@@ -2,8 +2,8 @@
 
 #include <string>
 #include <unordered_map>
-#include <chrono>
 #include <filesystem>
+#include <glm/glm.hpp>  // for glm::mat4 in SetMat4
 
 class Shader {
 public:
@@ -18,6 +18,9 @@ public:
 
     // Retrieve uniform location (cached)
     int GetUniformLocation(const std::string& name);
+
+    // Set a mat4 uniform (e.g. uMVP)
+    void SetMat4(const std::string& name, const glm::mat4& matrix);
 
     // Query and report if the underlying files have changed; if so, recompile & relink.
     void HotReloadIfNeeded();

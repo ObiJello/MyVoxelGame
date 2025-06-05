@@ -1,6 +1,13 @@
+// File: src/game/Mesher.cpp
 #include "Mesher.hpp"
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
+#include "../game/WorldMath.hpp"
+#include "../game/ChunkSection.hpp"
+#include <glm/vec3.hpp>
+#include <glm/vec2.hpp>
+#include <mutex>
+#include <queue>
 #include <cassert>
 
 namespace Game {
@@ -94,8 +101,6 @@ namespace Game {
 
                         // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
-                            // Local voxel-space position; each block is 1×1×1, so
-                            // pos = (sectionOffset + (x,y,z) +/- offsets)
                             glm::vec3 pos = {
                                 static_cast<float>(x + OFFSETS[face][corner][0]),
                                 static_cast<float>(y + OFFSETS[face][corner][1]),
@@ -111,7 +116,6 @@ namespace Game {
                         }
 
                         // Two triangles per quad, using baseIndex
-                        // Winding order is CCW looking at the face from outside
                         outData->indices.push_back(baseIndex + 0);
                         outData->indices.push_back(baseIndex + 1);
                         outData->indices.push_back(baseIndex + 2);
@@ -136,6 +140,7 @@ namespace Game {
     bool PopMeshData(MeshData*& outData) {
         std::lock_guard<std::mutex> lock(s_uploadMutex);
         if (s_uploadQueue.empty()) {
+            outData = nullptr;
             return false;
         }
         outData = s_uploadQueue.front();

@@ -6,7 +6,7 @@
 struct GLFWwindow;
 
 namespace Input {
-    // Enumerate the keys your game cares about.
+    // Enumerate keys and mouse buttons your game cares about
     enum class Key {
         W,
         A,
@@ -17,28 +17,33 @@ namespace Input {
         Left,
         Right,
         Space,
+        LeftControl,
         Escape,
         LeftMouse,
-        RightMouse,
-        // Add more as needed
+        RightMouse
     };
 
-    // Initialize the Input module with the GLFW window instance.
-    // Must be called once after creating the window.
+    // Initialize the input system with a pointer to the GLFW window
     void Init(GLFWwindow* window);
 
-    // Returns true if the specified key is currently held down.
+    // Return true if the specified key is currently held down
     bool IsKeyDown(Key key);
 
-    // Returns true if the specified mouse button is held down.
+    // Return true if the specified mouse button is held down
     bool IsMouseButtonDown(Key mouseButton);
 
-    // Returns mouse cursor position relative to the window (x, y) in screen coordinates.
+    // Get the current cursor position (x, y) in window coordinates
     std::pair<double, double> GetMousePosition();
 
-    // Returns the scroll wheel offsets since the last frame (xoffset, yoffset).
+    // Get how far the mouse moved since the last frame (dx, dy)
+    std::pair<double, double> GetMouseDelta();
+
+    // Reset the accumulated mouse-delta values to zero; call once per frame
+    void ResetMouseDelta();
+
+    // Get the scroll-wheel offsets since the last frame (xoffset, yoffset)
     std::pair<double, double> GetScrollOffset();
 
-    // Call once per frame to reset the scroll offset.
+    // Reset the accumulated scroll offsets to zero; call once per frame
     void ResetScrollOffset();
 }

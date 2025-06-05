@@ -2,32 +2,27 @@
 
 #include <vector>
 #include <cstdint>
-#include <mutex>
-#include <queue>
+#include "../render/Vertex.hpp"
 #include "ChunkSection.hpp"
-#include "../render/Vertex.hpp"  // for Render::Vertex
+#include "WorldMath.hpp"
+#include <glm/vec2.hpp>
 
 namespace Game {
 
-    // MeshData will hold a list of vertex attributes and indices.
-    // In Step 4, replace VertexPlaceholder with the real Vertex type from render/Vertex.hpp.
     struct MeshData {
-        std::vector<Render::Vertex>   vertices;
-        std::vector<uint32_t>   indices;
+        glm::ivec2                  chunkXZ;       // (x,z) of the chunk
+        int                         sectionIndex;  // sub‐chunk (0..15)
+        std::vector<Render::Vertex> vertices;      // vertex data for this section
+        std::vector<uint32_t>       indices;       // index buffer data
     };
 
-    // The mesher function that runs on a worker thread.
-    // - section: pointer to the ChunkSection to mesh
-    // - outData: pointer to a pre-allocated MeshData object where we write v/i
+    // This gets run on a worker thread. section != nullptr, outData is a fresh MeshData*
     void MesherJob(ChunkSection* section, MeshData* outData);
 
-    // Push completed MeshData onto a thread-safe upload queue.
-    // The render thread will call PopMeshData() to retrieve and upload to GPU.
+    // Push a completed MeshData* into the thread‐safe queue
     void PushMeshData(MeshData* data);
 
-    // Pop one MeshData from the queue. Returns true if an entry was popped.
-    // If true, outData will be set to a valid pointer that the caller must delete
-    // (or otherwise free). If false, the queue was empty.
+    // Pop a MeshData* from the queue. Returns false if queue is empty.
     bool PopMeshData(MeshData*& outData);
 
 } // namespace Game

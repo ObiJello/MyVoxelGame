@@ -24,7 +24,7 @@ namespace Log {
 
         switch (level) {
             case Level::Debug:
-                colorStart = "\033[34m"; // red
+                colorStart = "\033[34m"; // blue
                 break;
             case Level::Info:
                 colorStart = "\033[32m"; // green
