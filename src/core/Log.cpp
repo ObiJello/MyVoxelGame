@@ -8,8 +8,7 @@ namespace Log {
     static std::mutex logMutex;
 
     void Init() {
-        // For now, nothing to initialize (we’re logging to console).
-        // In future, we could open a file here.
+        // No-op for now; future file setup could go here.
     }
 
     void SetLevel(Level level) {
@@ -19,10 +18,27 @@ namespace Log {
     static void vLog(Level level, const char* prefix, const char* fmt, va_list args) {
         if (level < currentLevel) return;
 
+        // ANSI color codes
+        const char* colorStart = "";
+        const char* colorEnd   = "\033[0m";
+
+        switch (level) {
+            case Level::Debug:
+                colorStart = "\033[34m"; // red
+                break;
+            case Level::Info:
+                colorStart = "\033[32m"; // green
+                break;
+            case Level::Error:
+                colorStart = "\033[31m"; // red
+                break;
+        }
+
         std::lock_guard<std::mutex> lock(logMutex);
-        std::fprintf(level == Level::Error ? stderr : stdout, "%s: ", prefix);
-        std::vfprintf(level == Level::Error ? stderr : stdout, fmt, args);
-        std::fprintf(level == Level::Error ? stderr : stdout, "\n");
+        std::FILE* out = (level == Level::Error ? stderr : stdout);
+        std::fprintf(out, "%s%s%s: ", colorStart, prefix, colorEnd);
+        std::vfprintf(out, fmt, args);
+        std::fprintf(out, "\n");
     }
 
     void Info(const char* fmt, ...) {
@@ -33,12 +49,12 @@ namespace Log {
     }
 
     void Debug(const char* fmt, ...) {
-    #ifndef NDEBUG
+#ifndef NDEBUG
         va_list args;
         va_start(args, fmt);
         vLog(Level::Debug, "DEBUG", fmt, args);
         va_end(args);
-    #endif
+#endif
     }
 
     void Error(const char* fmt, ...) {
