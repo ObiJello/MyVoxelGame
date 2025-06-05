@@ -5,13 +5,14 @@
 #include <mutex>
 #include <queue>
 #include "ChunkSection.hpp"
+#include "../render/Vertex.hpp"  // for Render::Vertex
 
 namespace Game {
 
     // MeshData will hold a list of vertex attributes and indices.
     // In Step 4, replace VertexPlaceholder with the real Vertex type from render/Vertex.hpp.
     struct MeshData {
-        std::vector<float>      vertices; // placeholder: flatten your vertex attributes here
+        std::vector<Render::Vertex>   vertices;
         std::vector<uint32_t>   indices;
     };
 
