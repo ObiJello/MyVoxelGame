@@ -25,6 +25,7 @@ add_executable(MyVoxelGame
         src/platform/Time.cpp
         src/platform/Input.cpp
         src/core/Log.cpp
+        src/core/JobSystem.cpp
 )
 
 # 5) Precompile header
