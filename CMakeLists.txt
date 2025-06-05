@@ -56,7 +56,6 @@ add_executable(MyVoxelGame
 target_link_libraries(MyVoxelGame PRIVATE
     glfw
     glad
-    glm
     stb_image
     zlib
     OpenAL::OpenAL

@@ -46,10 +46,10 @@ int main()
     std::cout << "Version:  " << glGetString(GL_VERSION) << "\n";
 
     // 6) (Optional) Enable debug output if in debug mode
-#ifndef NDEBUG
+/*#ifndef NDEBUG
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback(glDebugOutput, nullptr);
-#endif
+#endif*/
 
     // 7) Main loop: just clear the screen at 60 Hz until user closes
     glfwSwapInterval(1); // vsync
