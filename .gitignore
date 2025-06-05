@@ -1,0 +1,20 @@
+# Ignore CMake build folders
+cmake-build-debug/
+cmake-build-release/
+build/
+ 
+# CLion / IntelliJ files
+.idea/
+*.iml
+ 
+# macOS system files
+.DS_Store
+ 
+# Ninja filesystem lock
+.ninja_deps
+.ninja_log
+ 
+# Editor backups / swap files
+*~
+*.swp
+
