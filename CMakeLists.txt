@@ -28,6 +28,7 @@ add_executable(MyVoxelGame
         src/core/JobSystem.cpp
         src/render/Shader.cpp
         src/render/QuadRenderer.cpp
+        src/game/BlockRegistry.cpp
 )
 
 # 5) Precompile header

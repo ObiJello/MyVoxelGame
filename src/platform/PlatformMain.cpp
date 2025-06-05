@@ -4,6 +4,7 @@
 #include "Log.hpp"
 #include "Config.hpp"
 #include "QuadRenderer.hpp"
+#include "BlockRegistry.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -22,13 +23,16 @@ namespace PlatformMain {
         Log::Init();
         Log::Info("Starting MyVoxelGame");
 
-        // 2) Initialize GLFW
+        // 2) Initialize block registry
+        Game::BlockRegistry::Init();
+
+        // 3) Initialize GLFW
         if (!glfwInit()) {
             Log::Error("Failed to initialize GLFW");
             return -1;
         }
 
-        // 3) Request an OpenGL context (version from Config)
+        // 4) Request an OpenGL context (version from Config)
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config::OpenGLMajor);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config::OpenGLMinor);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -38,7 +42,7 @@ namespace PlatformMain {
         // Enable debug context
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-        // 4) Create the window (using Config)
+        // 5) Create the window (using Config)
         GLFWwindow* window = glfwCreateWindow(
             Config::WindowWidth,
             Config::WindowHeight,
@@ -55,7 +59,7 @@ namespace PlatformMain {
         // Initialize input with the window
         Input::Init(window);
 
-        // 5) Make the context current, load GLAD
+        // 6) Make the context current, load GLAD
         glfwMakeContextCurrent(window);
         if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
             Log::Error("Failed to initialize GLAD");
@@ -64,12 +68,12 @@ namespace PlatformMain {
             return -3;
         }
 
-        // 6) Print GPU/GL version to verify
+        // 7) Print GPU/GL version to verify
         Log::Info("Vendor:   %s", glGetString(GL_VENDOR));
         Log::Info("Renderer: %s", glGetString(GL_RENDERER));
         Log::Info("Version:  %s", glGetString(GL_VERSION));
 
-        // 7) Enable debug output if available and in debug mode
+        // 8) Enable debug output if available and in debug mode
     #ifndef NDEBUG
         if (GLAD_GL_KHR_debug) {
             glEnable(GL_DEBUG_OUTPUT);
@@ -78,31 +82,32 @@ namespace PlatformMain {
         }
     #endif
 
-        // 8) Initialize our quad renderer
-       QuadRenderer quadRenderer;
-       glfwSwapInterval(1); // vsync
+        // 9) Initialize our quad renderer
+        QuadRenderer quadRenderer;
+        glfwSwapInterval(1); // vsync
 
-       while (!glfwWindowShouldClose(window)) {
-           // Update time
-           Time::Tick();
-           double dt = Time::Delta();
-           // Close window on Escape
-           if (Input::IsKeyDown(Input::Key::Escape)) {
-               glfwSetWindowShouldClose(window, GLFW_TRUE);
-           }
+        while (!glfwWindowShouldClose(window)) {
+            // Update time
+            Time::Tick();
+            double dt = Time::Delta();
 
-           // Draw the quad (which also clears with its own shader)
-           quadRenderer.Draw();
+            // Close window on Escape
+            if (Input::IsKeyDown(Input::Key::Escape)) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
 
-           // Poll events & swap buffers
-           glfwPollEvents();
-           glfwSwapBuffers(window);
+            // Draw the quad (which also clears with its own shader)
+            quadRenderer.Draw();
 
-           // Reset per-frame input
-           Input::ResetScrollOffset();
-       }
+            // Poll events & swap buffers
+            glfwPollEvents();
+            glfwSwapBuffers(window);
 
-        // 9) Cleanup
+            // Reset per-frame input
+            Input::ResetScrollOffset();
+        }
+
+        // 10) Cleanup
         Log::Info("Shutting down");
         glfwDestroyWindow(window);
         glfwTerminate();
