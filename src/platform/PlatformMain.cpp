@@ -1,5 +1,6 @@
 #include "PlatformMain.hpp"
 #include "Time.hpp"
+#include "Input.hpp"
 #include <iostream>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -39,6 +40,9 @@ namespace PlatformMain {
             return -2;
         }
 
+        // Initialize input with the window
+        Input::Init(window);
+
         // 4) Make the context current, load GLAD
         glfwMakeContextCurrent(window);
         if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
@@ -61,14 +65,17 @@ namespace PlatformMain {
         }
     #endif
 
-        // 7) Main loop: update time, clear screen, and process events
+        // 7) Main loop: update time, clear screen, process input, and events
         glfwSwapInterval(1); // vsync
 
         while (!glfwWindowShouldClose(window)) {
             // Update our high-resolution timer
             Time::Tick();
             double dt = Time::Delta();
-            // (Later, dt can drive animations or logging: e.g., Log::Info("Frame time: {:.3f} ms", dt * 1000.0);)
+            // Example: close window on Escape key
+            if (Input::IsKeyDown(Input::Key::Escape)) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
 
             // Clear the screen
             glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
@@ -77,6 +84,9 @@ namespace PlatformMain {
             // Poll events & swap buffers
             glfwPollEvents();
             glfwSwapBuffers(window);
+
+            // Reset per-frame input (scroll offset)
+            Input::ResetScrollOffset();
         }
 
         // 8) Cleanup
