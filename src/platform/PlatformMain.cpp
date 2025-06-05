@@ -1,4 +1,5 @@
 #include "PlatformMain.hpp"
+#include "Time.hpp"
 #include <iostream>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -27,6 +28,8 @@ namespace PlatformMain {
     #ifdef __APPLE__
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // for macOS
     #endif
+        // Enable a debug-enabled context
+        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
         // 3) Create the window
         GLFWwindow* window = glfwCreateWindow(1280, 720, "MyVoxelGame v0.1", nullptr, nullptr);
@@ -50,17 +53,24 @@ namespace PlatformMain {
         std::cout << "Renderer: " << glGetString(GL_RENDERER) << "\n";
         std::cout << "Version:  " << glGetString(GL_VERSION) << "\n";
 
-        // 6) (Optional) Enable debug output if in debug mode
-        /*
-        #ifndef NDEBUG
+        // 6) Enable debug output if available and in debug mode
+    #ifndef NDEBUG
+        if (GLAD_GL_KHR_debug) {
             glEnable(GL_DEBUG_OUTPUT);
             glDebugMessageCallback(glDebugOutput, nullptr);
-        #endif
-        */
+        }
+    #endif
 
-        // 7) Main loop: just clear the screen at 60 Hz until user closes
+        // 7) Main loop: update time, clear screen, and process events
         glfwSwapInterval(1); // vsync
+
         while (!glfwWindowShouldClose(window)) {
+            // Update our high-resolution timer
+            Time::Tick();
+            double dt = Time::Delta();
+            // (Later, dt can drive animations or logging: e.g., Log::Info("Frame time: {:.3f} ms", dt * 1000.0);)
+
+            // Clear the screen
             glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 

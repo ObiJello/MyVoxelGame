@@ -18,10 +18,11 @@ add_subdirectory(ext/zlib)
 add_subdirectory(ext/OpenAL)
 add_subdirectory(ext/stb_image)
 
-# 4) Add the executable from src/main.cpp and src/platform/PlatformMain.cpp
+# 4) Add the executable from src/main.cpp and platform sources
 add_executable(MyVoxelGame
         src/main.cpp
         src/platform/PlatformMain.cpp
+        src/platform/Time.cpp
 )
 
 # 5) Precompile header
