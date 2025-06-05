@@ -18,7 +18,7 @@ add_subdirectory(ext/zlib)
 add_subdirectory(ext/OpenAL)
 add_subdirectory(ext/stb_image)
 
-# 4) Add the executable from src/main.cpp and platform sources
+# 4) Add the executable from src/main.cpp and related sources
 add_executable(MyVoxelGame
         src/main.cpp
         src/platform/PlatformMain.cpp
@@ -26,6 +26,8 @@ add_executable(MyVoxelGame
         src/platform/Input.cpp
         src/core/Log.cpp
         src/core/JobSystem.cpp
+        src/render/Shader.cpp
+        src/render/QuadRenderer.cpp
 )
 
 # 5) Precompile header
@@ -56,6 +58,15 @@ target_link_libraries(MyVoxelGame PRIVATE
         zlib
         OpenAL::OpenAL
 )
+
+# ── Copy shaders directory to the build output ─────────────────────────────
+add_custom_command(TARGET MyVoxelGame
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${PROJECT_SOURCE_DIR}/shaders
+        $<TARGET_FILE_DIR:MyVoxelGame>/shaders
+)
+# ────────────────────────────────────────────────────────────────────────────
 
 # 8) Platform-specific OpenGL linking
 if(WIN32)

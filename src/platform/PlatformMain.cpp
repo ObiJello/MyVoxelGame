@@ -3,6 +3,7 @@
 #include "Input.hpp"
 #include "Log.hpp"
 #include "Config.hpp"
+#include "QuadRenderer.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -77,31 +78,29 @@ namespace PlatformMain {
         }
     #endif
 
-        // 8) Main loop: update time, clear screen, process input, and events
-        glfwSwapInterval(1); // vsync
+        // 8) Initialize our quad renderer
+       QuadRenderer quadRenderer;
+       glfwSwapInterval(1); // vsync
 
-        while (!glfwWindowShouldClose(window)) {
-            // Update our high-resolution timer
-            Time::Tick();
-            double dt = Time::Delta();
-            Log::Debug("Frame time: %.3f ms", dt * 1000.0);
+       while (!glfwWindowShouldClose(window)) {
+           // Update time
+           Time::Tick();
+           double dt = Time::Delta();
+           // Close window on Escape
+           if (Input::IsKeyDown(Input::Key::Escape)) {
+               glfwSetWindowShouldClose(window, GLFW_TRUE);
+           }
 
-            // Close window on Escape
-            if (Input::IsKeyDown(Input::Key::Escape)) {
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
-            }
+           // Draw the quad (which also clears with its own shader)
+           quadRenderer.Draw();
 
-            // Clear the screen
-            glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+           // Poll events & swap buffers
+           glfwPollEvents();
+           glfwSwapBuffers(window);
 
-            // Poll events & swap buffers
-            glfwPollEvents();
-            glfwSwapBuffers(window);
-
-            // Reset per-frame inputs (scroll offset)
-            Input::ResetScrollOffset();
-        }
+           // Reset per-frame input
+           Input::ResetScrollOffset();
+       }
 
         // 9) Cleanup
         Log::Info("Shutting down");
