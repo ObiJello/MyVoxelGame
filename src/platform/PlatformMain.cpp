@@ -1,7 +1,8 @@
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
-#include <iostream>
+#include "Log.hpp"
+#include "Config.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
@@ -11,31 +12,41 @@ namespace PlatformMain {
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam)
     {
-        std::cerr << "[OpenGL Debug] " << message << "\n";
+        Log::Error("[GL DEBUG] %s", message);
     }
 
     int Run(int argc, char** argv)
     {
-        // 1) Initialize GLFW
+        // 1) Initialize logging first
+        Log::Init();
+        Log::Info("Starting MyVoxelGame");
+
+        // 2) Initialize GLFW
         if (!glfwInit()) {
-            std::cerr << "Failed to initialize GLFW\n";
+            Log::Error("Failed to initialize GLFW");
             return -1;
         }
 
-        // 2) Request an OpenGL 3.3 core context (change to 4.1+ if you want)
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        // 3) Request an OpenGL context (version from Config)
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config::OpenGLMajor);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config::OpenGLMinor);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     #ifdef __APPLE__
-        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // for macOS
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     #endif
-        // Enable a debug-enabled context
+        // Enable debug context
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
-        // 3) Create the window
-        GLFWwindow* window = glfwCreateWindow(1280, 720, "MyVoxelGame v0.1", nullptr, nullptr);
+        // 4) Create the window (using Config)
+        GLFWwindow* window = glfwCreateWindow(
+            Config::WindowWidth,
+            Config::WindowHeight,
+            Config::WindowTitle,
+            nullptr,
+            nullptr
+        );
         if (!window) {
-            std::cerr << "Failed to create GLFW window\n";
+            Log::Error("Failed to create GLFW window");
             glfwTerminate();
             return -2;
         }
@@ -43,36 +54,39 @@ namespace PlatformMain {
         // Initialize input with the window
         Input::Init(window);
 
-        // 4) Make the context current, load GLAD
+        // 5) Make the context current, load GLAD
         glfwMakeContextCurrent(window);
         if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-            std::cerr << "Failed to initialize GLAD\n";
+            Log::Error("Failed to initialize GLAD");
             glfwDestroyWindow(window);
             glfwTerminate();
             return -3;
         }
 
-        // 5) Print GPU/GL version to verify
-        std::cout << "Vendor:   " << glGetString(GL_VENDOR) << "\n";
-        std::cout << "Renderer: " << glGetString(GL_RENDERER) << "\n";
-        std::cout << "Version:  " << glGetString(GL_VERSION) << "\n";
+        // 6) Print GPU/GL version to verify
+        Log::Info("Vendor:   %s", glGetString(GL_VENDOR));
+        Log::Info("Renderer: %s", glGetString(GL_RENDERER));
+        Log::Info("Version:  %s", glGetString(GL_VERSION));
 
-        // 6) Enable debug output if available and in debug mode
+        // 7) Enable debug output if available and in debug mode
     #ifndef NDEBUG
         if (GLAD_GL_KHR_debug) {
             glEnable(GL_DEBUG_OUTPUT);
             glDebugMessageCallback(glDebugOutput, nullptr);
+            Log::Info("KHR_debug enabled");
         }
     #endif
 
-        // 7) Main loop: update time, clear screen, process input, and events
+        // 8) Main loop: update time, clear screen, process input, and events
         glfwSwapInterval(1); // vsync
 
         while (!glfwWindowShouldClose(window)) {
             // Update our high-resolution timer
             Time::Tick();
             double dt = Time::Delta();
-            // Example: close window on Escape key
+            Log::Debug("Frame time: %.3f ms", dt * 1000.0);
+
+            // Close window on Escape
             if (Input::IsKeyDown(Input::Key::Escape)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
@@ -85,11 +99,12 @@ namespace PlatformMain {
             glfwPollEvents();
             glfwSwapBuffers(window);
 
-            // Reset per-frame input (scroll offset)
+            // Reset per-frame inputs (scroll offset)
             Input::ResetScrollOffset();
         }
 
-        // 8) Cleanup
+        // 9) Cleanup
+        Log::Info("Shutting down");
         glfwDestroyWindow(window);
         glfwTerminate();
         return 0;
