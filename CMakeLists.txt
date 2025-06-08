@@ -1,33 +1,31 @@
 cmake_minimum_required(VERSION 3.19)
 project(MyVoxelGame LANGUAGES CXX VERSION 0.1.0)
 
-# ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices ──────
+# ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices,
+#     and force a minimum deployment target ─────────────────────────────────
 if(APPLE)
     set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
-    # Force minimum deployment target to macOS 12.7.6 (or later)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.7.6" CACHE STRING "Minimum macOS version" FORCE)
 endif()
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
 
 # 1) Force C++17
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 2) Ensure binaries go into bin/
+# 2) Binaries go into bin/
 if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
-# 3) Vendor directories
+# 3) Vendor subprojects
 add_subdirectory(ext/glfw)
 add_subdirectory(ext/glad)
-add_subdirectory(ext/zlib)    # builds static zlibstatic
-
+add_subdirectory(ext/zlib)    # static-only zlibstatic
 set(ALSOFT_CPUEXT_NEON  OFF CACHE BOOL "Disable ARM NEON" FORCE)
 set(ALSOFT_REQUIRE_NEON OFF CACHE BOOL "Disable ARM NEON requirement" FORCE)
-add_subdirectory(ext/OpenAL)  # ensure BUILD_SHARED_LIBS=OFF inside ext/OpenAL/CMakeLists.txt
-
+add_subdirectory(ext/OpenAL)  # static-only OpenAL
 add_subdirectory(ext/stb_image)
 
 # 4) ImGui (no demo window)
@@ -39,13 +37,12 @@ add_library(imgui
         ext/imgui/backends/imgui_impl_glfw.cpp
         ext/imgui/backends/imgui_impl_opengl3.cpp
 )
-
 target_include_directories(imgui PRIVATE
         ext/imgui
         ext/imgui/backends
 )
 
-# 5) Link ImGui against GLFW, Glad, and OpenGL (per‐platform)
+# 5) ImGui linking per-platform
 if(WIN32)
     find_package(OpenGL REQUIRED)
     target_link_libraries(imgui PRIVATE glfw glad OpenGL::GL)
@@ -68,34 +65,46 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
-# 6) Add the executable and mark it as a macOS bundle
-add_executable(MyVoxelGame MACOSX_BUNDLE
-        src/main.cpp
-        src/platform/PlatformMain.cpp
-        src/platform/Time.cpp
-        src/platform/Input.cpp
-        src/core/Log.cpp
-        src/core/JobSystem.cpp
-        src/render/Shader.cpp
-        src/render/QuadRenderer.cpp
-        src/render/ChunkRenderer.cpp
-        src/game/BlockRegistry.cpp
-        src/game/Mesher.cpp
-        src/game/ChunkProvider.cpp
-)
+# 6) The game executable (on macOS, it's a bundle)
+if(APPLE)
+    add_executable(MyVoxelGame MACOSX_BUNDLE
+            src/main.cpp
+            src/platform/PlatformMain.cpp
+            src/platform/Time.cpp
+            src/platform/Input.cpp
+            src/core/Log.cpp
+            src/core/JobSystem.cpp
+            src/render/Shader.cpp
+            src/render/QuadRenderer.cpp
+            src/render/ChunkRenderer.cpp
+            src/game/BlockRegistry.cpp
+            src/game/Mesher.cpp
+            src/game/ChunkProvider.cpp
+    )
+    set_target_properties(MyVoxelGame PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
+    )
+else()
+    add_executable(MyVoxelGame
+            src/main.cpp
+            src/platform/PlatformMain.cpp
+            src/platform/Time.cpp
+            src/platform/Input.cpp
+            src/core/Log.cpp
+            src/core/JobSystem.cpp
+            src/render/Shader.cpp
+            src/render/QuadRenderer.cpp
+            src/render/ChunkRenderer.cpp
+            src/game/BlockRegistry.cpp
+            src/game/Mesher.cpp
+            src/game/ChunkProvider.cpp
+    )
+endif()
 
-# 7) Point to our custom Info.plist (must live next to this CMakeLists.txt)
-set(MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist")
-set_target_properties(MyVoxelGame PROPERTIES
-        MACOSX_BUNDLE_INFO_PLIST ${MACOSX_BUNDLE_INFO_PLIST}
-)
+# 7) PCH
+target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
 
-# 8) Precompile header
-target_precompile_headers(MyVoxelGame PRIVATE
-        src/pch.hpp
-)
-
-# 9) Include directories
+# 8) Includes
 target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/src
         ${PROJECT_SOURCE_DIR}/src/platform
@@ -106,13 +115,13 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/stb_image
-        ${PROJECT_SOURCE_DIR}/ext/zlib           # for zlib headers (zconf.h, zlib.h)
+        ${PROJECT_SOURCE_DIR}/ext/zlib           # for zconf.h, zlib.h
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
 )
 
-# 10) Link against vendored libraries + imgui + static zlib + static OpenAL
+# 9) Link libraries
 target_link_libraries(MyVoxelGame PRIVATE
         glfw
         glad
@@ -122,23 +131,27 @@ target_link_libraries(MyVoxelGame PRIVATE
         imgui
 )
 
-# ── Copy shaders into .app/Contents/Resources ───────────────────────────────
-add_custom_command(TARGET MyVoxelGame POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${PROJECT_SOURCE_DIR}/shaders"
-        "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
-)
+# ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
+if(APPLE)
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${PROJECT_SOURCE_DIR}/shaders"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
+    )
+else()
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${PROJECT_SOURCE_DIR}/shaders"
+            "$<TARGET_FILE_DIR:MyVoxelGame>/shaders"
+    )
+endif()
 # ────────────────────────────────────────────────────────────────────────────
 
-# 11) Platform‐specific OpenGL linking for MyVoxelGame itself
+# 10) Platform‐specific OpenGL linking for the game
 if(WIN32)
     find_package(OpenGL REQUIRED)
     target_link_libraries(MyVoxelGame PRIVATE OpenGL::GL)
 elseif(APPLE)
-    find_library(COCOA_FRAMEWORK Cocoa)
-    find_library(IOKIT_FRAMEWORK IOKit)
-    find_library(COREVIDEO_FRAMEWORK CoreVideo)
-    find_library(OpenGL_FRAMEWORK OpenGL)
     target_link_libraries(MyVoxelGame PRIVATE
             ${COCOA_FRAMEWORK}
             ${IOKIT_FRAMEWORK}
