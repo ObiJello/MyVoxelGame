@@ -34,17 +34,11 @@ namespace Input {
             lastX = xpos;
             lastY = ypos;
             firstMouse = false;
-            Log::Debug("First mouse callback: pos=(%.2f, %.2f)", xpos, ypos);
             return;
         }
 
         deltaX = xpos - lastX;
         deltaY = lastY - ypos; // invert Y so upward motion is positive dy
-
-        // Debug output to see if mouse is moving
-        if (deltaX != 0.0 || deltaY != 0.0) {
-            Log::Debug("Mouse delta: (%.2f, %.2f), pos=(%.2f, %.2f)", deltaX, deltaY, xpos, ypos);
-        }
 
         lastX = xpos;
         lastY = ypos;
@@ -55,13 +49,10 @@ namespace Input {
 
         // Initialize lastX/lastY from the current cursor position
         glfwGetCursorPos(gWindow, &lastX, &lastY);
-        Log::Info("Input::Init - Initial cursor pos: (%.2f, %.2f)", lastX, lastY);
 
         // Register callbacks
         glfwSetScrollCallback(gWindow, ScrollCallback);
         glfwSetCursorPosCallback(gWindow, MouseCallback);
-
-        Log::Info("Input system initialized with mouse callbacks");
     }
 
     bool IsKeyDown(Key key) {
@@ -108,10 +99,6 @@ namespace Input {
     }
 
     void ResetMouseDelta() {
-        // Debug output if there was significant mouse movement
-        if (deltaX != 0.0 || deltaY != 0.0) {
-            Log::Debug("Resetting mouse delta: (%.2f, %.2f)", deltaX, deltaY);
-        }
         deltaX = 0.0;
         deltaY = 0.0;
     }
