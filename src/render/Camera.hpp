@@ -38,6 +38,7 @@ namespace Render {
         void Update(float dt) {
             // 1) Mouse look: get how far the cursor has moved since last frame
             auto [dx, dy] = Input::GetMouseDelta();
+
             yaw   += dx * mouseSensitivity;
             pitch += dy * mouseSensitivity;
 
@@ -56,33 +57,51 @@ namespace Render {
             glm::vec3 up    = glm::normalize(glm::cross(right, front));
 
             // 2) Keyboard movement
-            glm::vec3 movement{ 0.0f };
+            // Calculate horizontal-only direction vectors (ignore pitch for movement)
+            glm::vec3 horizontalFront;
+            horizontalFront.x = cos(glm::radians(yaw));
+            horizontalFront.y = 0.0f;  // Keep Y at 0 for horizontal movement
+            horizontalFront.z = sin(glm::radians(yaw));
+            horizontalFront = glm::normalize(horizontalFront);
+
+            glm::vec3 horizontalRight = glm::normalize(glm::cross(horizontalFront, {0.0f, 1.0f, 0.0f}));
+
+            // Horizontal movement (WASD)
+            glm::vec3 horizontalMovement{ 0.0f };
             if (Input::IsKeyDown(Input::Key::W)) {
-                movement += front;
+                horizontalMovement += horizontalFront;
             }
             if (Input::IsKeyDown(Input::Key::S)) {
-                movement -= front;
+                horizontalMovement -= horizontalFront;
             }
             if (Input::IsKeyDown(Input::Key::A)) {
-                movement -= right;
+                horizontalMovement -= horizontalRight;
             }
             if (Input::IsKeyDown(Input::Key::D)) {
-                movement += right;
+                horizontalMovement += horizontalRight;
             }
+
+            // Vertical movement (Space/Ctrl)
+            glm::vec3 verticalMovement{ 0.0f };
             if (Input::IsKeyDown(Input::Key::Space)) {
-                movement += glm::vec3{0.0f, 1.0f, 0.0f};
+                verticalMovement += glm::vec3{0.0f, 1.0f, 0.0f};
             }
-            if (Input::IsKeyDown(Input::Key::LeftControl)) {
-                movement -= glm::vec3{0.0f, 1.0f, 0.0f};
-            }
-
-            if (glm::length(movement) > 0.0f) {
-                movement = glm::normalize(movement);
-                position += movement * moveSpeed * dt;
+            if (Input::IsKeyDown(Input::Key::LeftShift)) {
+                verticalMovement -= glm::vec3{0.0f, 1.0f, 0.0f};
             }
 
-            // 3) Reset per-frame mouse deltas
-            Input::ResetMouseDelta();
+            // Apply horizontal movement
+            if (glm::length(horizontalMovement) > 0.0f) {
+                horizontalMovement = glm::normalize(horizontalMovement);
+                position += horizontalMovement * moveSpeed * dt;
+            }
+
+            // Apply vertical movement
+            if (glm::length(verticalMovement) > 0.0f) {
+                position += verticalMovement * moveSpeed * dt;
+            }
+
+            // Note: Mouse delta reset is handled by the main loop, not here
         }
     };
 

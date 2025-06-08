@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- The bundle’s identifier -->
+    <key>CFBundleIdentifier</key>
+    <string>com.yourcompany.MyVoxelGame</string>
+
+    <!-- “MyVoxelGame” as the name that Finder will show -->
+    <key>CFBundleName</key>
+    <string>MyVoxelGame</string>
+
+    <!-- Version and build numbers (you can bump these as needed) -->
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+
+    <!-- The executable’s filename inside Contents/MacOS/ -->
+    <key>CFBundleExecutable</key>
+    <string>MyVoxelGame</string>
+
+    <!-- Require at least macOS 12.7.6 -->
+    <key>LSMinimumSystemVersion</key>
+    <string>12.7.6</string>
+
+    <!-- This allows retina, transparency, etc. (optional) -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+  </dict>
+</plist>

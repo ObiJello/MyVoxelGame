@@ -56,12 +56,31 @@ namespace Game {
     static std::mutex             s_uploadMutex;
     static std::queue<MeshData*>  s_uploadQueue;
 
-    void MesherJob(ChunkSection* section, MeshData* outData) {
+    void MesherJob(ChunkSection* section, MeshData* meshData) {
         assert(section != nullptr);
-        assert(outData != nullptr);
+        assert(meshData != nullptr);
 
-        outData->vertices.clear();
-        outData->indices.clear();
+        Log::Debug("MesherJob starting for chunk (%d, %d) section %d",
+                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+
+        // Validate input data
+        if (meshData->chunkXZ.x < -1000000 || meshData->chunkXZ.x > 1000000 ||
+            meshData->chunkXZ.y < -1000000 || meshData->chunkXZ.y > 1000000) {
+            Log::Error("Invalid chunk coordinates in MeshData: (%d, %d)",
+                      meshData->chunkXZ.x, meshData->chunkXZ.y);
+            delete meshData;
+            return;
+        }
+
+        // Create a temporary MeshData to build the mesh in
+        MeshData tempMesh;
+        tempMesh.chunkXZ = meshData->chunkXZ;
+        tempMesh.sectionIndex = meshData->sectionIndex;
+        tempMesh.vertices.clear();
+        tempMesh.indices.clear();
+
+        int solidBlocks = 0;
+        int facesGenerated = 0;
 
         // Iterate all voxels in the 16×16×16 section
         for (int y = 0; y < ChunkSection::SIZE; ++y) {
@@ -71,6 +90,8 @@ namespace Game {
                     if (raw == static_cast<uint16_t>(BlockID::Air)) {
                         continue; // skip air
                     }
+
+                    solidBlocks++;
 
                     // For each of 6 possible faces:
                     for (int face = 0; face < 6; ++face) {
@@ -97,7 +118,7 @@ namespace Game {
                         }
 
                         // At this point, we must emit a quad for this face.
-                        uint32_t baseIndex = static_cast<uint32_t>(outData->vertices.size());
+                        auto baseIndex = static_cast<uint32_t>(tempMesh.vertices.size());
 
                         // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
@@ -112,29 +133,54 @@ namespace Game {
                             vert.nrm = NRM[face];
                             vert.uv  = UVS[corner];
                             vert.ao  = 255; // no AO in MVP
-                            outData->vertices.push_back(vert);
+                            tempMesh.vertices.push_back(vert);
                         }
 
                         // Two triangles per quad, using baseIndex
-                        outData->indices.push_back(baseIndex + 0);
-                        outData->indices.push_back(baseIndex + 1);
-                        outData->indices.push_back(baseIndex + 2);
+                        tempMesh.indices.push_back(baseIndex + 0);
+                        tempMesh.indices.push_back(baseIndex + 1);
+                        tempMesh.indices.push_back(baseIndex + 2);
 
-                        outData->indices.push_back(baseIndex + 2);
-                        outData->indices.push_back(baseIndex + 3);
-                        outData->indices.push_back(baseIndex + 0);
+                        tempMesh.indices.push_back(baseIndex + 2);
+                        tempMesh.indices.push_back(baseIndex + 3);
+                        tempMesh.indices.push_back(baseIndex + 0);
+
+                        facesGenerated++;
                     }
                 }
             }
         }
 
-        // Once done, enqueue for upload
-        PushMeshData(outData);
+        Log::Debug("MesherJob: found %d solid blocks, generated %d faces, %zu vertices, %zu indices",
+                  solidBlocks, facesGenerated, tempMesh.vertices.size(), tempMesh.indices.size());
+
+        // CRITICAL FIX: Only after the mesh is completely built,
+        // copy it to the output MeshData atomically
+        {
+            std::lock_guard<std::mutex> lock(s_uploadMutex);
+
+            // Move the completed data to the output mesh
+            meshData->vertices = std::move(tempMesh.vertices);
+            meshData->indices = std::move(tempMesh.indices);
+
+            // Validate the final mesh data before enqueueing
+            if (meshData->vertices.size() > 0) {
+                Log::Debug("Enqueueing mesh for chunk (%d, %d) section %d with %zu vertices",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
+                          meshData->vertices.size());
+                s_uploadQueue.push(meshData);
+            } else {
+                Log::Debug("Mesh for chunk (%d, %d) section %d is empty, not enqueueing",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+                delete meshData; // Don't enqueue empty meshes
+            }
+        }
     }
 
     void PushMeshData(MeshData* data) {
-        std::lock_guard<std::mutex> lock(s_uploadMutex);
-        s_uploadQueue.push(data);
+        // This function is now called from within MesherJob under lock
+        // So we don't need to do anything here, but keep it for API compatibility
+        // The actual push happens in MesherJob after the mesh is complete
     }
 
     bool PopMeshData(MeshData*& outData) {
@@ -145,6 +191,14 @@ namespace Game {
         }
         outData = s_uploadQueue.front();
         s_uploadQueue.pop();
+
+        // Validate the popped data
+        if (outData) {
+            Log::Debug("Popped mesh data for chunk (%d, %d) section %d with %zu vertices",
+                      outData->chunkXZ.x, outData->chunkXZ.y, outData->sectionIndex,
+                      outData->vertices.size());
+        }
+
         return true;
     }
 

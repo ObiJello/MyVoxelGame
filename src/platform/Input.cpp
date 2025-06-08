@@ -1,4 +1,5 @@
 #include "Input.hpp"
+#include "Log.hpp"  // Add this include
 #include <GLFW/glfw3.h>
 #include <unordered_map>
 
@@ -17,6 +18,9 @@ namespace Input {
     static double deltaX = 0.0;
     static double deltaY = 0.0;
 
+    // Add a flag to track if this is the first mouse callback
+    static bool firstMouse = true;
+
     // Scroll callback: accumulates scroll deltas
     static void ScrollCallback(GLFWwindow* /*window*/, double xoffset, double yoffset) {
         scrollX += xoffset;
@@ -25,19 +29,39 @@ namespace Input {
 
     // Mouse-motion callback: calculates deltaX/deltaY
     static void MouseCallback(GLFWwindow* /*window*/, double xpos, double ypos) {
+        // Skip the first mouse callback to avoid a large jump
+        if (firstMouse) {
+            lastX = xpos;
+            lastY = ypos;
+            firstMouse = false;
+            Log::Debug("First mouse callback: pos=(%.2f, %.2f)", xpos, ypos);
+            return;
+        }
+
         deltaX = xpos - lastX;
         deltaY = lastY - ypos; // invert Y so upward motion is positive dy
+
+        // Debug output to see if mouse is moving
+        if (deltaX != 0.0 || deltaY != 0.0) {
+            Log::Debug("Mouse delta: (%.2f, %.2f), pos=(%.2f, %.2f)", deltaX, deltaY, xpos, ypos);
+        }
+
         lastX = xpos;
         lastY = ypos;
     }
 
     void Init(GLFWwindow* window) {
         gWindow = window;
+
+        // Initialize lastX/lastY from the current cursor position
+        glfwGetCursorPos(gWindow, &lastX, &lastY);
+        Log::Info("Input::Init - Initial cursor pos: (%.2f, %.2f)", lastX, lastY);
+
         // Register callbacks
         glfwSetScrollCallback(gWindow, ScrollCallback);
         glfwSetCursorPosCallback(gWindow, MouseCallback);
-        // Initialize lastX/lastY from the current cursor position
-        glfwGetCursorPos(gWindow, &lastX, &lastY);
+
+        Log::Info("Input system initialized with mouse callbacks");
     }
 
     bool IsKeyDown(Key key) {
@@ -55,6 +79,7 @@ namespace Input {
             case Key::Space:       glfwKey = GLFW_KEY_SPACE; break;
             case Key::LeftControl: glfwKey = GLFW_KEY_LEFT_CONTROL; break;
             case Key::Escape:      glfwKey = GLFW_KEY_ESCAPE; break;
+            case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
             default: return false;
         }
         return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
@@ -83,6 +108,10 @@ namespace Input {
     }
 
     void ResetMouseDelta() {
+        // Debug output if there was significant mouse movement
+        if (deltaX != 0.0 || deltaY != 0.0) {
+            Log::Debug("Resetting mouse delta: (%.2f, %.2f)", deltaX, deltaY);
+        }
         deltaX = 0.0;
         deltaY = 0.0;
     }

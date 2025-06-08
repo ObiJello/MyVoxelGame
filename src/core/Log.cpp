@@ -29,6 +29,9 @@ namespace Log {
             case Level::Info:
                 colorStart = "\033[32m"; // green
                 break;
+            case Level::Warning:
+                colorStart = "\033[33m"; // yellow
+                break;
             case Level::Error:
                 colorStart = "\033[31m"; // red
                 break;
@@ -55,6 +58,13 @@ namespace Log {
         vLog(Level::Debug, "DEBUG", fmt, args);
         va_end(args);
 #endif
+    }
+
+    void Warning(const char* fmt, ...) {
+        va_list args;
+        va_start(args, fmt);
+        vLog(Level::Warning, "WARNING", fmt, args);
+        va_end(args);
     }
 
     void Error(const char* fmt, ...) {

@@ -20,7 +20,8 @@ namespace Input {
         LeftControl,
         Escape,
         LeftMouse,
-        RightMouse
+        RightMouse,
+        LeftShift
     };
 
     // Initialize the input system with a pointer to the GLFW window
