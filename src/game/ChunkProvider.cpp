@@ -2,7 +2,7 @@
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
-
+#include <algorithm>
 #include "JobSystem.hpp"
 
 namespace Game {
