@@ -15,6 +15,7 @@ namespace Game {
         // Enqueue a background job to generate the chunk at chunk‐coordinates (pos.x, pos.z).
         // After filling in block data, this job will enqueue MesherJob for every non‐empty section.
         static void RequestChunk(Math::ChunkPos pos);
+        static void UnloadChunk(Math::ChunkPos pos);
     };
 
 } // namespace Game

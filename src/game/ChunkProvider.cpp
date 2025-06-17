@@ -116,4 +116,10 @@ namespace Game {
         });
     }
 
+    void ChunkProvider::UnloadChunk(Math::ChunkPos pos) {
+        uint64_t key = MakeChunkKey(pos.x, pos.z);
+        std::lock_guard<std::mutex> lk(s_chunkCacheMutex);
+        s_chunkCache.erase(key);
+    }
+
 } // namespace Game

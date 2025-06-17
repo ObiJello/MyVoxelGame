@@ -8,6 +8,7 @@
 // Include game headers
 #include "../game/BlockRegistry.hpp"
 #include "../game/ChunkProvider.hpp"
+#include "../game/WorldManager.hpp"
 
 // Include rendering headers
 #include "../render/Camera.hpp"
@@ -44,7 +45,6 @@ namespace PlatformMain {
 
         // 2) Initialize BlockRegistry and request a test chunk at (0,0)
         Game::BlockRegistry::Init();
-        Game::ChunkProvider::RequestChunk({0, 0});
 
         // 3) Initialize GLFW
         if (!glfwInit()) {
@@ -146,6 +146,9 @@ namespace PlatformMain {
 
             // d) Update camera from input (BEFORE resetting input deltas)
             camera.Update(dt);
+
+            // Stream world chunks around the camera
+            Game::WorldManager::Update(camera.position);
 
     #ifndef NDEBUG
             // 12b) Start the ImGui frame (debug only)
