@@ -5,7 +5,7 @@
 namespace Game {
 
     struct ChunkPosHash {
-        size_t operator()(ChunkPos const &p) const noexcept {
+        size_t operator()(Math::ChunkPos const &p) const noexcept {
             return std::hash<int>()(p.x) ^ (std::hash<int>()(p.z) << 1);
         }
     };
@@ -19,11 +19,11 @@ namespace Game {
 
     private:
         // which chunk‐coords are currently loaded
-        static std::unordered_set<ChunkPos,ChunkPosHash> s_loaded;
+        static std::unordered_set<Math::ChunkPos,ChunkPosHash> s_loaded;
 
         // Helpers:
-        static void LoadChunk(ChunkPos p);
-        static void UnloadChunk(ChunkPos p);
+        static void LoadChunk(Math::ChunkPos p);
+        static void UnloadChunk(Math::ChunkPos p);
     };
 
 } // namespace Game
