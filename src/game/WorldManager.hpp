@@ -1,6 +1,7 @@
 #pragma once
 #include "WorldMath.hpp"
 #include <unordered_set>
+#include <glm/vec3.hpp>
 
 namespace Game {
 

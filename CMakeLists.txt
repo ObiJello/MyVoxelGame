@@ -80,6 +80,7 @@ if(APPLE)
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
+            src/game/WorldManager.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -98,6 +99,7 @@ else()
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
+            src/game/WorldManager.cpp
     )
 endif()
 

@@ -2,19 +2,21 @@
 #include "ChunkProvider.hpp"
 #include "../render/ChunkRenderer.hpp"  // for g_chunkMeshes
 #include "Mesher.hpp"
+#include <algorithm>
+#include <cmath>
 
 namespace Game {
 
-    std::unordered_set<ChunkPos,ChunkPosHash> WorldManager::s_loaded;
+    std::unordered_set<Math::ChunkPos,ChunkPosHash> WorldManager::s_loaded;
 
     void WorldManager::Update(const glm::vec3 &cameraPos) {
         // 1) figure out camera chunk
-        int cx = int(std::floor(cameraPos.x / Math::CHUNK_SIZE));
-        int cz = int(std::floor(cameraPos.z / Math::CHUNK_SIZE));
-        ChunkPos cam{cx,cz};
+        int cx = int(std::floor(cameraPos.x / Math::CHUNK_SIZE_X));
+        int cz = int(std::floor(cameraPos.z / Math::CHUNK_SIZE_Z));
+        Math::ChunkPos cam{cx,cz};
 
         // 2) build desired set
-        std::unordered_set<ChunkPos,ChunkPosHash> want;
+        std::unordered_set<Math::ChunkPos,ChunkPosHash> want;
         for(int dz=-RENDER_RADIUS; dz<=RENDER_RADIUS; ++dz)
             for(int dx=-RENDER_RADIUS; dx<=RENDER_RADIUS; ++dx)
                 want.insert({cx+dx, cz+dz});
@@ -38,11 +40,11 @@ namespace Game {
         }
     }
 
-    void WorldManager::LoadChunk(ChunkPos p) {
+    void WorldManager::LoadChunk(Math::ChunkPos p) {
         ChunkProvider::RequestChunk(p);
     }
 
-    void WorldManager::UnloadChunk(ChunkPos p) {
+    void WorldManager::UnloadChunk(Math::ChunkPos p) {
         // 1) toss GPU meshes
         auto &meshes = Render::g_chunkMeshes;
         meshes.erase(std::remove_if(meshes.begin(), meshes.end(),
