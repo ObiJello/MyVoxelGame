@@ -18,6 +18,15 @@ namespace Game::Math {
         int32_t z;
     };
 
+    // Equality comparison so ChunkPos can be used in containers
+    inline constexpr bool operator==(const ChunkPos& a, const ChunkPos& b) noexcept {
+        return a.x == b.x && a.z == b.z;
+    }
+
+    inline constexpr bool operator!=(const ChunkPos& a, const ChunkPos& b) noexcept {
+        return !(a == b);
+    }
+
     // Convert a local (x [0..15], y [0..15], z [0..15]) within a single section
     // into a linear index (0..4095). Memory layout is Y-major, then Z, then X.
     inline constexpr uint32_t LocalIndex(int x, int y, int z) {

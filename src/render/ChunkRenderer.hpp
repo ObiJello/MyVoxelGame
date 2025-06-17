@@ -16,6 +16,8 @@ namespace Render {
         GLuint ebo         = 0;
         GLsizei indexCount = 0;
         glm::vec3 worldOffset{ 0.0f };
+        Game::Math::ChunkPos chunkXZ{};  // coordinates of parent chunk
+        int sectionIndex = 0;            // which section within the chunk
 
         // Construct from MeshData. Reads chunkXZ and sectionIndex from data.
         static ChunkMesh FromMeshData(const Game::MeshData* data) {
@@ -77,6 +79,10 @@ namespace Render {
                 float(data->sectionIndex * Game::Math::SECTION_HEIGHT),
                 float(data->chunkXZ.y * Game::Math::CHUNK_SIZE_Z)
             );
+
+            // Store metadata for later lookups
+            cm.chunkXZ = { data->chunkXZ.x, data->chunkXZ.y };
+            cm.sectionIndex = data->sectionIndex;
 
             return cm;
         }
