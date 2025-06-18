@@ -14,6 +14,16 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Optionally build 32-bit binaries on Windows. This is useful when targeting
+# older 32-bit environments or running on a 32-bit compiler toolchain.
+if(WIN32)
+    option(BUILD_WIN32_32BIT "Build 32-bit Windows binaries" OFF)
+    if(BUILD_WIN32_32BIT)
+        add_compile_options(-m32)
+        add_link_options(-m32)
+    endif()
+endif()
+
 # 2) Binaries go into bin/
 if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
