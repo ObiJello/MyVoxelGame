@@ -1,4 +1,4 @@
-// File: src/game/ChunkProvider.cpp
+// File: src/game/ChunkProvider.cpp (Updated to use enhanced mesher)
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
@@ -74,7 +74,8 @@ namespace Game {
 
             Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
 
-            // Now that blocks exist, enqueue MesherJob for each non-empty section
+            // Now that ALL blocks exist, enqueue enhanced MesherJob for each non-empty section
+            // We pass the entire chunk so the mesher can perform inter-section face culling
             int meshJobsEnqueued = 0;
             for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
                 if (chunk->sections[s]) {
@@ -86,23 +87,27 @@ namespace Game {
                     // Get the section pointer while keeping chunk alive
                     ChunkSection* sectionPtr = chunk->sections[s].get();
 
-                    Log::Debug("Enqueueing mesher job for chunk (%d, %d) section %d",
+                    Log::Debug("Enqueueing enhanced mesher job for chunk (%d, %d) section %d",
                               pos.x, pos.z, s);
 
-                    // CRITICAL: Capture the chunk shared_ptr to prevent deallocation
+                    // ENHANCED: Capture the chunk shared_ptr AND pass it to the mesher
+                    // This enables proper inter-section face culling
                     JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
                         try {
-                            Log::Debug("Starting mesher job for chunk (%d, %d) section %d",
+                            Log::Debug("Starting enhanced mesher job for chunk (%d, %d) section %d",
                                       pos.x, pos.z, s);
-                            MesherJob(sectionPtr, meshData);
-                            Log::Debug("Mesher job completed for chunk (%d, %d) section %d with %zu vertices",
+
+                            // Use the enhanced mesher that can access the entire chunk
+                            MesherJob(sectionPtr, meshData, chunk.get());
+
+                            Log::Debug("Enhanced mesher job completed for chunk (%d, %d) section %d with %zu vertices",
                                       pos.x, pos.z, s, meshData->vertices.size());
                         } catch (const std::exception& e) {
-                            Log::Error("MesherJob failed for chunk (%d, %d) section %d: %s",
+                            Log::Error("Enhanced MesherJob failed for chunk (%d, %d) section %d: %s",
                                       pos.x, pos.z, s, e.what());
                             delete meshData; // Clean up on failure
                         } catch (...) {
-                            Log::Error("MesherJob failed for chunk (%d, %d) section %d with unknown exception",
+                            Log::Error("Enhanced MesherJob failed for chunk (%d, %d) section %d with unknown exception",
                                       pos.x, pos.z, s);
                             delete meshData; // Clean up on failure
                         }
@@ -111,7 +116,7 @@ namespace Game {
                 }
             }
 
-            Log::Info("Chunk (%d, %d) generated → %d meshing jobs enqueued",
+            Log::Info("Chunk (%d, %d) generated → %d enhanced meshing jobs enqueued",
                      chunk->pos.x, chunk->pos.z, meshJobsEnqueued);
         });
     }

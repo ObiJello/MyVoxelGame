@@ -1,3 +1,4 @@
+// File: src/game/Mesher.hpp (Updated with Inter-Section Support)
 #pragma once
 
 #include <vector>
@@ -8,6 +9,8 @@
 #include <glm/vec2.hpp>
 
 namespace Game {
+    // Forward declarations to avoid circular includes
+    class Chunk;
 
     struct MeshData {
         glm::ivec2                  chunkXZ;       // (x,z) of the chunk
@@ -16,7 +19,13 @@ namespace Game {
         std::vector<uint32_t>       indices;       // index buffer data
     };
 
-    // This gets run on a worker thread. section != nullptr, outData is a fresh MeshData*
+    // Enhanced mesher job that takes the entire chunk for inter-section face culling
+    // This is the preferred method as it enables proper face culling between sections
+    void MesherJob(ChunkSection* section, MeshData* outData, const Chunk* chunk);
+
+    // Legacy mesher job for backward compatibility - DEPRECATED
+    // This version cannot perform inter-section culling and will log a warning
+    // Use the enhanced version above for optimal performance
     void MesherJob(ChunkSection* section, MeshData* outData);
 
     // Push a completed MeshData* into the thread‐safe queue

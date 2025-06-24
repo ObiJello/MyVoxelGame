@@ -1,10 +1,11 @@
-// File: src/game/Mesher.cpp (Enhanced Version - Simple)
+// File: src/game/Mesher.cpp (Enhanced Version with Inter-Section Culling)
 #include "Mesher.hpp"
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
 #include "../game/WorldMath.hpp"
 #include "../game/ChunkSection.hpp"
 #include "../game/BlockRegistry.hpp"
+#include "../game/Chunk.hpp"
 #include <glm/vec3.hpp>
 #include <glm/vec2.hpp>
 #include <mutex>
@@ -66,11 +67,40 @@ namespace Game {
         return block.opaque;
     }
 
-    void MesherJob(ChunkSection* section, MeshData* meshData) {
+    // Enhanced neighbor lookup function that can access blocks across section boundaries
+    // within the same chunk. Returns BlockID::Air for invalid coordinates or missing sections.
+    static BlockID GetBlockFromChunk(const Chunk* chunk, int localX, int localY, int localZ) {
+        // Validate chunk bounds
+        if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
+            localZ < 0 || localZ >= Math::CHUNK_SIZE_Z ||
+            localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
+            return BlockID::Air;
+        }
+
+        // Calculate which section this Y coordinate belongs to
+        int sectionIdx = localY / Math::SECTION_HEIGHT;
+        int yInSection = localY % Math::SECTION_HEIGHT;
+
+        // Validate section index
+        if (sectionIdx < 0 || sectionIdx >= Math::SECTIONS_PER_CHUNK) {
+            return BlockID::Air;
+        }
+
+        // Check if the section exists
+        if (!chunk->sections[sectionIdx]) {
+            return BlockID::Air; // Uninitialized sections default to Air
+        }
+
+        return chunk->sections[sectionIdx]->GetBlockID(localX, yInSection, localZ);
+    }
+
+    // Enhanced meshing function that takes the entire chunk for cross-section neighbor checks
+    void MesherJob(ChunkSection* section, MeshData* meshData, const Chunk* chunk) {
         assert(section != nullptr);
         assert(meshData != nullptr);
+        assert(chunk != nullptr);
 
-        Log::Debug("MesherJob starting for chunk (%d, %d) section %d",
+        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with inter-section culling",
                   meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
 
         // Validate input data
@@ -78,6 +108,13 @@ namespace Game {
             meshData->chunkXZ.y < -1000000 || meshData->chunkXZ.y > 1000000) {
             Log::Error("Invalid chunk coordinates in MeshData: (%d, %d)",
                       meshData->chunkXZ.x, meshData->chunkXZ.y);
+            delete meshData;
+            return;
+        }
+
+        // Validate section index
+        if (meshData->sectionIndex < 0 || meshData->sectionIndex >= Math::SECTIONS_PER_CHUNK) {
+            Log::Error("Invalid section index in MeshData: %d", meshData->sectionIndex);
             delete meshData;
             return;
         }
@@ -91,7 +128,11 @@ namespace Game {
 
         int solidBlocks = 0;
         int facesGenerated = 0;
-        int facesCulled = 0;
+        int facesCulledIntraSection = 0;
+        int facesCulledInterSection = 0;
+
+        // Calculate the Y offset for this section within the chunk
+        int sectionYOffset = meshData->sectionIndex * Math::SECTION_HEIGHT;
 
         // Iterate all voxels in the 16×16×16 section
         for (int y = 0; y < ChunkSection::SIZE; ++y) {
@@ -119,26 +160,45 @@ namespace Game {
                         int nz = z + DZ[face];
 
                         bool emitFace = false;
+                        BlockID neighborId = BlockID::Air;
 
-                        // Check if neighbor is outside section bounds
-                        if (nx < 0 || nx >= ChunkSection::SIZE ||
-                            ny < 0 || ny >= ChunkSection::SIZE ||
-                            nz < 0 || nz >= ChunkSection::SIZE) {
+                        // Check neighbor location and determine culling strategy
+                        if (nx >= 0 && nx < ChunkSection::SIZE &&
+                            ny >= 0 && ny < ChunkSection::SIZE &&
+                            nz >= 0 && nz < ChunkSection::SIZE) {
 
-                            // Neighbor is outside current section
-                            // For now, assume section boundaries are exposed (render face)
-                            // This is a simplification - for full optimization you'd need
-                            // to check neighboring sections/chunks
-                            emitFace = true;
-                        } else {
-                            // Neighbor is within current section - check if it's opaque
-                            BlockID neighborId = section->GetBlockID(nx, ny, nz);
-
-                            // Only emit face if neighbor is not opaque (air or transparent)
+                            // Neighbor is within current section - use fast intra-section lookup
+                            neighborId = section->GetBlockID(nx, ny, nz);
                             emitFace = !IsBlockOpaque(neighborId);
 
                             if (!emitFace) {
-                                facesCulled++;
+                                facesCulledIntraSection++;
+                            }
+                        }
+                        else {
+                            // Neighbor is outside current section - need inter-section lookup
+                            // Convert to chunk-local coordinates
+                            int chunkLocalX = x + DX[face];
+                            int chunkLocalY = (sectionYOffset + y) + DY[face];
+                            int chunkLocalZ = z + DZ[face];
+
+                            // Check if neighbor is within the chunk bounds
+                            if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
+                                chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
+                                chunkLocalY >= 0 && chunkLocalY < Math::CHUNK_TOTAL_HEIGHT) {
+
+                                // Use enhanced lookup function for cross-section access
+                                neighborId = GetBlockFromChunk(chunk, chunkLocalX, chunkLocalY, chunkLocalZ);
+                                emitFace = !IsBlockOpaque(neighborId);
+
+                                if (!emitFace) {
+                                    facesCulledInterSection++;
+                                }
+                            }
+                            else {
+                                // Neighbor is outside chunk bounds - assume it's air/transparent
+                                // This will be handled by inter-chunk culling in a future update
+                                emitFace = true;
                             }
                         }
 
@@ -185,8 +245,9 @@ namespace Game {
             }
         }
 
-        Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled), %zu vertices, %zu indices",
-                  solidBlocks, facesGenerated, facesCulled, tempMesh.vertices.size(), tempMesh.indices.size());
+        Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled intra-section, %d culled inter-section), %zu vertices, %zu indices",
+                  solidBlocks, facesGenerated, facesCulledIntraSection, facesCulledInterSection,
+                  tempMesh.vertices.size(), tempMesh.indices.size());
 
         // Copy the completed data to the output mesh
         {
@@ -206,6 +267,21 @@ namespace Game {
                 delete meshData;
             }
         }
+    }
+
+    // Legacy function for backward compatibility - logs a warning and delegates
+    void MesherJob(ChunkSection* section, MeshData* meshData) {
+        Log::Warning("MesherJob called without chunk context - inter-section culling disabled");
+
+        // Create a minimal temporary chunk with just this section for compatibility
+        Chunk tempChunk;
+        tempChunk.sections[meshData->sectionIndex] = std::unique_ptr<ChunkSection>(section);
+
+        // Call the enhanced version
+        MesherJob(section, meshData, &tempChunk);
+
+        // Release the section from the temporary chunk to prevent double-deletion
+        tempChunk.sections[meshData->sectionIndex].release();
     }
 
     void PushMeshData(MeshData* data) {
