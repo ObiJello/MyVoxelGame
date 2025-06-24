@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Enhanced with Performance Monitoring and Cursor Toggle)
+// File: src/platform/PlatformMain.cpp (Enhanced with Performance Monitoring, Cursor Toggle, and Chunk Visualization)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -20,6 +20,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#include <unordered_set>
+#include <cmath>
 
 #ifndef NDEBUG
 #include "imgui.h"
@@ -62,6 +64,180 @@ namespace PlatformMain {
             return avgTime > 0.0f ? 1.0f / avgTime : 0.0f;
         }
     };
+
+    // Chunk visualization helper functions
+    struct ChunkState {
+        bool isGenerated = false;
+        bool inFrustum = false;
+    };
+
+    // Helper function to check if a chunk is in the camera frustum
+    bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos) {
+        // Calculate chunk bounds in world space
+        float worldX = static_cast<float>(chunkPos.x * Game::Math::CHUNK_SIZE_X);
+        float worldZ = static_cast<float>(chunkPos.z * Game::Math::CHUNK_SIZE_Z);
+
+        // Create AABB for the entire chunk (from Y=0 to Y=256)
+        AABB chunkAABB;
+        chunkAABB.min = glm::vec3(worldX, 0.0f, worldZ);
+        chunkAABB.max = glm::vec3(
+            worldX + Game::Math::CHUNK_SIZE_X,
+            Game::Math::CHUNK_TOTAL_HEIGHT,
+            worldZ + Game::Math::CHUNK_SIZE_Z
+        );
+
+        return frustum.IsBoxVisible(chunkAABB);
+    }
+
+    // Draw chunk visualization in ImGui
+    void DrawChunkVisualization(const Render::Camera& camera, const Frustum& frustum) {
+        ImGui::Begin("Chunk Visualization");
+
+        // Calculate camera chunk position
+        int cameraChunkX = static_cast<int>(std::floor(camera.position.x / Game::Math::CHUNK_SIZE_X));
+        int cameraChunkZ = static_cast<int>(std::floor(camera.position.z / Game::Math::CHUNK_SIZE_Z));
+
+        // Get loaded chunks
+        auto loadedChunks = Game::WorldManager::GetLoadedChunks();
+        std::unordered_set<uint64_t> loadedChunkSet;
+
+        // Create a set for quick lookup of loaded chunks
+        for (const auto& chunk : loadedChunks) {
+            uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.x)) << 32) |
+                          static_cast<uint32_t>(chunk.z);
+            loadedChunkSet.insert(key);
+        }
+
+        // Visualization parameters
+        const int vizRadius = 12; // Show chunks in a 25x25 grid around player
+        const float circleRadius = 8.0f;
+        const float spacing = 20.0f;
+
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        ImVec2 canvasPos = ImGui::GetCursorScreenPos();
+        ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+
+        // Ensure minimum canvas size
+        if (canvasSize.x < 500) canvasSize.x = 500;
+        if (canvasSize.y < 500) canvasSize.y = 500;
+
+        // Calculate center of visualization
+        ImVec2 center = ImVec2(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
+
+        // Draw grid background
+        ImU32 gridColor = IM_COL32(64, 64, 64, 128);
+        for (int i = -vizRadius; i <= vizRadius; i++) {
+            float x = center.x + i * spacing;
+            drawList->AddLine(
+                ImVec2(x, canvasPos.y),
+                ImVec2(x, canvasPos.y + canvasSize.y),
+                gridColor, 1.0f
+            );
+
+            float y = center.y + i * spacing;
+            drawList->AddLine(
+                ImVec2(canvasPos.x, y),
+                ImVec2(canvasPos.x + canvasSize.x, y),
+                gridColor, 1.0f
+            );
+        }
+
+        // Draw chunks
+        int totalChunks = 0;
+        int generatedChunks = 0;
+        int visibleChunks = 0;
+
+        for (int dz = -vizRadius; dz <= vizRadius; dz++) {
+            for (int dx = -vizRadius; dx <= vizRadius; dx++) {
+                totalChunks++;
+
+                Game::Math::ChunkPos chunkPos = {cameraChunkX + dx, cameraChunkZ + dz};
+
+                // Check if chunk is loaded/generated
+                uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.x)) << 32) |
+                              static_cast<uint32_t>(chunkPos.z);
+                bool isGenerated = loadedChunkSet.find(key) != loadedChunkSet.end();
+
+                // Check if chunk is in frustum
+                bool inFrustum = false;
+                if (isGenerated) {
+                    generatedChunks++;
+                    inFrustum = IsChunkInFrustum(frustum, chunkPos);
+                    if (inFrustum) {
+                        visibleChunks++;
+                    }
+                }
+
+                // Determine color based on state
+                ImU32 chunkColor;
+                if (!isGenerated) {
+                    chunkColor = IM_COL32(255, 64, 64, 255);   // Red: not generated
+                } else if (inFrustum) {
+                    chunkColor = IM_COL32(64, 255, 64, 255);   // Green: generated and visible
+                } else {
+                    chunkColor = IM_COL32(255, 255, 64, 255);  // Yellow: generated but not visible
+                }
+
+                // Calculate position on screen
+                ImVec2 chunkScreenPos = ImVec2(
+                    center.x + dx * spacing,
+                    center.y + dz * spacing
+                );
+
+                // Draw chunk circle
+                drawList->AddCircleFilled(chunkScreenPos, circleRadius, chunkColor);
+
+                // Draw chunk outline
+                ImU32 outlineColor = IM_COL32(128, 128, 128, 255);
+                drawList->AddCircle(chunkScreenPos, circleRadius, outlineColor, 0, 2.0f);
+
+                // Draw chunk coordinates on hover
+                if (ImGui::IsMouseHoveringRect(
+                    ImVec2(chunkScreenPos.x - circleRadius, chunkScreenPos.y - circleRadius),
+                    ImVec2(chunkScreenPos.x + circleRadius, chunkScreenPos.y + circleRadius))) {
+
+                    ImGui::SetTooltip("Chunk (%d, %d)\nGenerated: %s\nIn Frustum: %s",
+                                     chunkPos.x, chunkPos.z,
+                                     isGenerated ? "Yes" : "No",
+                                     inFrustum ? "Yes" : "No");
+                }
+            }
+        }
+
+        // Draw player position (camera chunk)
+        ImVec2 playerPos = center;
+        drawList->AddCircleFilled(playerPos, circleRadius + 2.0f, IM_COL32(255, 255, 255, 255));
+        drawList->AddCircle(playerPos, circleRadius + 2.0f, IM_COL32(0, 0, 0, 255), 0, 3.0f);
+
+        // Draw player direction indicator
+        float playerYawRad = glm::radians(camera.yaw);
+        ImVec2 directionEnd = ImVec2(
+            playerPos.x + cos(playerYawRad) * (circleRadius + 8.0f),
+            playerPos.y + sin(playerYawRad) * (circleRadius + 8.0f)
+        );
+        drawList->AddLine(playerPos, directionEnd, IM_COL32(0, 0, 0, 255), 3.0f);
+
+        // Create invisible button for the entire canvas to capture input
+        ImGui::InvisibleButton("chunk_viz_canvas", canvasSize);
+
+        // Display statistics
+        ImGui::Separator();
+        ImGui::Text("Chunk Statistics:");
+        ImGui::Text("Total chunks in view: %d", totalChunks);
+        ImGui::Text("Generated chunks: %d", generatedChunks);
+        ImGui::Text("Visible chunks: %d", visibleChunks);
+        ImGui::Text("Camera chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
+
+        // Legend
+        ImGui::Separator();
+        ImGui::Text("Legend:");
+        ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "● Red: Not generated");
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.25f, 1.0f), "● Yellow: Generated, not visible");
+        ImGui::TextColored(ImVec4(0.25f, 1.0f, 0.25f, 1.0f), "● Green: Generated and visible");
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "● White: Player position");
+
+        ImGui::End();
+    }
 
     // Callback for OpenGL debug messages
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
@@ -227,7 +403,21 @@ namespace PlatformMain {
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f); // Sky blue
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // j) Upload meshes with performance tracking
+            // j) Calculate frustum for chunk visibility testing
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+            float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
+
+            glm::mat4 proj = glm::perspective(
+                glm::radians(camera.fov),
+                aspect,
+                0.1f,
+                1000.0f
+            );
+            glm::mat4 view = camera.GetViewMatrix();
+            Frustum frustum = Frustum::FromMatrix(proj * view);
+
+            // k) Upload meshes with performance tracking
             auto uploadStartTime = std::chrono::high_resolution_clock::now();
             {
                 Game::MeshData* meshPtr = nullptr;
@@ -268,26 +458,11 @@ namespace PlatformMain {
             auto uploadEndTime = std::chrono::high_resolution_clock::now();
             metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
 
-            // k) Render scene with performance tracking
+            // l) Render scene with performance tracking
             auto renderStartTime = std::chrono::high_resolution_clock::now();
             {
-                int width, height;
-                glfwGetFramebufferSize(window, &width, &height);
-                float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
-
-                glm::mat4 proj = glm::perspective(
-                    glm::radians(camera.fov),
-                    aspect,
-                    0.1f,
-                    1000.0f
-                );
-                glm::mat4 view = camera.GetViewMatrix();
-
                 // Use shader
                 blockShader.Use();
-
-                // Frustum culling
-                Frustum frust = Frustum::FromMatrix(proj * view);
 
                 // Render visible chunks
                 metrics.meshesRenderedThisFrame = 0;
@@ -297,7 +472,7 @@ namespace PlatformMain {
                 for (const auto& cm : Render::g_chunkMeshes) {
                     AABB box = cm.GetAABB();
 
-                    if (!frust.IsBoxVisible(box)) {
+                    if (!frustum.IsBoxVisible(box)) {
                         continue; // Frustum culled
                     }
 
@@ -316,7 +491,7 @@ namespace PlatformMain {
             metrics.renderTime = std::chrono::duration<float, std::milli>(renderEndTime - renderStartTime).count();
 
     #ifndef NDEBUG
-            // l) ImGui debug interface
+            // m) ImGui debug interface
             {
                 ImGui::Begin("Enhanced Voxel Engine Debug");
 
@@ -382,19 +557,22 @@ namespace PlatformMain {
                 ImGui::End();
             }
 
-            // m) Render ImGui
+            // n) Draw chunk visualization
+            DrawChunkVisualization(camera, frustum);
+
+            // o) Render ImGui
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // n) Swap buffers
+            // p) Swap buffers
             glfwSwapBuffers(window);
 
-            // o) Reset input deltas
+            // q) Reset input deltas
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // p) Calculate total frame time
+            // r) Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
