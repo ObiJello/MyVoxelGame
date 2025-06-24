@@ -21,7 +21,8 @@ namespace Input {
         Escape,
         LeftMouse,
         RightMouse,
-        LeftShift
+        LeftShift,
+        Tab  // Add Tab key for cursor toggle
     };
 
     // Initialize the input system with a pointer to the GLFW window
@@ -47,4 +48,10 @@ namespace Input {
 
     // Reset the accumulated scroll offsets to zero; call once per frame
     void ResetScrollOffset();
+
+    // Check if a key was just pressed this frame (not held)
+    bool IsKeyPressed(Key key);
+
+    // Call once per frame to update key press states
+    void UpdateKeyStates();
 }

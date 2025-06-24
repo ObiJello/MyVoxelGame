@@ -19,6 +19,9 @@ namespace Render {
         float moveSpeed      =  10.0f;  // units per second
         float mouseSensitivity = 0.1f;   // degrees per pixel
 
+        // Control flags
+        bool enableMouseLook = true;  // Whether mouse movement affects camera
+
         Camera() = default;
 
         // Returns a view matrix using glm::lookAt
@@ -37,14 +40,17 @@ namespace Render {
         // Reads Input::IsKeyDown and Input::GetMouseDelta() to update pos and orientation.
         void Update(float dt) {
             // 1) Mouse look: get how far the cursor has moved since last frame
-            auto [dx, dy] = Input::GetMouseDelta();
+            // Only process mouse input if mouse look is enabled
+            if (enableMouseLook) {
+                auto [dx, dy] = Input::GetMouseDelta();
 
-            yaw   += dx * mouseSensitivity;
-            pitch += dy * mouseSensitivity;
+                yaw   += dx * mouseSensitivity;
+                pitch += dy * mouseSensitivity;
 
-            // Clamp pitch to avoid gimbal flip
-            if (pitch >  89.0f) pitch =  89.0f;
-            if (pitch < -89.0f) pitch = -89.0f;
+                // Clamp pitch to avoid gimbal flip
+                if (pitch >  89.0f) pitch =  89.0f;
+                if (pitch < -89.0f) pitch = -89.0f;
+            }
 
             // Recalculate direction vectors
             glm::vec3 front;

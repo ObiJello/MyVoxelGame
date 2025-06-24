@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Enhanced with Performance Monitoring)
+// File: src/platform/PlatformMain.cpp (Enhanced with Performance Monitoring and Cursor Toggle)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -170,7 +170,6 @@ namespace PlatformMain {
 
         // Mouse cursor toggle state
         bool cursorEnabled = false;
-        bool tabKeyPressed = false;
 
         // 14) Main loop
         Log::Info("Entering main render loop with enhanced inter-chunk culling");
@@ -181,34 +180,54 @@ namespace PlatformMain {
             // a) Poll events
             glfwPollEvents();
 
-            // b) Update time
+            // b) Update input states
+            Input::UpdateKeyStates();
+
+            // c) Update time
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt);
 
-            // c) Handle input
+            // d) Handle input
             if (Input::IsKeyDown(Input::Key::Escape)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
-            // d) Update camera
+            // e) Handle cursor toggle (Tab key)
+            if (Input::IsKeyPressed(Input::Key::Tab)) {
+                cursorEnabled = !cursorEnabled;
+
+                if (cursorEnabled) {
+                    // Enable cursor and disable camera mouse look
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                    camera.enableMouseLook = false;
+                    Log::Info("Cursor enabled - camera mouse look disabled");
+                } else {
+                    // Disable cursor and enable camera mouse look
+                    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    camera.enableMouseLook = true;
+                    Log::Info("Cursor disabled - camera mouse look enabled");
+                }
+            }
+
+            // f) Update camera
             camera.Update(dt);
 
-            // e) Update world (handles chunk loading/unloading with enhanced meshing)
+            // g) Update world (handles chunk loading/unloading with enhanced meshing)
             Game::WorldManager::Update(camera.position);
 
     #ifndef NDEBUG
-            // f) Start ImGui frame
+            // h) Start ImGui frame
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
     #endif
 
-            // g) Clear buffers
+            // i) Clear buffers
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f); // Sky blue
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // h) Upload meshes with performance tracking
+            // j) Upload meshes with performance tracking
             auto uploadStartTime = std::chrono::high_resolution_clock::now();
             {
                 Game::MeshData* meshPtr = nullptr;
@@ -249,7 +268,7 @@ namespace PlatformMain {
             auto uploadEndTime = std::chrono::high_resolution_clock::now();
             metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
 
-            // i) Render scene with performance tracking
+            // k) Render scene with performance tracking
             auto renderStartTime = std::chrono::high_resolution_clock::now();
             {
                 int width, height;
@@ -297,7 +316,7 @@ namespace PlatformMain {
             metrics.renderTime = std::chrono::duration<float, std::milli>(renderEndTime - renderStartTime).count();
 
     #ifndef NDEBUG
-            // j) ImGui debug interface
+            // l) ImGui debug interface
             {
                 ImGui::Begin("Enhanced Voxel Engine Debug");
 
@@ -333,14 +352,24 @@ namespace PlatformMain {
                 ImGui::PlotLines("Frame Time (ms)", metrics.frameTimes, PerformanceMetrics::SAMPLE_COUNT,
                                metrics.sampleIndex, nullptr, 0.0f, 50.0f, ImVec2(0, 80));
 
-                // Controls
+                // Controls and status
                 ImGui::Spacing();
-                ImGui::Text("Controls");
+                ImGui::Text("Controls & Status");
                 ImGui::Separator();
                 ImGui::Text("WASD: Move horizontally");
                 ImGui::Text("Space/Shift: Move vertically");
-                ImGui::Text("Mouse: Look around");
+                ImGui::Text("Mouse: Look around (when enabled)");
+                ImGui::Text("Tab: Toggle cursor visibility");
                 ImGui::Text("Escape: Exit");
+                ImGui::Spacing();
+
+                // Cursor status indicator
+                if (cursorEnabled) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Cursor: VISIBLE (Camera locked)");
+                } else {
+                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Cursor: HIDDEN (Camera active)");
+                }
+                ImGui::Text("Mouse Look: %s", camera.enableMouseLook ? "ENABLED" : "DISABLED");
 
                 // Force remesh button for testing
                 if (ImGui::Button("Force Remesh Current Chunk")) {
@@ -353,19 +382,19 @@ namespace PlatformMain {
                 ImGui::End();
             }
 
-            // k) Render ImGui
+            // m) Render ImGui
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // l) Swap buffers
+            // n) Swap buffers
             glfwSwapBuffers(window);
 
-            // m) Reset input deltas
+            // o) Reset input deltas
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // n) Calculate total frame time
+            // p) Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }

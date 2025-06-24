@@ -21,6 +21,10 @@ namespace Input {
     // Add a flag to track if this is the first mouse callback
     static bool firstMouse = true;
 
+    // Key press tracking for single-frame press detection
+    static std::unordered_map<Key, bool> previousKeyStates;
+    static std::unordered_map<Key, bool> currentKeyStates;
+
     // Scroll callback: accumulates scroll deltas
     static void ScrollCallback(GLFWwindow* /*window*/, double xoffset, double yoffset) {
         scrollX += xoffset;
@@ -53,6 +57,10 @@ namespace Input {
         // Register callbacks
         glfwSetScrollCallback(gWindow, ScrollCallback);
         glfwSetCursorPosCallback(gWindow, MouseCallback);
+
+        // Initialize key state tracking
+        previousKeyStates.clear();
+        currentKeyStates.clear();
     }
 
     bool IsKeyDown(Key key) {
@@ -71,6 +79,7 @@ namespace Input {
             case Key::LeftControl: glfwKey = GLFW_KEY_LEFT_CONTROL; break;
             case Key::Escape:      glfwKey = GLFW_KEY_ESCAPE; break;
             case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
+            case Key::Tab:         glfwKey = GLFW_KEY_TAB; break;
             default: return false;
         }
         return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
@@ -110,5 +119,38 @@ namespace Input {
     void ResetScrollOffset() {
         scrollX = 0.0;
         scrollY = 0.0;
+    }
+
+    bool IsKeyPressed(Key key) {
+        // Key is "pressed" if it's currently down but wasn't down last frame
+        auto currentIt = currentKeyStates.find(key);
+        auto previousIt = previousKeyStates.find(key);
+
+        bool currentlyDown = (currentIt != currentKeyStates.end()) ? currentIt->second : false;
+        bool previouslyDown = (previousIt != previousKeyStates.end()) ? previousIt->second : false;
+
+        return currentlyDown && !previouslyDown;
+    }
+
+    void UpdateKeyStates() {
+        // Update previous states
+        previousKeyStates = currentKeyStates;
+
+        // Update current states
+        currentKeyStates[Key::W] = IsKeyDown(Key::W);
+        currentKeyStates[Key::A] = IsKeyDown(Key::A);
+        currentKeyStates[Key::S] = IsKeyDown(Key::S);
+        currentKeyStates[Key::D] = IsKeyDown(Key::D);
+        currentKeyStates[Key::Up] = IsKeyDown(Key::Up);
+        currentKeyStates[Key::Down] = IsKeyDown(Key::Down);
+        currentKeyStates[Key::Left] = IsKeyDown(Key::Left);
+        currentKeyStates[Key::Right] = IsKeyDown(Key::Right);
+        currentKeyStates[Key::Space] = IsKeyDown(Key::Space);
+        currentKeyStates[Key::LeftControl] = IsKeyDown(Key::LeftControl);
+        currentKeyStates[Key::Escape] = IsKeyDown(Key::Escape);
+        currentKeyStates[Key::LeftShift] = IsKeyDown(Key::LeftShift);
+        currentKeyStates[Key::Tab] = IsKeyDown(Key::Tab);
+        currentKeyStates[Key::LeftMouse] = IsMouseButtonDown(Key::LeftMouse);
+        currentKeyStates[Key::RightMouse] = IsMouseButtonDown(Key::RightMouse);
     }
 }
