@@ -1,18 +1,39 @@
-// File: src/game/ChunkProvider.cpp (Updated to use enhanced mesher)
+// File: src/game/ChunkProvider.cpp (Enhanced with Inter-Chunk Face Culling)
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
 #include <algorithm>
+#include <shared_mutex>
 #include "JobSystem.hpp"
+#include <unordered_set>
 
 namespace Game {
 
-    // Single global noise generator. We'll initialize it once.
+    // Single global noise generator
     static FastNoiseLite s_noise;
 
-    // Global storage for chunks to prevent premature deallocation
-    static std::unordered_map<uint64_t, std::shared_ptr<Chunk>> s_chunkCache;
-    static std::mutex s_chunkCacheMutex;
+    // Enhanced chunk storage with reference counting and neighbor tracking
+    struct ChunkData {
+        std::shared_ptr<Chunk> chunk;
+        std::unordered_set<uint64_t> dependents;  // Chunks that depend on this one for meshing
+        std::atomic<bool> isGenerated{false};     // Block data is complete
+        std::atomic<bool> hasPendingMesh{false};  // Mesh generation is queued
+        std::atomic<int> neighborCount{0};        // Number of available neighbors (0-4)
+
+        ChunkData(std::shared_ptr<Chunk> c) : chunk(std::move(c)) {}
+    };
+
+    // Thread-safe chunk registry
+    static std::unordered_map<uint64_t, std::unique_ptr<ChunkData>> s_chunkRegistry;
+    static std::shared_mutex s_registryMutex;
+
+    // Neighbor offset table for 4-directional neighbors (X, Z)
+    static constexpr std::array<std::pair<int, int>, 4> NEIGHBOR_OFFSETS = {{
+        {-1,  0}, // West
+        { 1,  0}, // East
+        { 0, -1}, // North
+        { 0,  1}  // South
+    }};
 
     // Helper function to create a unique key from chunk coordinates
     static uint64_t MakeChunkKey(int32_t x, int32_t z) {
@@ -20,7 +41,245 @@ namespace Game {
                static_cast<uint32_t>(z);
     }
 
+    // Helper function to get chunk coordinates from key
+    static Math::ChunkPos KeyToChunkPos(uint64_t key) {
+        int32_t x = static_cast<int32_t>(key >> 32);
+        int32_t z = static_cast<int32_t>(key & 0xFFFFFFFF);
+        return {x, z};
+    }
+
+    // Thread-safe neighbor lookup with bounds checking
+    static std::shared_ptr<Chunk> GetNeighborChunk(Math::ChunkPos pos, int dx, int dz) {
+        uint64_t key = MakeChunkKey(pos.x + dx, pos.z + dz);
+
+        std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+        auto it = s_chunkRegistry.find(key);
+        if (it != s_chunkRegistry.end() && it->second->isGenerated.load()) {
+            return it->second->chunk;
+        }
+        return nullptr;
+    }
+
+    // Forward declarations
+    static void EnhancedMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
+    static void StandardMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
+
+    // Create neighbor context for inter-chunk meshing
+    static NeighborContext CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos) {
+        NeighborContext ctx(centerChunk);
+        ctx.hasAllNeighbors = true;
+
+        for (size_t i = 0; i < 4; ++i) {
+            auto [dx, dz] = NEIGHBOR_OFFSETS[i];
+            ctx.neighbors[i] = GetNeighborChunk(pos, dx, dz);
+            if (!ctx.neighbors[i]) {
+                ctx.hasAllNeighbors = false;
+            }
+        }
+
+        return ctx;
+    }
+
+    // Register dependency relationships between chunks
+    static void RegisterDependency(uint64_t sourceKey, uint64_t dependentKey) {
+        std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+        auto sourceIt = s_chunkRegistry.find(sourceKey);
+        if (sourceIt != s_chunkRegistry.end()) {
+            sourceIt->second->dependents.insert(dependentKey);
+        }
+    }
+
+    // Update neighbor counts and trigger remeshing when appropriate
+    static void UpdateNeighborCounts(Math::ChunkPos pos) {
+        uint64_t centerKey = MakeChunkKey(pos.x, pos.z);
+
+        std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+        auto centerIt = s_chunkRegistry.find(centerKey);
+        if (centerIt == s_chunkRegistry.end() || !centerIt->second->isGenerated.load()) {
+            return;
+        }
+
+        // Count available neighbors for center chunk
+        int neighborCount = 0;
+        for (auto [dx, dz] : NEIGHBOR_OFFSETS) {
+            uint64_t neighborKey = MakeChunkKey(pos.x + dx, pos.z + dz);
+            auto neighborIt = s_chunkRegistry.find(neighborKey);
+            if (neighborIt != s_chunkRegistry.end() && neighborIt->second->isGenerated.load()) {
+                neighborCount++;
+                // Register bidirectional dependencies
+                centerIt->second->dependents.insert(neighborKey);
+                neighborIt->second->dependents.insert(centerKey);
+            }
+        }
+
+        centerIt->second->neighborCount.store(neighborCount);
+
+        // If we have all neighbors and no pending mesh, trigger enhanced meshing
+        if (neighborCount == 4 && !centerIt->second->hasPendingMesh.exchange(true)) {
+            auto chunk = centerIt->second->chunk;
+
+            Log::Debug("Triggering enhanced inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
+                      pos.x, pos.z);
+
+            // Schedule enhanced meshing job
+            JobSystem::g_ThreadPool.Enqueue([chunk, pos]() {
+                EnhancedMeshingJob(chunk, pos);
+            });
+        }
+    }
+
+    // Advanced block lookup that can access neighboring chunks
+    static BlockID GetBlockWithNeighbors(const NeighborContext& ctx, int localX, int localY, int localZ) {
+        // Handle within-chunk coordinates
+        if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
+            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z &&
+            localY >= 0 && localY < Math::CHUNK_TOTAL_HEIGHT) {
+            return ctx.center->GetBlock(localX, localY, localZ);
+        }
+
+        // Handle cross-chunk coordinates
+        if (localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
+            return BlockID::Air; // Out of world bounds
+        }
+
+        // Determine which neighbor chunk to query
+        std::shared_ptr<Chunk> targetChunk = nullptr;
+        int targetX = localX;
+        int targetZ = localZ;
+
+        if (localX < 0) {
+            targetChunk = ctx.neighbors[0]; // West neighbor
+            targetX = localX + Math::CHUNK_SIZE_X;
+        } else if (localX >= Math::CHUNK_SIZE_X) {
+            targetChunk = ctx.neighbors[1]; // East neighbor
+            targetX = localX - Math::CHUNK_SIZE_X;
+        } else if (localZ < 0) {
+            targetChunk = ctx.neighbors[2]; // North neighbor
+            targetZ = localZ + Math::CHUNK_SIZE_Z;
+        } else if (localZ >= Math::CHUNK_SIZE_Z) {
+            targetChunk = ctx.neighbors[3]; // South neighbor
+            targetZ = localZ - Math::CHUNK_SIZE_Z;
+        }
+
+        if (!targetChunk) {
+            return BlockID::Air; // Neighbor not available
+        }
+
+        return targetChunk->GetBlock(targetX, localY, targetZ);
+    }
+
+    // Enhanced meshing job with full inter-chunk face culling
+    static void EnhancedMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
+        Log::Debug("Starting enhanced inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
+
+        // Create neighbor context
+        NeighborContext ctx = CreateNeighborContext(chunk, pos);
+
+        if (!ctx.hasAllNeighbors) {
+            Log::Warning("Enhanced meshing called without all neighbors for chunk (%d, %d)", pos.x, pos.z);
+            // Fall back to standard meshing without inter-chunk culling
+            StandardMeshingJob(chunk, pos);
+            return;
+        }
+
+        int totalMeshJobs = 0;
+
+        // Process each non-empty section with enhanced neighbor context
+        for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
+            if (!chunk->sections[s]) {
+                continue; // Skip empty sections
+            }
+
+            // Allocate MeshData for this section
+            auto* meshData = new MeshData();
+            meshData->chunkXZ = { pos.x, pos.z };
+            meshData->sectionIndex = s;
+
+            ChunkSection* sectionPtr = chunk->sections[s].get();
+
+            Log::Debug("Enqueueing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+                      pos.x, pos.z, s);
+
+            // Enhanced meshing job with neighbor context
+            JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, pos, s]() {
+                try {
+                    Log::Debug("Executing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+                              pos.x, pos.z, s);
+
+                    // Call the enhanced mesher with neighbor context
+                    InterChunkMesherJob(sectionPtr, meshData, ctx);
+
+                    Log::Debug("Enhanced inter-chunk mesher completed for chunk (%d, %d) section %d with %zu vertices",
+                              pos.x, pos.z, s, meshData->vertices.size());
+
+                } catch (const std::exception& e) {
+                    Log::Error("Enhanced inter-chunk mesher failed for chunk (%d, %d) section %d: %s",
+                              pos.x, pos.z, s, e.what());
+                    delete meshData;
+                } catch (...) {
+                    Log::Error("Enhanced inter-chunk mesher failed for chunk (%d, %d) section %d with unknown exception",
+                              pos.x, pos.z, s);
+                    delete meshData;
+                }
+            });
+
+            totalMeshJobs++;
+        }
+
+        Log::Info("Enhanced inter-chunk meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
+                 pos.x, pos.z, totalMeshJobs);
+
+        // Mark mesh as no longer pending
+        {
+            std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+            uint64_t key = MakeChunkKey(pos.x, pos.z);
+            auto it = s_chunkRegistry.find(key);
+            if (it != s_chunkRegistry.end()) {
+                it->second->hasPendingMesh.store(false);
+            }
+        }
+    }
+
+    // Standard meshing fallback for chunks without all neighbors
+    static void StandardMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
+        Log::Debug("Starting standard meshing for chunk (%d, %d)", pos.x, pos.z);
+
+        int meshJobsEnqueued = 0;
+        for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
+            if (!chunk->sections[s]) {
+                continue;
+            }
+
+            auto* meshData = new MeshData();
+            meshData->chunkXZ = { pos.x, pos.z };
+            meshData->sectionIndex = s;
+
+            ChunkSection* sectionPtr = chunk->sections[s].get();
+
+            JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
+                try {
+                    // Use existing enhanced mesher that works within chunks
+                    MesherJob(sectionPtr, meshData, chunk.get());
+                } catch (const std::exception& e) {
+                    Log::Error("Standard mesher failed for chunk (%d, %d) section %d: %s",
+                              pos.x, pos.z, s, e.what());
+                    delete meshData;
+                } catch (...) {
+                    Log::Error("Standard mesher failed for chunk (%d, %d) section %d with unknown exception",
+                              pos.x, pos.z, s);
+                    delete meshData;
+                }
+            });
+
+            meshJobsEnqueued++;
+        }
+
+        Log::Info("Standard meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
+                 pos.x, pos.z, meshJobsEnqueued);
+    }
+
     void ChunkProvider::RequestChunk(Math::ChunkPos pos) {
+        // Initialize noise generator once
         static bool s_initialized = false;
         if (!s_initialized) {
             s_noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
@@ -28,39 +287,43 @@ namespace Game {
             s_initialized = true;
         }
 
-        // Check if chunk already exists
         uint64_t key = MakeChunkKey(pos.x, pos.z);
+
+        // Check if chunk already exists
         {
-            std::lock_guard<std::mutex> lock(s_chunkCacheMutex);
-            if (s_chunkCache.find(key) != s_chunkCache.end()) {
+            std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+            if (s_chunkRegistry.find(key) != s_chunkRegistry.end()) {
                 Log::Debug("Chunk (%d, %d) already exists, skipping", pos.x, pos.z);
                 return;
             }
         }
 
-        // Create and store chunk in cache
+        // Create new chunk and register it
         auto chunk = std::make_shared<Chunk>();
         chunk->pos = pos;
+        auto chunkData = std::make_unique<ChunkData>(chunk);
 
         {
-            std::lock_guard<std::mutex> lock(s_chunkCacheMutex);
-            s_chunkCache[key] = chunk;
+            std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+            s_chunkRegistry[key] = std::move(chunkData);
         }
 
-        // First job: fill block data asynchronously
-        JobSystem::g_ThreadPool.Enqueue([chunk, pos]() {
-            Log::Debug("Starting generation for chunk (%d, %d)", pos.x, pos.z);
+        Log::Debug("Requesting generation for chunk (%d, %d)", pos.x, pos.z);
 
-            int baseWorldX = chunk->pos.x * Math::CHUNK_SIZE_X;
-            int baseWorldZ = chunk->pos.z * Math::CHUNK_SIZE_Z;
+        // Enqueue block generation job
+        JobSystem::g_ThreadPool.Enqueue([chunk, pos, key]() {
+            Log::Debug("Starting block generation for chunk (%d, %d)", pos.x, pos.z);
 
-            // Generate heights and fill blocks
+            // Generate terrain data
+            int baseWorldX = pos.x * Math::CHUNK_SIZE_X;
+            int baseWorldZ = pos.z * Math::CHUNK_SIZE_Z;
+
             for (int localX = 0; localX < Math::CHUNK_SIZE_X; ++localX) {
                 for (int localZ = 0; localZ < Math::CHUNK_SIZE_Z; ++localZ) {
                     int worldX = baseWorldX + localX;
                     int worldZ = baseWorldZ + localZ;
 
-                    float n = s_noise.GetNoise((float)worldX, (float)worldZ);
+                    float n = s_noise.GetNoise(static_cast<float>(worldX), static_cast<float>(worldZ));
                     float f = (n + 1.0f) * 0.5f;
                     int height = static_cast<int>(f * 32.0f + 64.0f);
                     height = std::clamp(height, 0, 255);
@@ -74,57 +337,55 @@ namespace Game {
 
             Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
 
-            // Now that ALL blocks exist, enqueue enhanced MesherJob for each non-empty section
-            // We pass the entire chunk so the mesher can perform inter-section face culling
-            int meshJobsEnqueued = 0;
-            for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
-                if (chunk->sections[s]) {
-                    // Allocate MeshData and fill its metadata
-                    auto* meshData = new MeshData();
-                    meshData->chunkXZ = { chunk->pos.x, chunk->pos.z };
-                    meshData->sectionIndex = s;
-
-                    // Get the section pointer while keeping chunk alive
-                    ChunkSection* sectionPtr = chunk->sections[s].get();
-
-                    Log::Debug("Enqueueing enhanced mesher job for chunk (%d, %d) section %d",
-                              pos.x, pos.z, s);
-
-                    // ENHANCED: Capture the chunk shared_ptr AND pass it to the mesher
-                    // This enables proper inter-section face culling
-                    JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
-                        try {
-                            Log::Debug("Starting enhanced mesher job for chunk (%d, %d) section %d",
-                                      pos.x, pos.z, s);
-
-                            // Use the enhanced mesher that can access the entire chunk
-                            MesherJob(sectionPtr, meshData, chunk.get());
-
-                            Log::Debug("Enhanced mesher job completed for chunk (%d, %d) section %d with %zu vertices",
-                                      pos.x, pos.z, s, meshData->vertices.size());
-                        } catch (const std::exception& e) {
-                            Log::Error("Enhanced MesherJob failed for chunk (%d, %d) section %d: %s",
-                                      pos.x, pos.z, s, e.what());
-                            delete meshData; // Clean up on failure
-                        } catch (...) {
-                            Log::Error("Enhanced MesherJob failed for chunk (%d, %d) section %d with unknown exception",
-                                      pos.x, pos.z, s);
-                            delete meshData; // Clean up on failure
-                        }
-                    });
-                    meshJobsEnqueued++;
+            // Mark as generated and update neighbor relationships
+            {
+                std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+                auto it = s_chunkRegistry.find(key);
+                if (it != s_chunkRegistry.end()) {
+                    it->second->isGenerated.store(true);
                 }
             }
 
-            Log::Info("Chunk (%d, %d) generated → %d enhanced meshing jobs enqueued",
-                     chunk->pos.x, chunk->pos.z, meshJobsEnqueued);
+            // Update neighbor counts for this chunk and its neighbors
+            UpdateNeighborCounts(pos);
+            for (auto [dx, dz] : NEIGHBOR_OFFSETS) {
+                UpdateNeighborCounts({pos.x + dx, pos.z + dz});
+            }
+
+            Log::Info("Chunk (%d, %d) generation complete, neighbor relationships updated", pos.x, pos.z);
         });
     }
 
     void ChunkProvider::UnloadChunk(Math::ChunkPos pos) {
         uint64_t key = MakeChunkKey(pos.x, pos.z);
-        std::lock_guard<std::mutex> lk(s_chunkCacheMutex);
-        s_chunkCache.erase(key);
+
+        std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+        auto it = s_chunkRegistry.find(key);
+        if (it == s_chunkRegistry.end()) {
+            return;
+        }
+
+        // Trigger remeshing of dependent chunks that lose this neighbor
+        for (uint64_t dependentKey : it->second->dependents) {
+            auto dependentIt = s_chunkRegistry.find(dependentKey);
+            if (dependentIt != s_chunkRegistry.end()) {
+                Math::ChunkPos dependentPos = KeyToChunkPos(dependentKey);
+                Log::Debug("Triggering remesh of chunk (%d, %d) due to neighbor unload",
+                          dependentPos.x, dependentPos.z);
+
+                // Reset neighbor count and trigger standard meshing
+                dependentIt->second->neighborCount.store(0);
+                dependentIt->second->hasPendingMesh.store(false);
+
+                auto dependentChunk = dependentIt->second->chunk;
+                JobSystem::g_ThreadPool.Enqueue([dependentChunk, dependentPos]() {
+                    StandardMeshingJob(dependentChunk, dependentPos);
+                });
+            }
+        }
+
+        s_chunkRegistry.erase(it);
+        Log::Debug("Chunk (%d, %d) unloaded, dependents remeshed", pos.x, pos.z);
     }
 
 } // namespace Game

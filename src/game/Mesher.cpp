@@ -1,4 +1,4 @@
-// File: src/game/Mesher.cpp (Enhanced Version with Inter-Section Culling)
+// File: src/game/Mesher.cpp (Enhanced with Inter-Chunk Face Culling)
 #include "Mesher.hpp"
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
@@ -14,12 +14,12 @@
 
 namespace Game {
 
-    // Use these 6 directions to test neighbors and build face quads.
+    // Direction constants for neighbor checking
     static const int DX[6] = { +1, -1,  0,  0,  0,  0 };
     static const int DY[6] = {  0,  0, +1, -1,  0,  0 };
     static const int DZ[6] = {  0,  0,  0,  0, +1, -1 };
 
-    // Corresponding face normals
+    // Face normals
     static const glm::vec3 NRM[6] = {
         {+1,  0,  0},  // +X
         {-1,  0,  0},  // -X
@@ -29,7 +29,7 @@ namespace Game {
         { 0,  0, -1}   // -Z
     };
 
-    // For each face, these are the 4 local‐voxel offsets (x,y,z) of the quad corners
+    // Quad corner offsets for each face
     static const int OFFSETS[6][4][3] = {
         // +X face: (x+1, y, z) quad
         {{1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {1, 1, 0}},
@@ -45,7 +45,7 @@ namespace Game {
         {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}
     };
 
-    // Simple UVs for each corner (full‐face)
+    // UV coordinates for each corner
     static const glm::vec2 UVS[4] = {
         {0.0f, 0.0f},
         {1.0f, 0.0f},
@@ -53,54 +53,261 @@ namespace Game {
         {0.0f, 1.0f}
     };
 
-    // Internal upload queue and mutex
-    static std::mutex             s_uploadMutex;
-    static std::queue<MeshData*>  s_uploadQueue;
+    // Thread-safe upload queue
+    static std::mutex s_uploadMutex;
+    static std::queue<MeshData*> s_uploadQueue;
 
     // Helper function to check if a block is opaque
     static bool IsBlockOpaque(BlockID blockId) {
         if (blockId == BlockID::Air) {
             return false;
         }
-
         const Block& block = BlockRegistry::Get(blockId);
         return block.opaque;
     }
 
-    // Enhanced neighbor lookup function that can access blocks across section boundaries
-    // within the same chunk. Returns BlockID::Air for invalid coordinates or missing sections.
+    // Enhanced block lookup with full inter-chunk support
+    static BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int localX, int localY, int localZ) {
+        // Validate Y bounds first (common case) - return Air for out-of-world coordinates
+        if (localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
+            return BlockID::Air;
+        }
+
+        // Handle within-chunk coordinates (most common case)
+        if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
+            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+            return ctx.center->GetBlock(localX, localY, localZ);
+        }
+
+        // Handle cross-chunk coordinates - only for horizontal neighbors
+        std::shared_ptr<Chunk> targetChunk = nullptr;
+        int targetX = localX;
+        int targetZ = localZ;
+
+        // Determine which neighbor to use and adjust coordinates
+        if (localX < 0 && localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+            // West neighbor
+            targetChunk = ctx.neighbors[0];
+            targetX = localX + Math::CHUNK_SIZE_X;
+        } else if (localX >= Math::CHUNK_SIZE_X && localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+            // East neighbor
+            targetChunk = ctx.neighbors[1];
+            targetX = localX - Math::CHUNK_SIZE_X;
+        } else if (localZ < 0 && localX >= 0 && localX < Math::CHUNK_SIZE_X) {
+            // North neighbor
+            targetChunk = ctx.neighbors[2];
+            targetZ = localZ + Math::CHUNK_SIZE_Z;
+        } else if (localZ >= Math::CHUNK_SIZE_Z && localX >= 0 && localX < Math::CHUNK_SIZE_X) {
+            // South neighbor
+            targetChunk = ctx.neighbors[3];
+            targetZ = localZ - Math::CHUNK_SIZE_Z;
+        } else {
+            // Corner case or diagonal neighbor - not supported, return Air
+            return BlockID::Air;
+        }
+
+        // Return air if neighbor isn't available or coordinates are still out of bounds
+        if (!targetChunk || targetX < 0 || targetX >= Math::CHUNK_SIZE_X ||
+            targetZ < 0 || targetZ >= Math::CHUNK_SIZE_Z) {
+            return BlockID::Air;
+        }
+
+        return targetChunk->GetBlock(targetX, localY, targetZ);
+    }
+
+    // Optimized block lookup for intra-chunk access
     static BlockID GetBlockFromChunk(const Chunk* chunk, int localX, int localY, int localZ) {
-        // Validate chunk bounds
         if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
             localZ < 0 || localZ >= Math::CHUNK_SIZE_Z ||
             localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
             return BlockID::Air;
         }
 
-        // Calculate which section this Y coordinate belongs to
         int sectionIdx = localY / Math::SECTION_HEIGHT;
         int yInSection = localY % Math::SECTION_HEIGHT;
 
-        // Validate section index
         if (sectionIdx < 0 || sectionIdx >= Math::SECTIONS_PER_CHUNK) {
             return BlockID::Air;
         }
 
-        // Check if the section exists
         if (!chunk->sections[sectionIdx]) {
-            return BlockID::Air; // Uninitialized sections default to Air
+            return BlockID::Air;
         }
 
         return chunk->sections[sectionIdx]->GetBlockID(localX, yInSection, localZ);
     }
 
-    // Enhanced meshing function that takes the entire chunk for cross-section neighbor checks
+    // **NEW** Inter-chunk meshing function with full neighbor support
+    void InterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
+        assert(section != nullptr);
+        assert(meshData != nullptr);
+        assert(ctx.center != nullptr);
+
+        Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with full neighbor context",
+                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+
+        // Validate inputs
+        if (meshData->sectionIndex < 0 || meshData->sectionIndex >= Math::SECTIONS_PER_CHUNK) {
+            Log::Error("Invalid section index: %d", meshData->sectionIndex);
+            delete meshData;
+            return;
+        }
+
+        // Build mesh data
+        std::vector<Render::Vertex> vertices;
+        std::vector<uint32_t> indices;
+        vertices.reserve(24 * 64); // Estimate: 64 blocks * max 6 faces * 4 vertices
+        indices.reserve(36 * 64);  // Estimate: 64 blocks * max 6 faces * 6 indices
+
+        // Performance counters
+        int solidBlocks = 0;
+        int facesGenerated = 0;
+        int facesCulledIntraSection = 0;
+        int facesCulledInterSection = 0;
+        int facesCulledInterChunk = 0;
+
+        // Calculate the Y offset for this section within the chunk
+        int sectionYOffset = meshData->sectionIndex * Math::SECTION_HEIGHT;
+
+        // Process each voxel in the 16×16×16 section
+        for (int y = 0; y < ChunkSection::SIZE; ++y) {
+            for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                for (int x = 0; x < ChunkSection::SIZE; ++x) {
+                    BlockID blockId = section->GetBlockID(x, y, z);
+                    if (blockId == BlockID::Air || !IsBlockOpaque(blockId)) {
+                        continue;
+                    }
+
+                    solidBlocks++;
+                    const Block& block = BlockRegistry::Get(blockId);
+
+                    // Check each of the 6 potential faces
+                    for (int face = 0; face < 6; ++face) {
+                        int nx = x + DX[face];
+                        int ny = y + DY[face];
+                        int nz = z + DZ[face];
+
+                        bool emitFace = false;
+                        BlockID neighborId = BlockID::Air;
+
+                        // Determine neighbor location and culling strategy
+                        if (nx >= 0 && nx < ChunkSection::SIZE &&
+                            ny >= 0 && ny < ChunkSection::SIZE &&
+                            nz >= 0 && nz < ChunkSection::SIZE) {
+
+                            // Neighbor is within current section - fast path
+                            neighborId = section->GetBlockID(nx, ny, nz);
+                            emitFace = !IsBlockOpaque(neighborId);
+                            if (!emitFace) {
+                                facesCulledIntraSection++;
+                            }
+                        }
+                        else {
+                            // Neighbor is outside current section - need enhanced lookup
+                            int chunkLocalX = x + DX[face];
+                            int chunkLocalY = (sectionYOffset + y) + DY[face];
+                            int chunkLocalZ = z + DZ[face];
+
+                            // Check if neighbor is within the same chunk
+                            if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
+                                chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
+                                chunkLocalY >= 0 && chunkLocalY < Math::CHUNK_TOTAL_HEIGHT) {
+
+                                // Inter-section lookup within the same chunk
+                                neighborId = GetBlockFromChunk(ctx.center.get(), chunkLocalX, chunkLocalY, chunkLocalZ);
+                                emitFace = !IsBlockOpaque(neighborId);
+                                if (!emitFace) {
+                                    facesCulledInterSection++;
+                                }
+                            }
+                            else if (chunkLocalY < 0 || chunkLocalY >= Math::CHUNK_TOTAL_HEIGHT) {
+                                // Neighbor is outside world Y bounds - always emit face (top/bottom of world)
+                                emitFace = true;
+                            }
+                            else if (ctx.hasAllNeighbors) {
+                                // **ENHANCED** Inter-chunk lookup with neighbor context
+                                // Only do this for horizontal neighbors (X/Z), not vertical (Y)
+                                neighborId = GetBlockFromNeighborContext(ctx, chunkLocalX, chunkLocalY, chunkLocalZ);
+                                emitFace = !IsBlockOpaque(neighborId);
+                                if (!emitFace) {
+                                    facesCulledInterChunk++;
+                                }
+                            }
+                            else {
+                                // No neighbor available - assume air (will be corrected when neighbor loads)
+                                emitFace = true;
+                            }
+                        }
+
+                        if (!emitFace) {
+                            continue; // Face is culled
+                        }
+
+                        // Generate quad for this face
+                        auto baseIndex = static_cast<uint32_t>(vertices.size());
+
+                        // Build 4 vertices for the quad
+                        for (int corner = 0; corner < 4; ++corner) {
+                            glm::vec3 pos = {
+                                static_cast<float>(x + OFFSETS[face][corner][0]),
+                                static_cast<float>(y + OFFSETS[face][corner][1]),
+                                static_cast<float>(z + OFFSETS[face][corner][2])
+                            };
+
+                            Render::Vertex vert;
+                            vert.pos = pos;
+                            vert.nrm = NRM[face];
+                            vert.uv = UVS[corner];
+                            vert.ao = 255; // No ambient occlusion in this implementation
+
+                            vertices.push_back(vert);
+                        }
+
+                        // Generate two triangles (6 indices) for the quad
+                        // Use counter-clockwise winding when viewed from outside the block
+                        indices.insert(indices.end(), {
+                            baseIndex + 0, baseIndex + 2, baseIndex + 1,
+                            baseIndex + 0, baseIndex + 3, baseIndex + 2
+                        });
+
+                        facesGenerated++;
+                    }
+                }
+            }
+        }
+
+        Log::Debug("InterChunkMesherJob stats: %d solid blocks, %d faces generated, "
+                  "%d culled intra-section, %d culled inter-section, %d culled inter-chunk",
+                  solidBlocks, facesGenerated, facesCulledIntraSection,
+                  facesCulledInterSection, facesCulledInterChunk);
+
+        // Finalize mesh data
+        {
+            std::lock_guard<std::mutex> lock(s_uploadMutex);
+
+            meshData->vertices = std::move(vertices);
+            meshData->indices = std::move(indices);
+
+            if (!meshData->vertices.empty()) {
+                Log::Debug("Enqueueing inter-chunk mesh for chunk (%d, %d) section %d with %zu vertices",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
+                          meshData->vertices.size());
+                s_uploadQueue.push(meshData);
+            } else {
+                Log::Debug("Inter-chunk mesh for chunk (%d, %d) section %d is empty, discarding",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+                delete meshData;
+            }
+        }
+    }
+
+    // Enhanced meshing function with improved intra-chunk culling
     void MesherJob(ChunkSection* section, MeshData* meshData, const Chunk* chunk) {
         assert(section != nullptr);
         assert(meshData != nullptr);
         assert(chunk != nullptr);
 
-        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with inter-section culling",
+        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with intra-chunk culling",
                   meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
 
         // Validate input data
@@ -112,19 +319,17 @@ namespace Game {
             return;
         }
 
-        // Validate section index
         if (meshData->sectionIndex < 0 || meshData->sectionIndex >= Math::SECTIONS_PER_CHUNK) {
             Log::Error("Invalid section index in MeshData: %d", meshData->sectionIndex);
             delete meshData;
             return;
         }
 
-        // Create a temporary MeshData to build the mesh in
-        MeshData tempMesh;
-        tempMesh.chunkXZ = meshData->chunkXZ;
-        tempMesh.sectionIndex = meshData->sectionIndex;
-        tempMesh.vertices.clear();
-        tempMesh.indices.clear();
+        // Build mesh data
+        std::vector<Render::Vertex> vertices;
+        std::vector<uint32_t> indices;
+        vertices.reserve(24 * 64);
+        indices.reserve(36 * 64);
 
         int solidBlocks = 0;
         int facesGenerated = 0;
@@ -139,18 +344,11 @@ namespace Game {
             for (int z = 0; z < ChunkSection::SIZE; ++z) {
                 for (int x = 0; x < ChunkSection::SIZE; ++x) {
                     BlockID blockId = section->GetBlockID(x, y, z);
-                    if (blockId == BlockID::Air) {
-                        continue; // skip air
-                    }
-
-                    // Only render faces for opaque blocks
-                    if (!IsBlockOpaque(blockId)) {
+                    if (blockId == BlockID::Air || !IsBlockOpaque(blockId)) {
                         continue;
                     }
 
                     solidBlocks++;
-
-                    // Get the block info for texture indices
                     const Block& block = BlockRegistry::Get(blockId);
 
                     // For each of 6 possible faces:
@@ -177,7 +375,6 @@ namespace Game {
                         }
                         else {
                             // Neighbor is outside current section - need inter-section lookup
-                            // Convert to chunk-local coordinates
                             int chunkLocalX = x + DX[face];
                             int chunkLocalY = (sectionYOffset + y) + DY[face];
                             int chunkLocalZ = z + DZ[face];
@@ -197,7 +394,7 @@ namespace Game {
                             }
                             else {
                                 // Neighbor is outside chunk bounds - assume it's air/transparent
-                                // This will be handled by inter-chunk culling in a future update
+                                // This will be handled by inter-chunk culling when neighbors are available
                                 emitFace = true;
                             }
                         }
@@ -206,8 +403,8 @@ namespace Game {
                             continue;
                         }
 
-                        // At this point, we must emit a quad for this face.
-                        auto baseIndex = static_cast<uint32_t>(tempMesh.vertices.size());
+                        // Generate quad for this face
+                        auto baseIndex = static_cast<uint32_t>(vertices.size());
 
                         // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
@@ -221,23 +418,16 @@ namespace Game {
                             vert.pos = pos;
                             vert.nrm = NRM[face];
                             vert.uv  = UVS[corner];
-                            vert.ao  = 255; // no AO in MVP
+                            vert.ao  = 255;
 
-                            // Note: You could use block.texIdx[face] here if you want
-                            // per-face texturing, but you'd need to modify the Vertex
-                            // struct and shader to handle texture atlas indices
-
-                            tempMesh.vertices.push_back(vert);
+                            vertices.push_back(vert);
                         }
 
-                        // Two triangles per quad, using baseIndex
-                        tempMesh.indices.push_back(baseIndex + 0);
-                        tempMesh.indices.push_back(baseIndex + 1);
-                        tempMesh.indices.push_back(baseIndex + 2);
-
-                        tempMesh.indices.push_back(baseIndex + 2);
-                        tempMesh.indices.push_back(baseIndex + 3);
-                        tempMesh.indices.push_back(baseIndex + 0);
+                        // Two triangles per quad with correct winding
+                        indices.insert(indices.end(), {
+                            baseIndex + 0, baseIndex + 2, baseIndex + 1,
+                            baseIndex + 0, baseIndex + 3, baseIndex + 2
+                        });
 
                         facesGenerated++;
                     }
@@ -247,16 +437,16 @@ namespace Game {
 
         Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled intra-section, %d culled inter-section), %zu vertices, %zu indices",
                   solidBlocks, facesGenerated, facesCulledIntraSection, facesCulledInterSection,
-                  tempMesh.vertices.size(), tempMesh.indices.size());
+                  vertices.size(), indices.size());
 
         // Copy the completed data to the output mesh
         {
             std::lock_guard<std::mutex> lock(s_uploadMutex);
 
-            meshData->vertices = std::move(tempMesh.vertices);
-            meshData->indices = std::move(tempMesh.indices);
+            meshData->vertices = std::move(vertices);
+            meshData->indices = std::move(indices);
 
-            if (meshData->vertices.size() > 0) {
+            if (!meshData->vertices.empty()) {
                 Log::Debug("Enqueueing mesh for chunk (%d, %d) section %d with %zu vertices",
                           meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
                           meshData->vertices.size());
