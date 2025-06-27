@@ -12,7 +12,7 @@ namespace Config {
 
     // World / Chunk settings (matching vanilla Minecraft)
     inline constexpr int ChunkSizeX = 16;
-    inline constexpr int ChunkSizeY = 256;
+    inline constexpr int ChunkSizeY = 384;
     inline constexpr int ChunkSizeZ = 16;
     inline constexpr int SubChunkHeight = 16;   // each chunk is split into 16×16×16 sub-chunks
     inline constexpr int MinY = -64;
