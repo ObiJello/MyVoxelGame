@@ -65,6 +65,7 @@ namespace PlatformMain {
         }
     };
 
+#ifndef NDEBUG
     // Chunk visualization helper functions
     struct ChunkState {
         bool isGenerated = false;
@@ -238,6 +239,7 @@ namespace PlatformMain {
 
         ImGui::End();
     }
+#endif // NDEBUG
 
     // Callback for OpenGL debug messages
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
