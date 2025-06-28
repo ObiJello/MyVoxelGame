@@ -1,5 +1,5 @@
 // File: src/game/Raycast.cpp
-#include "Raycast.hpp"
+#include "RayCast.hpp"
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
 #include "../core/Log.hpp"

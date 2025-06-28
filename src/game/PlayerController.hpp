@@ -2,7 +2,7 @@
 #pragma once
 
 #include "Inventory.hpp"
-#include "Raycast.hpp"
+#include "RayCast.hpp"
 #include "../render/Camera.hpp"
 #include <optional>
 #include <chrono>

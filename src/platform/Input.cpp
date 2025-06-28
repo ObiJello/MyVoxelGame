@@ -80,6 +80,15 @@ namespace Input {
             case Key::Escape:      glfwKey = GLFW_KEY_ESCAPE; break;
             case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
             case Key::Tab:         glfwKey = GLFW_KEY_TAB; break;
+            case Key::Alpha1:      glfwKey = GLFW_KEY_1; break;
+            case Key::Alpha2:      glfwKey = GLFW_KEY_2; break;
+            case Key::Alpha3:      glfwKey = GLFW_KEY_3; break;
+            case Key::Alpha4:      glfwKey = GLFW_KEY_4; break;
+            case Key::Alpha5:      glfwKey = GLFW_KEY_5; break;
+            case Key::Alpha6:      glfwKey = GLFW_KEY_6; break;
+            case Key::Alpha7:      glfwKey = GLFW_KEY_7; break;
+            case Key::Alpha8:      glfwKey = GLFW_KEY_8; break;
+            case Key::Alpha9:      glfwKey = GLFW_KEY_9; break;
             default: return false;
         }
         return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
@@ -150,6 +159,15 @@ namespace Input {
         currentKeyStates[Key::Escape] = IsKeyDown(Key::Escape);
         currentKeyStates[Key::LeftShift] = IsKeyDown(Key::LeftShift);
         currentKeyStates[Key::Tab] = IsKeyDown(Key::Tab);
+        currentKeyStates[Key::Alpha1] = IsKeyDown(Key::Alpha1);
+        currentKeyStates[Key::Alpha2] = IsKeyDown(Key::Alpha2);
+        currentKeyStates[Key::Alpha3] = IsKeyDown(Key::Alpha3);
+        currentKeyStates[Key::Alpha4] = IsKeyDown(Key::Alpha4);
+        currentKeyStates[Key::Alpha5] = IsKeyDown(Key::Alpha5);
+        currentKeyStates[Key::Alpha6] = IsKeyDown(Key::Alpha6);
+        currentKeyStates[Key::Alpha7] = IsKeyDown(Key::Alpha7);
+        currentKeyStates[Key::Alpha8] = IsKeyDown(Key::Alpha8);
+        currentKeyStates[Key::Alpha9] = IsKeyDown(Key::Alpha9);
         currentKeyStates[Key::LeftMouse] = IsMouseButtonDown(Key::LeftMouse);
         currentKeyStates[Key::RightMouse] = IsMouseButtonDown(Key::RightMouse);
     }
