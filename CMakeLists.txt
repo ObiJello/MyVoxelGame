@@ -87,6 +87,7 @@ if(APPLE)
             src/render/Shader.cpp
             src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
+            src/render/TextureAtlas.cpp    # <-- ADDED: Missing TextureAtlas implementation
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -106,6 +107,7 @@ else()
             src/render/Shader.cpp
             src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
+            src/render/TextureAtlas.cpp    # <-- ADDED: Missing TextureAtlas implementation
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -150,11 +152,23 @@ if(APPLE)
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
     )
+    # ADDED: Copy assets directory for texture atlas
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${PROJECT_SOURCE_DIR}/assets"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
+    )
 else()
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_FILE_DIR:MyVoxelGame>/shaders"
+    )
+    # ADDED: Copy assets directory for texture atlas
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${PROJECT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:MyVoxelGame>/assets"
     )
 endif()
 # ────────────────────────────────────────────────────────────────────────────

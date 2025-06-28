@@ -47,9 +47,10 @@ namespace Render {
                 GL_STATIC_DRAW
             );
 
-            // 4) Set up vertex attributes: pos (location=0), normal (location=1)
+            // 4) Set up vertex attributes: pos (location=0), normal (location=1), texCoord (location=2)
             constexpr size_t stride = sizeof(Render::Vertex);
-            // aPos
+
+            // aPos (location = 0)
             glEnableVertexAttribArray(0);
             glVertexAttribPointer(
                 0,
@@ -59,7 +60,8 @@ namespace Render {
                 (GLsizei)stride,
                 (void*)offsetof(Render::Vertex, pos)
             );
-            // aNormal
+
+            // aNormal (location = 1)
             glEnableVertexAttribArray(1);
             glVertexAttribPointer(
                 1,
@@ -68,6 +70,17 @@ namespace Render {
                 GL_FALSE,
                 (GLsizei)stride,
                 (void*)offsetof(Render::Vertex, nrm)
+            );
+
+            // aTexCoord (location = 2)
+            glEnableVertexAttribArray(2);
+            glVertexAttribPointer(
+                2,
+                2,
+                GL_FLOAT,
+                GL_FALSE,
+                (GLsizei)stride,
+                (void*)offsetof(Render::Vertex, uv)
             );
 
             glBindVertexArray(0);
@@ -94,7 +107,7 @@ namespace Render {
             glBindVertexArray(0);
         }
 
-        // Compute this section’s AABB in world space for frustum culling
+        // Compute this section's AABB in world space for frustum culling
         AABB GetAABB() const {
             glm::vec3 min = worldOffset;
             glm::vec3 max = worldOffset + glm::vec3(

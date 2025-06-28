@@ -1,7 +1,8 @@
-// File: src/game/Mesher.cpp (Enhanced with Inter-Chunk Face Culling)
+// File: src/game/Mesher.cpp (Enhanced with Texture Atlas Support)
 #include "Mesher.hpp"
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
+#include "../render/TextureAtlas.hpp"  // Add texture atlas support
 #include "../game/WorldMath.hpp"
 #include "../game/ChunkSection.hpp"
 #include "../game/BlockRegistry.hpp"
@@ -43,14 +44,6 @@ namespace Game {
         {{1, 0, 1}, {0, 0, 1}, {0, 1, 1}, {1, 1, 1}},
         // -Z face: (x, y, z) quad
         {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}
-    };
-
-    // UV coordinates for each corner
-    static const glm::vec2 UVS[4] = {
-        {0.0f, 0.0f},
-        {1.0f, 0.0f},
-        {1.0f, 1.0f},
-        {0.0f, 1.0f}
     };
 
     // Thread-safe upload queue
@@ -137,13 +130,29 @@ namespace Game {
         return chunk->sections[sectionIdx]->GetBlockID(localX, yInSection, localZ);
     }
 
-    // **NEW** Inter-chunk meshing function with full neighbor support
+    // Helper function to generate UV coordinates for a face using texture atlas
+    static void GenerateUVsForFace(int face, const Block& block, glm::vec2 uvs[4]) {
+        // Get the atlas index for this face
+        uint8_t atlasIndex = block.texIdx[face];
+
+        // Get the UV tile from the texture atlas
+        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
+
+        // Map the 4 corners of the quad to the atlas tile
+        // The UV coordinates correspond to the 4 corners in the OFFSETS array
+        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Bottom-left
+        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Bottom-right
+        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Top-right
+        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Top-left
+    }
+
+    // **NEW** Inter-chunk meshing function with full neighbor support and texture atlas
     void InterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
         assert(section != nullptr);
         assert(meshData != nullptr);
         assert(ctx.center != nullptr);
 
-        Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with full neighbor context",
+        Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with texture atlas support",
                   meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
 
         // Validate inputs
@@ -243,8 +252,12 @@ namespace Game {
                             continue; // Face is culled
                         }
 
-                        // Generate quad for this face
+                        // Generate quad for this face with proper texture atlas UVs
                         auto baseIndex = static_cast<uint32_t>(vertices.size());
+
+                        // Get UV coordinates for this face from texture atlas
+                        glm::vec2 faceUVs[4];
+                        GenerateUVsForFace(face, block, faceUVs);
 
                         // Build 4 vertices for the quad
                         for (int corner = 0; corner < 4; ++corner) {
@@ -257,7 +270,7 @@ namespace Game {
                             Render::Vertex vert;
                             vert.pos = pos;
                             vert.nrm = NRM[face];
-                            vert.uv = UVS[corner];
+                            vert.uv = faceUVs[corner]; // Use atlas UV coordinates
                             vert.ao = 255; // No ambient occlusion in this implementation
 
                             vertices.push_back(vert);
@@ -301,13 +314,13 @@ namespace Game {
         }
     }
 
-    // Enhanced meshing function with improved intra-chunk culling
+    // Enhanced meshing function with improved intra-chunk culling and texture atlas support
     void MesherJob(ChunkSection* section, MeshData* meshData, const Chunk* chunk) {
         assert(section != nullptr);
         assert(meshData != nullptr);
         assert(chunk != nullptr);
 
-        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with intra-chunk culling",
+        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with texture atlas support",
                   meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
 
         // Validate input data
@@ -403,8 +416,12 @@ namespace Game {
                             continue;
                         }
 
-                        // Generate quad for this face
+                        // Generate quad for this face with proper texture atlas UVs
                         auto baseIndex = static_cast<uint32_t>(vertices.size());
+
+                        // Get UV coordinates for this face from texture atlas
+                        glm::vec2 faceUVs[4];
+                        GenerateUVsForFace(face, block, faceUVs);
 
                         // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
@@ -417,7 +434,7 @@ namespace Game {
                             Render::Vertex vert;
                             vert.pos = pos;
                             vert.nrm = NRM[face];
-                            vert.uv  = UVS[corner];
+                            vert.uv  = faceUVs[corner]; // Use atlas UV coordinates
                             vert.ao  = 255;
 
                             vertices.push_back(vert);

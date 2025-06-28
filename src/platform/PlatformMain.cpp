@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Enhanced with Performance Monitoring, Cursor Toggle, and Chunk Visualization)
+// File: src/platform/PlatformMain.cpp (Enhanced with Texture Atlas Support)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -15,6 +15,7 @@
 #include "../render/ChunkRenderer.hpp"
 #include "../render/Frustum.hpp"
 #include "../render/Shader.hpp"
+#include "../render/TextureAtlas.hpp"  // Add texture atlas support
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -239,6 +240,134 @@ namespace PlatformMain {
 
         ImGui::End();
     }
+
+    // Draw texture atlas debug window
+    void DrawTextureAtlasDebug() {
+        ImGui::Begin("Texture Atlas Debug");
+
+        if (!Render::g_textureAtlas.IsLoaded()) {
+            ImGui::Text("Texture atlas not loaded");
+            ImGui::End();
+            return;
+        }
+
+        ImGui::Text("Atlas Status: Loaded");
+        ImGui::Text("Atlas Size: %dx%d pixels", Render::TextureAtlas::ATLAS_WIDTH, Render::TextureAtlas::ATLAS_HEIGHT);
+        ImGui::Text("Tile Size: %dx%d pixels", Render::TextureAtlas::TILE_SIZE, Render::TextureAtlas::TILE_SIZE);
+        ImGui::Text("Grid Layout: %dx%d tiles", Render::TextureAtlas::TILES_PER_ROW, Render::TextureAtlas::TILES_PER_COLUMN);
+        ImGui::Text("Total Capacity: %d tiles", Render::TextureAtlas::MAX_TILES);
+        ImGui::Text("Loaded textures: %zu", Render::g_textureAtlas.GetLoadedTextureCount());
+
+        ImGui::Separator();
+
+        // Display the atlas texture with zoom and scroll
+        ImGui::Text("Atlas Preview (Scroll to navigate):");
+        GLuint atlasID = Render::g_textureAtlas.GetTextureID();
+
+        // Zoom controls
+        static float zoomLevel = 1.0f;
+        ImGui::SliderFloat("Zoom", &zoomLevel, 0.5f, 4.0f, "%.1fx");
+        ImGui::SameLine();
+        if (ImGui::Button("Reset Zoom")) {
+            zoomLevel = 1.0f;
+        }
+
+        // Calculate display size with zoom
+        float baseDisplayWidth = 256.0f;
+        float baseDisplayHeight = 1024.0f;
+        float displayWidth = baseDisplayWidth * zoomLevel;
+        float displayHeight = baseDisplayHeight * zoomLevel;
+
+        // Create scrollable region
+        ImVec2 scrollRegionSize = ImVec2(400, 500); // Fixed viewport size
+        ImGui::BeginChild("AtlasScrollRegion", scrollRegionSize, true, ImGuiWindowFlags_HorizontalScrollbar);
+
+        ImTextureID textureID = (ImTextureID)(uintptr_t)atlasID;
+        ImVec2 cursorPos = ImGui::GetCursorScreenPos();
+
+        // Draw the atlas image
+        ImGui::Image(textureID,
+                    ImVec2(displayWidth, displayHeight),
+                    ImVec2(0, 1), ImVec2(1, 0)); // Flip Y for OpenGL
+
+        // Show grid overlay for tiles with correct proportions
+        if (ImGui::IsItemHovered()) {
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            ImVec2 imagePos = ImGui::GetItemRectMin();
+
+            // Calculate actual tile display sizes
+            float tileDisplayWidth = displayWidth / Render::TextureAtlas::TILES_PER_ROW;   // displayWidth/16
+            float tileDisplayHeight = displayHeight / Render::TextureAtlas::TILES_PER_COLUMN; // displayHeight/64
+
+            ImU32 gridColor = IM_COL32(255, 255, 255, 100);
+            ImU32 majorGridColor = IM_COL32(255, 255, 0, 150); // Yellow for major divisions
+
+            // Only draw grid if zoomed in enough to see it clearly
+            if (zoomLevel >= 0.8f) {
+                // Vertical lines (every tile column)
+                for (int i = 0; i <= Render::TextureAtlas::TILES_PER_ROW; ++i) {
+                    float offset = i * tileDisplayWidth;
+                    ImU32 color = (i % 4 == 0) ? majorGridColor : gridColor;
+                    drawList->AddLine(
+                        ImVec2(imagePos.x + offset, imagePos.y),
+                        ImVec2(imagePos.x + offset, imagePos.y + displayHeight),
+                        color, (i % 4 == 0) ? 2.0f : 1.0f
+                    );
+                }
+
+                // Horizontal lines - show more lines when zoomed in
+                int lineStep = (zoomLevel >= 2.0f) ? 1 : (zoomLevel >= 1.5f) ? 2 : 4;
+                for (int i = 0; i <= Render::TextureAtlas::TILES_PER_COLUMN; i += lineStep) {
+                    float offset = i * tileDisplayHeight;
+                    ImU32 color = (i % 16 == 0) ? majorGridColor : gridColor;
+                    float thickness = (i % 16 == 0) ? 2.0f : 1.0f;
+                    drawList->AddLine(
+                        ImVec2(imagePos.x, imagePos.y + offset),
+                        ImVec2(imagePos.x + displayWidth, imagePos.y + offset),
+                        color, thickness
+                    );
+                }
+            }
+
+            // Show tile index on hover
+            ImVec2 mousePos = ImGui::GetMousePos();
+            ImVec2 relativePos = ImVec2(mousePos.x - imagePos.x, mousePos.y - imagePos.y);
+
+            if (relativePos.x >= 0 && relativePos.x < displayWidth &&
+                relativePos.y >= 0 && relativePos.y < displayHeight) {
+
+                int tileX = (int)(relativePos.x / tileDisplayWidth);
+                int tileY = (int)(relativePos.y / tileDisplayHeight);
+
+                // Clamp to valid range
+                tileX = std::max(0, std::min(tileX, Render::TextureAtlas::TILES_PER_ROW - 1));
+                tileY = std::max(0, std::min(tileY, Render::TextureAtlas::TILES_PER_COLUMN - 1));
+
+                int tileIndex = tileY * Render::TextureAtlas::TILES_PER_ROW + tileX;
+
+                // Highlight the hovered tile
+                ImVec2 tileTopLeft = ImVec2(imagePos.x + tileX * tileDisplayWidth,
+                                          imagePos.y + tileY * tileDisplayHeight);
+                ImVec2 tileBottomRight = ImVec2(tileTopLeft.x + tileDisplayWidth,
+                                              tileTopLeft.y + tileDisplayHeight);
+
+                drawList->AddRect(tileTopLeft, tileBottomRight, IM_COL32(255, 0, 0, 200), 0.0f, 0, 3.0f);
+
+                ImGui::SetTooltip("Tile (%d, %d) = Index %d\nUV: (%.4f, %.4f) to (%.4f, %.4f)",
+                                 tileX, tileY, tileIndex,
+                                 (float)tileX / 16.0f, (float)tileY / 64.0f,
+                                 (float)(tileX + 1) / 16.0f, (float)(tileY + 1) / 64.0f);
+            }
+        }
+
+        ImGui::EndChild();
+
+        // Show scroll position info
+        ImVec2 scrollPos = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
+        ImGui::Text("Scroll: (%.0f, %.0f) | Zoom: %.1fx", scrollPos.x, scrollPos.y, zoomLevel);
+
+        ImGui::End();
+    }
 #endif // NDEBUG
 
     // Callback for OpenGL debug messages
@@ -252,7 +381,7 @@ namespace PlatformMain {
     {
         // 1) Initialize logging
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Inter-Chunk Face Culling");
+        Log::Info("Starting MyVoxelGame v0.1 with Texture Atlas Support");
 
         // 2) Initialize BlockRegistry
         Game::BlockRegistry::Init();
@@ -312,19 +441,27 @@ namespace PlatformMain {
         }
     #endif
 
-        // 9) Compile shaders
+        // 9) Initialize texture atlas
+        if (!Render::g_textureAtlas.Initialize()) {
+            Log::Error("Failed to initialize texture atlas");
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return -4;
+        }
+
+        // 10) Compile shaders
         Shader blockShader({
             "shaders/block.vert",
             "shaders/block.frag"
         });
 
-        // 10) Enable OpenGL features
+        // 11) Enable OpenGL features
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // 11) Initialize camera
+        // 12) Initialize camera
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
         camera.yaw = 0.0f;
@@ -332,7 +469,7 @@ namespace PlatformMain {
         glfwSwapInterval(1); // Enable VSync
 
     #ifndef NDEBUG
-        // 12) Setup ImGui
+        // 13) Setup ImGui
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -342,15 +479,15 @@ namespace PlatformMain {
         ImGui_ImplOpenGL3_Init("#version 330 core");
     #endif
 
-        // 13) Performance monitoring
+        // 14) Performance monitoring
         PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
         // Mouse cursor toggle state
         bool cursorEnabled = false;
 
-        // 14) Main loop
-        Log::Info("Entering main render loop with enhanced inter-chunk culling");
+        // 15) Main loop
+        Log::Info("Entering main render loop with texture atlas support");
 
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -448,7 +585,6 @@ namespace PlatformMain {
                         continue;
                     }
 
-                    blockShader.Use();
                     Render::UploadMesh(meshPtr);
                     metrics.meshesUploadedThisFrame++;
 
@@ -460,11 +596,18 @@ namespace PlatformMain {
             auto uploadEndTime = std::chrono::high_resolution_clock::now();
             metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
 
-            // l) Render scene with performance tracking
+            // l) Render scene with performance tracking and texture atlas
             auto renderStartTime = std::chrono::high_resolution_clock::now();
             {
-                // Use shader
+                // Use shader and bind texture atlas
                 blockShader.Use();
+
+                // Bind the texture atlas to texture unit 0
+                Render::g_textureAtlas.Bind(GL_TEXTURE0);
+
+                // Set the texture atlas uniform (IMPORTANT: this was missing!)
+                int textureLocation = blockShader.GetUniformLocation("uTextureAtlas");
+                glUniform1i(textureLocation, 0); // Texture unit 0
 
                 // Render visible chunks
                 metrics.meshesRenderedThisFrame = 0;
@@ -504,6 +647,15 @@ namespace PlatformMain {
                 ImGui::Text("Frame Time: %.2f ms", dt * 1000.0f);
                 ImGui::Text("Mesh Upload: %.2f ms", metrics.meshUploadTime);
                 ImGui::Text("Render Time: %.2f ms", metrics.renderTime);
+                ImGui::Spacing();
+
+                // Texture Atlas information
+                ImGui::Text("Texture Atlas");
+                ImGui::Separator();
+                ImGui::Text("Status: %s", Render::g_textureAtlas.IsLoaded() ? "Loaded" : "Not Loaded");
+                ImGui::Text("Loaded Textures: %zu", Render::g_textureAtlas.GetLoadedTextureCount());
+                ImGui::Text("Atlas Size: %dx%d", Render::TextureAtlas::ATLAS_WIDTH, Render::TextureAtlas::ATLAS_HEIGHT);
+                ImGui::Text("Grid: %dx%d (%d tiles)", Render::TextureAtlas::TILES_PER_ROW, Render::TextureAtlas::TILES_PER_COLUMN, Render::TextureAtlas::MAX_TILES);
                 ImGui::Spacing();
 
                 // World statistics
@@ -562,38 +714,41 @@ namespace PlatformMain {
             // n) Draw chunk visualization
             DrawChunkVisualization(camera, frustum);
 
-            // o) Render ImGui
+            // o) Draw texture atlas debug window
+            DrawTextureAtlasDebug();
+
+            // p) Render ImGui
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // p) Swap buffers
+            // q) Swap buffers
             glfwSwapBuffers(window);
 
-            // q) Reset input deltas
+            // r) Reset input deltas
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // r) Calculate total frame time
+            // s) Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
 
     #ifndef NDEBUG
-        // 15) Cleanup ImGui
+        // 16) Cleanup ImGui
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
     #endif
 
-        // 16) Cleanup OpenGL resources
+        // 17) Cleanup OpenGL resources
         for (auto& cm : Render::g_chunkMeshes) {
             glDeleteVertexArrays(1, &cm.vao);
             glDeleteBuffers(1, &cm.vbo);
             glDeleteBuffers(1, &cm.ebo);
         }
 
-        Log::Info("Enhanced voxel engine shutting down");
+        Log::Info("Enhanced voxel engine with texture atlas shutting down");
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered total",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 
