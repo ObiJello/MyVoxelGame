@@ -14,7 +14,7 @@ namespace Render {
     TextureAtlas g_textureAtlas;
 
     TextureAtlas::TextureAtlas()
-        : textureID(0), isLoaded(false), nextAvailableIndex(1) // Reserve index 0 for air/empty
+        : textureID(0), isLoaded(false), nextAvailableIndex(0) // Don't reserve index 0 anymore
     {
         // Pre-allocate atlas data (RGBA format) for 256x1024 atlas
         atlasData.resize(ATLAS_WIDTH * ATLAS_HEIGHT * 4, 0);
@@ -110,24 +110,26 @@ namespace Render {
         // Fill with transparent pixels initially
         std::fill(atlasData.begin(), atlasData.end(), 0);
 
-        // Index 0: Fully transparent (for air blocks)
-        CreateSolidTexture(0, 0, 0, 0, 0);
-
         // Create some default textures for fallback when no atlas file is found
+        // Note: Index 0 is now available for your dirt texture from the atlas file
+
+        // Air now uses index 1008, so create a transparent texture there
+        CreateSolidTexture(1008, 0, 0, 0, 0); // Fully transparent for air
+
         if (nextAvailableIndex < MAX_TILES) {
-            // Index 1: Stone-like texture (gray with some noise)
+            // Index 1: Stone-like texture (gray with some noise) - if no atlas file
             CreateSolidTexture(1, 128, 128, 128);
             textureNameToIndex["stone"] = 1;
             loadedTextures.push_back("default_stone");
-            nextAvailableIndex++;
+            nextAvailableIndex = std::max(nextAvailableIndex, static_cast<uint16_t>(2));
         }
 
         if (nextAvailableIndex < MAX_TILES) {
-            // Index 2: Dirt-like texture (brown)
+            // Index 2: Dirt-like texture (brown) - fallback if no atlas file
             CreateSolidTexture(2, 139, 69, 19);
             textureNameToIndex["dirt"] = 2;
             loadedTextures.push_back("default_dirt");
-            nextAvailableIndex++;
+            nextAvailableIndex = std::max(nextAvailableIndex, static_cast<uint16_t>(3));
         }
 
         if (nextAvailableIndex < MAX_TILES) {
@@ -135,7 +137,7 @@ namespace Render {
             CreateSolidTexture(3, 34, 139, 34);
             textureNameToIndex["grass_top"] = 3;
             loadedTextures.push_back("default_grass_top");
-            nextAvailableIndex++;
+            nextAvailableIndex = std::max(nextAvailableIndex, static_cast<uint16_t>(4));
         }
 
         if (nextAvailableIndex < MAX_TILES) {
@@ -143,7 +145,7 @@ namespace Render {
             CreateSolidTexture(4, 107, 142, 35);
             textureNameToIndex["grass_side"] = 4;
             loadedTextures.push_back("default_grass_side");
-            nextAvailableIndex++;
+            nextAvailableIndex = std::max(nextAvailableIndex, static_cast<uint16_t>(5));
         }
     }
 
@@ -266,8 +268,8 @@ namespace Render {
 
     AtlasTile TextureAtlas::GetTile(uint16_t atlasIndex) const {
         if (atlasIndex >= MAX_TILES) {
-            Log::Warning("Atlas index %d out of range (max %d), using index 0", atlasIndex, MAX_TILES - 1);
-            atlasIndex = 0;
+            Log::Warning("Atlas index %d out of range (max %d), using index 1008 (air)", atlasIndex, MAX_TILES - 1);
+            atlasIndex = 1008; // Return air texture instead of index 0
         }
 
         // Calculate UV coordinates for 16x64 grid
@@ -298,7 +300,7 @@ namespace Render {
     uint16_t TextureAtlas::RegisterTexture(const std::string& name, const unsigned char* data, int width, int height) {
         if (nextAvailableIndex >= MAX_TILES) {
             Log::Warning("Atlas is full, cannot register texture: %s", name.c_str());
-            return 0; // Return air/empty index
+            return 1008; // Return air index instead of 0
         }
 
         uint16_t index = nextAvailableIndex++;

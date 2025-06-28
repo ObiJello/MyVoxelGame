@@ -16,14 +16,16 @@ namespace Game {
     }
 
     void BlockRegistry::Init() {
-        // 0: Air (transparent; no faces rendered)
-        RegisterBlock(BlockID::Air,   "Air",   false, {0,0,0,0,0,0});
+        // Texture indices: [Right, Left, Top, Bottom, Front, Back] = [+X, -X, +Y, -Y, +Z, -Z]
+
+        // 0: Air (transparent; no faces rendered) - Now uses texture index 1008
+        RegisterBlock(BlockID::Air,   "Air",   false, {1008,1008,1008,1008,1008,1008});
 
         // 1: Stone (opaque; same texture on all faces) - Try index 1 first, if that doesn't work try 0
         RegisterBlock(BlockID::Stone, "Stone", true,  {1,1,1,1,1,1});
 
-        // 2: Dirt (opaque; same texture on all faces)
-        RegisterBlock(BlockID::Dirt,  "Dirt",  true,  {2,2,2,2,2,2});
+        // 2: Dirt (opaque; same texture on all faces) - Now can use index 0 from your atlas
+        RegisterBlock(BlockID::Dirt,  "Dirt",  true,  {0,0,0,0,0,0});
 
         // 3: Grass (opaque; top=3, bottom=2, sides=4)
         RegisterBlock(BlockID::Grass, "Grass", true,  {1,1,1,1,1,1});
