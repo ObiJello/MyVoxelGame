@@ -17,7 +17,6 @@ namespace Game {
 
     void BlockRegistry::Init() {
         // Texture indices: [Right, Left, Top, Bottom, Front, Back] = [+X, -X, +Y, -Y, +Z, -Z]
-        // Converting pixel coordinates to atlas indices: index = (pixelY / 16) * 16 + (pixelX / 16)
 
         // 0: Air (transparent; no faces rendered) - Uses texture index 1008
         RegisterBlock(BlockID::Air, "Air", false, {1008,1008,1008,1008,1008,1008});
