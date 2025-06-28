@@ -132,18 +132,18 @@ namespace Game {
 
     // Helper function to generate UV coordinates for a face using texture atlas
     static void GenerateUVsForFace(int face, const Block& block, glm::vec2 uvs[4]) {
-        // Get the atlas index for this face - CHANGED TO uint16_t
+        // Get the atlas index for this face
         uint16_t atlasIndex = block.texIdx[face];
 
         // Get the UV tile from the texture atlas
         Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
 
-        // Map the 4 corners of the quad to the atlas tile
-        // The UV coordinates correspond to the 4 corners in the OFFSETS array
-        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Bottom-left
-        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Bottom-right
-        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Top-right
-        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Top-left
+        // FIXED: Flip V coordinates to correct upside-down textures
+        // Map the 4 corners of the quad to the atlas tile with corrected orientation
+        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left (was uvMin.y, now uvMax.y)
+        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right (was uvMin.y, now uvMax.y)
+        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right (was uvMax.y, now uvMin.y)
+        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left (was uvMax.y, now uvMin.y)
     }
 
     // **NEW** Inter-chunk meshing function with full neighbor support and texture atlas
