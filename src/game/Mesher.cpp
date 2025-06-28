@@ -132,8 +132,8 @@ namespace Game {
 
     // Helper function to generate UV coordinates for a face using texture atlas
     static void GenerateUVsForFace(int face, const Block& block, glm::vec2 uvs[4]) {
-        // Get the atlas index for this face
-        uint8_t atlasIndex = block.texIdx[face];
+        // Get the atlas index for this face - CHANGED TO uint16_t
+        uint16_t atlasIndex = block.texIdx[face];
 
         // Get the UV tile from the texture atlas
         Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);

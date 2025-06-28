@@ -9,7 +9,7 @@ layout (location = 2) in vec2 aTexCoord;  // Texture coordinates from atlas
 uniform mat4 uMVP;  // Model-View-Projection matrix
 
 // Output to fragment shader
-out vec3 fragNormal;    // Interpolated normal for lighting
+out vec3 fragNormal;    // Interpolated normall for lighting
 out vec2 fragTexCoord;  // Interpolated texture coordinates
 
 void main() {

@@ -5,7 +5,7 @@
 
 namespace Game {
 
-    // We’ll use a uint16_t under the hood to match our palette/palette-index style.
+    // We'll use a uint16_t under the hood to match our palette/palette-index style.
     enum class BlockID : uint16_t {
         Air   = 0,
         Stone = 1,
@@ -18,7 +18,7 @@ namespace Game {
     struct Block {
         std::string       name;        // e.g. "Stone"
         bool              opaque;      // Does this block occlude light / render faces?
-        std::array<uint8_t, 6> texIdx;  // Atlas index per face (0–N). { +X, -X, +Y, -Y, +Z, -Z }
+        std::array<uint16_t, 6> texIdx;  // Atlas index per face (0–N). { +X, -X, +Y, -Y, +Z, -Z } - CHANGED TO uint16_t
     };
 
 } // namespace Game

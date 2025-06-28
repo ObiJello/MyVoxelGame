@@ -39,7 +39,7 @@ namespace Render {
         } else {
             // Load the atlas file directly
             int width, height, channels;
-            stbi_set_flip_vertically_on_load(1); // Flip the image vertically to match OpenGL coordinates
+            stbi_set_flip_vertically_on_load(0); // DON'T flip - keep original orientation - FIXED!
             unsigned char* data = stbi_load(atlasPath.c_str(), &width, &height, &channels, STBI_rgb_alpha);
 
             if (!data) {
@@ -147,7 +147,7 @@ namespace Render {
         }
     }
 
-    bool TextureAtlas::LoadTextureToAtlas(const std::string& filePath, uint8_t atlasIndex) {
+    bool TextureAtlas::LoadTextureToAtlas(const std::string& filePath, uint16_t atlasIndex) {
         int width, height, channels;
         unsigned char* data = stbi_load(filePath.c_str(), &width, &height, &channels, STBI_rgb_alpha);
 
@@ -170,7 +170,7 @@ namespace Render {
         return true;
     }
 
-    void TextureAtlas::CreateErrorTexture(uint8_t atlasIndex) {
+    void TextureAtlas::CreateErrorTexture(uint16_t atlasIndex) {
         // Create a magenta/black checkerboard pattern for missing textures
         std::vector<unsigned char> errorData(TILE_SIZE * TILE_SIZE * 4);
 
@@ -198,7 +198,7 @@ namespace Render {
         CopyTileToAtlas(errorData.data(), atlasIndex, TILE_SIZE, TILE_SIZE);
     }
 
-    void TextureAtlas::CreateSolidTexture(uint8_t atlasIndex, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+    void TextureAtlas::CreateSolidTexture(uint16_t atlasIndex, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
         std::vector<unsigned char> solidData(TILE_SIZE * TILE_SIZE * 4);
 
         for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
@@ -211,7 +211,7 @@ namespace Render {
         CopyTileToAtlas(solidData.data(), atlasIndex, TILE_SIZE, TILE_SIZE);
     }
 
-    void TextureAtlas::CopyTileToAtlas(const unsigned char* tileData, uint8_t atlasIndex, int tileWidth, int tileHeight) {
+    void TextureAtlas::CopyTileToAtlas(const unsigned char* tileData, uint16_t atlasIndex, int tileWidth, int tileHeight) {
         int atlasX, atlasY;
         GetAtlasCoords(atlasIndex, atlasX, atlasY);
 
@@ -239,7 +239,7 @@ namespace Render {
         }
     }
 
-    void TextureAtlas::GetAtlasCoords(uint8_t atlasIndex, int& x, int& y) const {
+    void TextureAtlas::GetAtlasCoords(uint16_t atlasIndex, int& x, int& y) const {
         x = (atlasIndex % TILES_PER_ROW) * TILE_SIZE;
         y = (atlasIndex / TILES_PER_ROW) * TILE_SIZE;
     }
@@ -264,7 +264,7 @@ namespace Render {
         Log::Info("Uploaded %dx%d texture atlas to GPU (Texture ID: %u)", ATLAS_WIDTH, ATLAS_HEIGHT, textureID);
     }
 
-    AtlasTile TextureAtlas::GetTile(uint8_t atlasIndex) const {
+    AtlasTile TextureAtlas::GetTile(uint16_t atlasIndex) const {
         if (atlasIndex >= MAX_TILES) {
             Log::Warning("Atlas index %d out of range (max %d), using index 0", atlasIndex, MAX_TILES - 1);
             atlasIndex = 0;
@@ -286,7 +286,7 @@ namespace Render {
             static_cast<float>(tileX + 1) * uvPerTileX,
             static_cast<float>(tileY + 1) * uvPerTileY
         );
-        
+
         return AtlasTile(uvMin, uvMax);
     }
 
@@ -295,13 +295,13 @@ namespace Render {
         glBindTexture(GL_TEXTURE_2D, textureID);
     }
 
-    uint8_t TextureAtlas::RegisterTexture(const std::string& name, const unsigned char* data, int width, int height) {
+    uint16_t TextureAtlas::RegisterTexture(const std::string& name, const unsigned char* data, int width, int height) {
         if (nextAvailableIndex >= MAX_TILES) {
             Log::Warning("Atlas is full, cannot register texture: %s", name.c_str());
             return 0; // Return air/empty index
         }
-        
-        uint8_t index = nextAvailableIndex++;
+
+        uint16_t index = nextAvailableIndex++;
         CopyTileToAtlas(data, index, width, height);
         
         textureNameToIndex[name] = index;

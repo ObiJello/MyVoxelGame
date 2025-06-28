@@ -33,8 +33,8 @@ namespace Render {
         // Initialize the atlas by loading a single atlas texture file
         bool Initialize(const std::string& atlasPath = "assets/textures/atlas.png");
 
-        // Get UV coordinates for a specific atlas index
-        AtlasTile GetTile(uint8_t atlasIndex) const;
+        // Get UV coordinates for a specific atlas index - CHANGED TO uint16_t
+        AtlasTile GetTile(uint16_t atlasIndex) const;
 
         // Bind the atlas texture for rendering
         void Bind(GLenum textureUnit = GL_TEXTURE0) const;
@@ -48,15 +48,15 @@ namespace Render {
         // Get the number of loaded textures
         size_t GetLoadedTextureCount() const { return loadedTextures.size(); }
 
-        // Register a texture manually (for dynamic textures)
-        uint8_t RegisterTexture(const std::string& name, const unsigned char* data, int width, int height);
+        // Register a texture manually (for dynamic textures) - CHANGED TO uint16_t
+        uint16_t RegisterTexture(const std::string& name, const unsigned char* data, int width, int height);
 
     private:
         GLuint textureID;
         bool isLoaded;
         std::vector<std::string> loadedTextures;  // Track loaded texture names
-        std::unordered_map<std::string, uint8_t> textureNameToIndex;
-        uint8_t nextAvailableIndex;
+        std::unordered_map<std::string, uint16_t> textureNameToIndex; // CHANGED TO uint16_t
+        uint16_t nextAvailableIndex; // CHANGED TO uint16_t
 
         // Atlas pixel data (RGBA format)
         std::vector<unsigned char> atlasData;
@@ -64,23 +64,23 @@ namespace Render {
         // Initialize the atlas texture with default/error patterns
         void InitializeAtlasData();
 
-        // Load a single PNG file and copy it to the atlas at the specified index
-        bool LoadTextureToAtlas(const std::string& filePath, uint8_t atlasIndex);
+        // Load a single PNG file and copy it to the atlas at the specified index - CHANGED TO uint16_t
+        bool LoadTextureToAtlas(const std::string& filePath, uint16_t atlasIndex);
 
-        // Create a checkerboard error texture at the specified atlas index
-        void CreateErrorTexture(uint8_t atlasIndex);
+        // Create a checkerboard error texture at the specified atlas index - CHANGED TO uint16_t
+        void CreateErrorTexture(uint16_t atlasIndex);
 
-        // Create a solid color texture at the specified atlas index
-        void CreateSolidTexture(uint8_t atlasIndex, unsigned char r, unsigned char g, unsigned char b, unsigned char a = 255);
+        // Create a solid color texture at the specified atlas index - CHANGED TO uint16_t
+        void CreateSolidTexture(uint16_t atlasIndex, unsigned char r, unsigned char g, unsigned char b, unsigned char a = 255);
 
-        // Copy tile data into the atlas at the specified index
-        void CopyTileToAtlas(const unsigned char* tileData, uint8_t atlasIndex, int tileWidth, int tileHeight);
+        // Copy tile data into the atlas at the specified index - CHANGED TO uint16_t
+        void CopyTileToAtlas(const unsigned char* tileData, uint16_t atlasIndex, int tileWidth, int tileHeight);
 
         // Upload the atlas data to OpenGL
         void UploadToGPU();
 
-        // Utility: Get atlas pixel coordinates from index
-        void GetAtlasCoords(uint8_t atlasIndex, int& x, int& y) const;
+        // Utility: Get atlas pixel coordinates from index - CHANGED TO uint16_t
+        void GetAtlasCoords(uint16_t atlasIndex, int& x, int& y) const;
     };
 
     // Global atlas instance (defined in TextureAtlas.cpp)

@@ -5,23 +5,34 @@
 #include <filesystem>
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>  // for glm::value_ptr
+#include "../core/Log.hpp"  // Add this include for logging
 
 // Constructor
 Shader::Shader(const std::string& vertexPath, const std::string& fragmentPath)
     : vertexFile(vertexPath), fragmentFile(fragmentPath)
 {
+    Log::Info("Creating shader: %s + %s", vertexPath.c_str(), fragmentPath.c_str());
     UpdateTimestamps();
     CompileAndLink();
 }
 
 // Destructor: delete the GL program
 Shader::~Shader() {
-    glDeleteProgram(programID);
+    if (programID != 0) {
+        Log::Debug("Deleting shader program ID: %u", programID);
+        glDeleteProgram(programID);
+    }
 }
 
 // Use (bind) this shader
 void Shader::Use() const {
     glUseProgram(programID);
+
+    // Check for OpenGL errors
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        Log::Error("OpenGL error after glUseProgram: 0x%x", error);
+    }
 }
 
 // Retrieve uniform location (cached)
@@ -29,34 +40,73 @@ int Shader::GetUniformLocation(const std::string& name) {
     if (uniformCache.count(name)) {
         return uniformCache[name];
     }
+
     int loc = glGetUniformLocation(programID, name.c_str());
     uniformCache[name] = loc;
+
+    if (loc == -1) {
+        Log::Warning("Uniform '%s' not found in shader program %u", name.c_str(), programID);
+    } else {
+        Log::Debug("Found uniform '%s' at location %d in program %u", name.c_str(), loc, programID);
+    }
+
     return loc;
 }
 
 // Set a mat4 uniform
 void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) {
     int loc = GetUniformLocation(name);
-    glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(matrix));
+    if (loc != -1) {
+        glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(matrix));
+
+        // Check for OpenGL errors
+        GLenum error = glGetError();
+        if (error != GL_NO_ERROR) {
+            Log::Error("OpenGL error setting mat4 uniform '%s': 0x%x", name.c_str(), error);
+        }
+    }
 }
 
 // Hot-reload if either file changed
 void Shader::HotReloadIfNeeded() {
+    if (!std::filesystem::exists(vertexFile) || !std::filesystem::exists(fragmentFile)) {
+        Log::Error("Shader files don't exist: %s or %s", vertexFile.c_str(), fragmentFile.c_str());
+        return;
+    }
+
     auto vertTime = std::filesystem::last_write_time(vertexFile);
     auto fragTime = std::filesystem::last_write_time(fragmentFile);
 
     if (vertTime != lastWriteVert || fragTime != lastWriteFrag) {
+        Log::Info("Shader files changed, recompiling shaders (%s + %s)",
+                 vertexFile.c_str(), fragmentFile.c_str());
+
+        // Clear cache BEFORE recompiling
+        uniformCache.clear();
+
         UpdateTimestamps();
         CompileAndLink();
-        uniformCache.clear();
+
+        Log::Info("Shader recompiled successfully, uniform cache cleared");
     }
 }
 
 // Compile & link the shaders
 void Shader::CompileAndLink() {
+    Log::Debug("Starting shader compilation...");
+
+    // Clear uniform cache since we're creating a new program
+    uniformCache.clear();
+
     std::string vertCode = ReadFile(vertexFile);
     std::string fragCode = ReadFile(fragmentFile);
-    if (vertCode.empty() || fragCode.empty()) return;
+    if (vertCode.empty() || fragCode.empty()) {
+        Log::Error("Failed to read shader files");
+        return;
+    }
+
+    Log::Debug("Vertex shader size: %zu chars, Fragment shader size: %zu chars",
+              vertCode.size(), fragCode.size());
 
     const char* vSrc = vertCode.c_str();
     const char* fSrc = fragCode.c_str();
@@ -65,23 +115,34 @@ void Shader::CompileAndLink() {
     GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vShader, 1, &vSrc, nullptr);
     glCompileShader(vShader);
+
     GLint success;
     glGetShaderiv(vShader, GL_COMPILE_STATUS, &success);
     if (!success) {
         char infoLog[512];
         glGetShaderInfoLog(vShader, 512, nullptr, infoLog);
-        std::cerr << "[Shader] Vertex compilation failed: " << infoLog << "\n";
+        Log::Error("Vertex shader compilation failed: %s", infoLog);
+        glDeleteShader(vShader);
+        return;
+    } else {
+        Log::Debug("Vertex shader compiled successfully");
     }
 
     // Compile fragment shader
     GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fShader, 1, &fSrc, nullptr);
     glCompileShader(fShader);
+
     glGetShaderiv(fShader, GL_COMPILE_STATUS, &success);
     if (!success) {
         char infoLog[512];
         glGetShaderInfoLog(fShader, 512, nullptr, infoLog);
-        std::cerr << "[Shader] Fragment compilation failed: " << infoLog << "\n";
+        Log::Error("Fragment shader compilation failed: %s", infoLog);
+        glDeleteShader(vShader);
+        glDeleteShader(fShader);
+        return;
+    } else {
+        Log::Debug("Fragment shader compiled successfully");
     }
 
     // Link program
@@ -89,36 +150,83 @@ void Shader::CompileAndLink() {
     glAttachShader(newProgram, vShader);
     glAttachShader(newProgram, fShader);
     glLinkProgram(newProgram);
+
     glGetProgramiv(newProgram, GL_LINK_STATUS, &success);
     if (!success) {
         char infoLog[512];
         glGetProgramInfoLog(newProgram, 512, nullptr, infoLog);
-        std::cerr << "[Shader] Program link failed: " << infoLog << "\n";
+        Log::Error("Shader program link failed: %s", infoLog);
+        glDeleteShader(vShader);
+        glDeleteShader(fShader);
+        glDeleteProgram(newProgram);
+        return;
+    } else {
+        Log::Debug("Shader program linked successfully");
     }
 
-    // Delete old shaders and replace program
+    // Validate program
+    glValidateProgram(newProgram);
+    glGetProgramiv(newProgram, GL_VALIDATE_STATUS, &success);
+    if (!success) {
+        char infoLog[512];
+        glGetProgramInfoLog(newProgram, 512, nullptr, infoLog);
+        Log::Warning("Shader program validation failed: %s", infoLog);
+    }
+
+    // Clean up shaders (they're linked into the program now)
     glDeleteShader(vShader);
     glDeleteShader(fShader);
+
+    // Delete old program AFTER successful linking
     if (programID != 0) {
+        Log::Debug("Deleting old shader program %u", programID);
         glDeleteProgram(programID);
     }
+
     programID = newProgram;
+    Log::Info("Shader program created successfully, new ID: %u", programID);
+
+    // Check if our critical uniforms exist
+    glUseProgram(programID);
+    int mvpLoc = glGetUniformLocation(programID, "uMVP");
+    int atlasLoc = glGetUniformLocation(programID, "uTextureAtlas");
+
+    Log::Info("Critical uniforms - uMVP: %d, uTextureAtlas: %d", mvpLoc, atlasLoc);
+
+    if (mvpLoc == -1) {
+        Log::Error("CRITICAL: uMVP uniform not found in shader!");
+    }
+    if (atlasLoc == -1) {
+        Log::Error("CRITICAL: uTextureAtlas uniform not found in shader!");
+    }
 }
 
 // Internal: load file content
 std::string Shader::ReadFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        std::cerr << "[Shader] Failed to open file: " << path << "\n";
+        Log::Error("Failed to open shader file: %s", path.c_str());
         return "";
     }
     std::stringstream ss;
     ss << file.rdbuf();
-    return ss.str();
+    std::string content = ss.str();
+
+    if (content.empty()) {
+        Log::Error("Shader file is empty: %s", path.c_str());
+    } else {
+        Log::Debug("Successfully read shader file: %s (%zu chars)", path.c_str(), content.size());
+    }
+
+    return content;
 }
 
 // Check & update last-write times
 void Shader::UpdateTimestamps() {
-    lastWriteVert = std::filesystem::last_write_time(vertexFile);
-    lastWriteFrag = std::filesystem::last_write_time(fragmentFile);
+    if (std::filesystem::exists(vertexFile)) {
+        lastWriteVert = std::filesystem::last_write_time(vertexFile);
+    }
+    if (std::filesystem::exists(fragmentFile)) {
+        lastWriteFrag = std::filesystem::last_write_time(fragmentFile);
+    }
 }

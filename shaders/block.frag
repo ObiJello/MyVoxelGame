@@ -22,7 +22,7 @@ void main() {
     // Simple directional lighting calculation
     vec3 normal = normalize(fragNormal);
 
-    // Default sun direction (pointing down and slightly south-east)
+    // Default sun direction (pointingg down and slightly south-east)
     vec3 sunDir = normalize(vec3(0.3, -0.8, 0.2));
     vec3 sunCol = vec3(1.0, 1.0, 0.9);  // Warm white sunlight
     vec3 ambientCol = vec3(0.4, 0.5, 0.7);  // Cool blue ambient
