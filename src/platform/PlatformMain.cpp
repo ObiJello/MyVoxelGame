@@ -9,6 +9,9 @@
 #include "../game/BlockRegistry.hpp"
 #include "../game/ChunkProvider.hpp"
 #include "../game/WorldManager.hpp"
+#include "../game/PlayerController.hpp"
+#include "../game/WorldAccess.hpp"
+#include "../game/RayCast.hpp"
 
 // Include rendering headers
 #include "../render/Camera.hpp"
@@ -476,6 +479,10 @@ namespace PlatformMain {
         camera.pitch = 0.0f;
         glfwSwapInterval(1); // Enable VSync
 
+        // 12.5) Initialize player controller
+        Game::PlayerController playerController;
+        Log::Info("Player controller initialized with inventory");
+
     #ifndef NDEBUG
         // 13) Setup ImGui
         IMGUI_CHECKVERSION();
@@ -504,7 +511,41 @@ namespace PlatformMain {
             glfwPollEvents();
 
             // b) Update input states
+
             Input::UpdateKeyStates();
+
+            // d.5) Handle player input
+            // Mouse buttons for block interaction
+            if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
+                playerController.OnBreakPressed();
+            } else {
+                playerController.OnBreakReleased();
+            }
+
+            if (Input::IsMouseButtonDown(Input::Key::RightMouse)) {
+                playerController.OnPlacePressed();
+            } else {
+                playerController.OnPlaceReleased();
+            }
+
+            // Number keys for inventory slot selection
+            if (Input::IsKeyPressed(Input::Key::Alpha1)) playerController.SelectSlot(0);
+            if (Input::IsKeyPressed(Input::Key::Alpha2)) playerController.SelectSlot(1);
+            if (Input::IsKeyPressed(Input::Key::Alpha3)) playerController.SelectSlot(2);
+            if (Input::IsKeyPressed(Input::Key::Alpha4)) playerController.SelectSlot(3);
+            if (Input::IsKeyPressed(Input::Key::Alpha5)) playerController.SelectSlot(4);
+            if (Input::IsKeyPressed(Input::Key::Alpha6)) playerController.SelectSlot(5);
+            if (Input::IsKeyPressed(Input::Key::Alpha7)) playerController.SelectSlot(6);
+            if (Input::IsKeyPressed(Input::Key::Alpha8)) playerController.SelectSlot(7);
+            if (Input::IsKeyPressed(Input::Key::Alpha9)) playerController.SelectSlot(8);
+
+            // Mouse wheel for inventory scrolling
+            auto [scrollX, scrollY] = Input::GetScrollOffset();
+            if (scrollY > 0) {
+                playerController.SelectPreviousSlot();
+            } else if (scrollY < 0) {
+                playerController.SelectNextSlot();
+            }
 
             // c) Update time
             Time::Tick();
@@ -534,7 +575,11 @@ namespace PlatformMain {
             }
 
             // f) Update camera
+
             camera.Update(dt);
+
+            // f.5) Update player controller
+            playerController.Update(dt, camera);
 
             // g) Update world (handles chunk loading/unloading with enhanced meshing)
             Game::WorldManager::Update(camera.position);
@@ -684,6 +729,46 @@ namespace PlatformMain {
                 ImGui::Text("Total Indices Rendered: %zu", metrics.totalIndicesRendered);
                 ImGui::Text("Frustum Culled Sections: %zu",
                            Render::g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
+
+                // Player interaction info
+                ImGui::Spacing();
+                ImGui::Text("Player Interaction");
+                ImGui::Separator();
+                const auto& inventory = playerController.GetInventory();
+                BlockID selectedBlock = inventory.GetSelectedBlock();
+                ImGui::Text("Selected Block: %s (Slot %d)",
+                           selectedBlock == BlockID::Air ? "None" :
+                           Game::BlockRegistry::Get(selectedBlock).name.c_str(),
+                           inventory.GetSelectedSlot());
+
+                ImGui::Text("Inventory:");
+                for (int i = 0; i < Game::Inventory::HOTBAR_SIZE; ++i) {
+                    const auto& slot = inventory.GetSlot(i);
+                    if (!slot.IsEmpty()) {
+                        ImGui::Text("  [%d] %s x%d", i,
+                                   Game::BlockRegistry::Get(slot.blockId).name.c_str(),
+                                   slot.count);
+                    }
+                }
+
+                const auto& hit = playerController.GetCurrentHit();
+                if (hit.has_value()) {
+                    ImGui::Text("Looking at: %s at (%d, %d, %d)",
+                               Game::BlockRegistry::Get(hit->blockId).name.c_str(),
+                               hit->blockPos.x, hit->blockPos.y, hit->blockPos.z);
+                    ImGui::Text("Distance: %.2f", hit->distance);
+
+                    if (playerController.IsBreaking()) {
+                        ImGui::Text("Breaking Progress: %.0f%%",
+                                   playerController.GetBreakProgress() * 100.0f);
+                    }
+                } else {
+                    ImGui::Text("Looking at: Nothing");
+                }
+
+                const auto& stats = playerController.GetStats();
+                ImGui::Text("Blocks Placed: %d", stats.blocksPlaced);
+                ImGui::Text("Blocks Broken: %d", stats.blocksBroken);
 
                 // Performance graph
                 ImGui::PlotLines("Frame Time (ms)", metrics.frameTimes, PerformanceMetrics::SAMPLE_COUNT,
