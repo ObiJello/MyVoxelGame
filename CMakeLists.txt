@@ -112,6 +112,14 @@ else()
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
             src/game/WorldManager.cpp
+            src/game/RayCast.cpp
+            src/game/RayCast.hpp
+            src/game/WorldAccess.cpp
+            src/game/WorldAccess.hpp
+            src/game/Inventory.cpp
+            src/game/Inventory.hpp
+            src/game/PlayerController.cpp
+            src/game/PlayerController.hpp
     )
 endif()
 
