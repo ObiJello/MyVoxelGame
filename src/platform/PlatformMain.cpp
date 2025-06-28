@@ -285,10 +285,10 @@ namespace PlatformMain {
         ImTextureID textureID = (ImTextureID)(uintptr_t)atlasID;
         ImVec2 cursorPos = ImGui::GetCursorScreenPos();
 
-        // Draw the atlas image
+        // Draw the atlas image - FIXED: Don't flip Y since we're not loading flipped anymore
         ImGui::Image(textureID,
                     ImVec2(displayWidth, displayHeight),
-                    ImVec2(0, 1), ImVec2(1, 0)); // Flip Y for OpenGL
+                    ImVec2(0, 0), ImVec2(1, 1)); // Normal orientation: (0,0) to (1,1)
 
         // Show grid overlay for tiles with correct proportions
         if (ImGui::IsItemHovered()) {
@@ -329,7 +329,7 @@ namespace PlatformMain {
                 }
             }
 
-            // Show tile index on hover
+            // Show tile index on hover - FIXED: Calculate indices correctly for non-flipped image
             ImVec2 mousePos = ImGui::GetMousePos();
             ImVec2 relativePos = ImVec2(mousePos.x - imagePos.x, mousePos.y - imagePos.y);
 
@@ -353,10 +353,18 @@ namespace PlatformMain {
 
                 drawList->AddRect(tileTopLeft, tileBottomRight, IM_COL32(255, 0, 0, 200), 0.0f, 0, 3.0f);
 
+                // Calculate UV coordinates to match what GetTile() actually returns
+                float uvPerTileX = 1.0f / static_cast<float>(Render::TextureAtlas::TILES_PER_ROW);
+                float uvPerTileY = 1.0f / static_cast<float>(Render::TextureAtlas::TILES_PER_COLUMN);
+
+                float uvMinX = static_cast<float>(tileX) * uvPerTileX;
+                float uvMinY = static_cast<float>(tileY) * uvPerTileY;
+                float uvMaxX = static_cast<float>(tileX + 1) * uvPerTileX;
+                float uvMaxY = static_cast<float>(tileY + 1) * uvPerTileY;
+
                 ImGui::SetTooltip("Tile (%d, %d) = Index %d\nUV: (%.4f, %.4f) to (%.4f, %.4f)",
                                  tileX, tileY, tileIndex,
-                                 (float)tileX / 16.0f, (float)tileY / 64.0f,
-                                 (float)(tileX + 1) / 16.0f, (float)(tileY + 1) / 64.0f);
+                                 uvMinX, uvMinY, uvMaxX, uvMaxY);
             }
         }
 
