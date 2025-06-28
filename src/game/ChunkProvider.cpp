@@ -118,8 +118,8 @@ namespace Game {
         if (neighborCount == 4 && !centerIt->second->hasPendingMesh.exchange(true)) {
             auto chunk = centerIt->second->chunk;
 
-            Log::Debug("Triggering enhanced inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
-                      pos.x, pos.z);
+            /*Log::Debug("Triggering enhanced inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
+                      pos.x, pos.z);*/
 
             // Schedule enhanced meshing job
             JobSystem::g_ThreadPool.Enqueue([chunk, pos]() {
@@ -170,7 +170,7 @@ namespace Game {
 
     // Enhanced meshing job with full inter-chunk face culling
     static void EnhancedMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
-        Log::Debug("Starting enhanced inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
+        //Log::Debug("Starting enhanced inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
 
         // Create neighbor context
         NeighborContext ctx = CreateNeighborContext(chunk, pos);
@@ -197,20 +197,20 @@ namespace Game {
 
             ChunkSection* sectionPtr = chunk->sections[s].get();
 
-            Log::Debug("Enqueueing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
-                      pos.x, pos.z, s);
+            /*Log::Debug("Enqueueing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+                      pos.x, pos.z, s);*/
 
             // Enhanced meshing job with neighbor context
             JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, pos, s]() {
                 try {
-                    Log::Debug("Executing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
-                              pos.x, pos.z, s);
+                    /*Log::Debug("Executing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+                              pos.x, pos.z, s);*/
 
                     // Call the enhanced mesher with neighbor context
                     InterChunkMesherJob(sectionPtr, meshData, ctx);
 
-                    Log::Debug("Enhanced inter-chunk mesher completed for chunk (%d, %d) section %d with %zu vertices",
-                              pos.x, pos.z, s, meshData->vertices.size());
+                    /*Log::Debug("Enhanced inter-chunk mesher completed for chunk (%d, %d) section %d with %zu vertices",
+                              pos.x, pos.z, s, meshData->vertices.size());*/
 
                 } catch (const std::exception& e) {
                     Log::Error("Enhanced inter-chunk mesher failed for chunk (%d, %d) section %d: %s",
@@ -226,8 +226,8 @@ namespace Game {
             totalMeshJobs++;
         }
 
-        Log::Info("Enhanced inter-chunk meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
-                 pos.x, pos.z, totalMeshJobs);
+        /*Log::Info("Enhanced inter-chunk meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
+                 pos.x, pos.z, totalMeshJobs);*/
 
         // Mark mesh as no longer pending
         {
@@ -242,7 +242,7 @@ namespace Game {
 
     // Standard meshing fallback for chunks without all neighbors
     static void StandardMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
-        Log::Debug("Starting standard meshing for chunk (%d, %d)", pos.x, pos.z);
+        //Log::Debug("Starting standard meshing for chunk (%d, %d)", pos.x, pos.z);
 
         int meshJobsEnqueued = 0;
         for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
@@ -274,8 +274,8 @@ namespace Game {
             meshJobsEnqueued++;
         }
 
-        Log::Info("Standard meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
-                 pos.x, pos.z, meshJobsEnqueued);
+        /*Log::Info("Standard meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
+                 pos.x, pos.z, meshJobsEnqueued);*/
     }
 
     void ChunkProvider::RequestChunk(Math::ChunkPos pos) {
@@ -293,7 +293,7 @@ namespace Game {
         {
             std::shared_lock<std::shared_mutex> lock(s_registryMutex);
             if (s_chunkRegistry.find(key) != s_chunkRegistry.end()) {
-                Log::Debug("Chunk (%d, %d) already exists, skipping", pos.x, pos.z);
+                //Log::Debug("Chunk (%d, %d) already exists, skipping", pos.x, pos.z);
                 return;
             }
         }
@@ -308,11 +308,11 @@ namespace Game {
             s_chunkRegistry[key] = std::move(chunkData);
         }
 
-        Log::Debug("Requesting generation for chunk (%d, %d)", pos.x, pos.z);
+        //Log::Debug("Requesting generation for chunk (%d, %d)", pos.x, pos.z);
 
         // Enqueue block generation job
         JobSystem::g_ThreadPool.Enqueue([chunk, pos, key]() {
-            Log::Debug("Starting block generation for chunk (%d, %d)", pos.x, pos.z);
+            //Log::Debug("Starting block generation for chunk (%d, %d)", pos.x, pos.z);
 
             // Generate terrain data
             int baseWorldX = pos.x * Math::CHUNK_SIZE_X;
@@ -335,7 +335,7 @@ namespace Game {
                 }
             }
 
-            Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
+            //Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
 
             // Mark as generated and update neighbor relationships
             {
@@ -352,7 +352,7 @@ namespace Game {
                 UpdateNeighborCounts({pos.x + dx, pos.z + dz});
             }
 
-            Log::Info("Chunk (%d, %d) generation complete, neighbor relationships updated", pos.x, pos.z);
+            //Log::Info("Chunk (%d, %d) generation complete, neighbor relationships updated", pos.x, pos.z);
         });
     }
 

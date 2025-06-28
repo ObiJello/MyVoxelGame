@@ -152,8 +152,8 @@ namespace Game {
         assert(meshData != nullptr);
         assert(ctx.center != nullptr);
 
-        Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with texture atlas support",
-                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+        /*Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with texture atlas support",
+                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
 
         // Validate inputs
         if (meshData->sectionIndex < 0 || meshData->sectionIndex >= Math::SECTIONS_PER_CHUNK) {
@@ -289,10 +289,10 @@ namespace Game {
             }
         }
 
-        Log::Debug("InterChunkMesherJob stats: %d solid blocks, %d faces generated, "
+        /*Log::Debug("InterChunkMesherJob stats: %d solid blocks, %d faces generated, "
                   "%d culled intra-section, %d culled inter-section, %d culled inter-chunk",
                   solidBlocks, facesGenerated, facesCulledIntraSection,
-                  facesCulledInterSection, facesCulledInterChunk);
+                  facesCulledInterSection, facesCulledInterChunk);*/
 
         // Finalize mesh data
         {
@@ -302,13 +302,13 @@ namespace Game {
             meshData->indices = std::move(indices);
 
             if (!meshData->vertices.empty()) {
-                Log::Debug("Enqueueing inter-chunk mesh for chunk (%d, %d) section %d with %zu vertices",
+                /*Log::Debug("Enqueueing inter-chunk mesh for chunk (%d, %d) section %d with %zu vertices",
                           meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
-                          meshData->vertices.size());
+                          meshData->vertices.size());*/
                 s_uploadQueue.push(meshData);
             } else {
-                Log::Debug("Inter-chunk mesh for chunk (%d, %d) section %d is empty, discarding",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+                /*Log::Debug("Inter-chunk mesh for chunk (%d, %d) section %d is empty, discarding",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
                 delete meshData;
             }
         }
@@ -320,8 +320,8 @@ namespace Game {
         assert(meshData != nullptr);
         assert(chunk != nullptr);
 
-        Log::Debug("MesherJob starting for chunk (%d, %d) section %d with texture atlas support",
-                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+        /*Log::Debug("MesherJob starting for chunk (%d, %d) section %d with texture atlas support",
+                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
 
         // Validate input data
         if (meshData->chunkXZ.x < -1000000 || meshData->chunkXZ.x > 1000000 ||
@@ -452,9 +452,9 @@ namespace Game {
             }
         }
 
-        Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled intra-section, %d culled inter-section), %zu vertices, %zu indices",
+        /*Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled intra-section, %d culled inter-section), %zu vertices, %zu indices",
                   solidBlocks, facesGenerated, facesCulledIntraSection, facesCulledInterSection,
-                  vertices.size(), indices.size());
+                  vertices.size(), indices.size());*/
 
         // Copy the completed data to the output mesh
         {
@@ -464,13 +464,13 @@ namespace Game {
             meshData->indices = std::move(indices);
 
             if (!meshData->vertices.empty()) {
-                Log::Debug("Enqueueing mesh for chunk (%d, %d) section %d with %zu vertices",
+                /*Log::Debug("Enqueueing mesh for chunk (%d, %d) section %d with %zu vertices",
                           meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
-                          meshData->vertices.size());
+                          meshData->vertices.size());*/
                 s_uploadQueue.push(meshData);
             } else {
-                Log::Debug("Mesh for chunk (%d, %d) section %d is empty, not enqueueing",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);
+                /*Log::Debug("Mesh for chunk (%d, %d) section %d is empty, not enqueueing",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
                 delete meshData;
             }
         }
@@ -504,11 +504,11 @@ namespace Game {
         outData = s_uploadQueue.front();
         s_uploadQueue.pop();
 
-        if (outData) {
+        /*if (outData) {
             Log::Debug("Popped mesh data for chunk (%d, %d) section %d with %zu vertices",
                       outData->chunkXZ.x, outData->chunkXZ.y, outData->sectionIndex,
                       outData->vertices.size());
-        }
+        }*/
 
         return true;
     }

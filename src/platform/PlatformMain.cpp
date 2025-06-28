@@ -588,9 +588,9 @@ namespace PlatformMain {
                     Render::UploadMesh(meshPtr);
                     metrics.meshesUploadedThisFrame++;
 
-                    Log::Debug("Uploaded mesh: chunk (%d,%d) section %d, %zu vertices, %zu indices",
+                    /*Log::Debug("Uploaded mesh: chunk (%d,%d) section %d, %zu vertices, %zu indices",
                              meshPtr->chunkXZ.x, meshPtr->chunkXZ.y, meshPtr->sectionIndex,
-                             meshPtr->vertices.size(), meshPtr->indices.size());
+                             meshPtr->vertices.size(), meshPtr->indices.size());*/
                 }
             }
             auto uploadEndTime = std::chrono::high_resolution_clock::now();
@@ -605,9 +605,9 @@ namespace PlatformMain {
                 // Bind the texture atlas to texture unit 0
                 Render::g_textureAtlas.Bind(GL_TEXTURE0);
 
-                // Set the texture atlas uniform (IMPORTANT: this was missing!)
-                int textureLocation = blockShader.GetUniformLocation("uTextureAtlas");
-                glUniform1i(textureLocation, 0); // Texture unit 0
+                // Set the texture atlas uniform
+                blockShader.SetMat4("uMVP", glm::mat4(1.0f)); // Will be set per mesh
+                glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0); // Texture unit 0
 
                 // Render visible chunks
                 metrics.meshesRenderedThisFrame = 0;

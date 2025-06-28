@@ -62,8 +62,8 @@ namespace Game {
             s_loadTimes[pos] = std::chrono::steady_clock::now();
             loadsThisFrame++;
 
-            Log::Debug("Requested loading of chunk (%d, %d), distance from camera: %d",
-                      pos.x, pos.z, (pos.x - cx) * (pos.x - cx) + (pos.z - cz) * (pos.z - cz));
+            /*Log::Debug("Requested loading of chunk (%d, %d), distance from camera: %d",
+                      pos.x, pos.z, (pos.x - cx) * (pos.x - cx) + (pos.z - cz) * (pos.z - cz));*/
         }
 
         // 4) Identify chunks to unload (outside render radius)
@@ -121,7 +121,7 @@ namespace Game {
     }
 
     void WorldManager::LoadChunk(Math::ChunkPos pos) {
-        Log::Debug("LoadChunk requested for (%d, %d)", pos.x, pos.z);
+        //Log::Debug("LoadChunk requested for (%d, %d)", pos.x, pos.z);
 
         // Request chunk generation through the enhanced ChunkProvider
         // The ChunkProvider will automatically handle neighbor detection and
