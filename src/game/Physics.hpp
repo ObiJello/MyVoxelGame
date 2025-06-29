@@ -1,4 +1,4 @@
-// File: src/game/Physics.hpp
+// File: src/game/Physics.hpp (Added Chunk Loading Check)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -124,13 +124,16 @@ namespace Game {
 
         // Update player physics (gravity, movement, collision)
         static void UpdatePlayerPhysics(PlayerPhysics& physics, const glm::vec3& inputMovement,
-                                       bool jumpPressed, float deltaTime);
+                                       bool jumpPressed, bool sneakPressed, float deltaTime);
 
         // Check if player is standing on ground
         static bool CheckGroundCollision(const PlayerPhysics& physics);
 
         // Check if player is in water
         static bool CheckWaterCollision(const PlayerPhysics& physics);
+
+        // NEW: Check if the chunk containing the player is fully loaded
+        static bool IsPlayerChunkLoaded(const PlayerPhysics& physics);
 
         // Get all blocks that intersect with an AABB
         static std::vector<glm::ivec3> GetIntersectingBlocks(const AABB& aabb);

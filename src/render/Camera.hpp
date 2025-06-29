@@ -1,4 +1,4 @@
-// File: src/render/Camera.hpp (Updated for Physics Integration)
+// File: src/render/Camera.hpp (Updated for Enhanced Noclip Movement)
 #pragma once
 
 #include <glm/glm.hpp>

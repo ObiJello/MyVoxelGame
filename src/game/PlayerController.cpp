@@ -97,15 +97,15 @@ namespace Game {
         // Update statistics
         stats.totalPlayTime += deltaTime;
 
-        // Calculate distance traveled
+        // Calculate distance
         float distanceThisFrame = glm::length(physics.position - lastPosition);
         stats.totalDistanceTraveled += distanceThisFrame;
         lastPosition = physics.position;
     }
 
     void PlayerController::UpdatePhysics(float deltaTime) {
-        // Apply physics simulation
-        Physics::UpdatePlayerPhysics(physics, movementInput, jumpPressed, deltaTime);
+        // Apply physics simulation - FIXED: Now passes sneakPressed parameter
+        Physics::UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime);
 
         // Reset single-frame inputs
         jumpPressed = false;

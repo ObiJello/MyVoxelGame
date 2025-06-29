@@ -1,4 +1,4 @@
-// File: src/game/Physics.cpp
+// File: src/game/Physics.cpp (Fixed - No Gravity Until Chunk Loaded + Noclip Flight)
 #include "Physics.hpp"
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
@@ -117,17 +117,68 @@ namespace Game {
         return resolvedMovement;
     }
 
+    // NEW: Check if the chunk containing the player is fully loaded
+    bool Physics::IsPlayerChunkLoaded(const PlayerPhysics& physics) {
+        int chunkX = static_cast<int>(std::floor(physics.position.x / 16.0f));
+        int chunkZ = static_cast<int>(std::floor(physics.position.z / 16.0f));
+
+        // Check if the chunk is loaded
+        return WorldAccess::IsChunkLoadedAt(
+            static_cast<int>(physics.position.x),
+            static_cast<int>(physics.position.z)
+        );
+    }
+
     void Physics::UpdatePlayerPhysics(PlayerPhysics& physics, const glm::vec3& inputMovement,
-                                     bool jumpPressed, float deltaTime) {
+                                     bool jumpPressed, bool sneakPressed, float deltaTime) {
         if (physics.noclip) {
-            // Debug mode: no physics, just move freely
-            physics.position += inputMovement * physics.GetMoveSpeed() * deltaTime;
+            // FIXED: Noclip mode with full 3D movement including flight
+            glm::vec3 movement = inputMovement * physics.GetMoveSpeed() * deltaTime;
+
+            // Add vertical movement in noclip
+            if (jumpPressed) {
+                movement.y += physics.GetMoveSpeed() * deltaTime; // Space = fly up
+            }
+            if (sneakPressed) {
+                movement.y -= physics.GetMoveSpeed() * deltaTime; // Shift = fly down
+            }
+
+            physics.position += movement;
             physics.velocity = glm::vec3(0.0f);
             physics.isOnGround = false;
             return;
         }
 
-        // Check current state
+        // FIXED: Check if player's chunk is loaded before applying physics
+        bool chunkLoaded = IsPlayerChunkLoaded(physics);
+
+        if (!chunkLoaded) {
+            // Chunk not loaded yet - only allow horizontal movement, no gravity
+            glm::vec3 horizontalMovement = glm::vec3(inputMovement.x, 0.0f, inputMovement.z);
+            if (glm::length(horizontalMovement) > 0.0f) {
+                horizontalMovement = glm::normalize(horizontalMovement);
+                horizontalMovement *= physics.GetMoveSpeed() * deltaTime;
+
+                // Apply only horizontal movement (no collision checking since chunk isn't loaded)
+                physics.position.x += horizontalMovement.x;
+                physics.position.z += horizontalMovement.z;
+            }
+
+            // Keep velocity at zero and mark as not on ground
+            physics.velocity = glm::vec3(0.0f);
+            physics.isOnGround = false;
+            physics.isInWater = false;
+
+            // Log periodically that we're waiting for chunk to load
+            static int logCounter = 0;
+            if (++logCounter % 300 == 0) { // Every 5 seconds at 60 FPS
+                Log::Info("Waiting for player chunk to load before enabling physics...");
+            }
+
+            return;
+        }
+
+        // Chunk is loaded - normal physics processing
         physics.isOnGround = CheckGroundCollision(physics);
         physics.isInWater = CheckWaterCollision(physics);
 
