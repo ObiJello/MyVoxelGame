@@ -85,7 +85,6 @@ if(APPLE)
             src/core/Log.cpp
             src/core/JobSystem.cpp
             src/render/Shader.cpp
-            src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
             src/game/BlockRegistry.cpp
@@ -109,7 +108,6 @@ else()
             src/core/Log.cpp
             src/core/JobSystem.cpp
             src/render/Shader.cpp
-            src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
             src/game/BlockRegistry.cpp
