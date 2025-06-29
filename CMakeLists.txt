@@ -87,7 +87,7 @@ if(APPLE)
             src/render/Shader.cpp
             src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
-            src/render/TextureAtlas.cpp    # <-- ADDED: Missing TextureAtlas implementation
+            src/render/TextureAtlas.cpp
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -107,7 +107,7 @@ else()
             src/render/Shader.cpp
             src/render/QuadRenderer.cpp
             src/render/ChunkRenderer.cpp
-            src/render/TextureAtlas.cpp    # <-- ADDED: Missing TextureAtlas implementation
+            src/render/TextureAtlas.cpp
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp

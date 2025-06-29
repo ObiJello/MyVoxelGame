@@ -735,9 +735,9 @@ namespace PlatformMain {
                 ImGui::Text("Player Interaction");
                 ImGui::Separator();
                 const auto& inventory = playerController.GetInventory();
-                BlockID selectedBlock = inventory.GetSelectedBlock();
+                Game::BlockID selectedBlock = inventory.GetSelectedBlock();
                 ImGui::Text("Selected Block: %s (Slot %d)",
-                           selectedBlock == BlockID::Air ? "None" :
+                           selectedBlock == Game::BlockID::Air ? "None" :
                            Game::BlockRegistry::Get(selectedBlock).name.c_str(),
                            inventory.GetSelectedSlot());
 
