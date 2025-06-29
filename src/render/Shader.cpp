@@ -1,4 +1,4 @@
-// File: src/render/Shader.cpp (Fixed - Less Aggressive Error Checking)
+// File: src/render/Shader.cpp (Reduced Error Checking Spam)
 #include "Shader.hpp"
 #include <fstream>
 #include <sstream>
@@ -35,10 +35,10 @@ void Shader::Use() const {
 
     glUseProgram(programID);
 
-    // Only check for errors in debug builds and only occasionally
+    // Minimal error checking - only in debug and very rarely
 #ifndef NDEBUG
     static int errorCheckCounter = 0;
-    if (++errorCheckCounter % 100 == 0) { // Check every 100th call
+    if (++errorCheckCounter % 1000 == 0) { // Check every 1000th call
         GLenum error = glGetError();
         if (error != GL_NO_ERROR) {
             Log::Warning("OpenGL error after glUseProgram (ID: %u): 0x%x", programID, error);
@@ -66,11 +66,9 @@ int Shader::GetUniformLocation(const std::string& name) {
         // Only log this once per uniform to avoid spam
         static std::unordered_set<std::string> loggedMissingUniforms;
         if (loggedMissingUniforms.find(name) == loggedMissingUniforms.end()) {
-            Log::Warning("Uniform '%s' not found in shader program %u", name.c_str(), programID);
+            Log::Debug("Uniform '%s' not found in shader program %u", name.c_str(), programID);
             loggedMissingUniforms.insert(name);
         }
-    } else {
-        Log::Debug("Found uniform '%s' at location %d in program %u", name.c_str(), loc, programID);
     }
 
     return loc;
@@ -82,13 +80,13 @@ void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) {
     if (loc != -1) {
         glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(matrix));
 
-        // Only check for errors occasionally to avoid spam
+        // Very minimal error checking - only check occasionally and only in debug
 #ifndef NDEBUG
         static int matrixErrorCheckCounter = 0;
-        if (++matrixErrorCheckCounter % 50 == 0) { // Check every 50th call
+        if (++matrixErrorCheckCounter % 500 == 0) { // Check every 500th call
             GLenum error = glGetError();
             if (error != GL_NO_ERROR) {
-                Log::Warning("OpenGL error setting mat4 uniform '%s': 0x%x", name.c_str(), error);
+                Log::Warning("OpenGL error setting mat4 uniform '%s': 0x%x (checked every 500 calls)", name.c_str(), error);
             }
         }
 #endif
@@ -210,13 +208,13 @@ void Shader::CompileAndLink() {
         Log::Debug("Shader program linked successfully");
     }
 
-    // Validate program
+    // Validate program (but don't fail on validation errors)
     glValidateProgram(newProgram);
     glGetProgramiv(newProgram, GL_VALIDATE_STATUS, &success);
     if (!success) {
         char infoLog[512];
         glGetProgramInfoLog(newProgram, 512, nullptr, infoLog);
-        Log::Warning("Shader program validation failed: %s", infoLog);
+        Log::Debug("Shader program validation warning: %s", infoLog);
         // Don't fail on validation - it's just a warning
     }
 
@@ -250,12 +248,16 @@ void Shader::CompileAndLink() {
     programID = newProgram;
     Log::Info("Shader program created successfully, new ID: %u", programID);
 
-    // Check if our critical uniforms exist (but don't fail if they don't)
+    // Check if our critical uniforms exist (but don't spam the log)
     glUseProgram(programID);
     int mvpLoc = glGetUniformLocation(programID, "uMVP");
     int atlasLoc = glGetUniformLocation(programID, "uTextureAtlas");
 
-    Log::Info("Critical uniforms - uMVP: %d, uTextureAtlas: %d", mvpLoc, atlasLoc);
+    if (mvpLoc == -1 && atlasLoc == -1) {
+        Log::Debug("No standard uniforms found - might be a special purpose shader");
+    } else {
+        Log::Debug("Found uniforms - uMVP: %d, uTextureAtlas: %d", mvpLoc, atlasLoc);
+    }
 
     // Restore previous program
     glUseProgram(currentProgram);

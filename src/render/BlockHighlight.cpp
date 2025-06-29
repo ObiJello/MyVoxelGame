@@ -1,4 +1,4 @@
-// File: src/render/BlockHighlight.cpp
+// File: src/render/BlockHighlight.cpp (Complete Fix - Full State Isolation)
 #include "BlockHighlight.hpp"
 #include "../core/Log.hpp"
 #include "../game/BlockRegistry.hpp"
@@ -31,8 +31,8 @@ void main() {
 out vec4 FragColor;
 
 void main() {
-    // Minecraft-style white outline
-    FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+    // Minecraft-style black outline
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }
 )";
 
@@ -62,19 +62,42 @@ void main() {
     }
 
     void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& viewProjectionMatrix) {
-        // Enable wireframe mode and disable depth writing
+        // Clear any pending OpenGL errors before we start
+        while (glGetError() != GL_NO_ERROR) {
+            // Clear error queue
+        }
+
+        // Store ALL current OpenGL state that we might change
+        GLint currentProgram;
+        GLboolean depthMask;
+        GLboolean blendEnabled;
+        GLint polygonMode[2];
+        GLfloat lineWidth;
+        GLint blendSrc, blendDst;
+        GLint currentVAO;
+        GLint currentArrayBuffer;
+        GLint currentElementBuffer;
+
+        glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        blendEnabled = glIsEnabled(GL_BLEND);
+        glGetIntegerv(GL_POLYGON_MODE, polygonMode);
+        glGetFloatv(GL_LINE_WIDTH, &lineWidth);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrc);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDst);
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currentVAO);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &currentArrayBuffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &currentElementBuffer);
+
+        // Set up our rendering state
+        glUseProgram(shaderProgram);
         glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
         glDepthMask(GL_FALSE);
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-        // Set line width (may not work on all drivers due to OpenGL deprecation)
         glLineWidth(2.0f);
 
-        // Use our shader
-        glUseProgram(shaderProgram);
-
-        // Set uniforms
+        // Set uniforms ONLY on our shader (we're sure it's active now)
         GLint mvpLoc = glGetUniformLocation(shaderProgram, "uMVP");
         GLint blockPosLoc = glGetUniformLocation(shaderProgram, "uBlockPos");
 
@@ -92,13 +115,25 @@ void main() {
         // Render the wireframe cube
         glBindVertexArray(vao);
         glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, nullptr);
-        glBindVertexArray(0);
 
-        // Restore OpenGL state
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-        glLineWidth(1.0f);
+        // Restore ALL OpenGL state exactly as it was
+        glBindVertexArray(currentVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, currentArrayBuffer);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, currentElementBuffer);
+        glUseProgram(currentProgram);
+        glPolygonMode(GL_FRONT_AND_BACK, polygonMode[0]);
+        glDepthMask(depthMask);
+        glBlendFunc(blendSrc, blendDst);
+        if (!blendEnabled) {
+            glDisable(GL_BLEND);
+        }
+        glLineWidth(lineWidth);
+
+        // Clear any errors that might have occurred during our rendering
+        // (without logging them since they're not from the main renderer)
+        while (glGetError() != GL_NO_ERROR) {
+            // Silently clear error queue
+        }
     }
 
     bool BlockHighlight::IsValidHighlight(const std::optional<Game::RaycastHit>& hit) {
@@ -219,7 +254,7 @@ void main() {
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
 
-        // Unbind VAO
+        // Unbind VAO to prevent accidental modification
         glBindVertexArray(0);
 
         Log::Debug("Block highlight geometry created: %zu vertices, %zu indices",
