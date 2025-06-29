@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Enhanced with Texture Atlas Support)
+// File: src/platform/PlatformMain.cpp (Enhanced with Block Highlighting)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -18,7 +18,8 @@
 #include "../render/ChunkRenderer.hpp"
 #include "../render/Frustum.hpp"
 #include "../render/Shader.hpp"
-#include "../render/TextureAtlas.hpp"  // Add texture atlas support
+#include "../render/TextureAtlas.hpp"
+#include "../render/BlockHighlight.hpp"  // Add block highlighting
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -70,19 +71,16 @@ namespace PlatformMain {
     };
 
 #ifndef NDEBUG
-    // Chunk visualization helper functions
+    // Chunk visualization helper functions (existing functions remain the same)
     struct ChunkState {
         bool isGenerated = false;
         bool inFrustum = false;
     };
 
-    // Helper function to check if a chunk is in the camera frustum
     bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos) {
-        // Calculate chunk bounds in world space
         float worldX = static_cast<float>(chunkPos.x * Game::Math::CHUNK_SIZE_X);
         float worldZ = static_cast<float>(chunkPos.z * Game::Math::CHUNK_SIZE_Z);
 
-        // Create AABB for the entire chunk (from Y=0 to Y=256)
         AABB chunkAABB;
         chunkAABB.min = glm::vec3(worldX, 0.0f, worldZ);
         chunkAABB.max = glm::vec3(
@@ -94,27 +92,22 @@ namespace PlatformMain {
         return frustum.IsBoxVisible(chunkAABB);
     }
 
-    // Draw chunk visualization in ImGui
     void DrawChunkVisualization(const Render::Camera& camera, const Frustum& frustum) {
         ImGui::Begin("Chunk Visualization");
 
-        // Calculate camera chunk position
         int cameraChunkX = static_cast<int>(std::floor(camera.position.x / Game::Math::CHUNK_SIZE_X));
         int cameraChunkZ = static_cast<int>(std::floor(camera.position.z / Game::Math::CHUNK_SIZE_Z));
 
-        // Get loaded chunks
         auto loadedChunks = Game::WorldManager::GetLoadedChunks();
         std::unordered_set<uint64_t> loadedChunkSet;
 
-        // Create a set for quick lookup of loaded chunks
         for (const auto& chunk : loadedChunks) {
             uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.x)) << 32) |
                           static_cast<uint32_t>(chunk.z);
             loadedChunkSet.insert(key);
         }
 
-        // Visualization parameters
-        const int vizRadius = 12; // Show chunks in a 25x25 grid around player
+        const int vizRadius = 12;
         const float circleRadius = 8.0f;
         const float spacing = 20.0f;
 
@@ -122,14 +115,11 @@ namespace PlatformMain {
         ImVec2 canvasPos = ImGui::GetCursorScreenPos();
         ImVec2 canvasSize = ImGui::GetContentRegionAvail();
 
-        // Ensure minimum canvas size
         if (canvasSize.x < 500) canvasSize.x = 500;
         if (canvasSize.y < 500) canvasSize.y = 500;
 
-        // Calculate center of visualization
         ImVec2 center = ImVec2(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
 
-        // Draw grid background
         ImU32 gridColor = IM_COL32(64, 64, 64, 128);
         for (int i = -vizRadius; i <= vizRadius; i++) {
             float x = center.x + i * spacing;
@@ -147,7 +137,6 @@ namespace PlatformMain {
             );
         }
 
-        // Draw chunks
         int totalChunks = 0;
         int generatedChunks = 0;
         int visibleChunks = 0;
@@ -158,12 +147,10 @@ namespace PlatformMain {
 
                 Game::Math::ChunkPos chunkPos = {cameraChunkX + dx, cameraChunkZ + dz};
 
-                // Check if chunk is loaded/generated
                 uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.x)) << 32) |
                               static_cast<uint32_t>(chunkPos.z);
                 bool isGenerated = loadedChunkSet.find(key) != loadedChunkSet.end();
 
-                // Check if chunk is in frustum
                 bool inFrustum = false;
                 if (isGenerated) {
                     generatedChunks++;
@@ -173,30 +160,25 @@ namespace PlatformMain {
                     }
                 }
 
-                // Determine color based on state
                 ImU32 chunkColor;
                 if (!isGenerated) {
-                    chunkColor = IM_COL32(255, 64, 64, 255);   // Red: not generated
+                    chunkColor = IM_COL32(255, 64, 64, 255);
                 } else if (inFrustum) {
-                    chunkColor = IM_COL32(64, 255, 64, 255);   // Green: generated and visible
+                    chunkColor = IM_COL32(64, 255, 64, 255);
                 } else {
-                    chunkColor = IM_COL32(255, 255, 64, 255);  // Yellow: generated but not visible
+                    chunkColor = IM_COL32(255, 255, 64, 255);
                 }
 
-                // Calculate position on screen
                 ImVec2 chunkScreenPos = ImVec2(
                     center.x + dx * spacing,
                     center.y + dz * spacing
                 );
 
-                // Draw chunk circle
                 drawList->AddCircleFilled(chunkScreenPos, circleRadius, chunkColor);
 
-                // Draw chunk outline
                 ImU32 outlineColor = IM_COL32(128, 128, 128, 255);
                 drawList->AddCircle(chunkScreenPos, circleRadius, outlineColor, 0, 2.0f);
 
-                // Draw chunk coordinates on hover
                 if (ImGui::IsMouseHoveringRect(
                     ImVec2(chunkScreenPos.x - circleRadius, chunkScreenPos.y - circleRadius),
                     ImVec2(chunkScreenPos.x + circleRadius, chunkScreenPos.y + circleRadius))) {
@@ -209,12 +191,10 @@ namespace PlatformMain {
             }
         }
 
-        // Draw player position (camera chunk)
         ImVec2 playerPos = center;
         drawList->AddCircleFilled(playerPos, circleRadius + 2.0f, IM_COL32(255, 255, 255, 255));
         drawList->AddCircle(playerPos, circleRadius + 2.0f, IM_COL32(0, 0, 0, 255), 0, 3.0f);
 
-        // Draw player direction indicator
         float playerYawRad = glm::radians(camera.yaw);
         ImVec2 directionEnd = ImVec2(
             playerPos.x + cos(playerYawRad) * (circleRadius + 8.0f),
@@ -222,10 +202,8 @@ namespace PlatformMain {
         );
         drawList->AddLine(playerPos, directionEnd, IM_COL32(0, 0, 0, 255), 3.0f);
 
-        // Create invisible button for the entire canvas to capture input
         ImGui::InvisibleButton("chunk_viz_canvas", canvasSize);
 
-        // Display statistics
         ImGui::Separator();
         ImGui::Text("Chunk Statistics:");
         ImGui::Text("Total chunks in view: %d", totalChunks);
@@ -233,7 +211,6 @@ namespace PlatformMain {
         ImGui::Text("Visible chunks: %d", visibleChunks);
         ImGui::Text("Camera chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
 
-        // Legend
         ImGui::Separator();
         ImGui::Text("Legend:");
         ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "● Red: Not generated");
@@ -244,7 +221,6 @@ namespace PlatformMain {
         ImGui::End();
     }
 
-    // Draw texture atlas debug window
     void DrawTextureAtlasDebug() {
         ImGui::Begin("Texture Atlas Debug");
 
@@ -263,11 +239,9 @@ namespace PlatformMain {
 
         ImGui::Separator();
 
-        // Display the atlas texture with zoom and scroll
         ImGui::Text("Atlas Preview (Scroll to navigate):");
         GLuint atlasID = Render::g_textureAtlas.GetTextureID();
 
-        // Zoom controls
         static float zoomLevel = 1.0f;
         ImGui::SliderFloat("Zoom", &zoomLevel, 0.5f, 4.0f, "%.1fx");
         ImGui::SameLine();
@@ -275,39 +249,32 @@ namespace PlatformMain {
             zoomLevel = 1.0f;
         }
 
-        // Calculate display size with zoom
         float baseDisplayWidth = 256.0f;
         float baseDisplayHeight = 1024.0f;
         float displayWidth = baseDisplayWidth * zoomLevel;
         float displayHeight = baseDisplayHeight * zoomLevel;
 
-        // Create scrollable region
-        ImVec2 scrollRegionSize = ImVec2(400, 500); // Fixed viewport size
+        ImVec2 scrollRegionSize = ImVec2(400, 500);
         ImGui::BeginChild("AtlasScrollRegion", scrollRegionSize, true, ImGuiWindowFlags_HorizontalScrollbar);
 
         ImTextureID textureID = (ImTextureID)(uintptr_t)atlasID;
         ImVec2 cursorPos = ImGui::GetCursorScreenPos();
 
-        // Draw the atlas image - FIXED: Don't flip Y since we're not loading flipped anymore
         ImGui::Image(textureID,
                     ImVec2(displayWidth, displayHeight),
-                    ImVec2(0, 0), ImVec2(1, 1)); // Normal orientation: (0,0) to (1,1)
+                    ImVec2(0, 0), ImVec2(1, 1));
 
-        // Show grid overlay for tiles with correct proportions
         if (ImGui::IsItemHovered()) {
             ImDrawList* drawList = ImGui::GetWindowDrawList();
             ImVec2 imagePos = ImGui::GetItemRectMin();
 
-            // Calculate actual tile display sizes
-            float tileDisplayWidth = displayWidth / Render::TextureAtlas::TILES_PER_ROW;   // displayWidth/16
-            float tileDisplayHeight = displayHeight / Render::TextureAtlas::TILES_PER_COLUMN; // displayHeight/64
+            float tileDisplayWidth = displayWidth / Render::TextureAtlas::TILES_PER_ROW;
+            float tileDisplayHeight = displayHeight / Render::TextureAtlas::TILES_PER_COLUMN;
 
             ImU32 gridColor = IM_COL32(255, 255, 255, 100);
-            ImU32 majorGridColor = IM_COL32(255, 255, 0, 150); // Yellow for major divisions
+            ImU32 majorGridColor = IM_COL32(255, 255, 0, 150);
 
-            // Only draw grid if zoomed in enough to see it clearly
             if (zoomLevel >= 0.8f) {
-                // Vertical lines (every tile column)
                 for (int i = 0; i <= Render::TextureAtlas::TILES_PER_ROW; ++i) {
                     float offset = i * tileDisplayWidth;
                     ImU32 color = (i % 4 == 0) ? majorGridColor : gridColor;
@@ -318,7 +285,6 @@ namespace PlatformMain {
                     );
                 }
 
-                // Horizontal lines - show more lines when zoomed in
                 int lineStep = (zoomLevel >= 2.0f) ? 1 : (zoomLevel >= 1.5f) ? 2 : 4;
                 for (int i = 0; i <= Render::TextureAtlas::TILES_PER_COLUMN; i += lineStep) {
                     float offset = i * tileDisplayHeight;
@@ -332,7 +298,6 @@ namespace PlatformMain {
                 }
             }
 
-            // Show tile index on hover - FIXED: Calculate indices correctly for non-flipped image
             ImVec2 mousePos = ImGui::GetMousePos();
             ImVec2 relativePos = ImVec2(mousePos.x - imagePos.x, mousePos.y - imagePos.y);
 
@@ -342,13 +307,11 @@ namespace PlatformMain {
                 int tileX = (int)(relativePos.x / tileDisplayWidth);
                 int tileY = (int)(relativePos.y / tileDisplayHeight);
 
-                // Clamp to valid range
                 tileX = std::max(0, std::min(tileX, Render::TextureAtlas::TILES_PER_ROW - 1));
                 tileY = std::max(0, std::min(tileY, Render::TextureAtlas::TILES_PER_COLUMN - 1));
 
                 int tileIndex = tileY * Render::TextureAtlas::TILES_PER_ROW + tileX;
 
-                // Highlight the hovered tile
                 ImVec2 tileTopLeft = ImVec2(imagePos.x + tileX * tileDisplayWidth,
                                           imagePos.y + tileY * tileDisplayHeight);
                 ImVec2 tileBottomRight = ImVec2(tileTopLeft.x + tileDisplayWidth,
@@ -356,7 +319,6 @@ namespace PlatformMain {
 
                 drawList->AddRect(tileTopLeft, tileBottomRight, IM_COL32(255, 0, 0, 200), 0.0f, 0, 3.0f);
 
-                // Calculate UV coordinates to match what GetTile() actually returns
                 float uvPerTileX = 1.0f / static_cast<float>(Render::TextureAtlas::TILES_PER_ROW);
                 float uvPerTileY = 1.0f / static_cast<float>(Render::TextureAtlas::TILES_PER_COLUMN);
 
@@ -373,7 +335,6 @@ namespace PlatformMain {
 
         ImGui::EndChild();
 
-        // Show scroll position info
         ImVec2 scrollPos = ImVec2(ImGui::GetScrollX(), ImGui::GetScrollY());
         ImGui::Text("Scroll: (%.0f, %.0f) | Zoom: %.1fx", scrollPos.x, scrollPos.y, zoomLevel);
 
@@ -392,7 +353,7 @@ namespace PlatformMain {
     {
         // 1) Initialize logging
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Texture Atlas Support");
+        Log::Info("Starting MyVoxelGame v0.1 with Block Highlighting");
 
         // 2) Initialize BlockRegistry
         Game::BlockRegistry::Init();
@@ -460,31 +421,39 @@ namespace PlatformMain {
             return -4;
         }
 
-        // 10) Compile shaders
+        // 10) Initialize block highlighting system
+        if (!Render::g_blockHighlight.Initialize()) {
+            Log::Error("Failed to initialize block highlight system");
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return -5;
+        }
+
+        // 11) Compile shaders
         Shader blockShader({
             "shaders/block.vert",
             "shaders/block.frag"
         });
 
-        // 11) Enable OpenGL features
+        // 12) Enable OpenGL features
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // 12) Initialize camera
+        // 13) Initialize camera
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
         camera.yaw = 0.0f;
         camera.pitch = 0.0f;
         glfwSwapInterval(1); // Enable VSync
 
-        // 12.5) Initialize player controller
+        // 14) Initialize player controller
         Game::PlayerController playerController;
         Log::Info("Player controller initialized with inventory");
 
     #ifndef NDEBUG
-        // 13) Setup ImGui
+        // 15) Setup ImGui
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -494,15 +463,15 @@ namespace PlatformMain {
         ImGui_ImplOpenGL3_Init("#version 330 core");
     #endif
 
-        // 14) Performance monitoring
+        // 16) Performance monitoring
         PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
         // Mouse cursor toggle state
         bool cursorEnabled = false;
 
-        // 15) Main loop
-        Log::Info("Entering main render loop with texture atlas support");
+        // 17) Main loop
+        Log::Info("Entering main render loop with block highlighting");
 
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -511,10 +480,9 @@ namespace PlatformMain {
             glfwPollEvents();
 
             // b) Update input states
-
             Input::UpdateKeyStates();
 
-            // d.5) Handle player input
+            // c) Handle player input
             // Mouse buttons for block interaction
             if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
                 playerController.OnBreakPressed();
@@ -547,17 +515,17 @@ namespace PlatformMain {
                 playerController.SelectNextSlot();
             }
 
-            // c) Update time
+            // d) Update time
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt);
 
-            // d) Handle input
+            // e) Handle input
             if (Input::IsKeyDown(Input::Key::Escape)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
-            // e) Handle cursor toggle (Tab key)
+            // f) Handle cursor toggle (Tab key)
             if (Input::IsKeyPressed(Input::Key::Tab)) {
                 cursorEnabled = !cursorEnabled;
 
@@ -574,28 +542,27 @@ namespace PlatformMain {
                 }
             }
 
-            // f) Update camera
-
+            // g) Update camera
             camera.Update(dt);
 
-            // f.5) Update player controller
+            // h) Update player controller
             playerController.Update(dt, camera);
 
-            // g) Update world (handles chunk loading/unloading with enhanced meshing)
+            // i) Update world (handles chunk loading/unloading with enhanced meshing)
             Game::WorldManager::Update(camera.position);
 
     #ifndef NDEBUG
-            // h) Start ImGui frame
+            // j) Start ImGui frame
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
     #endif
 
-            // i) Clear buffers
+            // k) Clear buffers
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f); // Sky blue
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // j) Calculate frustum for chunk visibility testing
+            // l) Calculate frustum for chunk visibility testing
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
@@ -607,9 +574,10 @@ namespace PlatformMain {
                 1000.0f
             );
             glm::mat4 view = camera.GetViewMatrix();
-            Frustum frustum = Frustum::FromMatrix(proj * view);
+            glm::mat4 viewProj = proj * view;
+            Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // k) Upload meshes with performance tracking
+            // m) Upload meshes with performance tracking
             auto uploadStartTime = std::chrono::high_resolution_clock::now();
             {
                 Game::MeshData* meshPtr = nullptr;
@@ -640,16 +608,12 @@ namespace PlatformMain {
 
                     Render::UploadMesh(meshPtr);
                     metrics.meshesUploadedThisFrame++;
-
-                    /*Log::Debug("Uploaded mesh: chunk (%d,%d) section %d, %zu vertices, %zu indices",
-                             meshPtr->chunkXZ.x, meshPtr->chunkXZ.y, meshPtr->sectionIndex,
-                             meshPtr->vertices.size(), meshPtr->indices.size());*/
                 }
             }
             auto uploadEndTime = std::chrono::high_resolution_clock::now();
             metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
 
-            // l) Render scene with performance tracking and texture atlas
+            // n) Render scene with performance tracking and texture atlas
             auto renderStartTime = std::chrono::high_resolution_clock::now();
             {
                 // Use shader and bind texture atlas
@@ -688,8 +652,16 @@ namespace PlatformMain {
             auto renderEndTime = std::chrono::high_resolution_clock::now();
             metrics.renderTime = std::chrono::duration<float, std::milli>(renderEndTime - renderStartTime).count();
 
+            // o) Render block highlight (NEW)
+            {
+                const auto& hit = playerController.GetCurrentHit();
+                if (Render::BlockHighlight::IsValidHighlight(hit)) {
+                    Render::g_blockHighlight.Render(hit->blockPos, viewProj);
+                }
+            }
+
     #ifndef NDEBUG
-            // m) ImGui debug interface
+            // p) ImGui debug interface
             {
                 ImGui::Begin("Enhanced Voxel Engine Debug");
 
@@ -730,7 +702,7 @@ namespace PlatformMain {
                 ImGui::Text("Frustum Culled Sections: %zu",
                            Render::g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
 
-                // Player interaction info
+                // Player interaction info (ENHANCED)
                 ImGui::Spacing();
                 ImGui::Text("Player Interaction");
                 ImGui::Separator();
@@ -758,12 +730,22 @@ namespace PlatformMain {
                                hit->blockPos.x, hit->blockPos.y, hit->blockPos.z);
                     ImGui::Text("Distance: %.2f", hit->distance);
 
+                    // NEW: Block highlight status
+                    bool isHighlighted = Render::BlockHighlight::IsValidHighlight(hit);
+                    ImGui::Text("Block Highlighted: %s", isHighlighted ? "YES" : "NO");
+                    if (!isHighlighted && hit->distance > Game::PlayerController::INTERACTION_RANGE) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "  (Out of reach: %.2f > %.2f)",
+                                         hit->distance, Game::PlayerController::INTERACTION_RANGE);
+                    }
+
                     if (playerController.IsBreaking()) {
                         ImGui::Text("Breaking Progress: %.0f%%",
                                    playerController.GetBreakProgress() * 100.0f);
+                        ImGui::ProgressBar(playerController.GetBreakProgress(), ImVec2(-1, 0));
                     }
                 } else {
                     ImGui::Text("Looking at: Nothing");
+                    ImGui::Text("Block Highlighted: NO");
                 }
 
                 const auto& stats = playerController.GetStats();
@@ -781,6 +763,10 @@ namespace PlatformMain {
                 ImGui::Text("WASD: Move horizontally");
                 ImGui::Text("Space/Shift: Move vertically");
                 ImGui::Text("Mouse: Look around (when enabled)");
+                ImGui::Text("Left Click: Break blocks");
+                ImGui::Text("Right Click: Place blocks");
+                ImGui::Text("1-9: Select inventory slot");
+                ImGui::Text("Mouse Wheel: Scroll inventory");
                 ImGui::Text("Tab: Toggle cursor visibility");
                 ImGui::Text("Escape: Exit");
                 ImGui::Spacing();
@@ -804,44 +790,44 @@ namespace PlatformMain {
                 ImGui::End();
             }
 
-            // n) Draw chunk visualization
+            // q) Draw chunk visualization
             DrawChunkVisualization(camera, frustum);
 
-            // o) Draw texture atlas debug window
+            // r) Draw texture atlas debug window
             DrawTextureAtlasDebug();
 
-            // p) Render ImGui
+            // s) Render ImGui
             ImGui::Render();
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // q) Swap buffers
+            // t) Swap buffers
             glfwSwapBuffers(window);
 
-            // r) Reset input deltas
+            // u) Reset input deltas
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // s) Calculate total frame time
+            // v) Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
 
     #ifndef NDEBUG
-        // 16) Cleanup ImGui
+        // 18) Cleanup ImGui
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
     #endif
 
-        // 17) Cleanup OpenGL resources
+        // 19) Cleanup OpenGL resources
         for (auto& cm : Render::g_chunkMeshes) {
             glDeleteVertexArrays(1, &cm.vao);
             glDeleteBuffers(1, &cm.vbo);
             glDeleteBuffers(1, &cm.ebo);
         }
 
-        Log::Info("Enhanced voxel engine with texture atlas shutting down");
+        Log::Info("Enhanced voxel engine with block highlighting shutting down");
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered total",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 

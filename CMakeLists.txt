@@ -87,6 +87,7 @@ if(APPLE)
             src/render/Shader.cpp
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
+            src/render/BlockHighlight.cpp
             src/game/BlockRegistry.cpp
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -122,6 +123,8 @@ else()
             src/game/Inventory.hpp
             src/game/PlayerController.cpp
             src/game/PlayerController.hpp
+            src/render/BlockHighlight.hpp
+            src/render/BlockHighlight.cpp
     )
 endif()
 

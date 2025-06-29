@@ -1,8 +1,10 @@
+// File: src/render/Shader.cpp (Fixed - Less Aggressive Error Checking)
 #include "Shader.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <filesystem>
+#include <unordered_set>
 #include <glad/glad.h>
 #include <glm/gtc/type_ptr.hpp>  // for glm::value_ptr
 #include "../core/Log.hpp"  // Add this include for logging
@@ -26,13 +28,23 @@ Shader::~Shader() {
 
 // Use (bind) this shader
 void Shader::Use() const {
+    if (programID == 0) {
+        Log::Warning("Attempted to use invalid shader program (ID = 0)");
+        return;
+    }
+
     glUseProgram(programID);
 
-    // Check for OpenGL errors
-    GLenum error = glGetError();
-    if (error != GL_NO_ERROR) {
-        Log::Error("OpenGL error after glUseProgram: 0x%x", error);
+    // Only check for errors in debug builds and only occasionally
+#ifndef NDEBUG
+    static int errorCheckCounter = 0;
+    if (++errorCheckCounter % 100 == 0) { // Check every 100th call
+        GLenum error = glGetError();
+        if (error != GL_NO_ERROR) {
+            Log::Warning("OpenGL error after glUseProgram (ID: %u): 0x%x", programID, error);
+        }
     }
+#endif
 }
 
 // Retrieve uniform location (cached)
@@ -41,11 +53,22 @@ int Shader::GetUniformLocation(const std::string& name) {
         return uniformCache[name];
     }
 
+    if (programID == 0) {
+        Log::Warning("Cannot get uniform location for '%s' - invalid shader program", name.c_str());
+        uniformCache[name] = -1;
+        return -1;
+    }
+
     int loc = glGetUniformLocation(programID, name.c_str());
     uniformCache[name] = loc;
 
     if (loc == -1) {
-        Log::Warning("Uniform '%s' not found in shader program %u", name.c_str(), programID);
+        // Only log this once per uniform to avoid spam
+        static std::unordered_set<std::string> loggedMissingUniforms;
+        if (loggedMissingUniforms.find(name) == loggedMissingUniforms.end()) {
+            Log::Warning("Uniform '%s' not found in shader program %u", name.c_str(), programID);
+            loggedMissingUniforms.insert(name);
+        }
     } else {
         Log::Debug("Found uniform '%s' at location %d in program %u", name.c_str(), loc, programID);
     }
@@ -59,11 +82,16 @@ void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) {
     if (loc != -1) {
         glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(matrix));
 
-        // Check for OpenGL errors
-        GLenum error = glGetError();
-        if (error != GL_NO_ERROR) {
-            Log::Error("OpenGL error setting mat4 uniform '%s': 0x%x", name.c_str(), error);
+        // Only check for errors occasionally to avoid spam
+#ifndef NDEBUG
+        static int matrixErrorCheckCounter = 0;
+        if (++matrixErrorCheckCounter % 50 == 0) { // Check every 50th call
+            GLenum error = glGetError();
+            if (error != GL_NO_ERROR) {
+                Log::Warning("OpenGL error setting mat4 uniform '%s': 0x%x", name.c_str(), error);
+            }
         }
+#endif
     }
 }
 
@@ -113,6 +141,11 @@ void Shader::CompileAndLink() {
 
     // Compile vertex shader
     GLuint vShader = glCreateShader(GL_VERTEX_SHADER);
+    if (vShader == 0) {
+        Log::Error("Failed to create vertex shader object");
+        return;
+    }
+
     glShaderSource(vShader, 1, &vSrc, nullptr);
     glCompileShader(vShader);
 
@@ -130,6 +163,12 @@ void Shader::CompileAndLink() {
 
     // Compile fragment shader
     GLuint fShader = glCreateShader(GL_FRAGMENT_SHADER);
+    if (fShader == 0) {
+        Log::Error("Failed to create fragment shader object");
+        glDeleteShader(vShader);
+        return;
+    }
+
     glShaderSource(fShader, 1, &fSrc, nullptr);
     glCompileShader(fShader);
 
@@ -147,6 +186,13 @@ void Shader::CompileAndLink() {
 
     // Link program
     GLuint newProgram = glCreateProgram();
+    if (newProgram == 0) {
+        Log::Error("Failed to create shader program object");
+        glDeleteShader(vShader);
+        glDeleteShader(fShader);
+        return;
+    }
+
     glAttachShader(newProgram, vShader);
     glAttachShader(newProgram, fShader);
     glLinkProgram(newProgram);
@@ -171,13 +217,31 @@ void Shader::CompileAndLink() {
         char infoLog[512];
         glGetProgramInfoLog(newProgram, 512, nullptr, infoLog);
         Log::Warning("Shader program validation failed: %s", infoLog);
+        // Don't fail on validation - it's just a warning
     }
+
+    // Test that the program can actually be used
+    GLint currentProgram;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+
+    glUseProgram(newProgram);
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR) {
+        Log::Error("Cannot use newly created shader program: OpenGL error 0x%x", error);
+        glDeleteShader(vShader);
+        glDeleteShader(fShader);
+        glDeleteProgram(newProgram);
+        return;
+    }
+
+    // Restore previous program
+    glUseProgram(currentProgram);
 
     // Clean up shaders (they're linked into the program now)
     glDeleteShader(vShader);
     glDeleteShader(fShader);
 
-    // Delete old program AFTER successful linking
+    // Delete old program AFTER successful linking and testing
     if (programID != 0) {
         Log::Debug("Deleting old shader program %u", programID);
         glDeleteProgram(programID);
@@ -186,19 +250,15 @@ void Shader::CompileAndLink() {
     programID = newProgram;
     Log::Info("Shader program created successfully, new ID: %u", programID);
 
-    // Check if our critical uniforms exist
+    // Check if our critical uniforms exist (but don't fail if they don't)
     glUseProgram(programID);
     int mvpLoc = glGetUniformLocation(programID, "uMVP");
     int atlasLoc = glGetUniformLocation(programID, "uTextureAtlas");
 
     Log::Info("Critical uniforms - uMVP: %d, uTextureAtlas: %d", mvpLoc, atlasLoc);
 
-    if (mvpLoc == -1) {
-        Log::Error("CRITICAL: uMVP uniform not found in shader!");
-    }
-    if (atlasLoc == -1) {
-        Log::Error("CRITICAL: uTextureAtlas uniform not found in shader!");
-    }
+    // Restore previous program
+    glUseProgram(currentProgram);
 }
 
 // Internal: load file content
