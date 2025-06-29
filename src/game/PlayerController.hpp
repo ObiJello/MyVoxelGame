@@ -1,8 +1,9 @@
-// File: src/game/PlayerController.hpp
+// File: src/game/PlayerController.hpp (Updated with Physics)
 #pragma once
 
 #include "Inventory.hpp"
 #include "RayCast.hpp"
+#include "Physics.hpp"  // Add physics system
 #include "../render/Camera.hpp"
 #include <optional>
 #include <chrono>
@@ -19,11 +20,15 @@ namespace Game {
         PlayerController();
 
         // Update the player controller (call once per frame)
-        void Update(float deltaTime, const Render::Camera& camera);
+        void Update(float deltaTime, Render::Camera& camera);
 
         // Get the player's inventory
         Inventory& GetInventory() { return inventory; }
         const Inventory& GetInventory() const { return inventory; }
+
+        // Get the player's physics state
+        PlayerPhysics& GetPhysics() { return physics; }
+        const PlayerPhysics& GetPhysics() const { return physics; }
 
         // Get current raycast hit (if any)
         const std::optional<RaycastHit>& GetCurrentHit() const { return currentHit; }
@@ -40,10 +45,20 @@ namespace Game {
         void OnPlacePressed();
         void OnPlaceReleased();
 
+        // Movement input handlers
+        void SetMovementInput(const glm::vec3& movement);
+        void SetJumpPressed(bool pressed);
+        void SetSprintPressed(bool pressed);
+        void SetSneakPressed(bool pressed);
+
         // Inventory slot selection
         void SelectSlot(int slot);
         void SelectNextSlot();
         void SelectPreviousSlot();
+
+        // Debug/cheat functions
+        void ToggleNoclip();
+        void SetNoclip(bool enabled);
 
         // Statistics
         struct Stats {
@@ -51,13 +66,22 @@ namespace Game {
             int blocksBroken = 0;
             int lastPlacedBlockId = -1;
             int lastBrokenBlockId = -1;
+            float totalDistanceTraveled = 0.0f;
+            float totalPlayTime = 0.0f;
         };
 
         const Stats& GetStats() const { return stats; }
 
     private:
         Inventory inventory;
+        PlayerPhysics physics;  // Player physics state
         std::optional<RaycastHit> currentHit;
+
+        // Movement input state
+        glm::vec3 movementInput{0.0f};
+        bool jumpPressed = false;
+        bool sprintPressed = false;
+        bool sneakPressed = false;
 
         // Breaking state
         bool isBreaking;
@@ -71,15 +95,16 @@ namespace Game {
 
         // Statistics
         Stats stats;
+        glm::vec3 lastPosition{0.0f}; // For distance tracking
 
         // Helper methods
+        void UpdatePhysics(float deltaTime);
+        void UpdateCamera(Render::Camera& camera);
         void UpdateRaycast(const Render::Camera& camera);
         void UpdateBreaking(float deltaTime);
         void TryPlaceBlock();
         void FinishBreaking();
         bool CanPlaceBlockAt(const glm::ivec3& pos);
-
-        // Get the block type that should be used for breaking effects
         BlockID GetBreakingBlockType(const glm::ivec3& pos);
     };
 

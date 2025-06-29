@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Enhanced with Block Highlighting)
+// File: src/platform/PlatformMain.cpp (Complete with Physics Integration)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -12,6 +12,7 @@
 #include "../game/PlayerController.hpp"
 #include "../game/WorldAccess.hpp"
 #include "../game/RayCast.hpp"
+#include "../game/Physics.hpp"  // Add physics header
 
 // Include rendering headers
 #include "../render/Camera.hpp"
@@ -19,7 +20,7 @@
 #include "../render/Frustum.hpp"
 #include "../render/Shader.hpp"
 #include "../render/TextureAtlas.hpp"
-#include "../render/BlockHighlight.hpp"  // Add block highlighting
+#include "../render/BlockHighlight.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -71,7 +72,7 @@ namespace PlatformMain {
     };
 
 #ifndef NDEBUG
-    // Chunk visualization helper functions (existing functions remain the same)
+    // Chunk visualization helper functions
     struct ChunkState {
         bool isGenerated = false;
         bool inFrustum = false;
@@ -353,7 +354,7 @@ namespace PlatformMain {
     {
         // 1) Initialize logging
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Block Highlighting");
+        Log::Info("Starting MyVoxelGame v0.1 with Physics System");
 
         // 2) Initialize BlockRegistry
         Game::BlockRegistry::Init();
@@ -441,16 +442,17 @@ namespace PlatformMain {
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // 13) Initialize camera
+        // 13) Initialize camera with physics
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
         camera.yaw = 0.0f;
         camera.pitch = 0.0f;
+        camera.physicsControlled = true; // Enable physics control
         glfwSwapInterval(1); // Enable VSync
 
-        // 14) Initialize player controller
+        // 14) Initialize player controller with physics
         Game::PlayerController playerController;
-        Log::Info("Player controller initialized with inventory");
+        Log::Info("Player controller initialized with physics system");
 
     #ifndef NDEBUG
         // 15) Setup ImGui
@@ -471,7 +473,7 @@ namespace PlatformMain {
         bool cursorEnabled = false;
 
         // 17) Main loop
-        Log::Info("Entering main render loop with block highlighting");
+        Log::Info("Entering main render loop with physics system");
 
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -482,7 +484,21 @@ namespace PlatformMain {
             // b) Update input states
             Input::UpdateKeyStates();
 
-            // c) Handle player input
+            // c) Handle player input with physics
+
+            // Calculate movement input from camera
+            glm::vec3 movementInput = camera.CalculateMovementInput();
+            playerController.SetMovementInput(movementInput);
+
+            // Handle jump input
+            playerController.SetJumpPressed(camera.IsJumpPressed());
+
+            // Handle sprint input
+            playerController.SetSprintPressed(camera.IsSprintPressed());
+
+            // Handle sneak input
+            playerController.SetSneakPressed(camera.IsSneakPressed());
+
             // Mouse buttons for block interaction
             if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
                 playerController.OnBreakPressed();
@@ -515,6 +531,11 @@ namespace PlatformMain {
                 playerController.SelectNextSlot();
             }
 
+            // Debug key for noclip (N key)
+            if (Input::IsKeyPressed(Input::Key::N)) {
+                playerController.ToggleNoclip();
+            }
+
             // d) Update time
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
@@ -542,10 +563,10 @@ namespace PlatformMain {
                 }
             }
 
-            // g) Update camera
+            // g) Update camera (orientation only, position set by physics)
             camera.Update(dt);
 
-            // h) Update player controller
+            // h) Update player controller with physics
             playerController.Update(dt, camera);
 
             // i) Update world (handles chunk loading/unloading with enhanced meshing)
@@ -652,7 +673,7 @@ namespace PlatformMain {
             auto renderEndTime = std::chrono::high_resolution_clock::now();
             metrics.renderTime = std::chrono::duration<float, std::milli>(renderEndTime - renderStartTime).count();
 
-            // o) Render block highlight (NEW)
+            // o) Render block highlight
             {
                 const auto& hit = playerController.GetCurrentHit();
                 if (Render::BlockHighlight::IsValidHighlight(hit)) {
@@ -702,7 +723,29 @@ namespace PlatformMain {
                 ImGui::Text("Frustum Culled Sections: %zu",
                            Render::g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
 
-                // Player interaction info (ENHANCED)
+                // Physics information (NEW)
+                ImGui::Spacing();
+                ImGui::Text("Player Physics");
+                ImGui::Separator();
+                const auto& playerPhysics = playerController.GetPhysics();
+                ImGui::Text("Position: (%.2f, %.2f, %.2f)",
+                           playerPhysics.position.x, playerPhysics.position.y, playerPhysics.position.z);
+                ImGui::Text("Velocity: (%.2f, %.2f, %.2f)",
+                           playerPhysics.velocity.x, playerPhysics.velocity.y, playerPhysics.velocity.z);
+                ImGui::Text("Speed: %.2f blocks/s", glm::length(playerPhysics.velocity));
+                ImGui::Text("On Ground: %s", playerPhysics.isOnGround ? "YES" : "NO");
+                ImGui::Text("In Water: %s", playerPhysics.isInWater ? "YES" : "NO");
+                ImGui::Text("Sneaking: %s", playerPhysics.isSneaking ? "YES" : "NO");
+                ImGui::Text("Sprinting: %s", playerPhysics.isSprinting ? "YES" : "NO");
+                ImGui::Text("Noclip: %s", playerPhysics.noclip ? "ENABLED" : "DISABLED");
+
+                // Eye height
+                float currentEyeHeight = playerPhysics.isSneaking ?
+                    Game::PlayerPhysics::EYE_HEIGHT_SNEAKING :
+                    Game::PlayerPhysics::EYE_HEIGHT_STANDING;
+                ImGui::Text("Eye Height: %.2f blocks", currentEyeHeight);
+
+                // Player interaction info
                 ImGui::Spacing();
                 ImGui::Text("Player Interaction");
                 ImGui::Separator();
@@ -730,7 +773,7 @@ namespace PlatformMain {
                                hit->blockPos.x, hit->blockPos.y, hit->blockPos.z);
                     ImGui::Text("Distance: %.2f", hit->distance);
 
-                    // NEW: Block highlight status
+                    // Block highlight status
                     bool isHighlighted = Render::BlockHighlight::IsValidHighlight(hit);
                     ImGui::Text("Block Highlighted: %s", isHighlighted ? "YES" : "NO");
                     if (!isHighlighted && hit->distance > Game::PlayerController::INTERACTION_RANGE) {
@@ -748,26 +791,39 @@ namespace PlatformMain {
                     ImGui::Text("Block Highlighted: NO");
                 }
 
-                const auto& stats = playerController.GetStats();
-                ImGui::Text("Blocks Placed: %d", stats.blocksPlaced);
-                ImGui::Text("Blocks Broken: %d", stats.blocksBroken);
+                // Player statistics (enhanced)
+                ImGui::Spacing();
+                ImGui::Text("Player Statistics");
+                ImGui::Separator();
+                const auto& playerStats = playerController.GetStats();
+                ImGui::Text("Blocks Placed: %d", playerStats.blocksPlaced);
+                ImGui::Text("Blocks Broken: %d", playerStats.blocksBroken);
+                ImGui::Text("Distance Traveled: %.1f blocks", playerStats.totalDistanceTraveled);
+                ImGui::Text("Play Time: %.1f seconds", playerStats.totalPlayTime);
+                if (playerStats.totalPlayTime > 0.0f) {
+                    float avgSpeed = playerStats.totalDistanceTraveled / playerStats.totalPlayTime;
+                    ImGui::Text("Average Speed: %.2f blocks/s", avgSpeed);
+                }
 
                 // Performance graph
                 ImGui::PlotLines("Frame Time (ms)", metrics.frameTimes, PerformanceMetrics::SAMPLE_COUNT,
                                metrics.sampleIndex, nullptr, 0.0f, 50.0f, ImVec2(0, 80));
 
-                // Controls and status
+                // Enhanced controls list
                 ImGui::Spacing();
                 ImGui::Text("Controls & Status");
                 ImGui::Separator();
                 ImGui::Text("WASD: Move horizontally");
-                ImGui::Text("Space/Shift: Move vertically");
+                ImGui::Text("Space: Jump");
+                ImGui::Text("Shift: Sneak");
+                ImGui::Text("Ctrl: Sprint");
                 ImGui::Text("Mouse: Look around (when enabled)");
                 ImGui::Text("Left Click: Break blocks");
                 ImGui::Text("Right Click: Place blocks");
                 ImGui::Text("1-9: Select inventory slot");
                 ImGui::Text("Mouse Wheel: Scroll inventory");
                 ImGui::Text("Tab: Toggle cursor visibility");
+                ImGui::Text("N: Toggle noclip (debug)");
                 ImGui::Text("Escape: Exit");
                 ImGui::Spacing();
 
@@ -827,7 +883,7 @@ namespace PlatformMain {
             glDeleteBuffers(1, &cm.ebo);
         }
 
-        Log::Info("Enhanced voxel engine with block highlighting shutting down");
+        Log::Info("Enhanced voxel engine with physics system shutting down");
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered total",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 

@@ -22,7 +22,8 @@ namespace Input {
         LeftMouse,
         RightMouse,
         LeftShift,
-        Tab,  // Add Tab key for cursor toggle
+        Tab,
+        N,
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
     };
 

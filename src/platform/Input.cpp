@@ -80,6 +80,7 @@ namespace Input {
             case Key::Escape:      glfwKey = GLFW_KEY_ESCAPE; break;
             case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
             case Key::Tab:         glfwKey = GLFW_KEY_TAB; break;
+            case Key::N:           glfwKey = GLFW_KEY_N; break;
             case Key::Alpha1:      glfwKey = GLFW_KEY_1; break;
             case Key::Alpha2:      glfwKey = GLFW_KEY_2; break;
             case Key::Alpha3:      glfwKey = GLFW_KEY_3; break;
@@ -159,6 +160,7 @@ namespace Input {
         currentKeyStates[Key::Escape] = IsKeyDown(Key::Escape);
         currentKeyStates[Key::LeftShift] = IsKeyDown(Key::LeftShift);
         currentKeyStates[Key::Tab] = IsKeyDown(Key::Tab);
+        currentKeyStates[Key::N] = IsKeyDown(Key::N);
         currentKeyStates[Key::Alpha1] = IsKeyDown(Key::Alpha1);
         currentKeyStates[Key::Alpha2] = IsKeyDown(Key::Alpha2);
         currentKeyStates[Key::Alpha3] = IsKeyDown(Key::Alpha3);

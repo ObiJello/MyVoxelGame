@@ -1,4 +1,4 @@
-// File: src/game/PlayerController.cpp (Fixed Block Modification)
+// File: src/game/PlayerController.cpp (Updated with Physics)
 #include "PlayerController.hpp"
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
@@ -21,9 +21,18 @@ namespace Game {
         // Initialize inventory with default blocks
         inventory.InitializeDefaults();
 
-        // **IMPROVED**: Register for chunk modification notifications with better remesh coordination
+        // Initialize physics at a safe spawn position
+        physics.position = glm::vec3(0.0f, 80.0f, 0.0f);
+        physics.velocity = glm::vec3(0.0f);
+        physics.isOnGround = false;
+        physics.isSneaking = false;
+        physics.isSprinting = false;
+        physics.noclip = false;
+
+        lastPosition = physics.position;
+
+        // Register for chunk modification notifications
         WorldAccess::RegisterModificationCallback([](Math::ChunkPos pos) {
-            // **IMPROVED**: Add a small delay to batch multiple block changes
             static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> pendingRemeshes;
             static std::mutex remeshMutex;
 
@@ -36,22 +45,17 @@ namespace Game {
                 pendingRemeshes[key] = now;
             }
 
-            // Schedule a delayed remesh to batch multiple changes
             std::thread([key, pos]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 50ms delay
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
                 {
                     std::lock_guard<std::mutex> lock(remeshMutex);
                     auto it = pendingRemeshes.find(key);
                     if (it != pendingRemeshes.end()) {
-                        // Only remesh if this is still the latest request for this chunk
                         auto elapsed = std::chrono::steady_clock::now() - it->second;
                         if (elapsed >= std::chrono::milliseconds(45)) {
                             pendingRemeshes.erase(it);
-
-                            // Perform the remesh
                             WorldManager::ForceRemeshChunk(pos);
-
                             Log::Debug("Chunk (%d, %d) remeshed after block modification",
                                       pos.x, pos.z);
                         }
@@ -59,10 +63,22 @@ namespace Game {
                 }
             }).detach();
         });
+
+        Log::Info("PlayerController initialized with physics system");
     }
 
-    void PlayerController::Update(float deltaTime, const Render::Camera& camera) {
-        // Update raycast
+    void PlayerController::Update(float deltaTime, Render::Camera& camera) {
+        // Update physics state based on input
+        physics.isSneaking = sneakPressed;
+        physics.isSprinting = sprintPressed && !sneakPressed; // Can't sprint while sneaking
+
+        // Update physics simulation
+        UpdatePhysics(deltaTime);
+
+        // Update camera position to follow player
+        UpdateCamera(camera);
+
+        // Update raycast from camera position
         UpdateRaycast(camera);
 
         // Update breaking progress
@@ -77,6 +93,34 @@ namespace Game {
         if (placeButtonHeld && placeCooldownTimer <= 0.0f) {
             TryPlaceBlock();
         }
+
+        // Update statistics
+        stats.totalPlayTime += deltaTime;
+
+        // Calculate distance traveled
+        float distanceThisFrame = glm::length(physics.position - lastPosition);
+        stats.totalDistanceTraveled += distanceThisFrame;
+        lastPosition = physics.position;
+    }
+
+    void PlayerController::UpdatePhysics(float deltaTime) {
+        // Apply physics simulation
+        Physics::UpdatePlayerPhysics(physics, movementInput, jumpPressed, deltaTime);
+
+        // Reset single-frame inputs
+        jumpPressed = false;
+    }
+
+    void PlayerController::UpdateCamera(Render::Camera& camera) {
+        // Set camera position to player's eye position
+        camera.position = physics.GetEyePosition();
+
+        // If noclip is enabled, allow free camera movement
+        if (physics.noclip) {
+            // In noclip mode, camera position might be set independently
+            // Store camera position back to physics for consistency
+            physics.position = camera.position - glm::vec3(0.0f, physics.EYE_HEIGHT_STANDING, 0.0f);
+        }
     }
 
     void PlayerController::UpdateRaycast(const Render::Camera& camera) {
@@ -87,7 +131,7 @@ namespace Game {
         front.z = sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
         front = glm::normalize(front);
 
-        // Cast ray
+        // Cast ray from camera position (player's eyes)
         currentHit = Raycast::CastRay(camera.position, front, INTERACTION_RANGE);
 
         // If we're breaking a block but lost sight of it, cancel breaking
@@ -113,11 +157,28 @@ namespace Game {
         }
     }
 
+    void PlayerController::SetMovementInput(const glm::vec3& movement) {
+        movementInput = movement;
+    }
+
+    void PlayerController::SetJumpPressed(bool pressed) {
+        if (pressed && !jumpPressed) {
+            jumpPressed = true; // Only register the press edge
+        }
+    }
+
+    void PlayerController::SetSprintPressed(bool pressed) {
+        sprintPressed = pressed;
+    }
+
+    void PlayerController::SetSneakPressed(bool pressed) {
+        sneakPressed = pressed;
+    }
+
     void PlayerController::OnBreakPressed() {
         breakButtonHeld = true;
 
         if (currentHit.has_value() && !isBreaking) {
-            // Start breaking the block we're looking at
             isBreaking = true;
             breakProgress = 0.0f;
             breakingBlockPos = currentHit->blockPos;
@@ -131,7 +192,6 @@ namespace Game {
         breakButtonHeld = false;
 
         if (isBreaking) {
-            // Cancel breaking
             isBreaking = false;
             breakProgress = 0.0f;
             Log::Debug("Breaking cancelled - button released");
@@ -141,7 +201,6 @@ namespace Game {
     void PlayerController::OnPlacePressed() {
         placeButtonHeld = true;
 
-        // Try to place immediately if cooldown allows
         if (placeCooldownTimer <= 0.0f) {
             TryPlaceBlock();
         }
@@ -152,7 +211,6 @@ namespace Game {
     }
 
     void PlayerController::TryPlaceBlock() {
-        // Check if we have a valid hit and a block to place
         if (!currentHit.has_value()) {
             return;
         }
@@ -162,19 +220,27 @@ namespace Game {
             return;
         }
 
-        // Check if we can place at the adjacent position
         const glm::ivec3& placePos = currentHit->adjacentPos;
         if (!CanPlaceBlockAt(placePos)) {
             return;
         }
 
-        // Try to consume a block from inventory
+        // Check if placing block would intersect with player
+        AABB blockAABB(
+            glm::vec3(placePos) + glm::vec3(0.5f),
+            glm::vec3(1.0f)
+        );
+
+        if (physics.GetAABB().Intersects(blockAABB)) {
+            Log::Debug("Cannot place block - would intersect with player");
+            return;
+        }
+
         if (!inventory.ConsumeSelectedBlock()) {
             Log::Debug("Cannot place block - none left in inventory");
             return;
         }
 
-        // **IMPROVED**: Place the block with better error handling
         bool placementSuccessful = false;
         try {
             placementSuccessful = WorldAccess::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
@@ -184,18 +250,14 @@ namespace Game {
         }
 
         if (placementSuccessful) {
-            // Update statistics
             stats.blocksPlaced++;
             stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
-
-            // Reset cooldown
             placeCooldownTimer = PLACE_COOLDOWN;
 
             const Block& block = BlockRegistry::Get(selectedBlock);
             Log::Info("Placed %s at (%d, %d, %d)",
                      block.name.c_str(), placePos.x, placePos.y, placePos.z);
         } else {
-            // Failed to place, give the block back
             inventory.AddBlocks(selectedBlock, 1);
             Log::Warning("Failed to place block at (%d, %d, %d)",
                         placePos.x, placePos.y, placePos.z);
@@ -207,7 +269,6 @@ namespace Game {
             return;
         }
 
-        // Get the block type before breaking
         BlockID brokenBlock = BlockID::Air;
         try {
             brokenBlock = WorldAccess::GetBlock(
@@ -219,7 +280,6 @@ namespace Game {
             return;
         }
 
-        // Don't break bedrock
         if (brokenBlock == BlockID::Bedrock) {
             Log::Debug("Cannot break bedrock");
             isBreaking = false;
@@ -227,7 +287,6 @@ namespace Game {
             return;
         }
 
-        // Don't break air
         if (brokenBlock == BlockID::Air) {
             Log::Debug("Cannot break air");
             isBreaking = false;
@@ -235,7 +294,6 @@ namespace Game {
             return;
         }
 
-        // **IMPROVED**: Remove the block with better error handling
         bool breakingSuccessful = false;
         try {
             breakingSuccessful = WorldAccess::SetBlock(breakingBlockPos.x, breakingBlockPos.y,
@@ -246,7 +304,6 @@ namespace Game {
         }
 
         if (breakingSuccessful) {
-            // Add the broken block to inventory
             int remaining = inventory.AddBlocks(brokenBlock, 1);
 
             if (remaining > 0) {
@@ -254,7 +311,6 @@ namespace Game {
                            remaining, BlockRegistry::Get(brokenBlock).name.c_str());
             }
 
-            // Update statistics
             stats.blocksBroken++;
             stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
 
@@ -267,18 +323,15 @@ namespace Game {
                         breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
         }
 
-        // Reset breaking state regardless of success
         isBreaking = false;
         breakProgress = 0.0f;
     }
 
     bool PlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
-        // Check if position is valid
         if (!WorldAccess::IsValidPosition(pos.x, pos.y, pos.z)) {
             return false;
         }
 
-        // Check if space is empty
         BlockID existing = BlockID::Air;
         try {
             existing = WorldAccess::GetBlock(pos.x, pos.y, pos.z);
@@ -290,8 +343,6 @@ namespace Game {
         if (existing != BlockID::Air) {
             return false;
         }
-
-        // TODO: Add collision check with player position to prevent placing blocks inside player
 
         return true;
     }
@@ -309,6 +360,26 @@ namespace Game {
     void PlayerController::SelectPreviousSlot() {
         inventory.SelectPreviousSlot();
         Log::Debug("Selected inventory slot %d", inventory.GetSelectedSlot());
+    }
+
+    void PlayerController::ToggleNoclip() {
+        physics.noclip = !physics.noclip;
+        Log::Info("Noclip %s", physics.noclip ? "enabled" : "disabled");
+
+        if (physics.noclip) {
+            physics.velocity = glm::vec3(0.0f);
+            physics.isOnGround = false;
+        }
+    }
+
+    void PlayerController::SetNoclip(bool enabled) {
+        physics.noclip = enabled;
+        Log::Info("Noclip %s", physics.noclip ? "enabled" : "disabled");
+
+        if (physics.noclip) {
+            physics.velocity = glm::vec3(0.0f);
+            physics.isOnGround = false;
+        }
     }
 
     BlockID PlayerController::GetBreakingBlockType(const glm::ivec3& pos) {

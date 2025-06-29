@@ -96,6 +96,7 @@ if(APPLE)
             src/game/WorldAccess.cpp
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
+            src/game/Physics.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -125,6 +126,8 @@ else()
             src/game/PlayerController.hpp
             src/render/BlockHighlight.hpp
             src/render/BlockHighlight.cpp
+            src/game/Physics.cpp
+            src/game/Physics.hpp
     )
 endif()
 
