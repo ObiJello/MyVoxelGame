@@ -1,4 +1,4 @@
-// File: src/game/WorldManager.hpp (Fixed with Helper Functions)
+// File: src/game/WorldManager.hpp (Fixed Header)
 #pragma once
 
 #include "WorldMath.hpp"
@@ -51,12 +51,9 @@ namespace Game {
         static void LoadChunk(Math::ChunkPos pos);
         static void UnloadChunk(Math::ChunkPos pos);
 
-        // **NEW HELPER FUNCTIONS** for fixed remeshing
-        static std::shared_ptr<Chunk> GetChunkForRemesh(Math::ChunkPos pos);
-        static NeighborContext CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos);
-        static std::shared_ptr<Chunk> GetNeighborChunk(Math::ChunkPos pos, int dx, int dz);
-        static void UpdateNeighborCounts(Math::ChunkPos pos);
-        static uint64_t MakeChunkKey(int32_t x, int32_t z);
+        // NOTE: Helper functions like MakeChunkKey, GetNeighborChunk, etc. are now
+        // implemented as static functions inside WorldManager.cpp and don't need
+        // to be declared in the header since they're only used internally.
     };
 
 } // namespace Game
