@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <glad/glad.h>
 #include "Frustum.hpp"
+#include "Log.hpp"
 #include "../game/Mesher.hpp"     // for Game::MeshData
 #include "../game/WorldMath.hpp"  // for CHUNK_SIZE_X, SECTION_HEIGHT, CHUNK_SIZE_Z
 
@@ -18,6 +19,9 @@ namespace Render {
         glm::vec3 worldOffset{ 0.0f };
         Game::Math::ChunkPos chunkXZ{};  // coordinates of parent chunk
         int sectionIndex = 0;            // which section within the chunk
+
+        // **NEW**: Add timestamp for mesh replacement logic
+        std::chrono::steady_clock::time_point uploadTime;
 
         // Construct from MeshData. Reads chunkXZ and sectionIndex from data.
         static ChunkMesh FromMeshData(const Game::MeshData* data) {
@@ -97,7 +101,23 @@ namespace Render {
             cm.chunkXZ = { data->chunkXZ.x, data->chunkXZ.y };
             cm.sectionIndex = data->sectionIndex;
 
+            // **NEW**: Record upload time
+            cm.uploadTime = std::chrono::steady_clock::now();
+
             return cm;
+        }
+
+        // **NEW**: Cleanup method
+        void Cleanup() const {
+            if (vao != 0) {
+                glDeleteVertexArrays(1, &vao);
+            }
+            if (vbo != 0) {
+                glDeleteBuffers(1, &vbo);
+            }
+            if (ebo != 0) {
+                glDeleteBuffers(1, &ebo);
+            }
         }
 
         // Render this mesh (assumes a shader with uMVP already bound)
@@ -117,17 +137,77 @@ namespace Render {
             );
             return AABB{ min, max };
         }
+
+        // **NEW**: Check if this mesh matches chunk/section
+        bool Matches(Game::Math::ChunkPos pos, int section) const {
+            return chunkXZ.x == pos.x && chunkXZ.z == pos.z && sectionIndex == section;
+        }
     };
 
     // Global container of all uploaded meshes (one per section)
     extern std::vector<ChunkMesh> g_chunkMeshes;
 
-    // Called once per finished MeshData to upload a new mesh to the GPU.
-    // Reads chunkXZ and sectionIndex from data itself.
+    // **IMPROVED**: Upload mesh with proper replacement logic
     inline void UploadMesh(Game::MeshData* data) {
+        if (!data) {
+            return;
+        }
+
+        if (data->vertices.empty()) {
+            Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
+                      data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);
+            delete data;
+            return;
+        }
+
+        // **CRITICAL FIX**: Find and replace existing mesh for this chunk/section
+        auto& meshes = g_chunkMeshes;
+
+        // Look for existing mesh to replace
+        for (auto it = meshes.begin(); it != meshes.end(); ++it) {
+            if (it->chunkXZ.x == data->chunkXZ.x &&
+                it->chunkXZ.z == data->chunkXZ.y &&
+                it->sectionIndex == data->sectionIndex) {
+
+                Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
+                          data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);
+
+                // Clean up the old mesh
+                glDeleteVertexArrays(1, &it->vao);
+                glDeleteBuffers(1, &it->vbo);
+                glDeleteBuffers(1, &it->ebo);
+
+                // Replace with new mesh
+                *it = ChunkMesh::FromMeshData(data);
+                delete data;
+                return;
+                }
+        }
+
+        // No existing mesh found, add new one
+        Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
+                  data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex, data->vertices.size());
+
         ChunkMesh cm = ChunkMesh::FromMeshData(data);
-        g_chunkMeshes.push_back(cm);
+        meshes.push_back(cm);
         delete data;
+    }
+
+    // **NEW**: Safe cleanup function for chunk meshes
+    inline void RemoveChunkMeshes(Game::Math::ChunkPos pos) {
+        auto& meshes = g_chunkMeshes;
+
+        meshes.erase(
+            std::remove_if(meshes.begin(), meshes.end(),
+                [&pos](const ChunkMesh& cm) {
+                    bool shouldRemove = (cm.chunkXZ.x == pos.x && cm.chunkXZ.z == pos.z);
+                    if (shouldRemove) {
+                        cm.Cleanup();
+                    }
+                    return shouldRemove;
+                }),
+            meshes.end()
+        );
     }
 
 } // namespace Render

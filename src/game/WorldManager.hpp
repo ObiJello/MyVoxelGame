@@ -1,14 +1,20 @@
-// File: src/game/WorldManager.hpp (Enhanced with Inter-Chunk Coordination)
+// File: src/game/WorldManager.hpp (Fixed with Helper Functions)
 #pragma once
 
 #include "WorldMath.hpp"
+#include "Mesher.hpp"  // Add this for NeighborContext
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
 #include <chrono>
+#include <memory>
+#include <shared_mutex>
 #include <glm/vec3.hpp>
 
 namespace Game {
+
+    // Forward declarations
+    class Chunk;
 
     struct ChunkPosHash {
         size_t operator()(const Math::ChunkPos& p) const noexcept {
@@ -44,6 +50,13 @@ namespace Game {
         // Internal helper functions
         static void LoadChunk(Math::ChunkPos pos);
         static void UnloadChunk(Math::ChunkPos pos);
+
+        // **NEW HELPER FUNCTIONS** for fixed remeshing
+        static std::shared_ptr<Chunk> GetChunkForRemesh(Math::ChunkPos pos);
+        static NeighborContext CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos);
+        static std::shared_ptr<Chunk> GetNeighborChunk(Math::ChunkPos pos, int dx, int dz);
+        static void UpdateNeighborCounts(Math::ChunkPos pos);
+        static uint64_t MakeChunkKey(int32_t x, int32_t z);
     };
 
 } // namespace Game

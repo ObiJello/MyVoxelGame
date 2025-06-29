@@ -1,10 +1,12 @@
-// File: src/game/PlayerController.cpp
+// File: src/game/PlayerController.cpp (Fixed Block Modification)
 #include "PlayerController.hpp"
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
 #include "WorldManager.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
+#include <thread>
+#include <chrono>
 
 namespace Game {
 
@@ -19,13 +21,43 @@ namespace Game {
         // Initialize inventory with default blocks
         inventory.InitializeDefaults();
 
-        // Register for chunk modification notifications
+        // **IMPROVED**: Register for chunk modification notifications with better remesh coordination
         WorldAccess::RegisterModificationCallback([](Math::ChunkPos pos) {
-            // Request remesh for the modified chunk
-            WorldManager::ForceRemeshChunk(pos);
+            // **IMPROVED**: Add a small delay to batch multiple block changes
+            static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> pendingRemeshes;
+            static std::mutex remeshMutex;
 
-            Log::Debug("Chunk (%d, %d) marked for remeshing due to block modification",
-                      pos.x, pos.z);
+            auto now = std::chrono::steady_clock::now();
+            uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) << 32) |
+                          static_cast<uint32_t>(pos.z);
+
+            {
+                std::lock_guard<std::mutex> lock(remeshMutex);
+                pendingRemeshes[key] = now;
+            }
+
+            // Schedule a delayed remesh to batch multiple changes
+            std::thread([key, pos]() {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 50ms delay
+
+                {
+                    std::lock_guard<std::mutex> lock(remeshMutex);
+                    auto it = pendingRemeshes.find(key);
+                    if (it != pendingRemeshes.end()) {
+                        // Only remesh if this is still the latest request for this chunk
+                        auto elapsed = std::chrono::steady_clock::now() - it->second;
+                        if (elapsed >= std::chrono::milliseconds(45)) {
+                            pendingRemeshes.erase(it);
+
+                            // Perform the remesh
+                            WorldManager::ForceRemeshChunk(pos);
+
+                            Log::Debug("Chunk (%d, %d) remeshed after block modification",
+                                      pos.x, pos.z);
+                        }
+                    }
+                }
+            }).detach();
         });
     }
 
@@ -142,8 +174,16 @@ namespace Game {
             return;
         }
 
-        // Place the block
-        if (WorldAccess::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock)) {
+        // **IMPROVED**: Place the block with better error handling
+        bool placementSuccessful = false;
+        try {
+            placementSuccessful = WorldAccess::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
+        } catch (const std::exception& e) {
+            Log::Error("Exception during block placement: %s", e.what());
+            placementSuccessful = false;
+        }
+
+        if (placementSuccessful) {
             // Update statistics
             stats.blocksPlaced++;
             stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
@@ -168,8 +208,16 @@ namespace Game {
         }
 
         // Get the block type before breaking
-        BlockID brokenBlock = WorldAccess::GetBlock(
-            breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+        BlockID brokenBlock = BlockID::Air;
+        try {
+            brokenBlock = WorldAccess::GetBlock(
+                breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+        } catch (const std::exception& e) {
+            Log::Error("Exception getting block for breaking: %s", e.what());
+            isBreaking = false;
+            breakProgress = 0.0f;
+            return;
+        }
 
         // Don't break bedrock
         if (brokenBlock == BlockID::Bedrock) {
@@ -179,9 +227,25 @@ namespace Game {
             return;
         }
 
-        // Remove the block
-        if (WorldAccess::SetBlock(breakingBlockPos.x, breakingBlockPos.y,
-                                 breakingBlockPos.z, BlockID::Air)) {
+        // Don't break air
+        if (brokenBlock == BlockID::Air) {
+            Log::Debug("Cannot break air");
+            isBreaking = false;
+            breakProgress = 0.0f;
+            return;
+        }
+
+        // **IMPROVED**: Remove the block with better error handling
+        bool breakingSuccessful = false;
+        try {
+            breakingSuccessful = WorldAccess::SetBlock(breakingBlockPos.x, breakingBlockPos.y,
+                                                     breakingBlockPos.z, BlockID::Air);
+        } catch (const std::exception& e) {
+            Log::Error("Exception during block breaking: %s", e.what());
+            breakingSuccessful = false;
+        }
+
+        if (breakingSuccessful) {
             // Add the broken block to inventory
             int remaining = inventory.AddBlocks(brokenBlock, 1);
 
@@ -198,9 +262,12 @@ namespace Game {
             Log::Info("Broke %s at (%d, %d, %d)",
                      block.name.c_str(), breakingBlockPos.x,
                      breakingBlockPos.y, breakingBlockPos.z);
+        } else {
+            Log::Warning("Failed to break block at (%d, %d, %d)",
+                        breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
         }
 
-        // Reset breaking state
+        // Reset breaking state regardless of success
         isBreaking = false;
         breakProgress = 0.0f;
     }
@@ -212,7 +279,14 @@ namespace Game {
         }
 
         // Check if space is empty
-        BlockID existing = WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+        BlockID existing = BlockID::Air;
+        try {
+            existing = WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+        } catch (const std::exception& e) {
+            Log::Error("Exception checking block at placement position: %s", e.what());
+            return false;
+        }
+
         if (existing != BlockID::Air) {
             return false;
         }
@@ -238,7 +312,12 @@ namespace Game {
     }
 
     BlockID PlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
-        return WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+        try {
+            return WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+        } catch (const std::exception& e) {
+            Log::Error("Exception getting breaking block type: %s", e.what());
+            return BlockID::Air;
+        }
     }
 
 } // namespace Game
