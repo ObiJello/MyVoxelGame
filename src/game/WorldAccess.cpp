@@ -1,9 +1,12 @@
 // File: src/game/WorldAccess.cpp
 #include "WorldAccess.hpp"
-#include "ChunkProvider.hpp"
+#include "ChunkProvider.hpp"  // This now includes ChunkData definition
+#include "BlockRegistry.hpp"
 #include "../core/Log.hpp"
+#include "../core/Config.hpp"
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <cmath>
 #include <algorithm>
 
@@ -12,10 +15,6 @@ namespace Game {
     // Static storage for callbacks
     static std::vector<ChunkModifiedCallback> s_modificationCallbacks;
     static std::shared_mutex s_callbackMutex;
-
-    // External access to chunk registry (defined in ChunkProvider.cpp)
-    extern std::unordered_map<uint64_t, std::unique_ptr<struct ChunkData>> s_chunkRegistry;
-    extern std::shared_mutex s_registryMutex;
 
     // Helper to create chunk key
     static uint64_t MakeChunkKey(int32_t x, int32_t z) {
@@ -165,7 +164,7 @@ namespace Game {
     }
 
     bool WorldAccess::IsValidPosition(int worldX, int worldY, int worldZ) {
-        return worldY >= Math::MinY && worldY <= Math::MaxY;
+        return worldY >= Config::MinY && worldY <= Config::MaxY;
     }
 
     bool WorldAccess::IsChunkLoadedAt(int worldX, int worldZ) {

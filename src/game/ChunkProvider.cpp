@@ -12,20 +12,10 @@ namespace Game {
     // Single global noise generator
     static FastNoiseLite s_noise;
 
-    // Enhanced chunk storage with reference counting and neighbor tracking
-    struct ChunkData {
-        std::shared_ptr<Chunk> chunk;
-        std::unordered_set<uint64_t> dependents;  // Chunks that depend on this one for meshing
-        std::atomic<bool> isGenerated{false};     // Block data is complete
-        std::atomic<bool> hasPendingMesh{false};  // Mesh generation is queued
-        std::atomic<int> neighborCount{0};        // Number of available neighbors (0-4)
-
-        ChunkData(std::shared_ptr<Chunk> c) : chunk(std::move(c)) {}
-    };
-
-    // Thread-safe chunk registry
-    static std::unordered_map<uint64_t, std::unique_ptr<ChunkData>> s_chunkRegistry;
-    static std::shared_mutex s_registryMutex;
+    // CHANGED: Make these symbols have external linkage by removing 'static'
+    // Thread-safe chunk registry - now accessible from other files
+    std::unordered_map<uint64_t, std::unique_ptr<ChunkData>> s_chunkRegistry;
+    std::shared_mutex s_registryMutex;
 
     // Neighbor offset table for 4-directional neighbors (X, Z)
     static constexpr std::array<std::pair<int, int>, 4> NEIGHBOR_OFFSETS = {{

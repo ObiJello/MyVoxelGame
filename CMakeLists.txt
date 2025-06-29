@@ -92,6 +92,10 @@ if(APPLE)
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
             src/game/WorldManager.cpp
+            src/game/RayCast.cpp
+            src/game/WorldAccess.cpp
+            src/game/Inventory.cpp
+            src/game/PlayerController.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"

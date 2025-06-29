@@ -3,6 +3,7 @@
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
 #include "../core/Log.hpp"
+#include "../core/Config.hpp"  // Add this include for MinY and MaxY
 #include <cmath>
 #include <algorithm>
 
@@ -139,8 +140,8 @@ namespace Game {
                 lastStepAxis = 2;
             }
 
-            // Check world boundaries
-            if (currentBlock.y < Math::MinY || currentBlock.y > Math::MaxY) {
+            // Check world boundaries - use Config namespace
+            if (currentBlock.y < Config::MinY || currentBlock.y > Config::MaxY) {
                 break; // Out of world bounds
             }
         }
