@@ -1,4 +1,4 @@
-// File: src/game/WorldManager.cpp (Fixed Remeshing Issues)
+// File: src/game/WorldManager.cpp (Fixed Square Chunk Loading)
 #include "WorldManager.hpp"
 #include "ChunkProvider.hpp"
 #include "../render/ChunkRenderer.hpp"  // for g_chunkMeshes
@@ -170,15 +170,28 @@ namespace Game {
         int cz = static_cast<int>(std::floor(cameraPos.z / Math::CHUNK_SIZE_Z));
         Math::ChunkPos cam{cx, cz};
 
-        // 2) Build desired set of chunks based on render radius
+        // 2) Build desired set of chunks based on render radius (FIXED: Square pattern like Minecraft)
         std::unordered_set<Math::ChunkPos, ChunkPosHash> desiredChunks;
+
+        // FIXED: Use square pattern instead of circular
+        // For render distance N, we load chunks from (cx-N, cz-N) to (cx+N, cz+N)
+        // This creates a (2*N+1) × (2*N+1) square centered on the player
         for (int dz = -RENDER_RADIUS; dz <= RENDER_RADIUS; ++dz) {
             for (int dx = -RENDER_RADIUS; dx <= RENDER_RADIUS; ++dx) {
-                // Optional: Use circular culling instead of square
-                if (dx * dx + dz * dz <= RENDER_RADIUS * RENDER_RADIUS) {
-                    desiredChunks.insert({cx + dx, cz + dz});
-                }
+                // No distance check - load all chunks in the square
+                desiredChunks.insert({cx + dx, cz + dz});
             }
+        }
+
+        // Log the chunk loading pattern for verification
+        static bool hasLoggedPattern = false;
+        if (!hasLoggedPattern) {
+            int totalChunks = (2 * RENDER_RADIUS + 1) * (2 * RENDER_RADIUS + 1);
+            Log::Info("Using square chunk loading pattern: %d×%d grid (%d total chunks) around player",
+                     2 * RENDER_RADIUS + 1, 2 * RENDER_RADIUS + 1, totalChunks);
+            Log::Info("Render radius %d creates chunks from (%d,%d) to (%d,%d) relative to player",
+                     RENDER_RADIUS, -RENDER_RADIUS, -RENDER_RADIUS, RENDER_RADIUS, RENDER_RADIUS);
+            hasLoggedPattern = true;
         }
 
         // 3) Request loading of new chunks
