@@ -71,14 +71,14 @@ namespace Game {
         static constexpr float EYE_HEIGHT_SNEAKING = 1.27f;
 
         // Physics constants
-        static constexpr float GRAVITY = 32.0f;           // blocks/second²
-        static constexpr float TERMINAL_VELOCITY = 78.0f; // blocks/second
-        static constexpr float JUMP_VELOCITY = 10.0f;     // blocks/second
+        static constexpr float GRAVITY = 32.656f;           // blocks/second²
+        static constexpr float TERMINAL_VELOCITY = 78.4f; // blocks/second
+        static constexpr float JUMP_VELOCITY = 9.04f;     // blocks/second
         static constexpr float MOVE_SPEED = 4.317f;       // blocks/second (walking)
         static constexpr float SPRINT_SPEED = 5.612f;     // blocks/second (sprinting)
-        static constexpr float SNEAK_SPEED = 1.295f;      // blocks/second (sneaking)
-        static constexpr float FRICTION = 0.6f;           // Ground friction
-        static constexpr float AIR_RESISTANCE = 0.98f;    // Air resistance multiplier
+        static constexpr float SNEAK_SPEED = 1.832f;      // blocks/second (sneaking)
+        static constexpr float FRICTION = 1.0f; //0.6f;           // Ground friction
+        static constexpr float AIR_RESISTANCE = 1.0f; //0.98f;    // Air resistance multiplier
 
         // Current state
         glm::vec3 position{0.0f, 80.0f, 0.0f};  // Foot position
