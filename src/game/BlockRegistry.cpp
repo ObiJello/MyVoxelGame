@@ -53,7 +53,7 @@ namespace Game {
         RegisterBlock(BlockID::Ice, "Ice", true, {49,49,49,49,49,49});
 
         // 10: Glass (transparent; same texture on all faces) - Pixel (64,0) = Index 4
-        RegisterBlock(BlockID::Glass, "Glass", false, {4,4,4,4,4,4});
+        RegisterBlock(BlockID::Glass, "Glass", true, {4,4,4,4,4,4});
 
         // 11: Bedrock (opaque; same texture on all faces) - Pixel (80,0) = Index 5
         RegisterBlock(BlockID::Bedrock, "Bedrock", true, {5,5,5,5,5,5});

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include "WorldMath.hpp"     // for SECTIONS_PER_CHUNK, ChunkPos
 #include "ChunkSection.hpp"  // our section type
+#include "Log.hpp"
 #include "../core/Config.hpp" // for MinY
 
 namespace Game {
@@ -18,7 +19,7 @@ namespace Game {
         // Which chunk (in XZ plane) this represents
         Math::ChunkPos pos{ 0, 0 };
 
-        // Each chunk is subdivided vertically into 16 sections (16×16×16 voxels each).
+        // Each chunk is subdivided vertically into 24 sections (16×16×16 voxels each).
         // We use unique_ptr so that we can lazily allocate or drop sections as needed.
         std::array<std::unique_ptr<ChunkSection>, Math::SECTIONS_PER_CHUNK> sections{};
 
@@ -32,15 +33,23 @@ namespace Game {
 
         // FIXED: Convert world Y to section index, properly handling negative coordinates
         inline static int SectionIndexFromGlobalY(int globalY) {
+            // Check world bounds first - FIXED: MaxY is inclusive, so use >= for upper bound
+            if (globalY < Config::MinY || globalY > Config::MaxY) {
+                return -1; // Out of world bounds
+            }
+
             // Adjust for MinY offset and convert to section index
             int adjustedY = globalY - Config::MinY;  // Convert to 0-based indexing
-            if (adjustedY < 0) {
-                return -1; // Below world bounds
-            }
             int sectionIndex = adjustedY / Math::SECTION_HEIGHT;
-            if (sectionIndex >= Math::SECTIONS_PER_CHUNK) {
-                return -1; // Above world bounds
+
+            // FIXED: The bounds check was wrong here - we have 24 sections (0-23)
+            // World Y range is -64 to 319 = 384 blocks total
+            // 384 blocks / 16 blocks per section = 24 sections
+            // So valid section indices are 0 to 23
+            if (sectionIndex < 0 || sectionIndex >= Math::SECTIONS_PER_CHUNK) {
+                return -1; // Out of bounds
             }
+
             return sectionIndex;
         }
 

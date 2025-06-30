@@ -320,12 +320,12 @@ namespace Game {
                     // This ensures we get a mesh quickly to replace the old one
                     JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
                         try {
-                            Log::Debug("Remeshing chunk (%d, %d) section %d", pos.x, pos.z, s);
+                            //Log::Debug("Remeshing chunk (%d, %d) section %d", pos.x, pos.z, s);
 
                             // Use enhanced mesher with chunk context
                             MesherJob(sectionPtr, meshData, chunk.get());
 
-                            Log::Debug("Remesh completed for chunk (%d, %d) section %d", pos.x, pos.z, s);
+                            //Log::Debug("Remesh completed for chunk (%d, %d) section %d", pos.x, pos.z, s);
                         } catch (const std::exception& e) {
                             Log::Error("Remesh failed for chunk (%d, %d) section %d: %s",
                                       pos.x, pos.z, s, e.what());
