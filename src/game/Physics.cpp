@@ -205,7 +205,7 @@ namespace Game {
 
             float speed = physics.GetMoveSpeed();
             if (physics.isInWater) {
-                speed *= 0.5f; // Slower in water
+                speed *= 0.429f; // Slower in water
             }
 
             horizontalMovement *= speed;

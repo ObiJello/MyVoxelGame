@@ -7,6 +7,7 @@
 #include "Log.hpp"
 #include "../game/Mesher.hpp"     // for Game::MeshData
 #include "../game/WorldMath.hpp"  // for CHUNK_SIZE_X, SECTION_HEIGHT, CHUNK_SIZE_Z
+#include "../core/Config.hpp"     // for MinY offset
 
 namespace Render {
 
@@ -90,10 +91,12 @@ namespace Render {
             glBindVertexArray(0);
             cm.indexCount = static_cast<GLsizei>(data->indices.size());
 
-            // 5) Compute worldOffset using data->chunkXZ and data->sectionIndex
+            // 5) FIXED: Compute worldOffset accounting for MinY offset
+            // The mesh vertices are in section-local coordinates (0-15 for each axis)
+            // We need to translate them to world coordinates
             cm.worldOffset = glm::vec3(
                 float(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X),
-                float(data->sectionIndex * Game::Math::SECTION_HEIGHT),
+                float(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT)), // FIXED: Add MinY offset
                 float(data->chunkXZ.y * Game::Math::CHUNK_SIZE_Z)
             );
 
@@ -127,7 +130,7 @@ namespace Render {
             glBindVertexArray(0);
         }
 
-        // Compute this section's AABB in world space for frustum culling
+        // FIXED: Compute this section's AABB in world space for frustum culling
         AABB GetAABB() const {
             glm::vec3 min = worldOffset;
             glm::vec3 max = worldOffset + glm::vec3(

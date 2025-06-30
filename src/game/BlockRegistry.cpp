@@ -60,10 +60,10 @@ namespace Game {
 
         // 12: Water (transparent; different textures)
         // Top/Bottom: water (96,0) = Index 6, Sides: water_side (112,0) = Index 7
-        RegisterBlock(BlockID::Water, "Water", false, {7,7,6,6,7,7});
+        RegisterBlock(BlockID::Water, "Water", true, {7,7,6,6,7,7});
 
         // 13: Leaves (transparent; same texture on all faces) - Pixel (80,16) = Index 21
-        RegisterBlock(BlockID::Leaves, "Leaves", false, {21,21,21,21,21,21});
+        RegisterBlock(BlockID::Leaves, "Leaves", true, {21,21,21,21,21,21});
 
         // 14: Cherry Log (opaque; different textures)
         // Top/Bottom: cherry_log_top (32,64) = Index 66, Sides: cherry_log_side (16,64) = Index 65
