@@ -1,4 +1,4 @@
-// File: src/game/Mesher.cpp (Enhanced with Texture Atlas Support)
+// File: src/game/Mesher.cpp (Enhanced with Texture Atlas Support and Fixed Y Coordinates)
 #include "Mesher.hpp"
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
@@ -7,6 +7,7 @@
 #include "../game/ChunkSection.hpp"
 #include "../game/BlockRegistry.hpp"
 #include "../game/Chunk.hpp"
+#include "../core/Config.hpp"  // Add for MinY/MaxY bounds
 #include <glm/vec3.hpp>
 #include <glm/vec2.hpp>
 #include <mutex>
@@ -60,16 +61,16 @@ namespace Game {
     }
 
     // Enhanced block lookup with full inter-chunk support
-    static BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int localX, int localY, int localZ) {
-        // Validate Y bounds first (common case) - return Air for out-of-world coordinates
-        if (localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
+    static BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int localX, int worldY, int localZ) {
+        // FIXED: Validate world Y bounds first - return Air for out-of-world coordinates
+        if (worldY < Config::MinY || worldY > Config::MaxY) {
             return BlockID::Air;
         }
 
         // Handle within-chunk coordinates (most common case)
         if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
             localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
-            return ctx.center->GetBlock(localX, localY, localZ);
+            return ctx.center->GetBlock(localX, worldY, localZ);
         }
 
         // Handle cross-chunk coordinates - only for horizontal neighbors
@@ -105,29 +106,19 @@ namespace Game {
             return BlockID::Air;
         }
 
-        return targetChunk->GetBlock(targetX, localY, targetZ);
+        return targetChunk->GetBlock(targetX, worldY, targetZ);
     }
 
-    // Optimized block lookup for intra-chunk access
-    static BlockID GetBlockFromChunk(const Chunk* chunk, int localX, int localY, int localZ) {
+    // FIXED: Optimized block lookup for intra-chunk access with proper world Y coordinates
+    static BlockID GetBlockFromChunk(const Chunk* chunk, int localX, int worldY, int localZ) {
         if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
             localZ < 0 || localZ >= Math::CHUNK_SIZE_Z ||
-            localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
+            worldY < Config::MinY || worldY > Config::MaxY) {
             return BlockID::Air;
         }
 
-        int sectionIdx = localY / Math::SECTION_HEIGHT;
-        int yInSection = localY % Math::SECTION_HEIGHT;
-
-        if (sectionIdx < 0 || sectionIdx >= Math::SECTIONS_PER_CHUNK) {
-            return BlockID::Air;
-        }
-
-        if (!chunk->sections[sectionIdx]) {
-            return BlockID::Air;
-        }
-
-        return chunk->sections[sectionIdx]->GetBlockID(localX, yInSection, localZ);
+        // FIXED: Pass world Y coordinate directly to chunk
+        return chunk->GetBlock(localX, worldY, localZ);
     }
 
     // Helper function to generate UV coordinates for a face using texture atlas
@@ -175,8 +166,8 @@ namespace Game {
         int facesCulledInterSection = 0;
         int facesCulledInterChunk = 0;
 
-        // Calculate the Y offset for this section within the chunk
-        int sectionYOffset = meshData->sectionIndex * Math::SECTION_HEIGHT;
+        // FIXED: Calculate the world Y offset for this section
+        int sectionWorldYOffset = Config::MinY + (meshData->sectionIndex * Math::SECTION_HEIGHT);
 
         // Process each voxel in the 16×16×16 section
         for (int y = 0; y < ChunkSection::SIZE; ++y) {
@@ -214,29 +205,29 @@ namespace Game {
                         else {
                             // Neighbor is outside current section - need enhanced lookup
                             int chunkLocalX = x + DX[face];
-                            int chunkLocalY = (sectionYOffset + y) + DY[face];
+                            int worldY = sectionWorldYOffset + y + DY[face];
                             int chunkLocalZ = z + DZ[face];
 
                             // Check if neighbor is within the same chunk
                             if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
                                 chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
-                                chunkLocalY >= 0 && chunkLocalY < Math::CHUNK_TOTAL_HEIGHT) {
+                                worldY >= Config::MinY && worldY <= Config::MaxY) {
 
                                 // Inter-section lookup within the same chunk
-                                neighborId = GetBlockFromChunk(ctx.center.get(), chunkLocalX, chunkLocalY, chunkLocalZ);
+                                neighborId = GetBlockFromChunk(ctx.center.get(), chunkLocalX, worldY, chunkLocalZ);
                                 emitFace = !IsBlockOpaque(neighborId);
                                 if (!emitFace) {
                                     facesCulledInterSection++;
                                 }
                             }
-                            else if (chunkLocalY < 0 || chunkLocalY >= Math::CHUNK_TOTAL_HEIGHT) {
+                            else if (worldY < Config::MinY || worldY > Config::MaxY) {
                                 // Neighbor is outside world Y bounds - always emit face (top/bottom of world)
                                 emitFace = true;
                             }
                             else if (ctx.hasAllNeighbors) {
                                 // **ENHANCED** Inter-chunk lookup with neighbor context
                                 // Only do this for horizontal neighbors (X/Z), not vertical (Y)
-                                neighborId = GetBlockFromNeighborContext(ctx, chunkLocalX, chunkLocalY, chunkLocalZ);
+                                neighborId = GetBlockFromNeighborContext(ctx, chunkLocalX, worldY, chunkLocalZ);
                                 emitFace = !IsBlockOpaque(neighborId);
                                 if (!emitFace) {
                                     facesCulledInterChunk++;
@@ -349,8 +340,8 @@ namespace Game {
         int facesCulledIntraSection = 0;
         int facesCulledInterSection = 0;
 
-        // Calculate the Y offset for this section within the chunk
-        int sectionYOffset = meshData->sectionIndex * Math::SECTION_HEIGHT;
+        // FIXED: Calculate the world Y offset for this section
+        int sectionWorldYOffset = Config::MinY + (meshData->sectionIndex * Math::SECTION_HEIGHT);
 
         // Iterate all voxels in the 16×16×16 section
         for (int y = 0; y < ChunkSection::SIZE; ++y) {
@@ -389,16 +380,16 @@ namespace Game {
                         else {
                             // Neighbor is outside current section - need inter-section lookup
                             int chunkLocalX = x + DX[face];
-                            int chunkLocalY = (sectionYOffset + y) + DY[face];
+                            int worldY = sectionWorldYOffset + y + DY[face];
                             int chunkLocalZ = z + DZ[face];
 
                             // Check if neighbor is within the chunk bounds
                             if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
                                 chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
-                                chunkLocalY >= 0 && chunkLocalY < Math::CHUNK_TOTAL_HEIGHT) {
+                                worldY >= Config::MinY && worldY <= Config::MaxY) {
 
                                 // Use enhanced lookup function for cross-section access
-                                neighborId = GetBlockFromChunk(chunk, chunkLocalX, chunkLocalY, chunkLocalZ);
+                                neighborId = GetBlockFromChunk(chunk, chunkLocalX, worldY, chunkLocalZ);
                                 emitFace = !IsBlockOpaque(neighborId);
 
                                 if (!emitFace) {

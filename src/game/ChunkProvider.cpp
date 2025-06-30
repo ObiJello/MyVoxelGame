@@ -304,7 +304,7 @@ namespace Game {
         JobSystem::g_ThreadPool.Enqueue([chunk, pos, key]() {
             //Log::Debug("Starting block generation for chunk (%d, %d)", pos.x, pos.z);
 
-            // Generate terrain data
+                // Generate terrain data
             int baseWorldX = pos.x * Math::CHUNK_SIZE_X;
             int baseWorldZ = pos.z * Math::CHUNK_SIZE_Z;
 
@@ -315,16 +315,23 @@ namespace Game {
 
                     float n = s_noise.GetNoise(static_cast<float>(worldX), static_cast<float>(worldZ));
                     float f = (n + 1.0f) * 0.5f;
-                    int height = static_cast<int>(f * 32.0f + 64.0f);
-                    height = std::clamp(height, 0, 255);
 
-                    for (int y = 0; y < height; ++y) {
-                        BlockID id = (y == height - 1) ? BlockID::Grass : BlockID::Stone;
-                        chunk->SetBlock(localX, y, localZ, id);
+                    // FIXED: Generate terrain that properly accounts for negative Y
+                    int height = static_cast<int>(f * 32.0f + 64.0f);
+                    height = std::clamp(height, Config::MinY, Config::MaxY);
+
+                    // Generate bedrock layer at the bottom
+                    for (int worldY = Config::MinY; worldY < Config::MinY + 5; ++worldY) {
+                        chunk->SetBlock(localX, worldY, localZ, BlockID::Bedrock);
+                    }
+
+                    // Generate stone and surface blocks
+                    for (int worldY = Config::MinY + 5; worldY < height; ++worldY) {
+                        BlockID id = (worldY == height - 1) ? BlockID::Grass : BlockID::Stone;
+                        chunk->SetBlock(localX, worldY, localZ, id);
                     }
                 }
             }
-
             //Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
 
             // Mark as generated and update neighbor relationships

@@ -1,4 +1,4 @@
-// File: src/game/WorldAccess.cpp
+// File: src/game/WorldAccess.cpp - FIXED Y coordinate handling
 #include "WorldAccess.hpp"
 #include "ChunkProvider.hpp"  // This now includes ChunkData definition
 #include "BlockRegistry.hpp"
@@ -43,8 +43,8 @@ namespace Game {
             return BlockID::Air; // Chunk not loaded
         }
 
-        // Get block from chunk
-        return it->second->chunk->GetBlock(localX, localY, localZ);
+        // FIXED: Pass world Y coordinate, not local Y
+        return it->second->chunk->GetBlock(localX, worldY, localZ);
     }
 
     bool WorldAccess::SetBlock(int worldX, int worldY, int worldZ, BlockID id) {
@@ -73,8 +73,8 @@ namespace Game {
                 return false;
             }
 
-            // Set the block
-            it->second->chunk->SetBlock(localX, localY, localZ, id);
+            // FIXED: Pass world Y coordinate, not local Y
+            it->second->chunk->SetBlock(localX, worldY, localZ, id);
         }
 
         // Notify that this chunk was modified
@@ -138,7 +138,8 @@ namespace Game {
                     WorldToLocal(mod->worldX, mod->worldY, mod->worldZ,
                                 chunkPos, localX, localY, localZ);
 
-                    chunk->SetBlock(localX, localY, localZ, mod->newId);
+                    // FIXED: Pass world Y coordinate, not local Y
+                    chunk->SetBlock(localX, mod->worldY, localZ, mod->newId);
                     successCount++;
 
                     // Track modified chunks
@@ -205,7 +206,9 @@ namespace Game {
 
         // Calculate local coordinates within chunk
         localX = ((worldX % Math::CHUNK_SIZE_X) + Math::CHUNK_SIZE_X) % Math::CHUNK_SIZE_X;
-        localY = worldY; // Y is already in chunk space (0-255)
+        // FIXED: Y coordinate should remain as world coordinate, not converted to local
+        // The Chunk class now handles world Y coordinates directly
+        localY = worldY;
         localZ = ((worldZ % Math::CHUNK_SIZE_Z) + Math::CHUNK_SIZE_Z) % Math::CHUNK_SIZE_Z;
     }
 
