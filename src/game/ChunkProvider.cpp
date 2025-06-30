@@ -372,29 +372,6 @@ namespace Game {
         // This ensures neighbors won't find this chunk when they remesh
         s_chunkRegistry.erase(it);
 
-        // Now trigger remeshing of dependent chunks after the chunk is removed
-        for (uint64_t dependentKey : dependentKeys) {
-            auto dependentIt = s_chunkRegistry.find(dependentKey);
-            if (dependentIt != s_chunkRegistry.end()) {
-                Math::ChunkPos dependentPos = KeyToChunkPos(dependentKey);
-                Log::Debug("Triggering remesh of chunk (%d, %d) due to neighbor unload",
-                          dependentPos.x, dependentPos.z);
-
-                // Decrement neighbor count to reflect the unloaded neighbor
-                int currentCount = dependentIt->second->neighborCount.load();
-                dependentIt->second->neighborCount.store(std::max(0, currentCount - 1));
-
-                // Mark as not having pending mesh
-                dependentIt->second->hasPendingMesh.store(false);
-
-                auto dependentChunk = dependentIt->second->chunk;
-
-                // Schedule standard meshing job (without the unloaded neighbor)
-                JobSystem::g_ThreadPool.Enqueue([dependentChunk, dependentPos]() {
-                    StandardMeshingJob(dependentChunk, dependentPos);
-                });
-            }
-        }
 
         Log::Debug("Chunk (%d, %d) unloaded and removed from registry", pos.x, pos.z);
     }
