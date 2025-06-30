@@ -66,9 +66,9 @@ namespace Game {
         // Player dimensions (matching Minecraft)
         static constexpr float WIDTH = 0.6f;
         static constexpr float HEIGHT_STANDING = 1.8f;
-        static constexpr float HEIGHT_SNEAKING = 1.5f;
+        static constexpr float HEIGHT_SNEAKING = 1.49f;
         static constexpr float EYE_HEIGHT_STANDING = 1.62f;
-        static constexpr float EYE_HEIGHT_SNEAKING = 1.27f;
+        static constexpr float EYE_HEIGHT_SNEAKING = 1.42f;
 
         // Physics constants
         static constexpr float GRAVITY = 32.656f;           // blocks/second²

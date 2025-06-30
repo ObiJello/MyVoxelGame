@@ -1,12 +1,10 @@
-// File: src/game/WorldManager.hpp (Fixed Header)
+// File: src/game/WorldManager.hpp (Simplified Header)
 #pragma once
 
 #include "WorldMath.hpp"
 #include "Mesher.hpp"  // Add this for NeighborContext
 #include <unordered_set>
-#include <unordered_map>
 #include <vector>
-#include <chrono>
 #include <memory>
 #include <shared_mutex>
 #include <glm/vec3.hpp>
@@ -41,11 +39,8 @@ namespace Game {
         static std::vector<Math::ChunkPos> GetLoadedChunks();
 
     private:
-        // Set of currently loaded chunk coordinates
+        // Set of currently loaded chunk coordinates (simplified - no time tracking)
         static std::unordered_set<Math::ChunkPos, ChunkPosHash> s_loaded;
-
-        // Track when chunks were loaded for grace period management
-        static std::unordered_map<Math::ChunkPos, std::chrono::steady_clock::time_point, ChunkPosHash> s_loadTimes;
 
         // Internal helper functions
         static void LoadChunk(Math::ChunkPos pos);

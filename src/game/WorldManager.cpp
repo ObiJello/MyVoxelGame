@@ -1,4 +1,4 @@
-// File: src/game/WorldManager.cpp (Fixed Square Chunk Loading)
+// File: src/game/WorldManager.cpp (Fixed Chunk Unloading)
 #include "WorldManager.hpp"
 #include "ChunkProvider.hpp"
 #include "../render/ChunkRenderer.hpp"  // for g_chunkMeshes
@@ -15,7 +15,6 @@
 namespace Game {
 
     std::unordered_set<Math::ChunkPos, ChunkPosHash> WorldManager::s_loaded;
-    std::unordered_map<Math::ChunkPos, std::chrono::steady_clock::time_point, ChunkPosHash> WorldManager::s_loadTimes;
 
     // Helper function to create a unique key from chunk coordinates
     static uint64_t MakeChunkKey(int32_t x, int32_t z) {
@@ -210,8 +209,8 @@ namespace Game {
                 return distA < distB;
             });
 
-        // Load new chunks with throttling to prevent frame drops
-        constexpr int MAX_LOADS_PER_FRAME = 4;
+        // Load new chunks (with modest throttling to prevent frame spikes)
+        constexpr int MAX_LOADS_PER_FRAME = 8;
         int loadsThisFrame = 0;
 
         for (const auto& pos : newChunks) {
@@ -221,17 +220,15 @@ namespace Game {
 
             LoadChunk(pos);
             s_loaded.insert(pos);
-            s_loadTimes[pos] = std::chrono::steady_clock::now();
             loadsThisFrame++;
-
-            /*Log::Debug("Requested loading of chunk (%d, %d), distance from camera: %d",
-                      pos.x, pos.z, (pos.x - cx) * (pos.x - cx) + (pos.z - cz) * (pos.z - cz));*/
         }
 
-        // 4) Identify chunks to unload (outside render radius)
+        // 4) **SIMPLIFIED**: Identify and immediately unload chunks outside render distance
         std::vector<Math::ChunkPos> chunksToUnload;
+
         for (auto it = s_loaded.begin(); it != s_loaded.end();) {
             if (desiredChunks.find(*it) == desiredChunks.end()) {
+                // Chunk is outside render distance - unload it
                 chunksToUnload.push_back(*it);
                 it = s_loaded.erase(it);
             } else {
@@ -239,29 +236,9 @@ namespace Game {
             }
         }
 
-        // 5) Unload chunks with throttling and grace period
-        constexpr int MAX_UNLOADS_PER_FRAME = 2;
-        constexpr auto GRACE_PERIOD = std::chrono::seconds(5); // Keep chunks loaded for 5 seconds after they leave render distance
-
-        auto now = std::chrono::steady_clock::now();
-        int unloadsThisFrame = 0;
-
+        // 5) **SIMPLIFIED**: Unload all chunks immediately (no throttling or grace period)
         for (const auto& pos : chunksToUnload) {
-            if (unloadsThisFrame >= MAX_UNLOADS_PER_FRAME) {
-                break; // Defer remaining unloads to next frame
-            }
-
-            auto loadTimeIt = s_loadTimes.find(pos);
-            if (loadTimeIt != s_loadTimes.end()) {
-                if (now - loadTimeIt->second < GRACE_PERIOD) {
-                    continue; // Skip unloading, still in grace period
-                }
-                s_loadTimes.erase(loadTimeIt);
-            }
-
             UnloadChunk(pos);
-            unloadsThisFrame++;
-
             Log::Debug("Unloaded chunk (%d, %d)", pos.x, pos.z);
         }
 
@@ -275,8 +252,9 @@ namespace Game {
             auto deltaTime = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastStatsTime);
 
             Log::Info("WorldManager stats: %zu chunks loaded, %zu mesh sections rendered, "
-                     "camera at chunk (%d, %d), update time: %lld ms",
-                     s_loaded.size(), Render::g_chunkMeshes.size(), cx, cz, deltaTime.count());
+                     "camera at chunk (%d, %d), loaded %zu, unloaded %zu chunks this update",
+                     s_loaded.size(), Render::g_chunkMeshes.size(), cx, cz,
+                     loadsThisFrame, chunksToUnload.size());
 
             lastStatsTime = currentTime;
         }
@@ -292,34 +270,15 @@ namespace Game {
     }
 
     void WorldManager::UnloadChunk(Math::ChunkPos pos) {
-        Log::Debug("UnloadChunk requested for (%d, %d)", pos.x, pos.z);
+        Log::Info("UnloadChunk starting for (%d, %d)", pos.x, pos.z);
 
-        // 1) Remove GPU meshes for this chunk
-        auto& meshes = Render::g_chunkMeshes;
-        auto originalSize = meshes.size();
-
-        meshes.erase(
-            std::remove_if(meshes.begin(), meshes.end(),
-                [&pos](const auto& cm) {
-                    bool shouldRemove = (cm.chunkXZ.x == pos.x && cm.chunkXZ.z == pos.z);
-                    if (shouldRemove) {
-                        // Clean up OpenGL resources
-                        glDeleteVertexArrays(1, &cm.vao);
-                        glDeleteBuffers(1, &cm.vbo);
-                        glDeleteBuffers(1, &cm.ebo);
-                    }
-                    return shouldRemove;
-                }),
-            meshes.end()
-        );
-
-        auto removedMeshes = originalSize - meshes.size();
-        if (removedMeshes > 0) {
-            Log::Debug("Removed %zu mesh sections for chunk (%d, %d)", removedMeshes, pos.x, pos.z);
-        }
+        // 1) **FIXED**: Use the improved RemoveChunkMeshes function
+        Render::RemoveChunkMeshes(pos);
 
         // 2) Unload from ChunkProvider (this will also trigger remeshing of dependent neighbors)
         ChunkProvider::UnloadChunk(pos);
+
+        Log::Info("UnloadChunk completed for (%d, %d)", pos.x, pos.z);
     }
 
     void WorldManager::ForceRemeshChunk(Math::ChunkPos pos) {

@@ -362,27 +362,41 @@ namespace Game {
             return;
         }
 
-        // Trigger remeshing of dependent chunks that lose this neighbor
+        // Store dependent keys before erasing
+        std::vector<uint64_t> dependentKeys;
         for (uint64_t dependentKey : it->second->dependents) {
+            dependentKeys.push_back(dependentKey);
+        }
+
+        // CRITICAL: Remove the chunk from registry FIRST before triggering neighbor updates
+        // This ensures neighbors won't find this chunk when they remesh
+        s_chunkRegistry.erase(it);
+
+        // Now trigger remeshing of dependent chunks after the chunk is removed
+        for (uint64_t dependentKey : dependentKeys) {
             auto dependentIt = s_chunkRegistry.find(dependentKey);
             if (dependentIt != s_chunkRegistry.end()) {
                 Math::ChunkPos dependentPos = KeyToChunkPos(dependentKey);
                 Log::Debug("Triggering remesh of chunk (%d, %d) due to neighbor unload",
                           dependentPos.x, dependentPos.z);
 
-                // Reset neighbor count and trigger standard meshing
-                dependentIt->second->neighborCount.store(0);
+                // Decrement neighbor count to reflect the unloaded neighbor
+                int currentCount = dependentIt->second->neighborCount.load();
+                dependentIt->second->neighborCount.store(std::max(0, currentCount - 1));
+
+                // Mark as not having pending mesh
                 dependentIt->second->hasPendingMesh.store(false);
 
                 auto dependentChunk = dependentIt->second->chunk;
+
+                // Schedule standard meshing job (without the unloaded neighbor)
                 JobSystem::g_ThreadPool.Enqueue([dependentChunk, dependentPos]() {
                     StandardMeshingJob(dependentChunk, dependentPos);
                 });
             }
         }
 
-        s_chunkRegistry.erase(it);
-        Log::Debug("Chunk (%d, %d) unloaded, dependents remeshed", pos.x, pos.z);
+        Log::Debug("Chunk (%d, %d) unloaded and removed from registry", pos.x, pos.z);
     }
 
 } // namespace Game

@@ -28,6 +28,10 @@ namespace Render {
         static ChunkMesh FromMeshData(const Game::MeshData* data) {
             ChunkMesh cm;
 
+            /* **DEBUG**: Log what coordinates we're receiving
+            Log::Debug("FromMeshData: Creating mesh for chunk coords (%d,%d) section %d",
+                      data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);*/
+
             // 1) Generate and bind VAO
             glGenVertexArrays(1, &cm.vao);
             glBindVertexArray(cm.vao);
@@ -97,12 +101,19 @@ namespace Render {
             cm.worldOffset = glm::vec3(
                 float(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X),
                 float(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT)), // FIXED: Add MinY offset
-                float(data->chunkXZ.y * Game::Math::CHUNK_SIZE_Z)
+                float(data->chunkXZ.y * Game::Math::CHUNK_SIZE_Z)  // Note: .y is Z coordinate
             );
 
             // Store metadata for later lookups
-            cm.chunkXZ = { data->chunkXZ.x, data->chunkXZ.y };
+            // **CRITICAL FIX**: MeshData.chunkXZ uses .x for X and .y for Z coordinate!
+            // We need to store this in ChunkMesh.chunkXZ where .x is X and .z is Z
+            cm.chunkXZ.x = data->chunkXZ.x;  // X coordinate
+            cm.chunkXZ.z = data->chunkXZ.y;  // Z coordinate (from MeshData.y!)
             cm.sectionIndex = data->sectionIndex;
+
+            /* **DEBUG**: Log what coordinates we stored
+            Log::Debug("FromMeshData: Stored as ChunkMesh coords (%d,%d) section %d",
+                      cm.chunkXZ.x, cm.chunkXZ.z, cm.sectionIndex);*/
 
             // **NEW**: Record upload time
             cm.uploadTime = std::chrono::steady_clock::now();
@@ -166,14 +177,14 @@ namespace Render {
         // **CRITICAL FIX**: Find and replace existing mesh for this chunk/section
         auto& meshes = g_chunkMeshes;
 
-        // Look for existing mesh to replace
+        // Look for existing mesh to replace - FIXED coordinate comparison
         for (auto it = meshes.begin(); it != meshes.end(); ++it) {
             if (it->chunkXZ.x == data->chunkXZ.x &&
-                it->chunkXZ.z == data->chunkXZ.y &&
+                it->chunkXZ.z == data->chunkXZ.y &&  // NOTE: MeshData uses .y for Z coordinate
                 it->sectionIndex == data->sectionIndex) {
 
-                Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
-                          data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);
+                /*Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
+                          data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);*/
 
                 // Clean up the old mesh
                 glDeleteVertexArrays(1, &it->vao);
@@ -196,21 +207,37 @@ namespace Render {
         delete data;
     }
 
-    // **NEW**: Safe cleanup function for chunk meshes
+    // **FIXED**: Safe cleanup function for chunk meshes - coordinate comparison fix
     inline void RemoveChunkMeshes(Game::Math::ChunkPos pos) {
         auto& meshes = g_chunkMeshes;
+        size_t originalSize = meshes.size();
 
+        Log::Debug("RemoveChunkMeshes: Looking for meshes with chunk pos (%d,%d)", pos.x, pos.z);
+        Log::Debug("Current mesh count: %zu", meshes.size());
+
+        // **CRITICAL FIX**: ChunkMesh stores coordinates in chunkXZ where .x = X, .z = Z
+        // But when created from MeshData, it copies from MeshData.chunkXZ where .x = X, .y = Z
         meshes.erase(
             std::remove_if(meshes.begin(), meshes.end(),
                 [&pos](const ChunkMesh& cm) {
+                    // Debug: Show what we're comparing
+                    Log::Debug("Checking mesh: chunkXZ=(%d,%d) vs target=(%d,%d)",
+                              cm.chunkXZ.x, cm.chunkXZ.z, pos.x, pos.z);
+
                     bool shouldRemove = (cm.chunkXZ.x == pos.x && cm.chunkXZ.z == pos.z);
                     if (shouldRemove) {
+                        Log::Debug("MATCH! Removing mesh for chunk (%d,%d) section %d",
+                                  cm.chunkXZ.x, cm.chunkXZ.z, cm.sectionIndex);
                         cm.Cleanup();
                     }
                     return shouldRemove;
                 }),
             meshes.end()
         );
+
+        size_t removedCount = originalSize - meshes.size();
+        Log::Info("RemoveChunkMeshes: removed %zu meshes for chunk (%d,%d)",
+                 removedCount, pos.x, pos.z);
     }
 
 } // namespace Render
