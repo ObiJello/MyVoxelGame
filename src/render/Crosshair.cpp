@@ -1,9 +1,9 @@
-// File: src/render/Crosshair.cpp (CLEAN FIX - No Global Window Needed)
+// File: src/render/Crosshair.cpp (FULL DEBUG VERSION)
 #include "Crosshair.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/ext/matrix_clip_space.hpp>  // For glm::ortho
+#include <glm/ext/matrix_clip_space.hpp>
 #include <vector>
 #include <filesystem>
 
@@ -48,12 +48,7 @@ uniform float uOpacity;
 void main() {
     vec4 texColor = texture(uTexture, TexCoord);
 
-    // Discard fully transparent pixels
-    if (texColor.a < 0.01) {
-        discard;
-    }
-
-    // Apply opacity and output
+    // Normal rendering
     FragColor = vec4(texColor.rgb, texColor.a * uOpacity);
 }
 )";
@@ -71,39 +66,70 @@ void main() {
     }
 
     bool Crosshair::Initialize(const std::string& texturePath) {
-        Log::Info("Initializing crosshair system");
+        Log::Info("=== CROSSHAIR INITIALIZATION START ===");
+        Log::Info("Initializing crosshair system with texture: %s", texturePath.c_str());
 
         if (!CreateShaders()) {
             Log::Error("Failed to create crosshair shaders");
             return false;
         }
+        Log::Info("✓ Crosshair shaders created successfully");
 
         CreateGeometry();
+        Log::Info("✓ Crosshair geometry created successfully");
 
-        if (!LoadTexture(texturePath)) {
-            Log::Warning("Failed to load crosshair texture, using fallback");
+        // **DEBUG**: Always try to load the texture first, then fallback
+        bool textureLoaded = false;
+        if (!texturePath.empty() && std::filesystem::exists(texturePath)) {
+            Log::Info("Texture file exists: %s", texturePath.c_str());
+            textureLoaded = LoadTexture(texturePath);
+        } else {
+            Log::Warning("Texture file does not exist or path is empty: %s", texturePath.c_str());
+        }
+
+        if (!textureLoaded) {
+            Log::Info("Creating fallback crosshair texture");
             CreateFallbackTexture();
         }
 
+        // **DEBUG**: Verify texture was created
+        if (textureID == 0) {
+            Log::Error("Failed to create crosshair texture (ID is 0)");
+            return false;
+        }
+
+        // **DEBUG**: Check if texture is valid
+        glBindTexture(GL_TEXTURE_2D, textureID);
+        GLint width, height;
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+        glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        Log::Info("✓ Crosshair texture created - ID: %u, Size: %dx%d", textureID, width, height);
+
         isInitialized = true;
-        Log::Info("Crosshair system initialized successfully");
+        Log::Info("=== CROSSHAIR INITIALIZATION COMPLETE ===");
         return true;
     }
 
     void Crosshair::Render(int windowWidth, int windowHeight, int framebufferWidth, int framebufferHeight) {
         if (!isInitialized || !isVisible || framebufferWidth <= 0 || framebufferHeight <= 0) {
+            Log::Debug("Crosshair render skipped: init=%s, visible=%s, fb=%dx%d",
+                      isInitialized ? "yes" : "no", isVisible ? "yes" : "no",
+                      framebufferWidth, framebufferHeight);
             return;
         }
 
-        // Debug output (only occasionally to avoid spam)
+        // Debug output every frame for now
         static int debugCounter = 0;
-        if (++debugCounter % 300 == 0) { // Every 5 seconds at 60 FPS
-            Log::Debug("Crosshair render: window=%dx%d, framebuffer=%dx%d, size=%d, visible=%s",
-                      windowWidth, windowHeight, framebufferWidth, framebufferHeight,
-                      crosshairSize, isVisible ? "true" : "false");
+        bool shouldDebug = (++debugCounter % 60 == 0); // Every second at 60fps
+
+        if (shouldDebug) {
+            Log::Info("=== CROSSHAIR RENDER ATTEMPT ===");
+            Log::Info("Window: %dx%d, Framebuffer: %dx%d", windowWidth, windowHeight, framebufferWidth, framebufferHeight);
         }
 
-        // Store current OpenGL state
+        // **CRITICAL**: Store current OpenGL state
         GLint currentProgram;
         GLboolean depthTestEnabled;
         GLboolean blendEnabled;
@@ -111,6 +137,8 @@ void main() {
         GLint currentVAO;
         GLint activeTexture;
         GLint boundTexture;
+        GLint viewport[4];
+        GLboolean cullFaceEnabled;
 
         glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
         depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
@@ -120,79 +148,127 @@ void main() {
         glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currentVAO);
         glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
 
-        // Set up 2D rendering state
+        if (shouldDebug) {
+            Log::Info("GL State Before: prog=%d, depth=%s, blend=%s, cull=%s, vao=%d",
+                     currentProgram, depthTestEnabled ? "on" : "off",
+                     blendEnabled ? "on" : "off", cullFaceEnabled ? "on" : "off", currentVAO);
+            Log::Info("Viewport Before: (%d,%d) %dx%d", viewport[0], viewport[1], viewport[2], viewport[3]);
+        }
+
+        // **FIX 1**: Set up proper 2D rendering state
         glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);  // **CRITICAL**: Disable face culling for 2D
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        // Use our shader
+        // **FIX 2**: Use our shader program
         glUseProgram(shaderProgram);
 
-        // **FIXED**: Set up orthographic projection using WINDOW coordinates for positioning
-        // Map (0,0) to top-left, (windowWidth, windowHeight) to bottom-right
+        // **FIX 3**: Set viewport for 2D rendering - use window coordinates for simpler math
+        glViewport(0, 0, windowWidth, windowHeight);
+
+        // **FIX 4**: Use simple window-coordinate orthographic projection
         glm::mat4 projection = glm::ortho(
-            0.0f, static_cast<float>(windowWidth),    // left, right (use window size for positioning)
-            static_cast<float>(windowHeight), 0.0f,  // bottom, top (flipped for screen coords)
-            -1.0f, 1.0f                              // near, far
+            0.0f, static_cast<float>(windowWidth),    // left, right
+            static_cast<float>(windowHeight), 0.0f,   // bottom, top (flipped for screen coords)
+            -1.0f, 1.0f                               // near, far
         );
 
-        // **FIXED**: Calculate crosshair position using WINDOW coordinates
+        // **FIX 5**: Calculate crosshair position in window coordinates (much simpler)
         float halfSize = crosshairSize * 0.5f;
         glm::vec2 position(
-            windowWidth * 0.5f - halfSize,   // Use window width for centering
-            windowHeight * 0.5f - halfSize   // Use window height for centering
+            windowWidth - halfSize,   // Center X
+            windowHeight * 0.0f - halfSize   // Center Y
         );
         glm::vec2 size(crosshairSize, crosshairSize);
 
-        // Debug output for positioning
-        if (debugCounter % 300 == 0) {
-            Log::Debug("Crosshair position: (%.1f, %.1f), size: (%.1f, %.1f) [using window coordinates]",
-                      position.x, position.y, size.x, size.y);
+        if (shouldDebug) {
+            Log::Info("Crosshair: pos=(%.1f, %.1f), size=(%.1f, %.1f)",
+                     position.x, position.y, size.x, size.y);
+            Log::Info("Should be at screen center: (%.1f, %.1f)",
+                     windowWidth * 0.5f, windowHeight * 0.5f);
         }
 
-        // Set uniforms
+        // **FIX 6**: Verify shader program is valid
+        if (shaderProgram == 0) {
+            Log::Error("Crosshair shader program is 0!");
+            return;
+        }
+
+        // **FIX 7**: Set uniforms with error checking
         GLint projLoc = glGetUniformLocation(shaderProgram, "uProjection");
         GLint posLoc = glGetUniformLocation(shaderProgram, "uPosition");
         GLint sizeLoc = glGetUniformLocation(shaderProgram, "uSize");
         GLint texLoc = glGetUniformLocation(shaderProgram, "uTexture");
         GLint opacityLoc = glGetUniformLocation(shaderProgram, "uOpacity");
 
-        if (projLoc != -1) {
+        if (shouldDebug) {
+            Log::Info("Uniform locations: proj=%d, pos=%d, size=%d, tex=%d, opacity=%d",
+                     projLoc, posLoc, sizeLoc, texLoc, opacityLoc);
+        }
+
+        // **CRITICAL**: Check if required uniforms exist
+        if (projLoc == -1) {
+            Log::Error("uProjection uniform not found in crosshair shader!");
+        } else {
             glUniformMatrix4fv(projLoc, 1, GL_FALSE, &projection[0][0]);
         }
-        if (posLoc != -1) {
+
+        if (posLoc == -1) {
+            Log::Error("uPosition uniform not found in crosshair shader!");
+        } else {
             glUniform2f(posLoc, position.x, position.y);
         }
-        if (sizeLoc != -1) {
+
+        if (sizeLoc == -1) {
+            Log::Error("uSize uniform not found in crosshair shader!");
+        } else {
             glUniform2f(sizeLoc, size.x, size.y);
         }
+
         if (texLoc != -1) {
             glUniform1i(texLoc, 0);
         }
+
         if (opacityLoc != -1) {
-            glUniform1f(opacityLoc, 1.0f);  // Full opacity
+            glUniform1f(opacityLoc, 1.0f);
         }
 
-        // **CRITICAL**: Set viewport to use framebuffer dimensions for actual rendering
-        // This ensures the crosshair renders at the correct pixel density
-        glViewport(0, 0, framebufferWidth, framebufferHeight);
-
-        // Bind texture
+        // **FIX 8**: Bind texture (even for solid color test)
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, textureID);
 
-        // Render the quad
-        glBindVertexArray(vao);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        // Debug: Check for OpenGL errors
-        GLenum error = glGetError();
-        if (error != GL_NO_ERROR && debugCounter % 300 == 0) {
-            Log::Warning("OpenGL error during crosshair rendering: 0x%x", error);
+        // **FIX 9**: Verify VAO is valid
+        if (vao == 0) {
+            Log::Error("Crosshair VAO is 0!");
+            return;
         }
 
-        // Restore OpenGL state
+        // **FIX 10**: Bind VAO and draw
+        glBindVertexArray(vao);
+
+        if (shouldDebug) {
+            Log::Info("About to draw with VAO %u, shader %u, texture %u", vao, shaderProgram, textureID);
+        }
+
+        // **THE ACTUAL DRAW CALL**
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        // **FIX 11**: Check for OpenGL errors immediately after draw
+        GLenum error = glGetError();
+        if (error != GL_NO_ERROR) {
+            Log::Error("OpenGL error after crosshair draw: 0x%x", error);
+        }
+
+        if (shouldDebug) {
+            Log::Info("Drew crosshair - GL error check: %s", (error == GL_NO_ERROR) ? "OK" : "ERROR");
+        }
+
+        // **FIX 12**: Restore ALL OpenGL state exactly
+        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
         glBindVertexArray(currentVAO);
         glActiveTexture(activeTexture);
         glBindTexture(GL_TEXTURE_2D, boundTexture);
@@ -205,54 +281,21 @@ void main() {
         if (depthTestEnabled) {
             glEnable(GL_DEPTH_TEST);
         }
+        if (cullFaceEnabled) {
+            glEnable(GL_CULL_FACE);
+        }
+
+        if (shouldDebug) {
+            Log::Info("=== CROSSHAIR RENDER COMPLETE ===");
+        }
     }
 
-    bool Crosshair::CreateShaders() {
-        // Compile vertex shader
-        GLuint vertexShader = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
-        if (vertexShader == 0) {
-            return false;
-        }
-
-        // Compile fragment shader
-        GLuint fragmentShader = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
-        if (fragmentShader == 0) {
-            glDeleteShader(vertexShader);
-            return false;
-        }
-
-        // Create shader program
-        shaderProgram = glCreateProgram();
-        glAttachShader(shaderProgram, vertexShader);
-        glAttachShader(shaderProgram, fragmentShader);
-        glLinkProgram(shaderProgram);
-
-        // Check linking status
-        GLint success;
-        glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-        if (!success) {
-            char infoLog[512];
-            glGetProgramInfoLog(shaderProgram, 512, nullptr, infoLog);
-            Log::Error("Crosshair shader linking failed: %s", infoLog);
-
-            glDeleteShader(vertexShader);
-            glDeleteShader(fragmentShader);
-            glDeleteProgram(shaderProgram);
-            shaderProgram = 0;
-            return false;
-        }
-
-        // Clean up individual shaders
-        glDeleteShader(vertexShader);
-        glDeleteShader(fragmentShader);
-
-        Log::Debug("Crosshair shaders compiled and linked successfully");
-        return true;
-    }
-
+    // **ALSO FIX**: Make sure geometry is created correctly
     void Crosshair::CreateGeometry() {
-        // Create a simple quad (two triangles as triangle strip)
-        // Positions and texture coordinates for a unit quad
+        Log::Info("Creating crosshair geometry...");
+
+        // Create a simple quad (triangle strip)
+        // Make sure winding order is correct
         float vertices[] = {
             // Position  // TexCoord
             0.0f, 0.0f,  0.0f, 0.0f,  // Top-left
@@ -263,14 +306,24 @@ void main() {
 
         // Generate and bind VAO
         glGenVertexArrays(1, &vao);
+        if (vao == 0) {
+            Log::Error("Failed to generate VAO for crosshair");
+            return;
+        }
+
         glBindVertexArray(vao);
 
         // Generate and upload vertex buffer
         glGenBuffers(1, &vbo);
+        if (vbo == 0) {
+            Log::Error("Failed to generate VBO for crosshair");
+            return;
+        }
+
         glBindBuffer(GL_ARRAY_BUFFER, vbo);
         glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
 
-        // Set up vertex attributes
+        // **CRITICAL**: Set up vertex attributes correctly
         // Position attribute (location 0)
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
@@ -279,34 +332,52 @@ void main() {
         glEnableVertexAttribArray(1);
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
-        // Unbind VAO
+        // **IMPORTANT**: Unbind VAO to prevent accidental modification
         glBindVertexArray(0);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-        Log::Debug("Crosshair geometry created");
+        // Verify the setup worked
+        GLenum error = glGetError();
+        if (error != GL_NO_ERROR) {
+            Log::Error("OpenGL error creating crosshair geometry: 0x%x", error);
+        } else {
+            Log::Info("✓ Crosshair geometry created: VAO=%u, VBO=%u", vao, vbo);
+        }
     }
 
     bool Crosshair::LoadTexture(const std::string& texturePath) {
+        Log::Info("Attempting to load texture: %s", texturePath.c_str());
+
         // Check if file exists
         if (!std::filesystem::exists(texturePath)) {
-            Log::Warning("Crosshair texture file not found: %s", texturePath.c_str());
+            Log::Error("Texture file not found: %s", texturePath.c_str());
             return false;
         }
+
+        Log::Info("File exists, loading with stb_image...");
 
         // Load image
         int width, height, channels;
         stbi_set_flip_vertically_on_load(1);  // Flip for OpenGL
+
+        // **FIX**: Force RGBA loading to avoid alignment issues
         unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, STBI_rgb_alpha);
 
         if (!data) {
-            Log::Error("Failed to load crosshair texture: %s - %s", texturePath.c_str(), stbi_failure_reason());
+            Log::Error("stb_image failed to load texture: %s - %s", texturePath.c_str(), stbi_failure_reason());
             return false;
         }
+
+        Log::Info("stb_image loaded texture: %dx%d, %d channels (forced to RGBA)", width, height, channels);
+
+        // **FIX**: Set pixel alignment to 1 to avoid stride issues
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
         // Generate OpenGL texture
         glGenTextures(1, &textureID);
         glBindTexture(GL_TEXTURE_2D, textureID);
 
-        // Upload texture data
+        // Upload texture data - always use RGBA since we forced loading as RGBA
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
 
         // Set texture parameters for pixel-perfect rendering
@@ -315,35 +386,23 @@ void main() {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+        // Generate mipmaps
+        glGenerateMipmap(GL_TEXTURE_2D);
+
         // Clean up
         stbi_image_free(data);
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        Log::Info("Loaded crosshair texture: %dx%d from %s", width, height, texturePath.c_str());
+        // Reset pixel alignment to default
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+
+        Log::Info("✓ Loaded crosshair texture: %dx%d, texture ID: %u", width, height, textureID);
         return true;
     }
 
-    GLuint Crosshair::CompileShader(GLenum type, const char* source) {
-        GLuint shader = glCreateShader(type);
-        glShaderSource(shader, 1, &source, nullptr);
-        glCompileShader(shader);
-
-        // Check compilation status
-        GLint success;
-        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-        if (!success) {
-            char infoLog[512];
-            glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-            const char* shaderType = (type == GL_VERTEX_SHADER) ? "vertex" : "fragment";
-            Log::Error("Crosshair %s shader compilation failed: %s", shaderType, infoLog);
-            glDeleteShader(shader);
-            return 0;
-        }
-
-        return shader;
-    }
-
     void Crosshair::CreateFallbackTexture() {
+        Log::Info("Creating fallback crosshair texture");
+
         // Create a simple white plus sign crosshair as fallback
         const int size = 16;
         std::vector<unsigned char> data(size * size * 4, 0);  // RGBA, initially transparent
@@ -401,7 +460,71 @@ void main() {
 
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        Log::Info("Created fallback crosshair texture (%dx%d)", size, size);
+        Log::Info("✓ Created fallback crosshair texture (%dx%d), texture ID: %u", size, size, textureID);
+    }
+
+    // [Keep all other methods unchanged...]
+    bool Crosshair::CreateShaders() {
+        // Compile vertex shader
+        GLuint vertexShader = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
+        if (vertexShader == 0) {
+            return false;
+        }
+
+        // Compile fragment shader
+        GLuint fragmentShader = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
+        if (fragmentShader == 0) {
+            glDeleteShader(vertexShader);
+            return false;
+        }
+
+        // Create shader program
+        shaderProgram = glCreateProgram();
+        glAttachShader(shaderProgram, vertexShader);
+        glAttachShader(shaderProgram, fragmentShader);
+        glLinkProgram(shaderProgram);
+
+        // Check linking status
+        GLint success;
+        glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+        if (!success) {
+            char infoLog[512];
+            glGetProgramInfoLog(shaderProgram, 512, nullptr, infoLog);
+            Log::Error("Crosshair shader linking failed: %s", infoLog);
+
+            glDeleteShader(vertexShader);
+            glDeleteShader(fragmentShader);
+            glDeleteProgram(shaderProgram);
+            shaderProgram = 0;
+            return false;
+        }
+
+        // Clean up individual shaders
+        glDeleteShader(vertexShader);
+        glDeleteShader(fragmentShader);
+
+        Log::Debug("Crosshair shaders compiled and linked successfully");
+        return true;
+    }
+
+    GLuint Crosshair::CompileShader(GLenum type, const char* source) {
+        GLuint shader = glCreateShader(type);
+        glShaderSource(shader, 1, &source, nullptr);
+        glCompileShader(shader);
+
+        // Check compilation status
+        GLint success;
+        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            char infoLog[512];
+            glGetShaderInfoLog(shader, 512, nullptr, infoLog);
+            const char* shaderType = (type == GL_VERTEX_SHADER) ? "vertex" : "fragment";
+            Log::Error("Crosshair %s shader compilation failed: %s", shaderType, infoLog);
+            glDeleteShader(shader);
+            return 0;
+        }
+
+        return shader;
     }
 
 } // namespace Render
