@@ -179,13 +179,13 @@ void main() {
 
     // Debug output (remove this later)
     static int debugCounter = 0;
-    if (++debugCounter % 60 == 0) { // Every second at 60fps
+    /*if (++debugCounter % 60 == 0) { // Every second at 60fps
         Log::Info("Crosshair Debug:");
         Log::Info("  Window: %dx%d, Framebuffer: %dx%d", windowWidth, windowHeight, framebufferWidth, framebufferHeight);
         Log::Info("  Scale: %.2fx%.2f", scaleX, scaleY);
         Log::Info("  Crosshair size: %.1f, Position: (%.1f, %.1f)", scaledSize, position.x, position.y);
         Log::Info("  Should be at framebuffer center: (%.1f, %.1f)", framebufferWidth * 0.5f, framebufferHeight * 0.5f);
-    }
+    }*/
 
     // Set uniforms
     GLint projLoc = glGetUniformLocation(shaderProgram, "uProjection");
