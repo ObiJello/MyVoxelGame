@@ -1,4 +1,4 @@
-// File: src/render/Crosshair.cpp
+// File: src/render/Crosshair.cpp (CLEAN FIX - No Global Window Needed)
 #include "Crosshair.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
@@ -90,16 +90,17 @@ void main() {
         return true;
     }
 
-    void Crosshair::Render(int screenWidth, int screenHeight) {
-        if (!isInitialized || !isVisible || screenWidth <= 0 || screenHeight <= 0) {
+    void Crosshair::Render(int windowWidth, int windowHeight, int framebufferWidth, int framebufferHeight) {
+        if (!isInitialized || !isVisible || framebufferWidth <= 0 || framebufferHeight <= 0) {
             return;
         }
 
         // Debug output (only occasionally to avoid spam)
         static int debugCounter = 0;
         if (++debugCounter % 300 == 0) { // Every 5 seconds at 60 FPS
-            Log::Debug("Rendering crosshair: screen=%dx%d, size=%d, visible=%s",
-                      screenWidth, screenHeight, crosshairSize, isVisible ? "true" : "false");
+            Log::Debug("Crosshair render: window=%dx%d, framebuffer=%dx%d, size=%d, visible=%s",
+                      windowWidth, windowHeight, framebufferWidth, framebufferHeight,
+                      crosshairSize, isVisible ? "true" : "false");
         }
 
         // Store current OpenGL state
@@ -128,25 +129,25 @@ void main() {
         // Use our shader
         glUseProgram(shaderProgram);
 
-        // Set up orthographic projection for screen space rendering
-        // Map (0,0) to top-left, (screenWidth, screenHeight) to bottom-right
+        // **FIXED**: Set up orthographic projection using WINDOW coordinates for positioning
+        // Map (0,0) to top-left, (windowWidth, windowHeight) to bottom-right
         glm::mat4 projection = glm::ortho(
-            0.0f, static_cast<float>(screenWidth),    // left, right
-            static_cast<float>(screenHeight), 0.0f,  // bottom, top (flipped for screen coords)
+            0.0f, static_cast<float>(windowWidth),    // left, right (use window size for positioning)
+            static_cast<float>(windowHeight), 0.0f,  // bottom, top (flipped for screen coords)
             -1.0f, 1.0f                              // near, far
         );
 
-        // Calculate crosshair position (center of screen)
+        // **FIXED**: Calculate crosshair position using WINDOW coordinates
         float halfSize = crosshairSize * 0.5f;
         glm::vec2 position(
-            screenWidth * 0.5f - halfSize,
-            screenHeight * 0.5f - halfSize
+            windowWidth * 0.5f - halfSize,   // Use window width for centering
+            windowHeight * 0.5f - halfSize   // Use window height for centering
         );
         glm::vec2 size(crosshairSize, crosshairSize);
 
         // Debug output for positioning
         if (debugCounter % 300 == 0) {
-            Log::Debug("Crosshair position: (%.1f, %.1f), size: (%.1f, %.1f)",
+            Log::Debug("Crosshair position: (%.1f, %.1f), size: (%.1f, %.1f) [using window coordinates]",
                       position.x, position.y, size.x, size.y);
         }
 
@@ -172,6 +173,10 @@ void main() {
         if (opacityLoc != -1) {
             glUniform1f(opacityLoc, 1.0f);  // Full opacity
         }
+
+        // **CRITICAL**: Set viewport to use framebuffer dimensions for actual rendering
+        // This ensures the crosshair renders at the correct pixel density
+        glViewport(0, 0, framebufferWidth, framebufferHeight);
 
         // Bind texture
         glActiveTexture(GL_TEXTURE0);

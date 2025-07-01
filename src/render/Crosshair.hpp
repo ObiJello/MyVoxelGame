@@ -15,8 +15,13 @@ namespace Render {
         // Initialize the crosshair renderer (call once)
         bool Initialize(const std::string& texturePath = "assets/gui/sprites/hud/crosshair.png");
 
-        // Render the crosshair at screen center
-        void Render(int screenWidth, int screenHeight);
+        // Render the crosshair at screen center with proper Retina support
+        void Render(int windowWidth, int windowHeight, int framebufferWidth, int framebufferHeight);
+
+        // Legacy method for backward compatibility
+        void Render(int screenWidth, int screenHeight) {
+            Render(screenWidth, screenHeight, screenWidth, screenHeight);
+        }
 
         // Enable/disable crosshair visibility
         void SetVisible(bool visible) { isVisible = visible; }

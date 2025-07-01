@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Complete with Physics Integration and Crosshair)
+// File: src/platform/PlatformMain.cpp (Updated with Clean Crosshair Fix)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -355,7 +355,7 @@ namespace PlatformMain {
     {
         // 1) Initialize logging
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Physics System and Crosshair");
+        Log::Info("Starting MyVoxelGame v0.1 with Physics System and Crosshair (macOS Retina Fixed)");
 
         // 2) Initialize BlockRegistry
         Game::BlockRegistry::Init();
@@ -372,6 +372,8 @@ namespace PlatformMain {
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     #ifdef __APPLE__
         glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+        // **RETINA FIX**: Explicitly enable Retina framebuffer for high-DPI support
+        glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
     #endif
         glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
 
@@ -402,10 +404,27 @@ namespace PlatformMain {
         Input::Init(window);
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
-        // 8) Print GPU info
+        // 8) Print GPU info and display scaling info
         Log::Info("Vendor:   %s", glGetString(GL_VENDOR));
         Log::Info("Renderer: %s", glGetString(GL_RENDERER));
         Log::Info("Version:  %s", glGetString(GL_VERSION));
+
+        // **RETINA DEBUG**: Log window and framebuffer sizes to diagnose scaling
+        int windowWidth, windowHeight, framebufferWidth, framebufferHeight;
+        glfwGetWindowSize(window, &windowWidth, &windowHeight);
+        glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+        float xscale, yscale;
+        glfwGetWindowContentScale(window, &xscale, &yscale);
+
+        Log::Info("Window size: %dx%d", windowWidth, windowHeight);
+        Log::Info("Framebuffer size: %dx%d", framebufferWidth, framebufferHeight);
+        Log::Info("Content scale: %.2fx%.2f", xscale, yscale);
+
+        if (framebufferWidth != windowWidth || framebufferHeight != windowHeight) {
+            Log::Info("Retina/High-DPI display detected - using proper window/framebuffer coordination");
+        } else {
+            Log::Info("Standard display detected - window and framebuffer sizes match");
+        }
 
     #ifndef NDEBUG
         if (GLAD_GL_KHR_debug) {
@@ -431,7 +450,7 @@ namespace PlatformMain {
             return -5;
         }
 
-        // 11) Initialize crosshair system
+        // 11) Initialize crosshair system (with Retina fix)
         if (!Render::g_crosshair.Initialize()) {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
@@ -479,7 +498,7 @@ namespace PlatformMain {
         bool cursorEnabled = false;
 
         // 18) Main loop
-        Log::Info("Entering main render loop with physics system and crosshair");
+        Log::Info("Entering main render loop with physics system and crosshair (Retina-aware)");
 
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -587,10 +606,9 @@ namespace PlatformMain {
 
             // k) Clear buffers
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f); // Sky blue
-            //glClearColor(0.1f, 0.1f, 0.15f, 1.0f); // Sky purple
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // l) Calculate frustum for chunk visibility testing
+            // l) Get current framebuffer size for rendering
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
@@ -700,6 +718,22 @@ namespace PlatformMain {
                 ImGui::Text("Frame Time: %.2f ms", dt * 1000.0f);
                 ImGui::Text("Mesh Upload: %.2f ms", metrics.meshUploadTime);
                 ImGui::Text("Render Time: %.2f ms", metrics.renderTime);
+                ImGui::Spacing();
+
+                // **RETINA DEBUG**: Display scaling information
+                ImGui::Text("Display Information");
+                ImGui::Separator();
+                glfwGetWindowSize(window, &windowWidth, &windowHeight);
+                glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+                glfwGetWindowContentScale(window, &xscale, &yscale);
+                ImGui::Text("Window Size: %dx%d", windowWidth, windowHeight);
+                ImGui::Text("Framebuffer Size: %dx%d", framebufferWidth, framebufferHeight);
+                ImGui::Text("Content Scale: %.2fx%.2f", xscale, yscale);
+                if (framebufferWidth != windowWidth || framebufferHeight != windowHeight) {
+                    ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Retina/High-DPI Active");
+                } else {
+                    ImGui::Text("Standard Display");
+                }
                 ImGui::Spacing();
 
                 // Texture Atlas information
@@ -878,8 +912,18 @@ namespace PlatformMain {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // t) Render crosshair (AFTER ImGui, truly on top)
-            Render::g_crosshair.Render(width, height);
+            // **FIXED**: Render crosshair with proper Retina support (AFTER ImGui, truly on top)
+            {
+                // Get both window size (for positioning) and framebuffer size (for rendering)
+                int windowWidth, windowHeight;
+                glfwGetWindowSize(window, &windowWidth, &windowHeight);
+
+                // width and height variables are already the framebuffer size from earlier:
+                // glfwGetFramebufferSize(window, &width, &height);
+
+                // Render crosshair with proper coordinate separation for Retina displays
+                Render::g_crosshair.Render(windowWidth, windowHeight, width, height);
+            }
 
             // u) Swap buffers
             glfwSwapBuffers(window);
