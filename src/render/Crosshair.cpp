@@ -113,182 +113,135 @@ void main() {
     }
 
     void Crosshair::Render(int windowWidth, int windowHeight, int framebufferWidth, int framebufferHeight) {
-        if (!isInitialized || !isVisible || framebufferWidth <= 0 || framebufferHeight <= 0) {
-            Log::Debug("Crosshair render skipped: init=%s, visible=%s, fb=%dx%d",
-                      isInitialized ? "yes" : "no", isVisible ? "yes" : "no",
-                      framebufferWidth, framebufferHeight);
-            return;
-        }
-
-        // Debug output every frame for now
-        static int debugCounter = 0;
-        bool shouldDebug = (++debugCounter % 60 == 0); // Every second at 60fps
-
-        if (shouldDebug) {
-            Log::Info("=== CROSSHAIR RENDER ATTEMPT ===");
-            Log::Info("Window: %dx%d, Framebuffer: %dx%d", windowWidth, windowHeight, framebufferWidth, framebufferHeight);
-        }
-
-        // **CRITICAL**: Store current OpenGL state
-        GLint currentProgram;
-        GLboolean depthTestEnabled;
-        GLboolean blendEnabled;
-        GLint blendSrc, blendDst;
-        GLint currentVAO;
-        GLint activeTexture;
-        GLint boundTexture;
-        GLint viewport[4];
-        GLboolean cullFaceEnabled;
-
-        glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
-        depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
-        blendEnabled = glIsEnabled(GL_BLEND);
-        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrc);
-        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDst);
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currentVAO);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
-        glGetIntegerv(GL_VIEWPORT, viewport);
-        cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
-
-        if (shouldDebug) {
-            Log::Info("GL State Before: prog=%d, depth=%s, blend=%s, cull=%s, vao=%d",
-                     currentProgram, depthTestEnabled ? "on" : "off",
-                     blendEnabled ? "on" : "off", cullFaceEnabled ? "on" : "off", currentVAO);
-            Log::Info("Viewport Before: (%d,%d) %dx%d", viewport[0], viewport[1], viewport[2], viewport[3]);
-        }
-
-        // **FIX 1**: Set up proper 2D rendering state
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_CULL_FACE);  // **CRITICAL**: Disable face culling for 2D
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-        // **FIX 2**: Use our shader program
-        glUseProgram(shaderProgram);
-
-        // **FIX 3**: Set viewport for 2D rendering - use window coordinates for simpler math
-        glViewport(0, 0, windowWidth, windowHeight);
-
-        // **FIX 4**: Use simple window-coordinate orthographic projection
-        glm::mat4 projection = glm::ortho(
-            0.0f, static_cast<float>(windowWidth),    // left, right
-            static_cast<float>(windowHeight), 0.0f,   // bottom, top (flipped for screen coords)
-            -1.0f, 1.0f                               // near, far
-        );
-
-        // **FIX 5**: Calculate crosshair position in window coordinates (much simpler)
-        float halfSize = crosshairSize * 0.5f;
-        glm::vec2 position(
-            windowWidth - halfSize,   // Center X
-            windowHeight * 0.0f - halfSize   // Center Y
-        );
-        glm::vec2 size(crosshairSize, crosshairSize);
-
-        if (shouldDebug) {
-            Log::Info("Crosshair: pos=(%.1f, %.1f), size=(%.1f, %.1f)",
-                     position.x, position.y, size.x, size.y);
-            Log::Info("Should be at screen center: (%.1f, %.1f)",
-                     windowWidth * 0.5f, windowHeight * 0.5f);
-        }
-
-        // **FIX 6**: Verify shader program is valid
-        if (shaderProgram == 0) {
-            Log::Error("Crosshair shader program is 0!");
-            return;
-        }
-
-        // **FIX 7**: Set uniforms with error checking
-        GLint projLoc = glGetUniformLocation(shaderProgram, "uProjection");
-        GLint posLoc = glGetUniformLocation(shaderProgram, "uPosition");
-        GLint sizeLoc = glGetUniformLocation(shaderProgram, "uSize");
-        GLint texLoc = glGetUniformLocation(shaderProgram, "uTexture");
-        GLint opacityLoc = glGetUniformLocation(shaderProgram, "uOpacity");
-
-        if (shouldDebug) {
-            Log::Info("Uniform locations: proj=%d, pos=%d, size=%d, tex=%d, opacity=%d",
-                     projLoc, posLoc, sizeLoc, texLoc, opacityLoc);
-        }
-
-        // **CRITICAL**: Check if required uniforms exist
-        if (projLoc == -1) {
-            Log::Error("uProjection uniform not found in crosshair shader!");
-        } else {
-            glUniformMatrix4fv(projLoc, 1, GL_FALSE, &projection[0][0]);
-        }
-
-        if (posLoc == -1) {
-            Log::Error("uPosition uniform not found in crosshair shader!");
-        } else {
-            glUniform2f(posLoc, position.x, position.y);
-        }
-
-        if (sizeLoc == -1) {
-            Log::Error("uSize uniform not found in crosshair shader!");
-        } else {
-            glUniform2f(sizeLoc, size.x, size.y);
-        }
-
-        if (texLoc != -1) {
-            glUniform1i(texLoc, 0);
-        }
-
-        if (opacityLoc != -1) {
-            glUniform1f(opacityLoc, 1.0f);
-        }
-
-        // **FIX 8**: Bind texture (even for solid color test)
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, textureID);
-
-        // **FIX 9**: Verify VAO is valid
-        if (vao == 0) {
-            Log::Error("Crosshair VAO is 0!");
-            return;
-        }
-
-        // **FIX 10**: Bind VAO and draw
-        glBindVertexArray(vao);
-
-        if (shouldDebug) {
-            Log::Info("About to draw with VAO %u, shader %u, texture %u", vao, shaderProgram, textureID);
-        }
-
-        // **THE ACTUAL DRAW CALL**
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-        // **FIX 11**: Check for OpenGL errors immediately after draw
-        GLenum error = glGetError();
-        if (error != GL_NO_ERROR) {
-            Log::Error("OpenGL error after crosshair draw: 0x%x", error);
-        }
-
-        if (shouldDebug) {
-            Log::Info("Drew crosshair - GL error check: %s", (error == GL_NO_ERROR) ? "OK" : "ERROR");
-        }
-
-        // **FIX 12**: Restore ALL OpenGL state exactly
-        glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        glBindVertexArray(currentVAO);
-        glActiveTexture(activeTexture);
-        glBindTexture(GL_TEXTURE_2D, boundTexture);
-        glUseProgram(currentProgram);
-        glBlendFunc(blendSrc, blendDst);
-
-        if (!blendEnabled) {
-            glDisable(GL_BLEND);
-        }
-        if (depthTestEnabled) {
-            glEnable(GL_DEPTH_TEST);
-        }
-        if (cullFaceEnabled) {
-            glEnable(GL_CULL_FACE);
-        }
-
-        if (shouldDebug) {
-            Log::Info("=== CROSSHAIR RENDER COMPLETE ===");
-        }
+    if (!isInitialized || !isVisible || framebufferWidth <= 0 || framebufferHeight <= 0) {
+        return;
     }
+
+    // **CRITICAL**: Store current OpenGL state
+    GLint currentProgram;
+    GLboolean depthTestEnabled;
+    GLboolean blendEnabled;
+    GLint blendSrc, blendDst;
+    GLint currentVAO;
+    GLint activeTexture;
+    GLint boundTexture;
+    GLint viewport[4];
+    GLboolean cullFaceEnabled;
+
+    glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+    depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
+    blendEnabled = glIsEnabled(GL_BLEND);
+    glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrc);
+    glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDst);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currentVAO);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
+
+    // Set up proper 2D rendering state
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // Use our shader program
+    glUseProgram(shaderProgram);
+
+    // **FIX 1**: Use framebuffer size for viewport (this matches the actual rendering resolution)
+    glViewport(0, 0, framebufferWidth, framebufferHeight);
+
+    // **FIX 2**: Use framebuffer coordinates for projection (this is what actually gets rendered to)
+    glm::mat4 projection = glm::ortho(
+        0.0f, static_cast<float>(framebufferWidth),    // left, right
+        static_cast<float>(framebufferHeight), 0.0f,   // bottom, top (flipped for screen coords)
+        -1.0f, 1.0f                                    // near, far
+    );
+
+    // **FIX 3**: Calculate position for CENTER of crosshair, then adjust for top-left corner
+    float halfSize = crosshairSize * 0.5f;
+
+    // Calculate scale factor between window and framebuffer (for Retina displays)
+    float scaleX = static_cast<float>(framebufferWidth) / static_cast<float>(windowWidth);
+    float scaleY = static_cast<float>(framebufferHeight) / static_cast<float>(windowHeight);
+
+    // Scale the crosshair size appropriately for the display
+    float scaledSize = crosshairSize * scaleX; // Use X scale factor (should be same as Y on most displays)
+    float scaledHalfSize = scaledSize * 0.5f;
+
+    // Position for the TOP-LEFT corner of the crosshair (shader expects this)
+    glm::vec2 position(
+        (framebufferWidth * 0.5f) - scaledHalfSize,   // Center X minus half width
+        (framebufferHeight * 0.5f) - scaledHalfSize   // Center Y minus half height
+    );
+
+    glm::vec2 size(scaledSize, scaledSize);
+
+    // Debug output (remove this later)
+    static int debugCounter = 0;
+    if (++debugCounter % 60 == 0) { // Every second at 60fps
+        Log::Info("Crosshair Debug:");
+        Log::Info("  Window: %dx%d, Framebuffer: %dx%d", windowWidth, windowHeight, framebufferWidth, framebufferHeight);
+        Log::Info("  Scale: %.2fx%.2f", scaleX, scaleY);
+        Log::Info("  Crosshair size: %.1f, Position: (%.1f, %.1f)", scaledSize, position.x, position.y);
+        Log::Info("  Should be at framebuffer center: (%.1f, %.1f)", framebufferWidth * 0.5f, framebufferHeight * 0.5f);
+    }
+
+    // Set uniforms
+    GLint projLoc = glGetUniformLocation(shaderProgram, "uProjection");
+    GLint posLoc = glGetUniformLocation(shaderProgram, "uPosition");
+    GLint sizeLoc = glGetUniformLocation(shaderProgram, "uSize");
+    GLint texLoc = glGetUniformLocation(shaderProgram, "uTexture");
+    GLint opacityLoc = glGetUniformLocation(shaderProgram, "uOpacity");
+
+    if (projLoc != -1) {
+        glUniformMatrix4fv(projLoc, 1, GL_FALSE, &projection[0][0]);
+    }
+    if (posLoc != -1) {
+        glUniform2f(posLoc, position.x, position.y);
+    }
+    if (sizeLoc != -1) {
+        glUniform2f(sizeLoc, size.x, size.y);
+    }
+    if (texLoc != -1) {
+        glUniform1i(texLoc, 0);
+    }
+    if (opacityLoc != -1) {
+        glUniform1f(opacityLoc, 1.0f);
+    }
+
+    // Bind texture and VAO
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glBindVertexArray(vao);
+
+    // Draw the crosshair
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    // Check for errors
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR && debugCounter % 60 == 0) {
+        Log::Error("OpenGL error after crosshair draw: 0x%x", error);
+    }
+
+    // Restore ALL OpenGL state exactly
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    glBindVertexArray(currentVAO);
+    glActiveTexture(activeTexture);
+    glBindTexture(GL_TEXTURE_2D, boundTexture);
+    glUseProgram(currentProgram);
+    glBlendFunc(blendSrc, blendDst);
+
+    if (!blendEnabled) {
+        glDisable(GL_BLEND);
+    }
+    if (depthTestEnabled) {
+        glEnable(GL_DEPTH_TEST);
+    }
+    if (cullFaceEnabled) {
+        glEnable(GL_CULL_FACE);
+    }
+}
 
     // **ALSO FIX**: Make sure geometry is created correctly
     void Crosshair::CreateGeometry() {
