@@ -97,6 +97,7 @@ if(APPLE)
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
             src/game/Physics.cpp
+            src/render/Crosshair.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -128,6 +129,8 @@ else()
             src/render/BlockHighlight.cpp
             src/game/Physics.cpp
             src/game/Physics.hpp
+            src/render/Crosshair.cpp
+            src/render/Crosshair.hpp
     )
 endif()
 

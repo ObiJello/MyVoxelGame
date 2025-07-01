@@ -198,9 +198,9 @@ namespace Render {
                 }
         }
 
-        // No existing mesh found, add new one
+        /* No existing mesh found, add new one
         Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
-                  data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex, data->vertices.size());
+                  data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex, data->vertices.size());*/
 
         ChunkMesh cm = ChunkMesh::FromMeshData(data);
         meshes.push_back(cm);
@@ -221,8 +221,8 @@ namespace Render {
             std::remove_if(meshes.begin(), meshes.end(),
                 [&pos](const ChunkMesh& cm) {
                     // Debug: Show what we're comparing
-                    Log::Debug("Checking mesh: chunkXZ=(%d,%d) vs target=(%d,%d)",
-                              cm.chunkXZ.x, cm.chunkXZ.z, pos.x, pos.z);
+                    /*Log::Debug("Checking mesh: chunkXZ=(%d,%d) vs target=(%d,%d)",
+                              cm.chunkXZ.x, cm.chunkXZ.z, pos.x, pos.z);*/
 
                     bool shouldRemove = (cm.chunkXZ.x == pos.x && cm.chunkXZ.z == pos.z);
                     if (shouldRemove) {

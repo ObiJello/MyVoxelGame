@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Complete with Physics Integration)
+// File: src/platform/PlatformMain.cpp (Complete with Physics Integration and Crosshair)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -21,6 +21,7 @@
 #include "../render/Shader.hpp"
 #include "../render/TextureAtlas.hpp"
 #include "../render/BlockHighlight.hpp"
+#include "../render/Crosshair.hpp"  // Add crosshair header
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -354,7 +355,7 @@ namespace PlatformMain {
     {
         // 1) Initialize logging
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Physics System");
+        Log::Info("Starting MyVoxelGame v0.1 with Physics System and Crosshair");
 
         // 2) Initialize BlockRegistry
         Game::BlockRegistry::Init();
@@ -430,19 +431,24 @@ namespace PlatformMain {
             return -5;
         }
 
-        // 11) Compile shaders
+        // 11) Initialize crosshair system
+        if (!Render::g_crosshair.Initialize()) {
+            Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
+        }
+
+        // 12) Compile shaders
         Shader blockShader({
             "shaders/block.vert",
             "shaders/block.frag"
         });
 
-        // 12) Enable OpenGL features
+        // 13) Enable OpenGL features
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
 
-        // 13) Initialize camera with physics
+        // 14) Initialize camera with physics
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
         camera.yaw = 0.0f;
@@ -450,12 +456,12 @@ namespace PlatformMain {
         camera.physicsControlled = true; // Enable physics control
         glfwSwapInterval(1); // Enable VSync
 
-        // 14) Initialize player controller with physics
+        // 15) Initialize player controller with physics
         Game::PlayerController playerController;
         Log::Info("Player controller initialized with physics system");
 
     #ifndef NDEBUG
-        // 15) Setup ImGui
+        // 16) Setup ImGui
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO(); (void)io;
@@ -465,15 +471,15 @@ namespace PlatformMain {
         ImGui_ImplOpenGL3_Init("#version 330 core");
     #endif
 
-        // 16) Performance monitoring
+        // 17) Performance monitoring
         PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
         // Mouse cursor toggle state
         bool cursorEnabled = false;
 
-        // 17) Main loop
-        Log::Info("Entering main render loop with physics system");
+        // 18) Main loop
+        Log::Info("Entering main render loop with physics system and crosshair");
 
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -723,7 +729,7 @@ namespace PlatformMain {
                 ImGui::Text("Frustum Culled Sections: %zu",
                            Render::g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
 
-                // Physics information (NEW)
+                // Physics information
                 ImGui::Spacing();
                 ImGui::Text("Player Physics");
                 ImGui::Separator();
@@ -791,7 +797,7 @@ namespace PlatformMain {
                     ImGui::Text("Block Highlighted: NO");
                 }
 
-                // Player statistics (enhanced)
+                // Player statistics
                 ImGui::Spacing();
                 ImGui::Text("Player Statistics");
                 ImGui::Separator();
@@ -803,6 +809,20 @@ namespace PlatformMain {
                 if (playerStats.totalPlayTime > 0.0f) {
                     float avgSpeed = playerStats.totalDistanceTraveled / playerStats.totalPlayTime;
                     ImGui::Text("Average Speed: %.2f blocks/s", avgSpeed);
+                }
+
+                // Crosshair settings
+                ImGui::Spacing();
+                ImGui::Text("Crosshair Settings");
+                ImGui::Separator();
+                bool crosshairVisible = Render::g_crosshair.IsVisible();
+                if (ImGui::Checkbox("Show Crosshair", &crosshairVisible)) {
+                    Render::g_crosshair.SetVisible(crosshairVisible);
+                }
+
+                int crosshairSize = Render::g_crosshair.GetSize();
+                if (ImGui::SliderInt("Crosshair Size", &crosshairSize, 8, 32)) {
+                    Render::g_crosshair.SetSize(crosshairSize);
                 }
 
                 // Performance graph
@@ -846,10 +866,10 @@ namespace PlatformMain {
                 ImGui::End();
             }
 
-            // q) Draw chunk visualization
+            // r) Draw chunk visualization
             DrawChunkVisualization(camera, frustum);
 
-            // r) Draw texture atlas debug window
+            // s) Draw texture atlas debug window
             DrawTextureAtlasDebug();
 
             // s) Render ImGui
@@ -857,33 +877,36 @@ namespace PlatformMain {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     #endif
 
-            // t) Swap buffers
+            // t) Render crosshair (AFTER ImGui, truly on top)
+            Render::g_crosshair.Render(width, height);
+
+            // u) Swap buffers
             glfwSwapBuffers(window);
 
-            // u) Reset input deltas
+            // v) Reset input deltas
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // v) Calculate total frame time
+            // w) Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
 
     #ifndef NDEBUG
-        // 18) Cleanup ImGui
+        // 19) Cleanup ImGui
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
     #endif
 
-        // 19) Cleanup OpenGL resources
+        // 20) Cleanup OpenGL resources
         for (auto& cm : Render::g_chunkMeshes) {
             glDeleteVertexArrays(1, &cm.vao);
             glDeleteBuffers(1, &cm.vbo);
             glDeleteBuffers(1, &cm.ebo);
         }
 
-        Log::Info("Enhanced voxel engine with physics system shutting down");
+        Log::Info("Enhanced voxel engine with physics system and crosshair shutting down");
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered total",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 
