@@ -105,7 +105,6 @@ namespace Game {
 
     void PlayerController::UpdatePhysics(float deltaTime) {
         // Apply physics simulation - FIXED: Now passes sneakPressed parameter
-        //Physics::UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime);
         UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime);
 
         // Reset single-frame inputs

@@ -123,6 +123,7 @@ namespace Render {
         }
 
         // Calculate movement input vector for physics system
+        // FIXED: Now returns full 3D movement for noclip mode
         glm::vec3 CalculateMovementInput() const {
             if (!physicsControlled) {
                 return glm::vec3(0.0f); // Not using physics
@@ -132,6 +133,8 @@ namespace Render {
             glm::vec3 horizontalRight = GetHorizontalRight();
 
             glm::vec3 movement{ 0.0f };
+
+            // Horizontal movement (WASD)
             if (Input::IsKeyDown(Input::Key::W)) {
                 movement += horizontalFront;
             }
@@ -143,6 +146,14 @@ namespace Render {
             }
             if (Input::IsKeyDown(Input::Key::D)) {
                 movement += horizontalRight;
+            }
+
+            // FIXED: Add vertical movement for noclip mode
+            if (Input::IsKeyDown(Input::Key::Space)) {
+                movement.y += 1.0f;  // Move up
+            }
+            if (Input::IsKeyDown(Input::Key::LeftShift)) {
+                movement.y -= 1.0f;  // Move down
             }
 
             // Normalize to prevent faster diagonal movement

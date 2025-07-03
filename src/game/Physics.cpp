@@ -35,9 +35,29 @@ namespace Game {
         // Handle jumping
         HandleJump(physics, jumpPressed, blockCollisionCheck);
 
-        // Apply gravity (unless in noclip mode)
+        // FIXED: Only apply gravity if not in noclip mode AND the chunk below player is loaded
         if (!physics.noclip) {
-            ApplyGravity(physics, deltaTime);
+            // Check if the chunk containing the player is loaded before applying gravity
+            bool chunkLoaded = WorldAccess::IsChunkLoadedAt(
+                static_cast<int>(std::floor(physics.position.x)),
+                static_cast<int>(std::floor(physics.position.z))
+            );
+
+            if (chunkLoaded) {
+                ApplyGravity(physics, deltaTime);
+            } else {
+                // Chunk not loaded yet - don't apply gravity to prevent falling through world
+                // Keep vertical velocity at 0 and stay floating until chunk loads
+                physics.velocity.y = 0.0f;
+                physics.isOnGround = false;
+
+                // Log this occasionally for debugging
+                static int gravityDelayCounter = 0;
+                if (++gravityDelayCounter % 60 == 0) { // Every second at 60fps
+                    Log::Debug("Delaying gravity - chunk not loaded at player position (%.1f, %.1f)",
+                              physics.position.x, physics.position.z);
+                }
+            }
         }
 
         // Handle movement
@@ -117,24 +137,24 @@ namespace Game {
         // Calculate movement speed
         float speed = physics.isInWater ? PlayerPhysics::WATER_WALK_SPEED : physics.currentSpeed;
 
-        // Apply horizontal movement
-        glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
-        if (glm::length(horizontalMovement) > 0.0f) {
-            horizontalMovement = glm::normalize(horizontalMovement) * speed;
-        }
-
-        // In noclip mode, allow free movement in all directions
-        glm::vec3 totalMovement;
+        // FIXED: In noclip mode, allow free movement in all directions including vertical
         if (physics.noclip) {
-            totalMovement = movementInput * speed;
+            // Use full 3D movement input (including Y from Space/Shift keys)
+            glm::vec3 totalMovement = movementInput * speed;
             physics.position += totalMovement * deltaTime;
             physics.velocity = glm::vec3(0.0f); // No velocity in noclip
             physics.isOnGround = false;
             return;
         }
 
+        // Normal physics mode - separate horizontal and vertical movement
+        glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
+        if (glm::length(horizontalMovement) > 0.0f) {
+            horizontalMovement = glm::normalize(horizontalMovement) * speed;
+        }
+
         // Apply movement with collision detection
-        totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
+        glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
         glm::vec3 movement = totalMovement * deltaTime;
 
         // Handle vertical movement first to update onGround
