@@ -38,6 +38,17 @@ set(ALSOFT_REQUIRE_NEON OFF CACHE BOOL "Disable ARM NEON requirement" FORCE)
 add_subdirectory(ext/OpenAL)  # static-only OpenAL
 add_subdirectory(ext/stb_image)
 
+# ── Add nlohmann/json library for block model JSON parsing ─────────────────
+include(FetchContent)
+FetchContent_Declare(
+        nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+# ────────────────────────────────────────────────────────────────────────────
+
 # 4) ImGui (no demo window) - FIXED: Added GLM include directory
 add_library(imgui
         ext/imgui/imgui.cpp
@@ -48,6 +59,8 @@ add_library(imgui
         ext/imgui/backends/imgui_impl_opengl3.cpp
         src/debug/DebugSystem.cpp
         src/debug/DebugSystem.hpp
+        src/test/TestSystem.cpp
+        src/test/TestSystem.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
@@ -96,6 +109,7 @@ if(APPLE)
             src/render/TextureAtlas.cpp
             src/render/BlockHighlight.cpp
             src/game/BlockRegistry.cpp
+            src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
             src/game/WorldManager.cpp
@@ -121,6 +135,7 @@ else()
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
             src/game/BlockRegistry.cpp
+            src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
             src/game/WorldManager.cpp
@@ -169,6 +184,7 @@ target_link_libraries(MyVoxelGame PRIVATE
         ZLIB::ZLIBSTATIC     # static zlib
         OpenAL::OpenAL       # static OpenAL
         imgui
+        nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
 )
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
@@ -178,7 +194,7 @@ if(APPLE)
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
     )
-    # ADDED: Copy assets directory for texture atlas
+    # Copy assets directory for texture atlas and block models
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/assets"
@@ -190,7 +206,7 @@ else()
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_FILE_DIR:MyVoxelGame>/shaders"
     )
-    # ADDED: Copy assets directory for texture atlas
+    # Copy assets directory for texture atlas and block models
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/assets"
@@ -215,3 +231,35 @@ else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(MyVoxelGame PRIVATE X11::X11 OpenGL::GL)
 endif()
+
+# ── Optional: Print configuration summary ──────────────────────────────────────
+message(STATUS "")
+message(STATUS "═══════════════════════════════════════════════════════════════")
+message(STATUS "MyVoxelGame v${PROJECT_VERSION} Configuration Summary")
+message(STATUS "═══════════════════════════════════════════════════════════════")
+message(STATUS "Build Type:           ${CMAKE_BUILD_TYPE}")
+message(STATUS "C++ Standard:         C++${CMAKE_CXX_STANDARD}")
+message(STATUS "Compiler:             ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+if(APPLE)
+    message(STATUS "macOS Architectures:  ${CMAKE_OSX_ARCHITECTURES}")
+    message(STATUS "macOS Deployment:     ${CMAKE_OSX_DEPLOYMENT_TARGET}")
+endif()
+if(WIN32 AND BUILD_WIN32_32BIT)
+    message(STATUS "Windows Target:       32-bit")
+else()
+    message(STATUS "Windows Target:       64-bit")
+endif()
+message(STATUS "")
+message(STATUS "Dependencies:")
+message(STATUS "  GLFW:               Bundled (ext/glfw)")
+message(STATUS "  GLAD:               Bundled (ext/glad)")
+message(STATUS "  GLM:                Bundled (ext/glm)")
+message(STATUS "  STB Image:          Bundled (ext/stb_image)")
+message(STATUS "  zlib:               Bundled (ext/zlib)")
+message(STATUS "  OpenAL:             Bundled (ext/OpenAL)")
+message(STATUS "  ImGui:              Bundled (ext/imgui)")
+message(STATUS "  nlohmann/json:      FetchContent (v3.11.3)")
+message(STATUS "")
+message(STATUS "Output Directory:     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+message(STATUS "═══════════════════════════════════════════════════════════════")
+message(STATUS "")
