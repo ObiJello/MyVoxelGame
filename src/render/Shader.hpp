@@ -1,3 +1,4 @@
+// File: src/render/Shader.hpp (Updated with const-correctness)
 #pragma once
 
 #include <string>
@@ -13,16 +14,17 @@ public:
     // Destructor: deletes the GL program
     ~Shader();
 
-    // Use (bind) this shader
+    // Use (bind) this shader - const because it doesn't modify the shader object
     void Use() const;
 
-    // Retrieve uniform location (cached)
-    int GetUniformLocation(const std::string& name);
+    // Retrieve uniform location (cached) - mutable cache allows const method
+    int GetUniformLocation(const std::string& name) const;
 
-    // Set a mat4 uniform (e.g. uMVP)
-    void SetMat4(const std::string& name, const glm::mat4& matrix);
+    // Set a mat4 uniform (e.g. uMVP) - const because it doesn't modify the shader object
+    void SetMat4(const std::string& name, const glm::mat4& matrix) const;
 
     // Query and report if the underlying files have changed; if so, recompile & relink.
+    // This is NOT const because it can modify the shader program
     void HotReloadIfNeeded();
 
     // Return the OpenGL program ID
@@ -37,8 +39,8 @@ private:
     std::filesystem::file_time_type lastWriteVert;
     std::filesystem::file_time_type lastWriteFrag;
 
-    // Uniform location cache
-    std::unordered_map<std::string, int> uniformCache;
+    // Uniform location cache - mutable so it can be modified in const methods
+    mutable std::unordered_map<std::string, int> uniformCache;
 
     // Internal: compile and link shaders, replacing programID.
     void CompileAndLink();

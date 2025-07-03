@@ -48,19 +48,19 @@ void Shader::Use() const {
 }
 
 // Retrieve uniform location (cached)
-int Shader::GetUniformLocation(const std::string& name) {
+int Shader::GetUniformLocation(const std::string& name) const {  // Now const
     if (uniformCache.count(name)) {
         return uniformCache[name];
     }
 
     if (programID == 0) {
         Log::Warning("Cannot get uniform location for '%s' - invalid shader program", name.c_str());
-        uniformCache[name] = -1;
+        uniformCache[name] = -1;  // mutable allows modification
         return -1;
     }
 
     int loc = glGetUniformLocation(programID, name.c_str());
-    uniformCache[name] = loc;
+    uniformCache[name] = loc;  // mutable allows modification
 
     if (loc == -1) {
         // Only log this once per uniform to avoid spam
@@ -75,7 +75,7 @@ int Shader::GetUniformLocation(const std::string& name) {
 }
 
 // Set a mat4 uniform
-void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) {
+void Shader::SetMat4(const std::string& name, const glm::mat4& matrix) const {  // Now const
     int loc = GetUniformLocation(name);
     if (loc != -1) {
         glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(matrix));
