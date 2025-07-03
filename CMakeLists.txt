@@ -38,7 +38,7 @@ set(ALSOFT_REQUIRE_NEON OFF CACHE BOOL "Disable ARM NEON requirement" FORCE)
 add_subdirectory(ext/OpenAL)  # static-only OpenAL
 add_subdirectory(ext/stb_image)
 
-# 4) ImGui (no demo window)
+# 4) ImGui (no demo window) - FIXED: Added GLM include directory
 add_library(imgui
         ext/imgui/imgui.cpp
         ext/imgui/imgui_draw.cpp
@@ -52,6 +52,11 @@ add_library(imgui
 target_include_directories(imgui PRIVATE
         ext/imgui
         ext/imgui/backends
+        ${PROJECT_SOURCE_DIR}/ext/glm  # ADDED: GLM include for DebugSystem
+        ${PROJECT_SOURCE_DIR}/src      # ADDED: Source root for Log.hpp and other headers
+        ${PROJECT_SOURCE_DIR}/src/core # ADDED: Core directory for Log.hpp
+        ${PROJECT_SOURCE_DIR}/src/render # ADDED: Render directory
+        ${PROJECT_SOURCE_DIR}/src/game   # ADDED: Game directory
 )
 
 # 5) ImGui linking per-platform

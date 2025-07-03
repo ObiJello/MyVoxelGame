@@ -389,7 +389,11 @@ namespace Debug {
     }
 
     void DebugSystem::DrawTextureAtlasDebug() {
-        ImGui::Begin("Texture Atlas Debug");
+        if (!ImGui::Begin("Texture Atlas Debug")) {
+            // Window is collapsed or not visible, skip all content
+            ImGui::End();
+            return;
+        }
 
         if (!Render::g_textureAtlas.IsLoaded()) {
             ImGui::Text("Texture atlas not loaded");
@@ -431,8 +435,95 @@ namespace Debug {
                     ImVec2(displayWidth, displayHeight),
                     ImVec2(0, 0), ImVec2(1, 1));
 
-        // Grid overlay and mouse interaction code...
-        // (keeping existing texture atlas debug functionality)
+        // FIXED: Add grid overlay and mouse interaction for texture atlas indices
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+        // Draw grid lines over the atlas
+        ImU32 gridColor = IM_COL32(255, 255, 0, 128); // Yellow semi-transparent
+
+        // Vertical lines
+        for (int x = 0; x <= Render::TextureAtlas::TILES_PER_ROW; ++x) {
+            float lineX = cursorPos.x + (x * displayWidth / Render::TextureAtlas::TILES_PER_ROW);
+            drawList->AddLine(
+                ImVec2(lineX, cursorPos.y),
+                ImVec2(lineX, cursorPos.y + displayHeight),
+                gridColor, 1.0f
+            );
+        }
+
+        // Horizontal lines
+        for (int y = 0; y <= Render::TextureAtlas::TILES_PER_COLUMN; ++y) {
+            float lineY = cursorPos.y + (y * displayHeight / Render::TextureAtlas::TILES_PER_COLUMN);
+            drawList->AddLine(
+                ImVec2(cursorPos.x, lineY),
+                ImVec2(cursorPos.x + displayWidth, lineY),
+                gridColor, 1.0f
+            );
+        }
+
+        // Mouse interaction - show tile index on hover (only if window is focused)
+        if (ImGui::IsWindowFocused() || ImGui::IsWindowHovered()) {
+            ImVec2 mousePos = ImGui::GetMousePos();
+            if (mousePos.x >= cursorPos.x && mousePos.x <= cursorPos.x + displayWidth &&
+                mousePos.y >= cursorPos.y && mousePos.y <= cursorPos.y + displayHeight) {
+
+            // Calculate which tile the mouse is over
+            float relativeX = (mousePos.x - cursorPos.x) / displayWidth;
+            float relativeY = (mousePos.y - cursorPos.y) / displayHeight;
+
+            int tileX = static_cast<int>(relativeX * Render::TextureAtlas::TILES_PER_ROW);
+            int tileY = static_cast<int>(relativeY * Render::TextureAtlas::TILES_PER_COLUMN);
+
+            // Clamp to valid range
+            tileX = std::max(0, std::min(tileX, Render::TextureAtlas::TILES_PER_ROW - 1));
+            tileY = std::max(0, std::min(tileY, Render::TextureAtlas::TILES_PER_COLUMN - 1));
+
+            // Calculate atlas index
+            int atlasIndex = tileY * Render::TextureAtlas::TILES_PER_ROW + tileX;
+
+            // Show tooltip with index
+            ImGui::SetTooltip("Atlas Index: %d\nTile Position: (%d, %d)\nUV Range: (%.3f, %.3f) to (%.3f, %.3f)",
+                             atlasIndex, tileX, tileY,
+                             static_cast<float>(tileX) / Render::TextureAtlas::TILES_PER_ROW,
+                             static_cast<float>(tileY) / Render::TextureAtlas::TILES_PER_COLUMN,
+                             static_cast<float>(tileX + 1) / Render::TextureAtlas::TILES_PER_ROW,
+                             static_cast<float>(tileY + 1) / Render::TextureAtlas::TILES_PER_COLUMN);
+
+            // Highlight the hovered tile
+            float tileWidth = displayWidth / Render::TextureAtlas::TILES_PER_ROW;
+            float tileHeight = displayHeight / Render::TextureAtlas::TILES_PER_COLUMN;
+
+            ImVec2 tileTopLeft = ImVec2(
+                cursorPos.x + tileX * tileWidth,
+                cursorPos.y + tileY * tileHeight
+            );
+            ImVec2 tileBottomRight = ImVec2(
+                tileTopLeft.x + tileWidth,
+                tileTopLeft.y + tileHeight
+            );
+
+            // Draw highlight rectangle
+            drawList->AddRect(tileTopLeft, tileBottomRight, IM_COL32(255, 0, 0, 255), 0.0f, 0, 2.0f);
+
+            // Draw index number in the center of the tile
+            char indexText[16];
+            snprintf(indexText, sizeof(indexText), "%d", atlasIndex);
+
+            ImVec2 textSize = ImGui::CalcTextSize(indexText);
+            ImVec2 textPos = ImVec2(
+                tileTopLeft.x + (tileWidth - textSize.x) * 0.5f,
+                tileTopLeft.y + (tileHeight - textSize.y) * 0.5f
+            );
+
+            // Draw text with background for better visibility
+            drawList->AddRectFilled(
+                ImVec2(textPos.x - 2, textPos.y - 1),
+                ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
+                IM_COL32(0, 0, 0, 180)
+            );
+            drawList->AddText(textPos, IM_COL32(255, 255, 255, 255), indexText);
+            }
+        }
 
         ImGui::EndChild();
 
