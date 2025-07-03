@@ -59,8 +59,6 @@ add_library(imgui
         ext/imgui/backends/imgui_impl_opengl3.cpp
         src/debug/DebugSystem.cpp
         src/debug/DebugSystem.hpp
-        src/test/TestSystem.cpp
-        src/test/TestSystem.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui

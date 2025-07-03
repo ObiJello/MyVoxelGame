@@ -204,32 +204,6 @@ namespace PlatformMain {
         Log::Init();
         Log::Info("Starting MyVoxelGame v0.1 with Physics System and Crosshair");
 
-        // *** ADD THIS SECTION FOR TESTING ***
-#ifndef NDEBUG
-        // Check for test command line argument
-        bool runTests = false;
-        for (int i = 1; i < argc; ++i) {
-            if (std::string(argv[i]) == "--test" || std::string(argv[i]) == "-t") {
-                runTests = true;
-                break;
-            }
-        }
-
-        if (runTests) {
-            Log::Info("=== RUNNING TESTS (command line flag detected) ===");
-            bool allTestsPassed = Test::TestSystem::QuickTest();
-            return allTestsPassed ? 0 : 1; // Exit after tests
-        }
-
-        // Always run a quick test in debug builds during startup
-        Log::Info("Running startup validation tests...");
-        bool startupTestsPassed = Test::TestSystem::QuickTest();
-        if (!startupTestsPassed) {
-            Log::Warning("Some startup tests failed, but continuing anyway...");
-        }
-#endif
-        // *** END TEST SECTION ***
-
         Game::BlockRegistry::Init();
 
         // Initialize GLFW
