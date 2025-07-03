@@ -151,6 +151,8 @@ else()
             src/game/Physics.hpp
             src/render/Crosshair.cpp
             src/render/Crosshair.hpp
+            src/render/AtlasBuilder.cpp
+            src/render/AtlasBuilder.hpp
     )
 endif()
 
