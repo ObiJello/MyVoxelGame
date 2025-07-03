@@ -1,4 +1,4 @@
-// File: src/game/Physics.cpp (Fixed - No Gravity Until Chunk Loaded + Noclip Flight)
+// File: src/game/Physics.cpp (Enhanced with Sneak Edge Protection)
 #include "Physics.hpp"
 #include "WorldAccess.hpp"
 #include "BlockRegistry.hpp"
@@ -75,6 +75,81 @@ namespace Game {
         return result;
     }
 
+    // NEW: Check if there's solid ground beneath the given position (for sneak edge protection)
+    bool Physics::HasSolidGroundBelow(const glm::vec3& position, float checkRadius) {
+        // Check if ANY part of the player's 0.6x0.6 square hitbox would still be supported by solid ground
+        // Use the actual player width for accurate edge detection
+
+        const float halfWidth = PlayerPhysics::WIDTH * 0.5f; // 0.3 (half of 0.6)
+        const int checksPerSide = 4; // Check 4 points per side for good coverage
+
+        // Check the four corners of the 0.6x0.6 square first (most important for edge cases)
+        glm::vec2 corners[4] = {
+            {-halfWidth, -halfWidth}, // Bottom-left corner
+            { halfWidth, -halfWidth}, // Bottom-right corner
+            { halfWidth,  halfWidth}, // Top-right corner
+            {-halfWidth,  halfWidth}  // Top-left corner
+        };
+
+        for (int i = 0; i < 4; ++i) {
+            glm::vec3 checkPos = position + glm::vec3(corners[i].x, 0.0f, corners[i].y);
+
+            int blockX = static_cast<int>(std::floor(checkPos.x));
+            int blockY = static_cast<int>(std::floor(checkPos.y - 0.1f));
+            int blockZ = static_cast<int>(std::floor(checkPos.z));
+
+            BlockID blockBelow = WorldAccess::GetBlock(blockX, blockY, blockZ);
+            if (IsBlockSolid(blockBelow)) {
+                return true; // Found support at a corner
+            }
+        }
+
+        // Check points along the edges of the 0.6x0.6 square (excluding corners to avoid double-checking)
+        for (int side = 0; side < 4; ++side) {
+            for (int point = 1; point < checksPerSide - 1; ++point) {
+                float t = static_cast<float>(point) / static_cast<float>(checksPerSide - 1);
+                glm::vec3 checkPos;
+
+                switch (side) {
+                    case 0: // Bottom edge (-Z side)
+                        checkPos = position + glm::vec3(-halfWidth + t * 2.0f * halfWidth, 0.0f, -halfWidth);
+                        break;
+                    case 1: // Right edge (+X side)
+                        checkPos = position + glm::vec3(halfWidth, 0.0f, -halfWidth + t * 2.0f * halfWidth);
+                        break;
+                    case 2: // Top edge (+Z side)
+                        checkPos = position + glm::vec3(halfWidth - t * 2.0f * halfWidth, 0.0f, halfWidth);
+                        break;
+                    case 3: // Left edge (-X side)
+                        checkPos = position + glm::vec3(-halfWidth, 0.0f, halfWidth - t * 2.0f * halfWidth);
+                        break;
+                }
+
+                int blockX = static_cast<int>(std::floor(checkPos.x));
+                int blockY = static_cast<int>(std::floor(checkPos.y - 0.1f));
+                int blockZ = static_cast<int>(std::floor(checkPos.z));
+
+                BlockID blockBelow = WorldAccess::GetBlock(blockX, blockY, blockZ);
+                if (IsBlockSolid(blockBelow)) {
+                    return true; // Found support along an edge
+                }
+            }
+        }
+
+        // Check the center position of the 0.6x0.6 square
+        int centerX = static_cast<int>(std::floor(position.x));
+        int centerY = static_cast<int>(std::floor(position.y - 0.1f));
+        int centerZ = static_cast<int>(std::floor(position.z));
+
+        BlockID centerBlock = WorldAccess::GetBlock(centerX, centerY, centerZ);
+        if (IsBlockSolid(centerBlock)) {
+            return true;
+        }
+
+        // No solid ground found under any part of the player's 0.6x0.6 hitbox
+        return false;
+    }
+
     glm::vec3 Physics::ResolveCollision(const AABB& aabb, const glm::vec3& movement) {
         glm::vec3 resolvedMovement = movement;
 
@@ -104,6 +179,122 @@ namespace Game {
         }
 
         // Y axis last (vertical movement)
+        if (std::abs(movement.y) > 0.001f) {
+            AABB testAABB = aabb;
+            testAABB.min += resolvedMovement;
+            testAABB.max += resolvedMovement;
+
+            if (CheckCollision(testAABB).hasCollision) {
+                resolvedMovement.y = 0.0f;
+            }
+        }
+
+        return resolvedMovement;
+    }
+
+    // ENHANCED: Resolve collision with sneak edge protection
+    glm::vec3 Physics::ResolveCollisionWithSneakProtection(const AABB& aabb, const glm::vec3& movement, bool isSneaking) {
+        glm::vec3 resolvedMovement = movement;
+
+        // If not sneaking, use normal collision resolution
+        if (!isSneaking) {
+            return ResolveCollision(aabb, movement);
+        }
+
+        // IMPORTANT: Only apply sneak edge protection when the player is on the ground
+        // This prevents the wonky behavior when jumping while sneaking
+        glm::vec3 currentCenter = aabb.GetCenter();
+        glm::vec3 currentFeetPos = glm::vec3(currentCenter.x, aabb.min.y, currentCenter.z);
+
+        bool isOnGround = HasSolidGroundBelow(currentFeetPos, PlayerPhysics::WIDTH);
+
+        if (!isOnGround) {
+            // Player is in the air (jumping/falling), use normal collision resolution
+            return ResolveCollision(aabb, movement);
+        }
+
+        // When sneaking AND on ground, handle horizontal movement with sliding
+        glm::vec3 horizontalMovement = glm::vec3(resolvedMovement.x, 0.0f, resolvedMovement.z);
+
+        // Check if the combined horizontal movement would cause collision or falling
+        if (glm::length(horizontalMovement) > 0.001f) {
+            // Test the combined horizontal movement first
+            AABB testAABB = aabb;
+            testAABB.min.x += horizontalMovement.x;
+            testAABB.max.x += horizontalMovement.x;
+            testAABB.min.z += horizontalMovement.z;
+            testAABB.max.z += horizontalMovement.z;
+
+            bool hasCollision = CheckCollision(testAABB).hasCollision;
+            bool wouldFallOff = false;
+
+            if (!hasCollision) {
+                // Check if the FINAL combined position would cause player to walk off an edge
+                glm::vec3 newFeetPos = aabb.GetCenter() + horizontalMovement;
+                newFeetPos.y = aabb.min.y; // Set to feet level
+
+                wouldFallOff = !HasSolidGroundBelow(newFeetPos, PlayerPhysics::WIDTH);
+            }
+
+            if (hasCollision) {
+                // Normal collision - block all movement
+                resolvedMovement.x = 0.0f;
+                resolvedMovement.z = 0.0f;
+            } else if (wouldFallOff) {
+                // Would fall off - try to allow sliding along the edge
+
+                // Try X movement only (sliding left/right)
+                bool canMoveX = true;
+                if (std::abs(horizontalMovement.x) > 0.001f) {
+                    glm::vec3 xOnlyFeetPos = aabb.GetCenter() + glm::vec3(horizontalMovement.x, 0.0f, 0.0f);
+                    xOnlyFeetPos.y = aabb.min.y;
+
+                    AABB xTestAABB = aabb;
+                    xTestAABB.min.x += horizontalMovement.x;
+                    xTestAABB.max.x += horizontalMovement.x;
+
+                    if (CheckCollision(xTestAABB).hasCollision ||
+                        !HasSolidGroundBelow(xOnlyFeetPos, PlayerPhysics::WIDTH)) {
+                        canMoveX = false;
+                    }
+                }
+
+                // Try Z movement only (sliding forward/back)
+                bool canMoveZ = true;
+                if (std::abs(horizontalMovement.z) > 0.001f) {
+                    glm::vec3 zOnlyFeetPos = aabb.GetCenter() + glm::vec3(0.0f, 0.0f, horizontalMovement.z);
+                    zOnlyFeetPos.y = aabb.min.y;
+
+                    AABB zTestAABB = aabb;
+                    zTestAABB.min.z += horizontalMovement.z;
+                    zTestAABB.max.z += horizontalMovement.z;
+
+                    if (CheckCollision(zTestAABB).hasCollision ||
+                        !HasSolidGroundBelow(zOnlyFeetPos, PlayerPhysics::WIDTH)) {
+                        canMoveZ = false;
+                    }
+                }
+
+                // Apply sliding: allow movement in directions that don't cause falling
+                if (!canMoveX) {
+                    resolvedMovement.x = 0.0f;
+                    Log::Debug("Sneak edge protection: blocked X movement, allowing Z sliding");
+                }
+                if (!canMoveZ) {
+                    resolvedMovement.z = 0.0f;
+                    Log::Debug("Sneak edge protection: blocked Z movement, allowing X sliding");
+                }
+
+                // If neither direction is safe, block all movement
+                if (!canMoveX && !canMoveZ) {
+                    resolvedMovement.x = 0.0f;
+                    resolvedMovement.z = 0.0f;
+                    Log::Debug("Sneak edge protection: blocked all horizontal movement");
+                }
+            }
+        }
+
+        // Y axis (vertical movement) - no sneak protection needed
         if (std::abs(movement.y) > 0.001f) {
             AABB testAABB = aabb;
             testAABB.min += resolvedMovement;
@@ -211,12 +402,15 @@ namespace Game {
             horizontalMovement *= speed;
         }
 
-        // Apply movement with collision
+        // Apply movement with collision (now includes sneak edge protection)
         glm::vec3 totalMovement = horizontalMovement * deltaTime +
                                  glm::vec3(0.0f, physics.velocity.y * deltaTime, 0.0f);
 
         AABB currentAABB = physics.GetAABB();
-        glm::vec3 resolvedMovement = ResolveCollision(currentAABB, totalMovement);
+
+        // ENHANCED: Use sneak-aware collision resolution
+        glm::vec3 resolvedMovement = ResolveCollisionWithSneakProtection(
+            currentAABB, totalMovement, physics.isSneaking);
 
         // Update position
         physics.position += resolvedMovement;

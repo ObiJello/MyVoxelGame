@@ -1,4 +1,4 @@
-// File: src/game/Physics.hpp (Added Chunk Loading Check)
+// File: src/game/Physics.hpp (Enhanced with Sneak Edge Protection)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -121,6 +121,12 @@ namespace Game {
 
         // Perform collision detection and response for movement
         static glm::vec3 ResolveCollision(const AABB& aabb, const glm::vec3& movement);
+
+        // NEW: Enhanced collision resolution with sneak edge protection
+        static glm::vec3 ResolveCollisionWithSneakProtection(const AABB& aabb, const glm::vec3& movement, bool isSneaking);
+
+        // NEW: Check if there's solid ground below the given position (for sneak protection)
+        static bool HasSolidGroundBelow(const glm::vec3& position, float checkRadius = 0.25f);
 
         // Update player physics (gravity, movement, collision)
         static void UpdatePlayerPhysics(PlayerPhysics& physics, const glm::vec3& inputMovement,
