@@ -207,7 +207,7 @@ namespace Game {
                 int distA = (a.x - cx) * (a.x - cx) + (a.z - cz) * (a.z - cz);
                 int distB = (b.x - cx) * (b.x - cx) + (b.z - cz) * (b.z - cz);
                 return distA < distB;
-            });
+        });
 
         // Load new chunks (with modest throttling to prevent frame spikes)
         constexpr int MAX_LOADS_PER_FRAME = 8;

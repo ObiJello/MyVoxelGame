@@ -120,12 +120,15 @@ namespace Render {
 
             std::string type = source["type"];
 
-            if (type == "directory") {
+            auto colon = type.find(':');
+            auto coreType = (colon==std::string::npos) ? type : type.substr(colon+1);
+
+            if (coreType == "directory") {
                 ProcessDirectorySource(source, texturesRoot, sources);
-            } else if (type == "single") {
+            } else if (coreType == "single") {
                 ProcessSingleSource(source, texturesRoot, sources);
             } else {
-                Log::Warning("Unknown source type: %s", type.c_str());
+                Log::Warning("Unknown source type: %s", coreType.c_str());
             }
         }
 
@@ -399,6 +402,9 @@ namespace Render {
     }
 
     PackNode* AtlasBuilder::InsertRect(PackNode* node, int width, int height, int index) {
+        if (!node) {
+            return nullptr;
+        }
         if (node->used) {
             // Try inserting into children
             PackNode* newNode = InsertRect(node->left.get(), width, height, index);

@@ -30,6 +30,8 @@
 #include <GLFW/glfw3.h>
 #include <chrono>
 
+#include "AtlasBuilder.hpp"
+
 namespace PlatformMain {
 
     // Input handling
@@ -276,6 +278,13 @@ namespace PlatformMain {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
 
+        // Initialize the new AtlasBuilder system
+        Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
+        if (!Render::g_atlasBuilder->BuildFromJSON("assets/atlases/blocks.json")) {
+            Log::Warning("AtlasBuilder failed to build texture atlas from JSON");
+            Render::g_atlasBuilder.reset();
+        }
+
         // Compile shaders
         Shader blockShader({"shaders/block.vert", "shaders/block.frag"});
 
@@ -354,6 +363,9 @@ namespace PlatformMain {
             // Render UI elements
             RenderBlockHighlight(playerController, viewProj);
 
+            // Render crosshair (must be last to appear on top)
+            RenderCrosshair(window);
+
             // Render debug UI
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
@@ -364,9 +376,6 @@ namespace PlatformMain {
 
             // Finish debug frame
             Debug::DebugSystem::EndFrame();
-
-            // Render crosshair (must be last to appear on top)
-            RenderCrosshair(window);
 
             // Swap buffers and reset input
             glfwSwapBuffers(window);

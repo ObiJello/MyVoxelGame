@@ -70,6 +70,9 @@ target_include_directories(imgui PRIVATE
         ${PROJECT_SOURCE_DIR}/src/game   # ADDED: Game directory
 )
 
+# Link JSON library so DebugSystem can include <nlohmann/json.hpp>
+target_link_libraries(imgui PRIVATE nlohmann_json::nlohmann_json)
+
 # 5) ImGui linking per-platform
 if(WIN32)
     find_package(OpenGL REQUIRED)

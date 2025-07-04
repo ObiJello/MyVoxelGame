@@ -55,7 +55,7 @@ void main() {
 
     Crosshair::Crosshair()
         : vao(0), vbo(0), textureID(0), shaderProgram(0)
-        , isVisible(true), crosshairSize(16), isInitialized(false) {
+        , isVisible(true), crosshairSize(32), isInitialized(false) {
     }
 
     Crosshair::~Crosshair() {

@@ -495,12 +495,6 @@ namespace Game {
         outData = s_uploadQueue.front();
         s_uploadQueue.pop();
 
-        /*if (outData) {
-            Log::Debug("Popped mesh data for chunk (%d, %d) section %d with %zu vertices",
-                      outData->chunkXZ.x, outData->chunkXZ.y, outData->sectionIndex,
-                      outData->vertices.size());
-        }*/
-
         return true;
     }
 

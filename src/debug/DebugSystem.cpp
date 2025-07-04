@@ -197,7 +197,7 @@ namespace Debug {
         }
 
         int crosshairSize = Render::g_crosshair.GetSize();
-        if (ImGui::SliderInt("Crosshair Size", &crosshairSize, 8, 32)) {
+        if (ImGui::SliderInt("Crosshair Size", &crosshairSize, 2, 100)) {
             Render::g_crosshair.SetSize(crosshairSize);
         }
 
@@ -438,7 +438,7 @@ namespace Debug {
         ImGui::Text("Atlas Preview (Scroll to navigate):");
 
         static float zoomLevel = 1.0f;
-        ImGui::SliderFloat("Zoom", &zoomLevel, 0.25f, 4.0f, "%.2fx");
+        ImGui::SliderFloat("Zoom", &zoomLevel, 0.25f, 10.0f, "%.2fx");
         ImGui::SameLine();
         if (ImGui::Button("Reset Zoom")) {
             zoomLevel = 1.0f;
