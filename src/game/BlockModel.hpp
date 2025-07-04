@@ -87,14 +87,14 @@ namespace Game {
 
         BlockModel() = default;
 
-        // Resolve a texture reference like "#side" to actual texture path
+        // Resolve a texture reference like "side" to actual texture path
         std::string ResolveTexture(const std::string& textureRef) const {
-            if (textureRef.empty() || textureRef[0] != '#') {
-                return textureRef; // Not a reference, return as-is
+            if (textureRef.empty()) {
+                return textureRef; // Empty reference, return as-is
             }
 
-            std::string key = textureRef.substr(1); // Remove '#'
-            auto it = textures.find(key);
+            // Look up in texture map (textureRef is already clean, e.g., "side")
+            auto it = textures.find(textureRef);
             if (it != textures.end()) {
                 return it->second;
             }
@@ -156,18 +156,15 @@ namespace Game {
 
     private:
         static std::unordered_map<std::string, BlockModel> s_models;
-        static std::unordered_map<std::string, BlockModel> s_parentModels; // NEW: Cache for parent models
         static std::unordered_map<std::string, nlohmann::json> s_rawJsons; // Raw JSON storage
         static BlockModel s_defaultModel;
 
-        // Helper functions
-        static BlockModel LoadModelFromFile(const std::string& filePath);
+        // Helper functions - FIXED: Now match the implementation
         static void CreateDefaultModel();
-
-        // NEW: Parent model resolution functions
-        static void LoadParentModels(const std::string& modelsPath);
-        static BlockModel ResolveModel(const BlockModel& model);
-        static BlockModel ResolveModelRecursive(const BlockModel& model, int depth);
+        static BlockModel ResolveModel(const std::string& name);
+        static BlockModel ResolveModelRecursive(const std::string& name, int depth);
+        static std::string CanonicalizeModelName(const std::string& modelRef);
+        static Element ParseElement(const nlohmann::json& elemJson);
     };
 
 } // namespace Game

@@ -1,12 +1,13 @@
-// File: src/game/ModelBasedMesher.cpp - FIXED
+// File: src/game/ModelBasedMesher.cpp - FIXED Memory Safety
 #include "ModelBasedMesher.hpp"
 #include "EnhancedBlockRegistry.hpp"
 #include "BlockRegistry.hpp"
-#include "Chunk.hpp"  // ADDED: For Chunk class definition
+#include "Chunk.hpp"
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
 #include <cmath>
 #include <algorithm>
+#include <unordered_set>
 
 namespace Game {
 
@@ -32,11 +33,42 @@ namespace Game {
             return;
         }
 
-        // Process each element in the block model
-        for (const auto& element : model.elements) {
+        // **CRITICAL FIX**: Validate model integrity before processing
+        if (model.elements.empty()) {
+            Log::Debug("Block model has no elements, skipping");
+            return;
+        }
 
-            // Process each face of the element
-            for (const auto& [faceDir, faceDef] : element.faces) {
+        // Process each element in the block model
+        for (size_t elementIndex = 0; elementIndex < model.elements.size(); ++elementIndex) {
+            const auto& element = model.elements[elementIndex];
+
+            // **SAFETY**: Validate element integrity
+            if (element.faces.empty()) {
+                continue; // Skip elements with no faces
+            }
+
+            // **CRITICAL FIX**: Use safe iteration to prevent iterator corruption
+            std::vector<std::pair<FaceDir, FaceDef>> facesToProcess;
+            facesToProcess.reserve(element.faces.size());
+
+            // Copy faces to a vector for safe iteration
+            try {
+                for (const auto& facePair : element.faces) {
+                    facesToProcess.emplace_back(facePair.first, facePair.second);
+                }
+            } catch (const std::exception& e) {
+                Log::Error("Exception while copying faces for element %zu: %s", elementIndex, e.what());
+                continue; // Skip this element
+            }
+
+            // Process each face safely
+            for (const auto& [faceDir, faceDef] : facesToProcess) {
+                // **SAFETY**: Validate face definition
+                if (faceDef.textureRef.empty()) {
+                    Log::Debug("Skipping face with empty texture reference");
+                    continue;
+                }
 
                 // Check if this face should be culled
                 if (ShouldCullFace(blockPos, faceDir, faceDef.cullface, context)) {
@@ -47,7 +79,12 @@ namespace Game {
                 // Get texture UV coordinates from AtlasBuilder
                 Render::AtlasUVRect uvRect;
                 if (!GetModelTextureUV(faceDef.textureRef, model, *context.atlasBuilder, uvRect)) {
-                    Log::Warning("Failed to get UV for texture: %s", faceDef.textureRef.c_str());
+                    // **FIX**: Only log once per unique texture to avoid spam
+                    static std::unordered_set<std::string> loggedMissingTextures;
+                    if (loggedMissingTextures.find(faceDef.textureRef) == loggedMissingTextures.end()) {
+                        Log::Warning("Failed to get UV for texture: %s", faceDef.textureRef.c_str());
+                        loggedMissingTextures.insert(faceDef.textureRef);
+                    }
                     continue;
                 }
 
@@ -58,12 +95,25 @@ namespace Game {
                 glm::vec3 elementMin = element.from / 16.0f;
                 glm::vec3 elementMax = element.to / 16.0f;
 
+                // **SAFETY**: Validate element bounds
+                if (elementMin.x > elementMax.x || elementMin.y > elementMax.y || elementMin.z > elementMax.z) {
+                    Log::Warning("Invalid element bounds: min(%.2f,%.2f,%.2f) max(%.2f,%.2f,%.2f)",
+                                elementMin.x, elementMin.y, elementMin.z,
+                                elementMax.x, elementMax.y, elementMax.z);
+                    continue;
+                }
+
                 // Generate quad vertices and UVs
                 std::array<glm::vec3, 4> quadVertices;
                 std::array<glm::vec2, 4> quadUVs;
 
-                GenerateQuadForFace(faceDir, elementMin, elementMax,
-                                  faceDef.uv, uvRect, quadVertices, quadUVs);
+                try {
+                    GenerateQuadForFace(faceDir, elementMin, elementMax,
+                                      faceDef.uv, uvRect, quadVertices, quadUVs);
+                } catch (const std::exception& e) {
+                    Log::Error("Exception generating quad for face: %s", e.what());
+                    continue;
+                }
 
                 // Calculate biome tint if needed
                 glm::vec3 tintColor(1.0f); // Default: no tint
@@ -76,6 +126,14 @@ namespace Game {
                     );
                 }
 
+                // **SAFETY**: Reserve space if needed to prevent reallocations during push_back
+                if (vertices.capacity() < vertices.size() + 4) {
+                    vertices.reserve(vertices.size() + 64); // Reserve in chunks
+                }
+                if (indices.capacity() < indices.size() + 6) {
+                    indices.reserve(indices.size() + 96); // Reserve in chunks
+                }
+
                 // Add vertices to mesh
                 uint32_t baseIndex = static_cast<uint32_t>(vertices.size());
 
@@ -85,9 +143,6 @@ namespace Game {
                     vertex.nrm = faceNormal;
                     vertex.uv = quadUVs[i];
                     vertex.ao = 255; // Full brightness for now
-
-                    // Note: Biome tinting would be applied in the fragment shader
-                    // using the tintIndex and colormap textures
 
                     vertices.push_back(vertex);
                 }
@@ -109,8 +164,24 @@ namespace Game {
         const Render::AtlasBuilder& atlas,
         Render::AtlasUVRect& uvRect) {
 
+        // **SAFETY**: Validate input
+        if (textureRef.empty()) {
+            return false;
+        }
+
         // Resolve texture reference through the model
-        std::string texturePath = model.ResolveTexture(textureRef);
+        std::string texturePath;
+        try {
+            texturePath = model.ResolveTexture(textureRef);
+        } catch (const std::exception& e) {
+            Log::Error("Exception resolving texture reference '%s': %s", textureRef.c_str(), e.what());
+            return false;
+        }
+
+        // **SAFETY**: Check for valid texture path
+        if (texturePath.empty() || texturePath == "missingno") {
+            return false;
+        }
 
         // Look up in AtlasBuilder
         return atlas.GetUVRect(texturePath, uvRect);
@@ -145,9 +216,6 @@ namespace Game {
             return tintColor; // No colormap available
         }
 
-        // For now, return a simple calculated tint
-        // TODO: Implement actual colormap texture sampling
-
         // Simple grass tinting formula (based on Minecraft's algorithm)
         if (tintIndex == 0) {
             // Grass tinting
@@ -181,6 +249,12 @@ namespace Game {
 
         if (!context.neighborCtx) {
             return false; // Can't cull without neighbor info
+        }
+
+        // **SAFETY**: Validate face direction
+        if (static_cast<int>(faceDir) < 0 || static_cast<int>(faceDir) >= 6) {
+            Log::Warning("Invalid face direction: %d", static_cast<int>(faceDir));
+            return false;
         }
 
         // Calculate neighbor position
@@ -266,6 +340,12 @@ namespace Game {
         float u2 = faceUV.z / 16.0f;
         float v2 = faceUV.w / 16.0f;
 
+        // **SAFETY**: Clamp UV coordinates to valid range
+        u1 = std::clamp(u1, 0.0f, 1.0f);
+        v1 = std::clamp(v1, 0.0f, 1.0f);
+        u2 = std::clamp(u2, 0.0f, 1.0f);
+        v2 = std::clamp(v2, 0.0f, 1.0f);
+
         // Map to atlas coordinates
         float atlasU1 = atlasUV.uvMin.x + u1 * (atlasUV.uvMax.x - atlasUV.uvMin.x);
         float atlasV1 = atlasUV.uvMin.y + v1 * (atlasUV.uvMax.y - atlasUV.uvMin.y);
@@ -288,16 +368,24 @@ namespace Game {
         }
 
         // Convert to local chunk coordinates for the neighbor context lookup
-        // This is similar to the existing GetBlockFromNeighborContext function
         int localX = pos.x;
         int worldY = pos.y;
         int localZ = pos.z;
 
+        // **SAFETY**: Validate world Y bounds
+        if (worldY < Config::MinY || worldY > Config::MaxY) {
+            return BlockID::Air;
+        }
+
         // Handle within-chunk coordinates (most common case)
         if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
-            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z &&
-            worldY >= Config::MinY && worldY <= Config::MaxY) {
-            return context.neighborCtx->center->GetBlock(localX, worldY, localZ);
+            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+            try {
+                return context.neighborCtx->center->GetBlock(localX, worldY, localZ);
+            } catch (const std::exception& e) {
+                Log::Error("Exception getting block from center chunk: %s", e.what());
+                return BlockID::Air;
+            }
         }
 
         // Handle cross-chunk coordinates
@@ -335,12 +423,16 @@ namespace Game {
         // Return air if neighbor isn't available or coordinates are out of bounds
         if (!targetChunk ||
             targetX < 0 || targetX >= Math::CHUNK_SIZE_X ||
-            targetZ < 0 || targetZ >= Math::CHUNK_SIZE_Z ||
-            worldY < Config::MinY || worldY > Config::MaxY) {
+            targetZ < 0 || targetZ >= Math::CHUNK_SIZE_Z) {
             return BlockID::Air;
         }
 
-        return targetChunk->GetBlock(targetX, worldY, targetZ);
+        try {
+            return targetChunk->GetBlock(targetX, worldY, targetZ);
+        } catch (const std::exception& e) {
+            Log::Error("Exception getting block from neighbor chunk: %s", e.what());
+            return BlockID::Air;
+        }
     }
 
     bool ModelBasedMesher::IsBlockOpaque(BlockID blockId) {
@@ -348,8 +440,13 @@ namespace Game {
             return false;
         }
 
-        const EnhancedBlock& block = EnhancedBlockRegistry::Get(blockId);
-        return block.opaque;
+        try {
+            const EnhancedBlock& block = EnhancedBlockRegistry::Get(blockId);
+            return block.opaque;
+        } catch (const std::exception& e) {
+            Log::Error("Exception checking block opacity: %s", e.what());
+            return false; // Assume transparent if we can't check
+        }
     }
 
 } // namespace Game

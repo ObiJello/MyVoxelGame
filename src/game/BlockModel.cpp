@@ -1,4 +1,4 @@
-// File: src/game/BlockModel.cpp (Refactored - Vanilla Minecraft Pattern)
+// File: src/game/BlockModel.cpp (Fixed - Vanilla Minecraft Pattern)
 #include "BlockModel.hpp"
 #include "../core/Log.hpp"
 #include <filesystem>
@@ -12,7 +12,7 @@ namespace Game {
 
     // Static member definitions
     std::unordered_map<std::string, BlockModel> BlockModelRegistry::s_models;
-    std::unordered_map<std::string, nlohmann::json> BlockModelRegistry::s_rawJsons; // NEW: Raw JSON storage
+    std::unordered_map<std::string, nlohmann::json> BlockModelRegistry::s_rawJsons; // Raw JSON storage
     BlockModel BlockModelRegistry::s_defaultModel;
 
     bool BlockModelRegistry::LoadModels(const std::string& modelsPath) {
@@ -61,10 +61,8 @@ namespace Game {
                     json j;
                     file >> j;
 
-                    // Store under multiple key schemes for flexible lookup
+                    // Store under base name only (canonicalization handles prefixed references)
                     s_rawJsons[filename] = j;                           // "grass_block"
-                    s_rawJsons["block/" + filename] = j;                // "block/grass_block"
-                    s_rawJsons["minecraft:block/" + filename] = j;      // "minecraft:block/grass_block"
 
                     loadedJsonCount++;
                     Log::Debug("Loaded raw JSON: %s", filename.c_str());
@@ -89,12 +87,10 @@ namespace Game {
 
             for (const std::string& modelName : modelNames) {
                 try {
-                    BlockModel resolvedModel = ResolveModel(modelName);
-                    s_models[modelName] = std::move(resolvedModel);
+                    ResolveModel(modelName); // Model is cached inside ResolveModelRecursive
                     resolvedModelCount++;
 
-                    Log::Debug("Successfully resolved model '%s' with %zu elements",
-                              modelName.c_str(), s_models[modelName].elements.size());
+                    Log::Debug("Successfully resolved model '%s'", modelName.c_str());
                 } catch (const std::exception& e) {
                     Log::Error("Failed to resolve model '%s': %s", modelName.c_str(), e.what());
                     failedCount++;
@@ -159,6 +155,13 @@ namespace Game {
 
             Log::Debug("  Parent: %s -> %s", parentRef.c_str(), parentName.c_str());
             result = ResolveModelRecursive(parentName, depth + 1);
+
+            // **OPTIMIZATION**: Early-out for no-op children that only redirect to parent
+            if (!j.contains("textures") && !j.contains("elements")) {
+                Log::Debug("  No-op child model, returning parent directly");
+                s_models[name] = result;
+                return result;
+            }
         } else {
             // No parent - start with default model
             result = s_defaultModel;
@@ -167,8 +170,16 @@ namespace Game {
         // Merge this JSON's textures (child overrides parent)
         if (j.contains("textures")) {
             for (const auto& [key, value] : j["textures"].items()) {
-                result.textures[key] = value.get<std::string>();
-                Log::Debug("  Texture: %s -> %s", key.c_str(), value.get<std::string>().c_str());
+                std::string texPath = value.get<std::string>();
+
+                // **CANONICALIZATION**: Strip "minecraft:" namespace prefix to match atlas keys
+                // "minecraft:block/stone" -> "block/stone"
+                if (texPath.rfind("minecraft:", 0) == 0) {
+                    texPath = texPath.substr(10); // Remove "minecraft:" prefix
+                }
+
+                result.textures[key] = texPath;
+                Log::Debug("  Texture: %s -> %s", key.c_str(), texPath.c_str());
             }
         }
 
@@ -188,6 +199,10 @@ namespace Game {
 
         Log::Debug("Resolved model '%s': %zu elements, %zu textures",
                   name.c_str(), result.elements.size(), result.textures.size());
+
+        // **OPTIMIZATION**: Cache the resolved model immediately to avoid redundant work
+        // This matches Minecraft's exact behavior where each model is resolved only once
+        s_models[name] = result;
 
         return result;
     }
@@ -250,9 +265,11 @@ namespace Game {
                     faceDef.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f);
                 }
 
-                // Parse texture reference
+                // Parse texture reference and strip leading '#' for clean downstream lookup
                 if (faceJson.contains("texture")) {
-                    faceDef.textureRef = faceJson["texture"].get<std::string>();
+                    std::string rawRef = faceJson["texture"].get<std::string>();
+                    // Strip leading '#' to canonicalize: "#side" -> "side"
+                    faceDef.textureRef = (rawRef[0] == '#') ? rawRef.substr(1) : rawRef;
                 }
 
                 // Parse tint index (optional)
@@ -285,8 +302,17 @@ namespace Game {
     void BlockModelRegistry::CreateDefaultModel() {
         s_defaultModel = BlockModel();
 
-        // Create default texture mappings
+        // Create comprehensive default texture mappings
         s_defaultModel.textures["all"] = "block/stone";
+        s_defaultModel.textures["up"] = "block/stone";
+        s_defaultModel.textures["down"] = "block/stone";
+        s_defaultModel.textures["north"] = "block/stone";
+        s_defaultModel.textures["south"] = "block/stone";
+        s_defaultModel.textures["west"] = "block/stone";
+        s_defaultModel.textures["east"] = "block/stone";
+        s_defaultModel.textures["side"] = "block/stone";
+        s_defaultModel.textures["top"] = "block/stone";
+        s_defaultModel.textures["bottom"] = "block/stone";
 
         // Create a single full cube element
         Element defaultElement;
@@ -302,7 +328,7 @@ namespace Game {
         for (FaceDir dir : allFaces) {
             FaceDef face;
             face.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f); // Full face UV
-            face.textureRef = "#all";
+            face.textureRef = "all"; // Clean reference (no '#' prefix)
             face.tintIndex = -1; // No tinting
             face.cullface = FaceDirToString(dir); // Enable culling for all faces
 
@@ -311,7 +337,7 @@ namespace Game {
 
         s_defaultModel.elements.push_back(defaultElement);
 
-        Log::Debug("Created default cube model");
+        Log::Debug("Created default cube model with comprehensive texture mappings");
     }
 
     const BlockModel& BlockModelRegistry::GetModel(const std::string& name) {
