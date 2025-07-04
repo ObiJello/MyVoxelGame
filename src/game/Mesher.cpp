@@ -1,13 +1,16 @@
-// File: src/game/Mesher.cpp (Enhanced with Texture Atlas Support and Fixed Y Coordinates)
+// File: src/game/Mesher.cpp (Enhanced with Model Support)
 #include "Mesher.hpp"
+#include "ModelBasedMesher.hpp"          // NEW
+#include "EnhancedBlockRegistry.hpp"     // NEW
 #include "Log.hpp"
 #include "../render/Vertex.hpp"
-#include "../render/TextureAtlas.hpp"  // Add texture atlas support
+#include "../render/TextureAtlas.hpp"
+#include "../render/AtlasBuilder.hpp"    // NEW
 #include "../game/WorldMath.hpp"
 #include "../game/ChunkSection.hpp"
 #include "../game/BlockRegistry.hpp"
 #include "../game/Chunk.hpp"
-#include "../core/Config.hpp"  // Add for MinY/MaxY bounds
+#include "../core/Config.hpp"
 #include <glm/vec3.hpp>
 #include <glm/vec2.hpp>
 #include <mutex>
@@ -56,13 +59,13 @@ namespace Game {
         if (blockId == BlockID::Air) {
             return false;
         }
-        const Block& block = BlockRegistry::Get(blockId);
+        const EnhancedBlock& block = EnhancedBlockRegistry::Get(blockId);
         return block.opaque;
     }
 
     // Enhanced block lookup with full inter-chunk support
     static BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int localX, int worldY, int localZ) {
-        // FIXED: Validate world Y bounds first - return Air for out-of-world coordinates
+        // Validate world Y bounds first
         if (worldY < Config::MinY || worldY > Config::MaxY) {
             return BlockID::Air;
         }
@@ -109,7 +112,7 @@ namespace Game {
         return targetChunk->GetBlock(targetX, worldY, targetZ);
     }
 
-    // FIXED: Optimized block lookup for intra-chunk access with proper world Y coordinates
+    // Optimized block lookup for intra-chunk access with proper world Y coordinates
     static BlockID GetBlockFromChunk(const Chunk* chunk, int localX, int worldY, int localZ) {
         if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
             localZ < 0 || localZ >= Math::CHUNK_SIZE_Z ||
@@ -117,33 +120,35 @@ namespace Game {
             return BlockID::Air;
         }
 
-        // FIXED: Pass world Y coordinate directly to chunk
         return chunk->GetBlock(localX, worldY, localZ);
     }
 
     // Helper function to generate UV coordinates for a face using texture atlas
-    static void GenerateUVsForFace(int face, const Block& block, glm::vec2 uvs[4]) {
-        // Get the atlas index for this face
-        uint16_t atlasIndex = block.texIdx[face];
+    static void GenerateUVsForFace(int face, const EnhancedBlock& block, glm::vec2 uvs[4]) {
+        if (Render::g_atlasBuilder && !block.useLegacyTextures) {
+            // This shouldn't happen - model-based blocks should use ModelBasedMesher
+            Log::Warning("GenerateUVsForFace called for model-based block: %s", block.name.c_str());
+            // Fall back to legacy for safety
+        }
 
-        // Get the UV tile from the texture atlas
+        // Use legacy texture atlas
+        uint16_t atlasIndex = block.legacyTexIdx[face];
         Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
 
-        // FIXED: Flip V coordinates to correct upside-down textures
         // Map the 4 corners of the quad to the atlas tile with corrected orientation
-        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left (was uvMin.y, now uvMax.y)
-        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right (was uvMin.y, now uvMax.y)
-        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right (was uvMax.y, now uvMin.y)
-        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left (was uvMax.y, now uvMin.y)
+        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left
+        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right
+        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right
+        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left
     }
 
-    // **NEW** Inter-chunk meshing function with full neighbor support and texture atlas
-    void InterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
+    // NEW: Enhanced meshing function that can handle both model-based and legacy blocks
+    void EnhancedInterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
         assert(section != nullptr);
         assert(meshData != nullptr);
         assert(ctx.center != nullptr);
 
-        /*Log::Debug("InterChunkMesherJob starting for chunk (%d, %d) section %d with texture atlas support",
+        /*Log::Debug("EnhancedInterChunkMesherJob starting for chunk (%d, %d) section %d",
                   meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
 
         // Validate inputs
@@ -162,11 +167,203 @@ namespace Game {
         // Performance counters
         int solidBlocks = 0;
         int facesGenerated = 0;
+        int facesCulled = 0;
+        int modelBasedBlocks = 0;
+        int legacyBlocks = 0;
+
+        // Calculate the world Y offset for this section
+        int sectionWorldYOffset = Config::MinY + (meshData->sectionIndex * Math::SECTION_HEIGHT);
+
+        // Setup model mesh context
+        ModelMeshContext modelContext;
+        modelContext.neighborCtx = &ctx;
+        modelContext.atlasBuilder = Render::g_atlasBuilder.get();
+        modelContext.facesGenerated = &facesGenerated;
+        modelContext.facesCulled = &facesCulled;
+        // TODO: Add biome data lookup for actual biome tinting
+        modelContext.biomeTemperature = 128;
+        modelContext.biomeHumidity = 128;
+
+        // Process each voxel in the 16×16×16 section
+        for (int y = 0; y < ChunkSection::SIZE; ++y) {
+            for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                for (int x = 0; x < ChunkSection::SIZE; ++x) {
+                    BlockID blockId = section->GetBlockID(x, y, z);
+                    if (blockId == BlockID::Air) {
+                        continue;
+                    }
+
+                    solidBlocks++;
+
+                    // Check if this block uses model-based rendering
+                    if (EnhancedBlockRegistry::UsesModelRendering(blockId)) {
+                        // Use model-based meshing
+                        modelBasedBlocks++;
+
+                        const BlockModel& model = EnhancedBlockRegistry::GetBlockModel(blockId);
+                        glm::ivec3 worldPos(x, sectionWorldYOffset + y, z);
+
+                        ModelBasedMesher::MeshBlockWithModel(
+                            model, worldPos, modelContext, vertices, indices
+                        );
+                    } else {
+                        // Use legacy meshing for this block
+                        legacyBlocks++;
+
+                        const EnhancedBlock& block = EnhancedBlockRegistry::Get(blockId);
+
+                        // Use legacy meshing code
+                        LegacyMeshBlock(block, x, y, z, sectionWorldYOffset, ctx,
+                                      vertices, indices, facesGenerated, facesCulled);
+                    }
+                }
+            }
+        }
+
+        /*Log::Debug("EnhancedInterChunkMesherJob stats: %d solid blocks (%d model-based, %d legacy), "
+                  "%d faces generated, %d faces culled",
+                  solidBlocks, modelBasedBlocks, legacyBlocks, facesGenerated, facesCulled);*/
+
+        // Finalize mesh data
+        {
+            std::lock_guard<std::mutex> lock(s_uploadMutex);
+
+            meshData->vertices = std::move(vertices);
+            meshData->indices = std::move(indices);
+
+            if (!meshData->vertices.empty()) {
+                /*Log::Debug("Enqueueing enhanced mesh for chunk (%d, %d) section %d with %zu vertices",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
+                          meshData->vertices.size());*/
+                s_uploadQueue.push(meshData);
+            } else {
+                /*Log::Debug("Enhanced mesh for chunk (%d, %d) section %d is empty, discarding",
+                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
+                delete meshData;
+            }
+        }
+    }
+
+    // NEW: Legacy meshing function for blocks that still use the old system
+    void LegacyMeshBlock(const EnhancedBlock& block, int x, int y, int z, int sectionWorldYOffset,
+                        const NeighborContext& ctx, std::vector<Render::Vertex>& vertices,
+                        std::vector<uint32_t>& indices, int& facesGenerated, int& facesCulled) {
+
+        // Check each of the 6 potential faces
+        for (int face = 0; face < 6; ++face) {
+            int nx = x + DX[face];
+            int ny = y + DY[face];
+            int nz = z + DZ[face];
+
+            bool emitFace = false;
+            BlockID neighborId = BlockID::Air;
+
+            // Determine neighbor location and culling strategy
+            if (nx >= 0 && nx < ChunkSection::SIZE &&
+                ny >= 0 && ny < ChunkSection::SIZE &&
+                nz >= 0 && nz < ChunkSection::SIZE) {
+
+                // Neighbor is within current section - fast path
+                neighborId = ctx.center->sections[0]->GetBlockID(nx, ny, nz); // This needs the right section!
+                emitFace = !IsBlockOpaque(neighborId);
+                if (!emitFace) {
+                    facesCulled++;
+                }
+            }
+            else {
+                // Neighbor is outside current section - need enhanced lookup
+                int chunkLocalX = x + DX[face];
+                int worldY = sectionWorldYOffset + y + DY[face];
+                int chunkLocalZ = z + DZ[face];
+
+                // Use the enhanced neighbor context lookup
+                neighborId = GetBlockFromNeighborContext(ctx, chunkLocalX, worldY, chunkLocalZ);
+                emitFace = !IsBlockOpaque(neighborId);
+                if (!emitFace) {
+                    facesCulled++;
+                }
+            }
+
+            if (!emitFace) {
+                continue; // Face is culled
+            }
+
+            // Generate quad for this face using legacy texture system
+            auto baseIndex = static_cast<uint32_t>(vertices.size());
+
+            // Get UV coordinates for this face from legacy texture atlas
+            glm::vec2 faceUVs[4];
+            GenerateUVsForFace(face, block, faceUVs);
+
+            // Build 4 vertices for the quad
+            for (int corner = 0; corner < 4; ++corner) {
+                glm::vec3 pos = {
+                    static_cast<float>(x + OFFSETS[face][corner][0]),
+                    static_cast<float>(y + OFFSETS[face][corner][1]),
+                    static_cast<float>(z + OFFSETS[face][corner][2])
+                };
+
+                Render::Vertex vert;
+                vert.pos = pos;
+                vert.nrm = NRM[face];
+                vert.uv = faceUVs[corner];
+                vert.ao = 255; // No ambient occlusion in this implementation
+
+                vertices.push_back(vert);
+            }
+
+            // Generate two triangles (6 indices) for the quad
+            indices.insert(indices.end(), {
+                baseIndex + 0, baseIndex + 2, baseIndex + 1,
+                baseIndex + 0, baseIndex + 3, baseIndex + 2
+            });
+
+            facesGenerated++;
+        }
+    }
+
+    // UPDATED: Inter-chunk meshing function with model support
+    void InterChunkMesherJob(ChunkSection* section, MeshData* outData, const NeighborContext& ctx) {
+        // Check if enhanced system is available
+        if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
+            // Use enhanced mesher with model support
+            EnhancedInterChunkMesherJob(section, outData, ctx);
+        } else {
+            // Fall back to legacy meshing - use the original implementation
+            Log::Debug("AtlasBuilder not available, using legacy inter-chunk mesher");
+
+            // Call the original InterChunkMesherJob implementation
+            OriginalInterChunkMesherJob(section, outData, ctx);
+        }
+    }
+
+    // Original inter-chunk mesher (renamed for fallback)
+    void OriginalInterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
+        assert(section != nullptr);
+        assert(meshData != nullptr);
+        assert(ctx.center != nullptr);
+
+        // Validate inputs
+        if (meshData->sectionIndex < 0 || meshData->sectionIndex >= Math::SECTIONS_PER_CHUNK) {
+            Log::Error("Invalid section index: %d", meshData->sectionIndex);
+            delete meshData;
+            return;
+        }
+
+        // Build mesh data
+        std::vector<Render::Vertex> vertices;
+        std::vector<uint32_t> indices;
+        vertices.reserve(24 * 64);
+        indices.reserve(36 * 64);
+
+        // Performance counters
+        int solidBlocks = 0;
+        int facesGenerated = 0;
         int facesCulledIntraSection = 0;
         int facesCulledInterSection = 0;
         int facesCulledInterChunk = 0;
 
-        // FIXED: Calculate the world Y offset for this section
+        // Calculate the world Y offset for this section
         int sectionWorldYOffset = Config::MinY + (meshData->sectionIndex * Math::SECTION_HEIGHT);
 
         // Process each voxel in the 16×16×16 section
@@ -181,7 +378,7 @@ namespace Game {
                     solidBlocks++;
                     const Block& block = BlockRegistry::Get(blockId);
 
-                    // Check each of the 6 potential faces
+                    // For each of 6 possible faces:
                     for (int face = 0; face < 6; ++face) {
                         int nx = x + DX[face];
                         int ny = y + DY[face];
@@ -190,43 +387,44 @@ namespace Game {
                         bool emitFace = false;
                         BlockID neighborId = BlockID::Air;
 
-                        // Determine neighbor location and culling strategy
+                        // Check neighbor location and determine culling strategy
                         if (nx >= 0 && nx < ChunkSection::SIZE &&
                             ny >= 0 && ny < ChunkSection::SIZE &&
                             nz >= 0 && nz < ChunkSection::SIZE) {
 
-                            // Neighbor is within current section - fast path
+                            // Neighbor is within current section - use fast intra-section lookup
                             neighborId = section->GetBlockID(nx, ny, nz);
                             emitFace = !IsBlockOpaque(neighborId);
+
                             if (!emitFace) {
                                 facesCulledIntraSection++;
                             }
                         }
                         else {
-                            // Neighbor is outside current section - need enhanced lookup
+                            // Neighbor is outside current section - need inter-section lookup
                             int chunkLocalX = x + DX[face];
                             int worldY = sectionWorldYOffset + y + DY[face];
                             int chunkLocalZ = z + DZ[face];
 
-                            // Check if neighbor is within the same chunk
+                            // Check if neighbor is within the chunk bounds
                             if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
                                 chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
                                 worldY >= Config::MinY && worldY <= Config::MaxY) {
 
-                                // Inter-section lookup within the same chunk
+                                // Use enhanced lookup function for cross-section access
                                 neighborId = GetBlockFromChunk(ctx.center.get(), chunkLocalX, worldY, chunkLocalZ);
                                 emitFace = !IsBlockOpaque(neighborId);
+
                                 if (!emitFace) {
                                     facesCulledInterSection++;
                                 }
                             }
                             else if (worldY < Config::MinY || worldY > Config::MaxY) {
-                                // Neighbor is outside world Y bounds - always emit face (top/bottom of world)
+                                // Neighbor is outside world Y bounds - always emit face
                                 emitFace = true;
                             }
                             else if (ctx.hasAllNeighbors) {
-                                // **ENHANCED** Inter-chunk lookup with neighbor context
-                                // Only do this for horizontal neighbors (X/Z), not vertical (Y)
+                                // Enhanced inter-chunk lookup with neighbor context
                                 neighborId = GetBlockFromNeighborContext(ctx, chunkLocalX, worldY, chunkLocalZ);
                                 emitFace = !IsBlockOpaque(neighborId);
                                 if (!emitFace) {
@@ -234,13 +432,13 @@ namespace Game {
                                 }
                             }
                             else {
-                                // No neighbor available - assume air (will be corrected when neighbor loads)
+                                // No neighbor available - assume air
                                 emitFace = true;
                             }
                         }
 
                         if (!emitFace) {
-                            continue; // Face is culled
+                            continue;
                         }
 
                         // Generate quad for this face with proper texture atlas UVs
@@ -248,9 +446,9 @@ namespace Game {
 
                         // Get UV coordinates for this face from texture atlas
                         glm::vec2 faceUVs[4];
-                        GenerateUVsForFace(face, block, faceUVs);
+                        GenerateUVsForFaceLegacy(face, block, faceUVs);
 
-                        // Build 4 vertices for the quad
+                        // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
                             glm::vec3 pos = {
                                 static_cast<float>(x + OFFSETS[face][corner][0]),
@@ -261,14 +459,13 @@ namespace Game {
                             Render::Vertex vert;
                             vert.pos = pos;
                             vert.nrm = NRM[face];
-                            vert.uv = faceUVs[corner]; // Use atlas UV coordinates
-                            vert.ao = 255; // No ambient occlusion in this implementation
+                            vert.uv  = faceUVs[corner];
+                            vert.ao  = 255;
 
                             vertices.push_back(vert);
                         }
 
-                        // Generate two triangles (6 indices) for the quad
-                        // Use counter-clockwise winding when viewed from outside the block
+                        // Two triangles per quad with correct winding
                         indices.insert(indices.end(), {
                             baseIndex + 0, baseIndex + 2, baseIndex + 1,
                             baseIndex + 0, baseIndex + 3, baseIndex + 2
@@ -280,12 +477,7 @@ namespace Game {
             }
         }
 
-        /*Log::Debug("InterChunkMesherJob stats: %d solid blocks, %d faces generated, "
-                  "%d culled intra-section, %d culled inter-section, %d culled inter-chunk",
-                  solidBlocks, facesGenerated, facesCulledIntraSection,
-                  facesCulledInterSection, facesCulledInterChunk);*/
-
-        // Finalize mesh data
+        // Copy the completed data to the output mesh
         {
             std::lock_guard<std::mutex> lock(s_uploadMutex);
 
@@ -293,16 +485,26 @@ namespace Game {
             meshData->indices = std::move(indices);
 
             if (!meshData->vertices.empty()) {
-                /*Log::Debug("Enqueueing inter-chunk mesh for chunk (%d, %d) section %d with %zu vertices",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
-                          meshData->vertices.size());*/
                 s_uploadQueue.push(meshData);
             } else {
-                /*Log::Debug("Inter-chunk mesh for chunk (%d, %d) section %d is empty, discarding",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
                 delete meshData;
             }
         }
+    }
+
+    // Helper function for legacy UV generation (original system)
+    void GenerateUVsForFaceLegacy(int face, const Block& block, glm::vec2 uvs[4]) {
+        // Get the atlas index for this face
+        uint16_t atlasIndex = block.texIdx[face];
+
+        // Get the UV tile from the legacy texture atlas
+        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
+
+        // Map the 4 corners of the quad to the atlas tile with corrected orientation
+        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left
+        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right
+        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right
+        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left
     }
 
     // Enhanced meshing function with improved intra-chunk culling and texture atlas support
@@ -310,9 +512,6 @@ namespace Game {
         assert(section != nullptr);
         assert(meshData != nullptr);
         assert(chunk != nullptr);
-
-        /*Log::Debug("MesherJob starting for chunk (%d, %d) section %d with texture atlas support",
-                  meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
 
         // Validate input data
         if (meshData->chunkXZ.x < -1000000 || meshData->chunkXZ.x > 1000000 ||
@@ -340,7 +539,7 @@ namespace Game {
         int facesCulledIntraSection = 0;
         int facesCulledInterSection = 0;
 
-        // FIXED: Calculate the world Y offset for this section
+        // Calculate the world Y offset for this section
         int sectionWorldYOffset = Config::MinY + (meshData->sectionIndex * Math::SECTION_HEIGHT);
 
         // Iterate all voxels in the 16×16×16 section
@@ -398,7 +597,6 @@ namespace Game {
                             }
                             else {
                                 // Neighbor is outside chunk bounds - assume it's air/transparent
-                                // This will be handled by inter-chunk culling when neighbors are available
                                 emitFace = true;
                             }
                         }
@@ -412,7 +610,7 @@ namespace Game {
 
                         // Get UV coordinates for this face from texture atlas
                         glm::vec2 faceUVs[4];
-                        GenerateUVsForFace(face, block, faceUVs);
+                        GenerateUVsForFaceLegacy(face, block, faceUVs);
 
                         // Build 4 vertices
                         for (int corner = 0; corner < 4; ++corner) {
@@ -425,7 +623,7 @@ namespace Game {
                             Render::Vertex vert;
                             vert.pos = pos;
                             vert.nrm = NRM[face];
-                            vert.uv  = faceUVs[corner]; // Use atlas UV coordinates
+                            vert.uv  = faceUVs[corner];
                             vert.ao  = 255;
 
                             vertices.push_back(vert);
@@ -443,10 +641,6 @@ namespace Game {
             }
         }
 
-        /*Log::Debug("MesherJob: found %d solid blocks, generated %d faces (%d culled intra-section, %d culled inter-section), %zu vertices, %zu indices",
-                  solidBlocks, facesGenerated, facesCulledIntraSection, facesCulledInterSection,
-                  vertices.size(), indices.size());*/
-
         // Copy the completed data to the output mesh
         {
             std::lock_guard<std::mutex> lock(s_uploadMutex);
@@ -455,19 +649,14 @@ namespace Game {
             meshData->indices = std::move(indices);
 
             if (!meshData->vertices.empty()) {
-                /*Log::Debug("Enqueueing mesh for chunk (%d, %d) section %d with %zu vertices",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex,
-                          meshData->vertices.size());*/
                 s_uploadQueue.push(meshData);
             } else {
-                /*Log::Debug("Mesh for chunk (%d, %d) section %d is empty, not enqueueing",
-                          meshData->chunkXZ.x, meshData->chunkXZ.y, meshData->sectionIndex);*/
                 delete meshData;
             }
         }
     }
 
-    // Legacy function for backward compatibility - logs a warning and delegates
+    // Legacy function for backward compatibility
     void MesherJob(ChunkSection* section, MeshData* meshData) {
         Log::Warning("MesherJob called without chunk context - inter-section culling disabled");
 

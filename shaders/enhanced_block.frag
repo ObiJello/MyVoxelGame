@@ -1,0 +1,91 @@
+// File: shaders/enhanced_block.frag
+#version 330 core
+
+// Input from vertex shader
+in vec3 fragNormal;     // Interpolated normal
+in vec2 fragTexCoord;   // Interpolated texture coordinates
+in vec3 fragWorldPos;   // World position
+
+// Uniforms
+uniform sampler2D uTextureAtlas;     // The main texture atlas
+uniform sampler2D uGrassColormap;    // Grass biome colormap (256x256)
+uniform sampler2D uFoliageColormap;  // Foliage biome colormap (256x256)
+
+// Biome parameters (could be per-vertex in the future)
+uniform float uBiomeTemperature;     // 0.0-1.0 range
+uniform float uBiomeHumidity;        // 0.0-1.0 range
+uniform int uEnableBiomeTinting;     // 0 = disabled, 1 = enabled
+
+// Output
+out vec4 FragColor;
+
+// Function to sample biome colormap
+vec3 sampleBiomeColormap(sampler2D colormap, float temperature, float humidity) {
+    // Clamp temperature and humidity to valid range
+    temperature = clamp(temperature, 0.0, 1.0);
+    humidity = clamp(humidity, 0.0, 1.0);
+
+    // Sample the colormap at the biome coordinates
+    vec2 biomeCoord = vec2(temperature, humidity);
+    vec4 colormapSample = texture(colormap, biomeCoord);
+
+    return colormapSample.rgb;
+}
+
+// Simple biome tinting based on world position
+vec3 calculateBiomeTint(vec3 worldPos) {
+    if (uEnableBiomeTinting == 0) {
+        return vec3(1.0); // No tinting
+    }
+
+    // For now, use simple positional variation
+    // In a real implementation, this would sample from biome data
+    float posTemperature = uBiomeTemperature + 0.1 * sin(worldPos.x * 0.01);
+    float posHumidity = uBiomeHumidity + 0.1 * cos(worldPos.z * 0.01);
+
+    // Clamp to valid range
+    posTemperature = clamp(posTemperature, 0.0, 1.0);
+    posHumidity = clamp(posHumidity, 0.0, 1.0);
+
+    // Sample grass colormap for basic biome tinting
+    // TODO: Determine tint type based on block type or vertex data
+    return sampleBiomeColormap(uGrassColormap, posTemperature, posHumidity);
+}
+
+void main() {
+    // Sample the texture atlas
+    vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
+
+    // Discard fully transparent pixels
+    if (textureColor.a < 0.1) {
+        discard;
+    }
+
+    // Calculate biome tinting
+    vec3 biomeTint = calculateBiomeTint(fragWorldPos);
+
+    // Simple directional lighting calculation
+    vec3 normal = normalize(fragNormal);
+
+    // Default sun direction (pointing down and slightly south-east)
+    vec3 sunDir = normalize(vec3(0.3, -0.8, 0.2));
+    vec3 sunCol = vec3(1.0, 1.0, 0.9);  // Warm white sunlight
+    vec3 ambientCol = vec3(0.4, 0.5, 0.7);  // Cool blue ambient
+    float ambientStr = 0.3;
+
+    // Calculate diffuse lighting
+    float NdotL = max(dot(normal, -sunDir), 0.0);
+    vec3 diffuse = sunCol * NdotL;
+
+    // Calculate ambient lighting
+    vec3 ambient = ambientCol * ambientStr;
+
+    // Combine lighting
+    vec3 lighting = ambient + diffuse;
+
+    // Apply lighting and biome tinting to texture color
+    vec3 finalColor = textureColor.rgb * lighting * biomeTint;
+
+    // Output final color with original alpha
+    FragColor = vec4(finalColor, textureColor.a);
+}

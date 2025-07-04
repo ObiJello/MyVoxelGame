@@ -54,4 +54,25 @@ namespace Game {
     // Pop a MeshData* from the queue. Returns false if queue is empty.
     bool PopMeshData(MeshData*& outData);
 
+    // Forward declarations
+    struct EnhancedBlock;
+
+    // NEW: Enhanced meshing function that can handle both model-based and legacy blocks
+    void EnhancedInterChunkMesherJob(ChunkSection* section, MeshData* outData, const NeighborContext& ctx);
+
+    // NEW: Original inter-chunk mesher (renamed for fallback)
+    void OriginalInterChunkMesherJob(ChunkSection* section, MeshData* outData, const NeighborContext& ctx);
+
+    // NEW: Legacy meshing function for blocks that still use the old system
+    void LegacyMeshBlock(const EnhancedBlock& block, int x, int y, int z, int sectionWorldYOffset,
+                        const NeighborContext& ctx, std::vector<Render::Vertex>& vertices,
+                        std::vector<uint32_t>& indices, int& facesGenerated, int& facesCulled);
+
+    // NEW: Helper function for legacy UV generation
+    void GenerateUVsForFaceLegacy(int face, const Block& block, glm::vec2 uvs[4]);
+
+    // NEW: Enhanced block lookup using neighbor context
+    BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int chunkLocalX, int worldY, int chunkLocalZ);
+
+
 } // namespace Game

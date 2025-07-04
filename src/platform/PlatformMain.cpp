@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Simplified Main Loop)
+// File: src/platform/PlatformMain.cpp (Updated for Model Integration)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -8,6 +8,8 @@
 
 // Include game headers
 #include "../game/BlockRegistry.hpp"
+#include "../game/EnhancedBlockRegistry.hpp"  // NEW
+#include "../game/BlockModel.hpp"             // NEW
 #include "../game/ChunkProvider.hpp"
 #include "../game/WorldManager.hpp"
 #include "../game/PlayerController.hpp"
@@ -23,14 +25,14 @@
 #include "../render/TextureAtlas.hpp"
 #include "../render/BlockHighlight.hpp"
 #include "../render/Crosshair.hpp"
+#include "../render/AtlasBuilder.hpp"         // NEW
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <chrono>
-
-#include "AtlasBuilder.hpp"
+#include <filesystem>  // NEW
 
 namespace PlatformMain {
 
@@ -140,16 +142,52 @@ namespace PlatformMain {
         metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
+    // UPDATED: Enhanced rendering with biome tinting support
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
                     const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
                     Debug::PerformanceMetrics& metrics) {
 
         auto renderStartTime = std::chrono::high_resolution_clock::now();
 
-        // Use shader and bind texture atlas
+        // Use shader
         blockShader.Use();
-        Render::g_textureAtlas.Bind(GL_TEXTURE0);
-        glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0);
+
+        // Bind textures based on available systems
+        if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
+            // Use AtlasBuilder system
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, Render::g_atlasBuilder->GetAtlasTextureID());
+            glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0);
+
+            // Bind biome colormaps if available
+            GLuint grassColormap = Render::g_atlasBuilder->GetGrassColormapID();
+            GLuint foliageColormap = Render::g_atlasBuilder->GetFoliageColormapID();
+
+            if (grassColormap != 0) {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, grassColormap);
+                glUniform1i(blockShader.GetUniformLocation("uGrassColormap"), 1);
+            }
+
+            if (foliageColormap != 0) {
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, foliageColormap);
+                glUniform1i(blockShader.GetUniformLocation("uFoliageColormap"), 2);
+            }
+
+            // Set biome parameters
+            glUniform1f(blockShader.GetUniformLocation("uBiomeTemperature"), 0.7f); // Temperate
+            glUniform1f(blockShader.GetUniformLocation("uBiomeHumidity"), 0.6f);    // Moderate
+            glUniform1i(blockShader.GetUniformLocation("uEnableBiomeTinting"), 1);  // Enable
+
+        } else {
+            // Fall back to legacy texture atlas
+            Render::g_textureAtlas.Bind(GL_TEXTURE0);
+            glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0);
+
+            // Disable biome tinting for legacy system
+            glUniform1i(blockShader.GetUniformLocation("uEnableBiomeTinting"), 0);
+        }
 
         // Render visible chunks
         metrics.meshesRenderedThisFrame = 0;
@@ -193,6 +231,58 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
+    // NEW: Initialize enhanced game systems
+    void InitializeGameSystems() {
+        Log::Info("Initializing game systems...");
+
+        // Initialize both registries for backward compatibility
+        Game::BlockRegistry::Init();
+        Game::EnhancedBlockRegistry::Init();
+
+        // Load block models
+        if (!Game::BlockModelRegistry::LoadModels("assets/models/block")) {
+            Log::Warning("Failed to load block models, using default models");
+        }
+
+        Log::Info("Game systems initialized successfully");
+    }
+
+    // NEW: Initialize enhanced shaders
+    Shader InitializeShaders() {
+        // Try to use enhanced shaders if available
+        if (std::filesystem::exists("shaders/enhanced_block.vert") &&
+            std::filesystem::exists("shaders/enhanced_block.frag")) {
+            Log::Info("Using enhanced block shaders with biome tinting support");
+            return Shader("shaders/enhanced_block.vert", "shaders/enhanced_block.frag");
+        } else {
+            Log::Info("Enhanced shaders not found, using standard block shaders");
+            return Shader("shaders/block.vert", "shaders/block.frag");
+        }
+    }
+
+    // NEW: Initialize enhanced texture systems
+    bool InitializeTextureSystem() {
+        // Initialize legacy texture atlas first
+        if (!Render::g_textureAtlas.Initialize()) {
+            Log::Error("Failed to initialize legacy texture atlas");
+            return false;
+        }
+
+        // Initialize AtlasBuilder
+        Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
+        if (!Render::g_atlasBuilder->BuildFromJSON("assets/atlases/blocks.json")) {
+            Log::Warning("AtlasBuilder failed to build from JSON, falling back to legacy system");
+            Render::g_atlasBuilder.reset();
+        } else {
+            Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
+                     Render::g_atlasBuilder->GetAtlasWidth(),
+                     Render::g_atlasBuilder->GetAtlasHeight(),
+                     Render::g_atlasBuilder->GetTextureCount());
+        }
+
+        return true;
+    }
+
     // Callback for OpenGL debug messages
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam) {
@@ -202,9 +292,10 @@ namespace PlatformMain {
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Physics System and Crosshair");
+        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Model System");
 
-        Game::BlockRegistry::Init();
+        // UPDATED: Initialize enhanced game systems
+        InitializeGameSystems();
 
         // Initialize GLFW
         if (!glfwInit()) {
@@ -259,9 +350,9 @@ namespace PlatformMain {
         }
     #endif
 
-        // Initialize rendering systems
-        if (!Render::g_textureAtlas.Initialize()) {
-            Log::Error("Failed to initialize texture atlas");
+        // UPDATED: Initialize enhanced texture systems
+        if (!InitializeTextureSystem()) {
+            Log::Error("Failed to initialize texture systems");
             glfwDestroyWindow(window);
             glfwTerminate();
             return -4;
@@ -278,15 +369,8 @@ namespace PlatformMain {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
 
-        // Initialize the new AtlasBuilder system
-        Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
-        if (!Render::g_atlasBuilder->BuildFromJSON("assets/atlases/blocks.json")) {
-            Log::Warning("AtlasBuilder failed to build texture atlas from JSON");
-            Render::g_atlasBuilder.reset();
-        }
-
-        // Compile shaders
-        Shader blockShader({"shaders/block.vert", "shaders/block.frag"});
+        // UPDATED: Compile enhanced shaders
+        Shader blockShader = InitializeShaders();
 
         // Setup OpenGL state
         glEnable(GL_DEPTH_TEST);
@@ -309,9 +393,9 @@ namespace PlatformMain {
         Debug::PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        Log::Info("Entering main render loop");
+        Log::Info("Entering main render loop with enhanced model system");
 
-        // MAIN LOOP - Much cleaner now!
+        // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
 
@@ -357,7 +441,7 @@ namespace PlatformMain {
             // Upload mesh data
             UploadMeshData(metrics);
 
-            // Render scene
+            // UPDATED: Render scene with enhanced system
             RenderScene(camera, blockShader, proj, view, frustum, metrics);
 
             // Render UI elements
