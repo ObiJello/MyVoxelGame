@@ -182,8 +182,7 @@ namespace Render {
 
             sources.push_back(texSource);
 
-            Log::Debug("  Added texture: %s -> %s",
-                      textureKey.c_str(), pngFile.c_str());
+            //Log::Debug("  Added texture: %s -> %s", textureKey.c_str(), pngFile.c_str());
         }
     }
 

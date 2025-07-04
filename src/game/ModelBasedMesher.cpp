@@ -1,7 +1,8 @@
-// File: src/game/ModelBasedMesher.cpp
+// File: src/game/ModelBasedMesher.cpp - FIXED
 #include "ModelBasedMesher.hpp"
 #include "EnhancedBlockRegistry.hpp"
 #include "BlockRegistry.hpp"
+#include "Chunk.hpp"  // ADDED: For Chunk class definition
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
 #include <cmath>

@@ -1,4 +1,4 @@
-// File: src/game/Mesher.hpp (Enhanced with Inter-Chunk Support)
+// File: src/game/Mesher.hpp (Enhanced with Inter-Chunk Support) - FIXED
 #pragma once
 
 #include <vector>
@@ -13,6 +13,7 @@
 namespace Game {
     // Forward declarations to avoid circular includes
     class Chunk;
+    struct Block;  // Add forward declaration for Block
 
     struct MeshData {
         glm::ivec2                  chunkXZ;       // (x,z) of the chunk
@@ -74,5 +75,7 @@ namespace Game {
     // NEW: Enhanced block lookup using neighbor context
     BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int chunkLocalX, int worldY, int chunkLocalZ);
 
+    // NEW: Helper function to check if block is opaque
+    bool IsBlockOpaque(BlockID blockId);
 
 } // namespace Game

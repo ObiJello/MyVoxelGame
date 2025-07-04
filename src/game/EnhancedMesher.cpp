@@ -1,22 +1,38 @@
-// File: src/game/EnhancedMesher.cpp
+// File: src/game/EnhancedMesher.cpp - FIXED
 // This file provides the integration between the new model-based meshing and existing system
 #include "Mesher.hpp"
 #include "ModelBasedMesher.hpp"
 #include "EnhancedBlockRegistry.hpp"
+#include "BlockRegistry.hpp"  // ADDED: For Block struct
+#include "Chunk.hpp"  // ADDED: For Chunk class definition
 #include "../render/AtlasBuilder.hpp"
+#include "../render/TextureAtlas.hpp"  // ADDED: For g_textureAtlas
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
 #include <glm/glm.hpp>
 #include <mutex>
 #include <queue>
 
-#include "TextureAtlas.hpp"
-
 namespace Game {
 
+    // Helper function for legacy UV generation - SPECIFIC for EnhancedBlock
+    void GenerateUVsForEnhancedBlock(int face, const EnhancedBlock& block, glm::vec2 uvs[4]) {
+        // Get the atlas index for this face
+        uint16_t atlasIndex = block.legacyTexIdx[face];
+
+        // Get the UV tile from the legacy texture atlas
+        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
+
+        // Map the 4 corners of the quad to the atlas tile with corrected orientation
+        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left
+        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right
+        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right
+        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left
+    }
+
     // Enhanced mesher that can use both model-based and legacy rendering
-    void EnhancedInterChunkMesherJob(ChunkSection* section, MeshData* meshData, const NeighborContext& ctx) {
-        assert(section != nullptr);
+    void EnhancedInterChunkMesherJob(ChunkSection* sectionPtr, MeshData* meshData, const NeighborContext& ctx) {
+        assert(sectionPtr != nullptr);
         assert(meshData != nullptr);
         assert(ctx.center != nullptr);
 
@@ -60,7 +76,7 @@ namespace Game {
         for (int y = 0; y < ChunkSection::SIZE; ++y) {
             for (int z = 0; z < ChunkSection::SIZE; ++z) {
                 for (int x = 0; x < ChunkSection::SIZE; ++x) {
-                    BlockID blockId = section->GetBlockID(x, y, z);
+                    BlockID blockId = sectionPtr->GetBlockID(x, y, z);
                     if (blockId == BlockID::Air) {
                         continue;
                     }
@@ -155,6 +171,14 @@ namespace Game {
             {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}
         };
 
+        // Get the section pointer from the neighbor context
+        // We need to find the right section in the chunk for intra-section lookups
+        ChunkSection* currentSection = nullptr;
+        int sectionIndex = (sectionWorldYOffset - Config::MinY) / Math::SECTION_HEIGHT;
+        if (sectionIndex >= 0 && sectionIndex < Math::SECTIONS_PER_CHUNK) {
+            currentSection = ctx.center->sections[sectionIndex].get();
+        }
+
         // Check each of the 6 potential faces
         for (int face = 0; face < 6; ++face) {
             int nx = x + DX[face];
@@ -170,10 +194,15 @@ namespace Game {
                 nz >= 0 && nz < ChunkSection::SIZE) {
 
                 // Neighbor is within current section - fast path
-                neighborId = section->GetBlockID(nx, ny, nz);
-                emitFace = !IsBlockOpaque(neighborId);
-                if (!emitFace) {
-                    facesCulled++;
+                if (currentSection) {
+                    neighborId = currentSection->GetBlockID(nx, ny, nz);
+                    emitFace = !IsBlockOpaque(neighborId);
+                    if (!emitFace) {
+                        facesCulled++;
+                    }
+                } else {
+                    // Section not available, assume air
+                    emitFace = true;
                 }
             }
             else {
@@ -199,7 +228,8 @@ namespace Game {
 
             // Get UV coordinates for this face from legacy texture atlas
             glm::vec2 faceUVs[4];
-            GenerateUVsForFaceLegacy(face, block, faceUVs);
+            // Call our EnhancedBlock-specific function
+            GenerateUVsForEnhancedBlock(face, block, faceUVs);
 
             // Build 4 vertices for the quad
             for (int corner = 0; corner < 4; ++corner) {
@@ -229,70 +259,14 @@ namespace Game {
     }
 
     // Helper function to get neighbor block using existing system
-    BlockID GetBlockFromNeighborContext(const NeighborContext& ctx, int chunkLocalX, int worldY, int chunkLocalZ) {
-        // Check if neighbor is within the same chunk
-        if (chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X &&
-            chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z &&
-            worldY >= Config::MinY && worldY <= Config::MaxY) {
+    // Note: This calls the implementation from Mesher.cpp to avoid duplication
+    // The actual GetBlockFromNeighborContext is implemented in Mesher.cpp
 
-            // Inter-section lookup within the same chunk
-            return ctx.center->GetBlock(chunkLocalX, worldY, chunkLocalZ);
-        }
-        else if (worldY < Config::MinY || worldY > Config::MaxY) {
-            // Neighbor is outside world Y bounds
-            return BlockID::Air;
-        }
-        else if (ctx.hasAllNeighbors) {
-            // Inter-chunk lookup with neighbor context
-            std::shared_ptr<Chunk> targetChunk = nullptr;
-            int targetX = chunkLocalX;
-            int targetZ = chunkLocalZ;
+    bool IsBlockOpaque(BlockID blockId); // Forward declaration - implemented in Mesher.cpp
 
-            // Determine which neighbor chunk to query
-            if (chunkLocalX < 0 && chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z) {
-                targetChunk = ctx.neighbors[0]; // West neighbor
-                targetX = chunkLocalX + Math::CHUNK_SIZE_X;
-            } else if (chunkLocalX >= Math::CHUNK_SIZE_X && chunkLocalZ >= 0 && chunkLocalZ < Math::CHUNK_SIZE_Z) {
-                targetChunk = ctx.neighbors[1]; // East neighbor
-                targetX = chunkLocalX - Math::CHUNK_SIZE_X;
-            } else if (chunkLocalZ < 0 && chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X) {
-                targetChunk = ctx.neighbors[2]; // North neighbor
-                targetZ = chunkLocalZ + Math::CHUNK_SIZE_Z;
-            } else if (chunkLocalZ >= Math::CHUNK_SIZE_Z && chunkLocalX >= 0 && chunkLocalX < Math::CHUNK_SIZE_X) {
-                targetChunk = ctx.neighbors[3]; // South neighbor
-                targetZ = chunkLocalZ - Math::CHUNK_SIZE_Z;
-            }
+    // Helper function for legacy UV generation - SPECIFIC for EnhancedBlock
 
-            if (targetChunk && targetX >= 0 && targetX < Math::CHUNK_SIZE_X &&
-                targetZ >= 0 && targetZ < Math::CHUNK_SIZE_Z) {
-                return targetChunk->GetBlock(targetX, worldY, targetZ);
-            }
-        }
-
-        return BlockID::Air; // No neighbor available or out of bounds
-    }
-
-    // Helper function for legacy UV generation
-    void GenerateUVsForFaceLegacy(int face, const EnhancedBlock& block, glm::vec2 uvs[4]) {
-        // Get the atlas index for this face
-        uint16_t atlasIndex = block.legacyTexIdx[face];
-
-        // Get the UV tile from the legacy texture atlas
-        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
-
-        // Map the 4 corners of the quad to the atlas tile with corrected orientation
-        uvs[0] = glm::vec2(tile.uvMin.x, tile.uvMax.y); // Bottom-left
-        uvs[1] = glm::vec2(tile.uvMax.x, tile.uvMax.y); // Bottom-right
-        uvs[2] = glm::vec2(tile.uvMax.x, tile.uvMin.y); // Top-right
-        uvs[3] = glm::vec2(tile.uvMin.x, tile.uvMin.y); // Top-left
-    }
-
-    bool IsBlockOpaque(BlockID blockId) {
-        if (blockId == BlockID::Air) {
-            return false;
-        }
-        const EnhancedBlock& block = EnhancedBlockRegistry::Get(blockId);
-        return block.opaque;
-    }
+    // Note: IsBlockOpaque and GetBlockFromNeighborContext are implemented in Mesher.cpp
+    // to avoid duplicate symbols
 
 } // namespace Game

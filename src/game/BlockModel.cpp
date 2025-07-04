@@ -3,6 +3,7 @@
 #include "../core/Log.hpp"
 #include <filesystem>
 #include <fstream>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -15,6 +16,12 @@ namespace Game {
 
     bool BlockModelRegistry::LoadModels(const std::string& modelsPath) {
         Log::Info("Loading block models from: %s", modelsPath.c_str());
+
+        // DEBUG: Print current working directory
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+            Log::Info("Current working directory: %s", cwd);
+        }
 
         // Clear existing models
         s_models.clear();
