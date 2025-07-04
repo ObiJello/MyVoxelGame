@@ -101,14 +101,14 @@ namespace Render {
             cm.worldOffset = glm::vec3(
                 float(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X),
                 float(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT)), // FIXED: Add MinY offset
-                float(data->chunkXZ.y * Game::Math::CHUNK_SIZE_Z)  // Note: .y is Z coordinate
+                float(data->chunkXZ.z * Game::Math::CHUNK_SIZE_Z)  // Note: .y is Z coordinate
             );
 
             // Store metadata for later lookups
             // **CRITICAL FIX**: MeshData.chunkXZ uses .x for X and .y for Z coordinate!
             // We need to store this in ChunkMesh.chunkXZ where .x is X and .z is Z
             cm.chunkXZ.x = data->chunkXZ.x;  // X coordinate
-            cm.chunkXZ.z = data->chunkXZ.y;  // Z coordinate (from MeshData.y!)
+            cm.chunkXZ.z = data->chunkXZ.z;  // Z coordinate (from MeshData.y!)
             cm.sectionIndex = data->sectionIndex;
 
             /* **DEBUG**: Log what coordinates we stored
@@ -169,7 +169,7 @@ namespace Render {
 
         if (data->vertices.empty()) {
             Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                      data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);
+                      data->chunkXZ.x, data->chunkXZ.z, data->sectionIndex);
             delete data;
             return;
         }
@@ -180,7 +180,7 @@ namespace Render {
         // Look for existing mesh to replace - FIXED coordinate comparison
         for (auto it = meshes.begin(); it != meshes.end(); ++it) {
             if (it->chunkXZ.x == data->chunkXZ.x &&
-                it->chunkXZ.z == data->chunkXZ.y &&  // NOTE: MeshData uses .y for Z coordinate
+                it->chunkXZ.z == data->chunkXZ.z &&  // NOTE: MeshData uses .y for Z coordinate
                 it->sectionIndex == data->sectionIndex) {
 
                 /*Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",

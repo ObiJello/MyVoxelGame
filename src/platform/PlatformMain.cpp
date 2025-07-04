@@ -150,38 +150,7 @@ namespace PlatformMain {
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
-        Game::MeshData* meshPtr = nullptr;
-        metrics.meshesUploadedThisFrame = 0;
 
-        // Limit uploads per frame to maintain consistent frame rate
-        constexpr int MAX_UPLOADS_PER_FRAME = 8;
-
-        while (metrics.meshesUploadedThisFrame < MAX_UPLOADS_PER_FRAME &&
-               Game::PopMeshData(meshPtr) && meshPtr != nullptr) {
-
-            // Validate mesh data
-            if (meshPtr->vertices.empty()) {
-                Log::Warning("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                            meshPtr->chunkXZ.x, meshPtr->chunkXZ.y, meshPtr->sectionIndex);
-                delete meshPtr;
-                continue;
-            }
-
-            // Check for corrupted coordinates
-            if (meshPtr->chunkXZ.x < -10000 || meshPtr->chunkXZ.x > 10000 ||
-                meshPtr->chunkXZ.y < -10000 || meshPtr->chunkXZ.y > 10000) {
-                Log::Error("Corrupted chunk coordinates: (%d,%d), skipping",
-                          meshPtr->chunkXZ.x, meshPtr->chunkXZ.y);
-                delete meshPtr;
-                continue;
-            }
-
-            Render::UploadMesh(meshPtr);
-            metrics.meshesUploadedThisFrame++;
-        }
-
-        auto uploadEndTime = std::chrono::high_resolution_clock::now();
-        metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
     // UPDATED: Enhanced rendering with biome tinting support

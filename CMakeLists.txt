@@ -122,8 +122,6 @@ if(APPLE)
             src/game/PlayerController.cpp
             src/game/Physics.cpp
             src/game/EnhancedBlockRegistry.cpp
-            src/game/ModelBasedMesher.cpp
-            src/game/EnhancedMesher.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -162,10 +160,6 @@ else()
             src/render/AtlasBuilder.hpp
             src/game/EnhancedBlockRegistry.cpp
             src/game/EnhancedBlockRegistry.hpp
-            src/game/ModelBasedMesher.cpp
-            src/game/ModelBasedMesher.hpp
-            src/game/EnhancedMesher.cpp
-            src/game/EnhancedMesher.hpp
     )
 endif()
 
