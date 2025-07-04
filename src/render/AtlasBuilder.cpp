@@ -12,7 +12,7 @@
 
 // Include stb_image_write for debug output (optional)
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "../../ext/stb_image/stb_image_write.h"
+#include "../ext/stb_image/stb_image_write.h"
 
 namespace Render {
 

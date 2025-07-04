@@ -106,6 +106,8 @@ if(APPLE)
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
             src/render/BlockHighlight.cpp
+            src/render/Crosshair.cpp
+            src/render/AtlasBuilder.cpp
             src/game/BlockRegistry.cpp
             src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
@@ -116,7 +118,6 @@ if(APPLE)
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
             src/game/Physics.cpp
-            src/render/Crosshair.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"

@@ -30,8 +30,6 @@
 #include <GLFW/glfw3.h>
 #include <chrono>
 
-#include "test/TestSystem.hpp"
-
 namespace PlatformMain {
 
     // Input handling
