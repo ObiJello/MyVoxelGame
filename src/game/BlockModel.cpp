@@ -1,4 +1,4 @@
-// File: src/game/BlockModel.cpp
+// File: src/game/BlockModel.cpp (Refactored - Vanilla Minecraft Pattern)
 #include "BlockModel.hpp"
 #include "../core/Log.hpp"
 #include <filesystem>
@@ -12,6 +12,7 @@ namespace Game {
 
     // Static member definitions
     std::unordered_map<std::string, BlockModel> BlockModelRegistry::s_models;
+    std::unordered_map<std::string, nlohmann::json> BlockModelRegistry::s_rawJsons; // NEW: Raw JSON storage
     BlockModel BlockModelRegistry::s_defaultModel;
 
     bool BlockModelRegistry::LoadModels(const std::string& modelsPath) {
@@ -23,8 +24,9 @@ namespace Game {
             Log::Info("Current working directory: %s", cwd);
         }
 
-        // Clear existing models
+        // Clear existing models and raw JSON
         s_models.clear();
+        s_rawJsons.clear();
         CreateDefaultModel();
 
         // Check if directory exists
@@ -34,11 +36,13 @@ namespace Game {
             return false;
         }
 
-        int loadedCount = 0;
+        int loadedJsonCount = 0;
+        int resolvedModelCount = 0;
         int failedCount = 0;
 
         try {
-            // Iterate through all JSON files in the directory
+            // PHASE 1: Load all raw JSON files into memory
+            Log::Debug("Phase 1: Loading raw JSON files...");
             for (const auto& entry : std::filesystem::directory_iterator(modelsPath)) {
                 if (!entry.is_regular_file() || entry.path().extension() != ".json") {
                     continue;
@@ -47,26 +51,63 @@ namespace Game {
                 std::string filename = entry.path().stem().string();
                 std::string filepath = entry.path().string();
 
-                Log::Debug("Loading model: %s", filename.c_str());
-
                 try {
-                    BlockModel model = LoadModelFromFile(filepath);
-                    s_models[filename] = std::move(model);
-                    loadedCount++;
+                    std::ifstream file(filepath);
+                    if (!file.is_open()) {
+                        Log::Warning("Cannot open JSON file: %s", filepath.c_str());
+                        continue;
+                    }
 
-                    Log::Debug("Successfully loaded model '%s' with %zu elements",
-                              filename.c_str(), s_models[filename].elements.size());
+                    json j;
+                    file >> j;
+
+                    // Store under multiple key schemes for flexible lookup
+                    s_rawJsons[filename] = j;                           // "grass_block"
+                    s_rawJsons["block/" + filename] = j;                // "block/grass_block"
+                    s_rawJsons["minecraft:block/" + filename] = j;      // "minecraft:block/grass_block"
+
+                    loadedJsonCount++;
+                    Log::Debug("Loaded raw JSON: %s", filename.c_str());
+
                 } catch (const std::exception& e) {
-                    Log::Error("Failed to load model '%s': %s", filename.c_str(), e.what());
+                    Log::Error("Failed to load JSON '%s': %s", filename.c_str(), e.what());
                     failedCount++;
                 }
             }
+
+            // PHASE 2: Resolve all models by following parent chains
+            Log::Debug("Phase 2: Resolving model inheritance...");
+
+            // Get all unique model names (just the base names, not the prefixed versions)
+            std::set<std::string> modelNames;
+            for (const auto& [key, json] : s_rawJsons) {
+                // Only process base names (no slashes or prefixes)
+                if (key.find('/') == std::string::npos && key.find(':') == std::string::npos) {
+                    modelNames.insert(key);
+                }
+            }
+
+            for (const std::string& modelName : modelNames) {
+                try {
+                    BlockModel resolvedModel = ResolveModel(modelName);
+                    s_models[modelName] = std::move(resolvedModel);
+                    resolvedModelCount++;
+
+                    Log::Debug("Successfully resolved model '%s' with %zu elements",
+                              modelName.c_str(), s_models[modelName].elements.size());
+                } catch (const std::exception& e) {
+                    Log::Error("Failed to resolve model '%s': %s", modelName.c_str(), e.what());
+                    failedCount++;
+                }
+            }
+
         } catch (const std::exception& e) {
             Log::Error("Error iterating models directory: %s", e.what());
             return false;
         }
 
-        Log::Info("Block model loading complete: %d loaded, %d failed", loadedCount, failedCount);
+        Log::Info("Block model loading complete: %d JSON files loaded, %d models resolved, %d failed",
+                 loadedJsonCount, resolvedModelCount, failedCount);
 
         // Log some statistics
         for (const auto& [name, model] : s_models) {
@@ -78,116 +119,167 @@ namespace Game {
                       usesTinting ? "yes" : "no");
         }
 
-        return loadedCount > 0;
+        return resolvedModelCount > 0;
     }
 
-    BlockModel BlockModelRegistry::LoadModelFromFile(const std::string& filePath) {
-        // Read JSON file
-        std::ifstream file(filePath);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open file: " + filePath);
-        }
+    BlockModel BlockModelRegistry::ResolveModel(const std::string& name) {
+        return ResolveModelRecursive(name, 0);
+    }
 
-        json j;
-        try {
-            file >> j;
-        } catch (const json::exception& e) {
-            throw std::runtime_error("JSON parse error: " + std::string(e.what()));
-        }
-
-        BlockModel model;
-
-        // Parse parent (for model inheritance - not fully implemented but recorded)
-        if (j.contains("parent")) {
-            model.parent = j["parent"].get<std::string>();
-        }
-
-        // Parse textures section
-        if (j.contains("textures")) {
-            for (const auto& [key, value] : j["textures"].items()) {
-                model.textures[key] = value.get<std::string>();
-                Log::Debug("  Texture mapping: %s -> %s", key.c_str(), value.get<std::string>().c_str());
-            }
-        }
-
-        // Parse elements section
-        if (j.contains("elements")) {
-            for (const auto& elemJson : j["elements"]) {
-                Element element;
-
-                // Parse "from" and "to" coordinates (convert from 0-16 to 0-1 range)
-                if (elemJson.contains("from") && elemJson["from"].is_array() && elemJson["from"].size() == 3) {
-                    element.from = glm::vec3(
-                        elemJson["from"][0].get<float>(),
-                        elemJson["from"][1].get<float>(),
-                        elemJson["from"][2].get<float>()
-                    );
-                }
-
-                if (elemJson.contains("to") && elemJson["to"].is_array() && elemJson["to"].size() == 3) {
-                    element.to = glm::vec3(
-                        elemJson["to"][0].get<float>(),
-                        elemJson["to"][1].get<float>(),
-                        elemJson["to"][2].get<float>()
-                    );
-                }
-
-                // Parse faces
-                if (elemJson.contains("faces")) {
-                    for (const auto& [faceName, faceJson] : elemJson["faces"].items()) {
-                        FaceDir dir = ParseFaceDir(faceName);
-                        FaceDef faceDef;
-
-                        // Parse UV coordinates
-                        if (faceJson.contains("uv") && faceJson["uv"].is_array() && faceJson["uv"].size() == 4) {
-                            faceDef.uv = glm::vec4(
-                                faceJson["uv"][0].get<float>(),
-                                faceJson["uv"][1].get<float>(),
-                                faceJson["uv"][2].get<float>(),
-                                faceJson["uv"][3].get<float>()
-                            );
-                        }
-
-                        // Parse texture reference
-                        if (faceJson.contains("texture")) {
-                            faceDef.textureRef = faceJson["texture"].get<std::string>();
-                        }
-
-                        // Parse tint index (optional)
-                        if (faceJson.contains("tintindex")) {
-                            faceDef.tintIndex = faceJson["tintindex"].get<int>();
-                        }
-
-                        // Parse cullface (optional)
-                        if (faceJson.contains("cullface")) {
-                            faceDef.cullface = faceJson["cullface"].get<std::string>();
-                        }
-
-                        element.faces[dir] = faceDef;
-
-                        Log::Debug("    Face %s: uv(%.1f,%.1f,%.1f,%.1f) texture=%s tint=%d cull=%s",
-                                  FaceDirToString(dir).c_str(),
-                                  faceDef.uv.x, faceDef.uv.y, faceDef.uv.z, faceDef.uv.w,
-                                  faceDef.textureRef.c_str(), faceDef.tintIndex, faceDef.cullface.c_str());
-                    }
-                }
-
-                model.elements.push_back(element);
-                Log::Debug("  Element: from(%.1f,%.1f,%.1f) to(%.1f,%.1f,%.1f) faces=%zu",
-                          element.from.x, element.from.y, element.from.z,
-                          element.to.x, element.to.y, element.to.z,
-                          element.faces.size());
-            }
-        }
-
-        // Validate model
-        if (model.elements.empty()) {
-            Log::Warning("Model has no elements, creating default cube");
-            CreateDefaultModel();
+    BlockModel BlockModelRegistry::ResolveModelRecursive(const std::string& name, int depth) {
+        // Prevent infinite recursion
+        if (depth > 16) {
+            Log::Warning("Maximum parent resolution depth reached for model: %s", name.c_str());
             return s_defaultModel;
         }
 
-        return model;
+        // Check if already cached
+        auto itCached = s_models.find(name);
+        if (itCached != s_models.end()) {
+            return itCached->second;
+        }
+
+        // Find raw JSON
+        auto itRaw = s_rawJsons.find(name);
+        if (itRaw == s_rawJsons.end()) {
+            Log::Debug("Model JSON not found: %s", name.c_str());
+            return s_defaultModel;
+        }
+
+        const json& j = itRaw->second;
+        Log::Debug("Resolving model: %s (depth: %d)", name.c_str(), depth);
+
+        // Start with parent if any
+        BlockModel result;
+        if (j.contains("parent") && !j["parent"].get<std::string>().empty()) {
+            std::string parentRef = j["parent"].get<std::string>();
+
+            // Canonicalize parent reference - strip to just the model name
+            std::string parentName = CanonicalizeModelName(parentRef);
+
+            Log::Debug("  Parent: %s -> %s", parentRef.c_str(), parentName.c_str());
+            result = ResolveModelRecursive(parentName, depth + 1);
+        } else {
+            // No parent - start with default model
+            result = s_defaultModel;
+        }
+
+        // Merge this JSON's textures (child overrides parent)
+        if (j.contains("textures")) {
+            for (const auto& [key, value] : j["textures"].items()) {
+                result.textures[key] = value.get<std::string>();
+                Log::Debug("  Texture: %s -> %s", key.c_str(), value.get<std::string>().c_str());
+            }
+        }
+
+        // Override elements if this JSON has any (completely replace parent elements)
+        if (j.contains("elements")) {
+            result.elements.clear();
+            Log::Debug("  Parsing %zu elements", j["elements"].size());
+
+            for (const auto& elemJson : j["elements"]) {
+                Element element = ParseElement(elemJson);
+                result.elements.push_back(element);
+            }
+        }
+
+        // Clear parent reference to avoid confusion
+        result.parent = "";
+
+        Log::Debug("Resolved model '%s': %zu elements, %zu textures",
+                  name.c_str(), result.elements.size(), result.textures.size());
+
+        return result;
+    }
+
+    std::string BlockModelRegistry::CanonicalizeModelName(const std::string& modelRef) {
+        // Strip prefixes to get just the model name
+        // "minecraft:block/cube_all" -> "cube_all"
+        // "block/cube" -> "cube"
+        // "cube_all" -> "cube_all"
+
+        auto slash = modelRef.find_last_of('/');
+        if (slash != std::string::npos) {
+            return modelRef.substr(slash + 1);
+        }
+
+        auto colon = modelRef.find_last_of(':');
+        if (colon != std::string::npos) {
+            return modelRef.substr(colon + 1);
+        }
+
+        return modelRef;
+    }
+
+    Element BlockModelRegistry::ParseElement(const nlohmann::json& elemJson) {
+        Element element;
+
+        // Parse "from" and "to" coordinates
+        if (elemJson.contains("from") && elemJson["from"].is_array() && elemJson["from"].size() == 3) {
+            element.from = glm::vec3(
+                elemJson["from"][0].get<float>(),
+                elemJson["from"][1].get<float>(),
+                elemJson["from"][2].get<float>()
+            );
+        }
+
+        if (elemJson.contains("to") && elemJson["to"].is_array() && elemJson["to"].size() == 3) {
+            element.to = glm::vec3(
+                elemJson["to"][0].get<float>(),
+                elemJson["to"][1].get<float>(),
+                elemJson["to"][2].get<float>()
+            );
+        }
+
+        // Parse faces
+        if (elemJson.contains("faces")) {
+            for (const auto& [faceName, faceJson] : elemJson["faces"].items()) {
+                FaceDir dir = ParseFaceDir(faceName);
+                FaceDef faceDef;
+
+                // Parse UV coordinates
+                if (faceJson.contains("uv") && faceJson["uv"].is_array() && faceJson["uv"].size() == 4) {
+                    faceDef.uv = glm::vec4(
+                        faceJson["uv"][0].get<float>(),
+                        faceJson["uv"][1].get<float>(),
+                        faceJson["uv"][2].get<float>(),
+                        faceJson["uv"][3].get<float>()
+                    );
+                } else {
+                    // Default to full face UV
+                    faceDef.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f);
+                }
+
+                // Parse texture reference
+                if (faceJson.contains("texture")) {
+                    faceDef.textureRef = faceJson["texture"].get<std::string>();
+                }
+
+                // Parse tint index (optional)
+                if (faceJson.contains("tintindex")) {
+                    faceDef.tintIndex = faceJson["tintindex"].get<int>();
+                }
+
+                // Parse cullface (optional)
+                if (faceJson.contains("cullface")) {
+                    faceDef.cullface = faceJson["cullface"].get<std::string>();
+                }
+
+                element.faces[dir] = faceDef;
+
+                Log::Debug("    Face %s: uv(%.1f,%.1f,%.1f,%.1f) texture=%s tint=%d cull=%s",
+                          FaceDirToString(dir).c_str(),
+                          faceDef.uv.x, faceDef.uv.y, faceDef.uv.z, faceDef.uv.w,
+                          faceDef.textureRef.c_str(), faceDef.tintIndex, faceDef.cullface.c_str());
+            }
+        }
+
+        Log::Debug("  Element: from(%.1f,%.1f,%.1f) to(%.1f,%.1f,%.1f) faces=%zu",
+                  element.from.x, element.from.y, element.from.z,
+                  element.to.x, element.to.y, element.to.z,
+                  element.faces.size());
+
+        return element;
     }
 
     void BlockModelRegistry::CreateDefaultModel() {
@@ -259,6 +351,7 @@ namespace Game {
 
     void BlockModelRegistry::Clear() {
         s_models.clear();
+        s_rawJsons.clear();
         CreateDefaultModel();
     }
 

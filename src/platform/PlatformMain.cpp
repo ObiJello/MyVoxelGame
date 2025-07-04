@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Updated for Model Integration)
+// File: src/platform/PlatformMain.cpp (Fixed for macOS Bundle Asset Loading)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -34,7 +34,49 @@
 #include <chrono>
 #include <filesystem>  // NEW
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#include <unistd.h>
+#endif
+
 namespace PlatformMain {
+
+    // NEW: Platform-specific function to get the correct asset path
+    std::string GetAssetPath(const std::string& relativePath) {
+#ifdef __APPLE__
+        // On macOS, check if we're running from a bundle
+        CFBundleRef mainBundle = CFBundleGetMainBundle();
+        if (mainBundle) {
+            // Get the Resources directory from the bundle
+            CFURLRef resourcesURL = CFBundleCopyResourcesDirectoryURL(mainBundle);
+            if (resourcesURL) {
+                char path[PATH_MAX];
+                if (CFURLGetFileSystemRepresentation(resourcesURL, TRUE, (UInt8*)path, PATH_MAX)) {
+                    CFRelease(resourcesURL);
+
+                    std::string resourcesPath = std::string(path);
+                    std::string fullPath = resourcesPath + "/" + relativePath;
+
+                    // Check if the asset exists in the bundle Resources directory
+                    if (std::filesystem::exists(fullPath)) {
+                        Log::Info("Using bundle asset path: %s", fullPath.c_str());
+                        return fullPath;
+                    } else {
+                        Log::Debug("Asset not found in bundle Resources: %s", fullPath.c_str());
+                    }
+                }
+                CFRelease(resourcesURL);
+            }
+        }
+
+        // Fall back to relative path from current directory
+        Log::Debug("Falling back to relative asset path: %s", relativePath.c_str());
+        return relativePath;
+#else
+        // On other platforms, use relative path directly
+        return relativePath;
+#endif
+    }
 
     // Input handling
     void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
@@ -231,7 +273,7 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    // NEW: Initialize enhanced game systems
+    // UPDATED: Initialize enhanced game systems with proper asset paths
     void InitializeGameSystems() {
         Log::Info("Initializing game systems...");
 
@@ -239,39 +281,52 @@ namespace PlatformMain {
         Game::BlockRegistry::Init();
         Game::EnhancedBlockRegistry::Init();
 
+        // FIXED: Use platform-specific asset path function
+        std::string modelsPath = GetAssetPath("assets/models/block");
+
         // Load block models
-        if (!Game::BlockModelRegistry::LoadModels("assets/models/block")) {
-            Log::Warning("Failed to load block models, using default models");
+        if (!Game::BlockModelRegistry::LoadModels(modelsPath)) {
+            Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
         Log::Info("Game systems initialized successfully");
     }
 
-    // NEW: Initialize enhanced shaders
+    // UPDATED: Initialize enhanced shaders with proper asset paths
     Shader InitializeShaders() {
+        // FIXED: Use platform-specific asset paths
+        std::string enhancedVertPath = GetAssetPath("shaders/enhanced_block.vert");
+        std::string enhancedFragPath = GetAssetPath("shaders/enhanced_block.frag");
+        std::string standardVertPath = GetAssetPath("shaders/block.vert");
+        std::string standardFragPath = GetAssetPath("shaders/block.frag");
+
         // Try to use enhanced shaders if available
-        if (std::filesystem::exists("shaders/enhanced_block.vert") &&
-            std::filesystem::exists("shaders/enhanced_block.frag")) {
+        if (std::filesystem::exists(enhancedVertPath) && std::filesystem::exists(enhancedFragPath)) {
             Log::Info("Using enhanced block shaders with biome tinting support");
-            return Shader("shaders/enhanced_block.vert", "shaders/enhanced_block.frag");
+            return Shader(enhancedVertPath, enhancedFragPath);
         } else {
             Log::Info("Enhanced shaders not found, using standard block shaders");
-            return Shader("shaders/block.vert", "shaders/block.frag");
+            return Shader(standardVertPath, standardFragPath);
         }
     }
 
-    // NEW: Initialize enhanced texture systems
+    // UPDATED: Initialize enhanced texture systems with proper asset paths
     bool InitializeTextureSystem() {
         // Initialize legacy texture atlas first
-        if (!Render::g_textureAtlas.Initialize()) {
+        std::string atlasPath = GetAssetPath("assets/textures/atlas.png");
+        if (!Render::g_textureAtlas.Initialize(atlasPath)) {
             Log::Error("Failed to initialize legacy texture atlas");
             return false;
         }
 
         // Initialize AtlasBuilder
         Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
-        if (!Render::g_atlasBuilder->BuildFromJSON("assets/atlases/blocks.json")) {
-            Log::Warning("AtlasBuilder failed to build from JSON, falling back to legacy system");
+        std::string atlasJsonPath = GetAssetPath("assets/atlases/blocks.json");
+        std::string texturesPath = GetAssetPath("assets/textures");
+
+        if (!Render::g_atlasBuilder->BuildFromJSON(atlasJsonPath, texturesPath)) {
+            Log::Warning("AtlasBuilder failed to build from JSON at %s, falling back to legacy system",
+                        atlasJsonPath.c_str());
             Render::g_atlasBuilder.reset();
         } else {
             Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
@@ -365,7 +420,9 @@ namespace PlatformMain {
             return -5;
         }
 
-        if (!Render::g_crosshair.Initialize()) {
+        // UPDATED: Initialize crosshair with proper asset path
+        std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
+        if (!Render::g_crosshair.Initialize(crosshairPath)) {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
 

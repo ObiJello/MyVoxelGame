@@ -1,4 +1,4 @@
-// File: src/game/BlockModel.hpp
+// File: src/game/BlockModel.hpp (FIXED - Parent Model Support)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -6,6 +6,8 @@
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <set>
+#include <nlohmann/json.hpp>
 
 namespace Game {
 
@@ -154,11 +156,18 @@ namespace Game {
 
     private:
         static std::unordered_map<std::string, BlockModel> s_models;
+        static std::unordered_map<std::string, BlockModel> s_parentModels; // NEW: Cache for parent models
+        static std::unordered_map<std::string, nlohmann::json> s_rawJsons; // Raw JSON storage
         static BlockModel s_defaultModel;
 
         // Helper functions
         static BlockModel LoadModelFromFile(const std::string& filePath);
         static void CreateDefaultModel();
+
+        // NEW: Parent model resolution functions
+        static void LoadParentModels(const std::string& modelsPath);
+        static BlockModel ResolveModel(const BlockModel& model);
+        static BlockModel ResolveModelRecursive(const BlockModel& model, int depth);
     };
 
 } // namespace Game
