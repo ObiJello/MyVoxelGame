@@ -9,6 +9,7 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 #include "TextureAtlas.hpp"
 
@@ -155,12 +156,31 @@ namespace Game {
                         const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
                         BlockID currentBlockId, MeshData* meshData, bool enableBiomeTinting) {
 
+        // DEBUG: Log texture resolution process
+        static int debugCounter = 0;
+        bool shouldDebug = (++debugCounter < 10); // Only debug first 10 faces to avoid spam
+
+        if (shouldDebug) {
+            Log::Debug("=== TEXTURE RESOLUTION DEBUG ===");
+            Log::Debug("Face textureRef (raw): '%s'", faceDef.textureRef.c_str());
+
+            // Show what's in the model's texture map
+            Log::Debug("Model texture map contents:");
+            for (const auto& [key, value] : model.textures) {
+                Log::Debug("  '%s' -> '%s'", key.c_str(), value.c_str());
+            }
+        }
+
         // Get face geometry
         glm::vec3 normal = GetFaceNormal(faceDir);
         auto vertices = GetFaceVertices(element, faceDir);
 
-        // Resolve texture path
+        // Resolve texture path - THIS IS THE CRITICAL STEP
         std::string texturePath = model.ResolveTexture(faceDef.textureRef);
+
+        if (shouldDebug) {
+            Log::Debug("After ResolveTexture('%s') -> '%s'", faceDef.textureRef.c_str(), texturePath.c_str());
+        }
 
         // FIXED: Get biome tinting as color, not separate
         glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -186,10 +206,14 @@ namespace Game {
 
             // UV coordinates - convert model UV to atlas UV
             glm::vec2 atlasUV;
-            if (!GetAtlasUVs(texturePath, uvs[i], atlasUV)) {
-                // Fallback to default UV if atlas lookup fails
-                atlasUV = uvs[i];
+            bool uvSuccess = GetAtlasUVs(texturePath, uvs[i], atlasUV);
+
+            if (shouldDebug && i == 0) { // Only log for first vertex to avoid spam
+                Log::Debug("GetAtlasUVs('%s', (%.3f,%.3f)) -> success=%s, result=(%.3f,%.3f)",
+                          texturePath.c_str(), uvs[i].x, uvs[i].y,
+                          uvSuccess ? "true" : "false", atlasUV.x, atlasUV.y);
             }
+
             vertex.uv = atlasUV;
 
             // FIXED: Store tint color in vertex
@@ -211,6 +235,10 @@ namespace Game {
         meshData->indices.push_back(baseIndex + 0);
         meshData->indices.push_back(baseIndex + 2);
         meshData->indices.push_back(baseIndex + 3);
+
+        if (shouldDebug) {
+            Log::Debug("=== END TEXTURE RESOLUTION DEBUG ===");
+        }
     }
 
     BlockID Mesher::GetBlockWithNeighbors(const NeighborContext& context,
@@ -421,38 +449,77 @@ namespace Game {
 
     bool Mesher::GetAtlasUVs(const std::string& texturePath,
                            const glm::vec2& modelUV, glm::vec2& atlasUV) {
+
+        // DEBUG: Always log texture path attempts
+        static std::unordered_set<std::string> loggedPaths;
+        bool firstTime = loggedPaths.find(texturePath) == loggedPaths.end();
+        if (firstTime) {
+            loggedPaths.insert(texturePath);
+            Log::Debug("GetAtlasUVs: Looking for texture '%s'", texturePath.c_str());
+        }
+
         // Try to get UVs from AtlasBuilder first
         if (Render::g_atlasBuilder) {
             Render::AtlasUVRect uvRect;
 
-            // Try exact path first
+            // Strategy 1: Try exact path first
             if (Render::g_atlasBuilder->GetUVRect(texturePath, uvRect)) {
                 atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                if (firstTime) {
+                    Log::Debug("✓ Found exact match for '%s'", texturePath.c_str());
+                }
                 return true;
             }
 
-            // Try with "minecraft:" prefix added
+            // Strategy 2: Try with "minecraft:" prefix added
             std::string prefixedPath = "minecraft:" + texturePath;
             if (Render::g_atlasBuilder->GetUVRect(prefixedPath, uvRect)) {
                 atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                if (firstTime) {
+                    Log::Debug("✓ Found with prefix: '%s' -> '%s'", texturePath.c_str(), prefixedPath.c_str());
+                }
                 return true;
             }
 
-            // Try without "minecraft:" prefix if it exists
+            // Strategy 3: Try without "minecraft:" prefix if it exists
             if (texturePath.rfind("minecraft:", 0) == 0) {
                 std::string unprefixedPath = texturePath.substr(10);
                 if (Render::g_atlasBuilder->GetUVRect(unprefixedPath, uvRect)) {
                     atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                    if (firstTime) {
+                        Log::Debug("✓ Found without prefix: '%s' -> '%s'", texturePath.c_str(), unprefixedPath.c_str());
+                    }
                     return true;
                 }
             }
 
-            Log::Warning("Texture '%s' not found in AtlasBuilder", texturePath.c_str());
+            // Strategy 4: Try common texture path variations
+            std::vector<std::string> variations = {
+                "block/" + texturePath,                    // "stone" -> "block/stone"
+                "minecraft:block/" + texturePath,          // "stone" -> "minecraft:block/stone"
+                texturePath.substr(texturePath.find_last_of('/') + 1)  // "block/stone" -> "stone"
+            };
+
+            for (const auto& variant : variations) {
+                if (Render::g_atlasBuilder->GetUVRect(variant, uvRect)) {
+                    atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                    if (firstTime) {
+                        Log::Debug("✓ Found variant: '%s' -> '%s'", texturePath.c_str(), variant.c_str());
+                    }
+                    return true;
+                }
+            }
+
+            if (firstTime) {
+                Log::Warning("✗ Texture '%s' not found in AtlasBuilder", texturePath.c_str());
+            }
         }
 
         // Fallback to legacy atlas system for basic blocks
         if (!Render::g_textureAtlas.IsLoaded()) {
-            Log::Warning("No texture atlas available for: %s", texturePath.c_str());
+            if (firstTime) {
+                Log::Warning("No texture atlas available for: %s", texturePath.c_str());
+            }
             atlasUV = modelUV;
             return false;
         }
@@ -460,20 +527,34 @@ namespace Game {
         // Map common block textures to legacy atlas indices
         uint16_t atlasIndex = 1008; // Default to air (transparent)
 
-        if (texturePath == "block/stone" || texturePath == "minecraft:block/stone") {
+        // Enhanced texture mapping - handle common paths
+        std::string basePath = texturePath;
+
+        // Strip common prefixes to get base name
+        if (basePath.rfind("minecraft:block/", 0) == 0) {
+            basePath = basePath.substr(16); // Remove "minecraft:block/"
+        } else if (basePath.rfind("block/", 0) == 0) {
+            basePath = basePath.substr(6); // Remove "block/"
+        }
+
+        // Map base names to atlas indices
+        if (basePath == "stone") {
             atlasIndex = 1; // Stone at index 1
-        } else if (texturePath == "block/dirt" || texturePath == "minecraft:block/dirt") {
+        } else if (basePath == "dirt") {
             atlasIndex = 0; // Dirt at index 0
-        } else if (texturePath == "block/grass_block_top" || texturePath == "minecraft:block/grass_block_top") {
+        } else if (basePath == "grass_block_top") {
             atlasIndex = 2; // Grass top at index 2
-        } else if (texturePath == "block/grass_block_side" || texturePath == "minecraft:block/grass_block_side") {
+        } else if (basePath == "grass_block_side") {
             atlasIndex = 18; // Grass side at index 18
-        } else if (texturePath == "block/bedrock" || texturePath == "minecraft:block/bedrock") {
+        } else if (basePath == "bedrock") {
             atlasIndex = 5; // Bedrock at index 5
-        } else if (texturePath == "block/sand" || texturePath == "minecraft:block/sand") {
+        } else if (basePath == "sand") {
             atlasIndex = 16; // Sand at index 16
         } else {
-            Log::Warning("Unknown texture path '%s', using default", texturePath.c_str());
+            if (firstTime) {
+                Log::Warning("Unknown texture path '%s' (base: '%s'), using default stone",
+                            texturePath.c_str(), basePath.c_str());
+            }
             atlasIndex = 1; // Default to stone
         }
 
@@ -483,17 +564,25 @@ namespace Game {
         // Interpolate within the tile using modelUV
         atlasUV = glm::mix(tile.uvMin, tile.uvMax, modelUV);
 
-        Log::Debug("Using legacy atlas index %u for texture '%s'", atlasIndex, texturePath.c_str());
+        if (firstTime) {
+            Log::Debug("Using legacy atlas index %u for texture '%s' (base: '%s')",
+                      atlasIndex, texturePath.c_str(), basePath.c_str());
+        }
         return true;
     }
 
     // Legacy entry points
+     // **FIXED**: Legacy entry points with proper ownership transfer
     void Mesher::MesherJob(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
         MeshSection(section, meshData, parentChunk);
 
-        // Upload the mesh data using the callback if available
+        // **CRITICAL**: Transfer ownership to callback - callback takes ownership
         if (g_meshUploadCallback && meshData) {
             g_meshUploadCallback(meshData);
+            // DON'T delete meshData here - the callback owns it now
+        } else {
+            // No callback registered, clean up ourselves
+            delete meshData;
         }
     }
 
@@ -501,20 +590,70 @@ namespace Game {
                                    const NeighborContext& context) {
         MeshSectionWithNeighbors(section, meshData, context);
 
-        // Upload the mesh data using the callback if available
+        // **CRITICAL**: Transfer ownership to callback - callback takes ownership
         if (g_meshUploadCallback && meshData) {
             g_meshUploadCallback(meshData);
+            // DON'T delete meshData here - the callback owns it now
+        } else {
+            // No callback registered, clean up ourselves
+            delete meshData;
         }
     }
 
-    // Global convenience functions
+    // **FIXED**: Global convenience functions with proper ownership
     void MesherJob(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
-        Mesher::MesherJob(section, meshData, parentChunk);
+        if (!section || !meshData) {
+            Log::Warning("MesherJob called with null parameters");
+            delete meshData; // Clean up if invalid
+            return;
+        }
+
+        try {
+            Mesher::MeshSection(section, meshData, parentChunk);
+
+            // Transfer ownership to callback
+            if (g_meshUploadCallback) {
+                g_meshUploadCallback(meshData);
+                // Callback now owns meshData
+            } else {
+                Log::Warning("No mesh upload callback registered");
+                delete meshData;
+            }
+        } catch (const std::exception& e) {
+            Log::Error("MesherJob failed: %s", e.what());
+            delete meshData;
+        } catch (...) {
+            Log::Error("MesherJob failed with unknown exception");
+            delete meshData;
+        }
     }
 
     void InterChunkMesherJob(ChunkSection* section, MeshData* meshData,
                            const NeighborContext& context) {
-        Mesher::InterChunkMesherJob(section, meshData, context);
+        if (!section || !meshData) {
+            Log::Warning("InterChunkMesherJob called with null parameters");
+            delete meshData; // Clean up if invalid
+            return;
+        }
+
+        try {
+            Mesher::MeshSectionWithNeighbors(section, meshData, context);
+
+            // Transfer ownership to callback
+            if (g_meshUploadCallback) {
+                g_meshUploadCallback(meshData);
+                // Callback now owns meshData
+            } else {
+                Log::Warning("No mesh upload callback registered");
+                delete meshData;
+            }
+        } catch (const std::exception& e) {
+            Log::Error("InterChunkMesherJob failed: %s", e.what());
+            delete meshData;
+        } catch (...) {
+            Log::Error("InterChunkMesherJob failed with unknown exception");
+            delete meshData;
+        }
     }
 
 } // namespace Game

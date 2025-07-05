@@ -87,37 +87,53 @@ namespace Game {
 
         BlockModel() = default;
 
-        // Resolve a texture reference like "side" to actual texture path
+        // FIXED: Resolve a texture reference recursively
         std::string ResolveTexture(const std::string& textureRef) const {
             if (textureRef.empty()) {
-                return textureRef; // Empty reference, return as-is
+                return "missingno"; // Empty reference
             }
 
-            // Look up in texture map (textureRef is already clean, e.g., "side")
-            auto it = textures.find(textureRef);
-            if (it != textures.end()) {
-                return it->second;
+            // CRITICAL FIX: Handle both "#key" and "key" formats
+            std::string cleanRef = textureRef;
+            if (cleanRef[0] == '#') {
+                cleanRef = cleanRef.substr(1); // Remove '#' prefix
             }
 
-            // Fallback for missing texture references
-            return "missingno";
+            // Look up in texture map
+            auto it = textures.find(cleanRef);
+            if (it == textures.end()) {
+                // Key not found in texture map
+                return "missingno";
+            }
+
+            std::string result = it->second;
+
+            // RECURSIVE RESOLUTION: If the result is another reference (starts with '#'), resolve it too
+            if (!result.empty() && result[0] == '#') {
+                return ResolveTexture(result); // Recursive call
+            }
+
+            // CANONICALIZATION: Strip "minecraft:" prefix if present
+            if (result.rfind("minecraft:", 0) == 0) {
+                result = result.substr(10); // Remove "minecraft:" prefix
+            }
+
+            return result;
         }
 
         // Get all unique texture paths used by this model
         std::vector<std::string> GetAllTexturePaths() const {
-            std::vector<std::string> paths;
+            std::set<std::string> uniquePaths; // Use set to avoid duplicates
 
             for (const auto& element : elements) {
                 for (const auto& [dir, face] : element.faces) {
                     std::string path = ResolveTexture(face.textureRef);
-                    // Add to list if not already present
-                    if (std::find(paths.begin(), paths.end(), path) == paths.end()) {
-                        paths.push_back(path);
-                    }
+                    uniquePaths.insert(path);
                 }
             }
 
-            return paths;
+            // Convert set to vector
+            return std::vector<std::string>(uniquePaths.begin(), uniquePaths.end());
         }
 
         // Check if this model uses biome tinting

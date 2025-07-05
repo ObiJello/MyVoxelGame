@@ -265,10 +265,10 @@ namespace Game {
                     faceDef.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f);
                 }
 
-                // Parse texture reference and strip leading '#' for clean downstream lookup
+                // CRITICAL FIX: Parse texture reference and strip leading '#' for clean storage
                 if (faceJson.contains("texture")) {
                     std::string rawRef = faceJson["texture"].get<std::string>();
-                    // Strip leading '#' to canonicalize: "#side" -> "side"
+                    // Store without the '#' prefix for consistent lookup
                     faceDef.textureRef = (rawRef[0] == '#') ? rawRef.substr(1) : rawRef;
                 }
 

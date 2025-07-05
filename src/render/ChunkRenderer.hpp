@@ -176,78 +176,97 @@ namespace Render {
     extern std::vector<ChunkMesh> g_chunkMeshes;
 
     // **IMPROVED**: Upload mesh with proper replacement logic
+    // **FIXED**: Upload mesh with proper memory ownership
     inline void UploadMesh(Game::MeshData* data) {
         if (!data) {
+            Log::Warning("UploadMesh called with null data");
             return;
         }
 
-        if (data->vertices.empty()) {
+        // **CRITICAL**: Take ownership immediately to prevent double-delete
+        std::unique_ptr<Game::MeshData> ownedData(data);
+
+        if (ownedData->vertices.empty()) {
             Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                      data->chunkXZ.x, data->chunkXZ.z, data->sectionIndex);
-            delete data;
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            // ownedData automatically deleted when it goes out of scope
             return;
         }
 
-        // **CRITICAL FIX**: Find and replace existing mesh for this chunk/section
+        // Find and replace existing mesh for this chunk/section
         auto& meshes = g_chunkMeshes;
 
-        // Look for existing mesh to replace - FIXED coordinate comparison
+        // Look for existing mesh to replace
         for (auto it = meshes.begin(); it != meshes.end(); ++it) {
-            if (it->chunkXZ.x == data->chunkXZ.x &&
-                it->chunkXZ.z == data->chunkXZ.z &&  // NOTE: MeshData uses .y for Z coordinate
-                it->sectionIndex == data->sectionIndex) {
+            if (it->chunkXZ.x == ownedData->chunkXZ.x &&
+                it->chunkXZ.z == ownedData->chunkXZ.z &&
+                it->sectionIndex == ownedData->sectionIndex) {
 
-                /*Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
-                          data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex);*/
+                Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
+                          ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
 
-                // Clean up the old mesh
-                glDeleteVertexArrays(1, &it->vao);
-                glDeleteBuffers(1, &it->vbo);
-                glDeleteBuffers(1, &it->ebo);
-
-                // Replace with new mesh
-                *it = ChunkMesh::FromMeshData(data);
-                delete data;
-                return;
+                // **FIXED**: Properly clean up the old mesh
+                if (it->vao != 0) {
+                    glDeleteVertexArrays(1, &it->vao);
+                    it->vao = 0;
                 }
+                if (it->vbo != 0) {
+                    glDeleteBuffers(1, &it->vbo);
+                    it->vbo = 0;
+                }
+                if (it->ebo != 0) {
+                    glDeleteBuffers(1, &it->ebo);
+                    it->ebo = 0;
+                }
+
+                // Replace with new mesh (data is automatically deleted)
+                *it = ChunkMesh::FromMeshData(ownedData.get());
+                return; // Early return - data is automatically cleaned up
+            }
         }
 
-        /* No existing mesh found, add new one
+        // No existing mesh found, add new one
         Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
-                  data->chunkXZ.x, data->chunkXZ.y, data->sectionIndex, data->vertices.size());*/
+                  ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
+                  ownedData->vertices.size());
 
-        ChunkMesh cm = ChunkMesh::FromMeshData(data);
+        ChunkMesh cm = ChunkMesh::FromMeshData(ownedData.get());
         meshes.push_back(cm);
-        delete data;
+        // ownedData automatically deleted when it goes out of scope
     }
 
-    // **FIXED**: Safe cleanup function for chunk meshes - coordinate comparison fix
+    // **IMPROVED**: Safer cleanup function for chunk meshes
     inline void RemoveChunkMeshes(Game::Math::ChunkPos pos) {
         auto& meshes = g_chunkMeshes;
         size_t originalSize = meshes.size();
 
         Log::Debug("RemoveChunkMeshes: Looking for meshes with chunk pos (%d,%d)", pos.x, pos.z);
-        Log::Debug("Current mesh count: %zu", meshes.size());
 
-        // **CRITICAL FIX**: ChunkMesh stores coordinates in chunkXZ where .x = X, .z = Z
-        // But when created from MeshData, it copies from MeshData.chunkXZ where .x = X, .y = Z
-        meshes.erase(
-            std::remove_if(meshes.begin(), meshes.end(),
-                [&pos](const ChunkMesh& cm) {
-                    // Debug: Show what we're comparing
-                    /*Log::Debug("Checking mesh: chunkXZ=(%d,%d) vs target=(%d,%d)",
-                              cm.chunkXZ.x, cm.chunkXZ.z, pos.x, pos.z);*/
+        // **FIXED**: Use safer cleanup approach
+        for (auto it = meshes.begin(); it != meshes.end();) {
+            bool shouldRemove = (it->chunkXZ.x == pos.x && it->chunkXZ.z == pos.z);
 
-                    bool shouldRemove = (cm.chunkXZ.x == pos.x && cm.chunkXZ.z == pos.z);
-                    if (shouldRemove) {
-                        Log::Debug("MATCH! Removing mesh for chunk (%d,%d) section %d",
-                                  cm.chunkXZ.x, cm.chunkXZ.z, cm.sectionIndex);
-                        cm.Cleanup();
-                    }
-                    return shouldRemove;
-                }),
-            meshes.end()
-        );
+            if (shouldRemove) {
+                Log::Debug("Removing mesh for chunk (%d,%d) section %d",
+                          it->chunkXZ.x, it->chunkXZ.z, it->sectionIndex);
+
+                // Clean up OpenGL resources
+                if (it->vao != 0) {
+                    glDeleteVertexArrays(1, &it->vao);
+                }
+                if (it->vbo != 0) {
+                    glDeleteBuffers(1, &it->vbo);
+                }
+                if (it->ebo != 0) {
+                    glDeleteBuffers(1, &it->ebo);
+                }
+
+                // Remove from vector
+                it = meshes.erase(it);
+            } else {
+                ++it;
+            }
+        }
 
         size_t removedCount = originalSize - meshes.size();
         Log::Info("RemoveChunkMeshes: removed %zu meshes for chunk (%d,%d)",

@@ -43,16 +43,6 @@
 
 namespace PlatformMain {
 
-    // NEW: Mesh upload queue for thread safety
-    static std::queue<Game::MeshData*> g_meshUploadQueue;
-    static std::mutex g_meshQueueMutex;
-
-    // NEW: Global function to enqueue mesh data from background threads
-    void EnqueueMeshUpload(Game::MeshData* meshData) {
-        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-        g_meshUploadQueue.push(meshData);
-    }
-
     // Platform-specific function to get the correct asset path
     std::string GetAssetPath(const std::string& relativePath) {
 #ifdef __APPLE__
@@ -159,24 +149,60 @@ namespace PlatformMain {
         return cursorEnabled;
     }
 
-    // NEW: Upload mesh data from the queue
+    // NEW: Mesh upload queue for thread safety
+    static std::queue<Game::MeshData*> g_meshUploadQueue;
+    static std::mutex g_meshQueueMutex;
+
+    // **FIXED**: Global function to enqueue mesh data from background threads
+    void EnqueueMeshUpload(Game::MeshData* meshData) {
+        if (!meshData) {
+            Log::Warning("EnqueueMeshUpload called with null meshData");
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+        g_meshUploadQueue.push(meshData);
+        // Note: Queue now owns the meshData pointer
+    }
+
+    // **FIXED**: Upload mesh data from the queue with proper error handling
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
         int uploadedThisFrame = 0;
         constexpr int MAX_UPLOADS_PER_FRAME = 5; // Limit to prevent frame drops
 
-        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+        // **CRITICAL**: Use try-catch to prevent crashes during OpenGL operations
+        try {
+            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
 
-        while (!g_meshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
-            Game::MeshData* meshData = g_meshUploadQueue.front();
-            g_meshUploadQueue.pop();
+            while (!g_meshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
+                Game::MeshData* meshData = g_meshUploadQueue.front();
+                g_meshUploadQueue.pop();
 
-            if (meshData) {
-                // Upload to GPU using the existing ChunkRenderer system
-                Render::UploadMesh(meshData); // This takes ownership and deletes meshData
-                uploadedThisFrame++;
+                if (meshData) {
+                    try {
+                        // Upload to GPU using the existing ChunkRenderer system
+                        // UploadMesh takes ownership and handles deletion
+                        Render::UploadMesh(meshData);
+                        uploadedThisFrame++;
+                    } catch (const std::exception& e) {
+                        Log::Error("Failed to upload mesh data: %s", e.what());
+                        // Clean up if upload failed
+                        delete meshData;
+                    } catch (...) {
+                        Log::Error("Failed to upload mesh data: unknown exception");
+                        // Clean up if upload failed
+                        delete meshData;
+                    }
+                } else {
+                    Log::Warning("Found null meshData in upload queue");
+                }
             }
+        } catch (const std::exception& e) {
+            Log::Error("Error in UploadMeshData: %s", e.what());
+        } catch (...) {
+            Log::Error("Unknown error in UploadMeshData");
         }
 
         metrics.meshesUploadedThisFrame = uploadedThisFrame;
@@ -184,6 +210,7 @@ namespace PlatformMain {
         auto uploadEndTime = std::chrono::high_resolution_clock::now();
         metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
+
 
     // Enhanced rendering with biome tinting support
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
@@ -536,18 +563,31 @@ namespace PlatformMain {
         // Cleanup
         Debug::DebugSystem::Shutdown();
 
-        for (auto& cm : Render::g_chunkMeshes) {
-            glDeleteVertexArrays(1, &cm.vao);
-            glDeleteBuffers(1, &cm.vbo);
-            glDeleteBuffers(1, &cm.ebo);
+        // Clean up OpenGL resources
+        try {
+            for (auto& cm : Render::g_chunkMeshes) {
+                if (cm.vao != 0) glDeleteVertexArrays(1, &cm.vao);
+                if (cm.vbo != 0) glDeleteBuffers(1, &cm.vbo);
+                if (cm.ebo != 0) glDeleteBuffers(1, &cm.ebo);
+            }
+        } catch (...) {
+            Log::Warning("Error cleaning up chunk meshes during shutdown");
         }
 
-        // NEW: Clean up mesh queue
+        // **FIXED**: Clean up mesh queue with proper error handling
         {
             std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+            int cleanedUp = 0;
             while (!g_meshUploadQueue.empty()) {
-                delete g_meshUploadQueue.front();
+                Game::MeshData* meshData = g_meshUploadQueue.front();
                 g_meshUploadQueue.pop();
+                if (meshData) {
+                    delete meshData;
+                    cleanedUp++;
+                }
+            }
+            if (cleanedUp > 0) {
+                Log::Info("Cleaned up %d pending mesh uploads during shutdown", cleanedUp);
             }
         }
 
