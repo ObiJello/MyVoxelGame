@@ -5,7 +5,7 @@
 #include "Chunk.hpp"
 #include "WorldMath.hpp"
 #include "BlockModel.hpp"
-#include "EnhancedBlockRegistry.hpp"
+#include "BlockRegistry.hpp"
 #include "../render/Vertex.hpp"
 #include "../render/AtlasBuilder.hpp"
 #include <vector>

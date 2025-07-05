@@ -111,7 +111,6 @@ if(APPLE)
             src/render/BlockHighlight.cpp
             src/render/Crosshair.cpp
             src/render/AtlasBuilder.cpp
-            src/game/BlockRegistry.cpp
             src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -121,7 +120,7 @@ if(APPLE)
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
             src/game/Physics.cpp
-            src/game/EnhancedBlockRegistry.cpp
+            src/game/BlockRegistry.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -137,7 +136,6 @@ else()
             src/render/Shader.cpp
             src/render/ChunkRenderer.cpp
             src/render/TextureAtlas.cpp
-            src/game/BlockRegistry.cpp
             src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
@@ -158,8 +156,8 @@ else()
             src/render/Crosshair.hpp
             src/render/AtlasBuilder.cpp
             src/render/AtlasBuilder.hpp
-            src/game/EnhancedBlockRegistry.cpp
-            src/game/EnhancedBlockRegistry.hpp
+            src/game/BlockRegistry.cpp
+            src/game/BlockRegistry.hpp
     )
 endif()
 

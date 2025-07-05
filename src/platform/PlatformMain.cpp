@@ -8,7 +8,7 @@
 
 // Include game headers
 #include "../game/BlockRegistry.hpp"
-#include "../game/EnhancedBlockRegistry.hpp"
+#include "../game/BlockRegistry.hpp"
 #include "../game/BlockModel.hpp"
 #include "../game/ChunkProvider.hpp"
 #include "../game/WorldManager.hpp"
@@ -309,7 +309,7 @@ namespace PlatformMain {
 
         // Initialize both registries for backward compatibility
         Game::BlockRegistry::Init();
-        Game::EnhancedBlockRegistry::Init();
+        Game::BlockRegistry::Init();
 
         // Use platform-specific asset path function
         std::string modelsPath = GetAssetPath("assets/models/block");
@@ -329,18 +329,13 @@ namespace PlatformMain {
     // Initialize enhanced shaders with proper asset paths
     Shader InitializeShaders() {
         // Use platform-specific asset paths
-        std::string enhancedVertPath = GetAssetPath("shaders/enhanced_block.vert");
-        std::string enhancedFragPath = GetAssetPath("shaders/enhanced_block.frag");
-        std::string standardVertPath = GetAssetPath("shaders/block.vert");
-        std::string standardFragPath = GetAssetPath("shaders/block.frag");
+        std::string enhancedVertPath = GetAssetPath("shaders/block.vert");
+        std::string enhancedFragPath = GetAssetPath("shaders/block.frag");
 
         // Try to use enhanced shaders if available
         if (std::filesystem::exists(enhancedVertPath) && std::filesystem::exists(enhancedFragPath)) {
-            Log::Info("Using enhanced block shaders with biome tinting support");
+            Log::Info("Using block shaders");
             return Shader(enhancedVertPath, enhancedFragPath);
-        } else {
-            Log::Info("Enhanced shaders not found, using standard block shaders");
-            return Shader(standardVertPath, standardFragPath);
         }
     }
 

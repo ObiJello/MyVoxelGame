@@ -1,7 +1,7 @@
 // File: src/game/Mesher.cpp (FIXED - Proper Grass Tinting Based on tintindex)
 #include "Mesher.hpp"
 #include "BlockRegistry.hpp"
-#include "EnhancedBlockRegistry.hpp"
+#include "BlockRegistry.hpp"
 #include "BlockModel.hpp"
 #include "../render/AtlasBuilder.hpp"
 #include "../core/Log.hpp"
@@ -78,7 +78,7 @@ namespace Game {
                     }
 
                     // Get enhanced block definition
-                    const EnhancedBlock& enhancedBlock = EnhancedBlockRegistry::Get(blockId);
+                    const EnhancedBlock& enhancedBlock = BlockRegistry::Get(blockId);
 
                     // Handle legacy blocks differently
                     if (enhancedBlock.useLegacyTextures) {
@@ -87,7 +87,7 @@ namespace Game {
                     }
 
                     // Get the block model
-                    const BlockModel& model = EnhancedBlockRegistry::GetBlockModel(blockId);
+                    const BlockModel& model = BlockRegistry::GetBlockModel(blockId);
 
                     // Calculate positions
                     glm::ivec3 blockPos(x, y, z);  // Local position within section
@@ -317,8 +317,8 @@ namespace Game {
         }
 
         // Rule 2: Get block properties for both current and neighbor
-        const EnhancedBlock& currentEnhanced = EnhancedBlockRegistry::Get(currentBlock);
-        const EnhancedBlock& neighborEnhanced = EnhancedBlockRegistry::Get(neighborBlock);
+        const EnhancedBlock& currentEnhanced = BlockRegistry::Get(currentBlock);
+        const EnhancedBlock& neighborEnhanced = BlockRegistry::Get(neighborBlock);
 
         // Rule 3: Special case - transparent blocks against other transparent blocks
         // Generally, we don't cull between transparent blocks unless they're the same type

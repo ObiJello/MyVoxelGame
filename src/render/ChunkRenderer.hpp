@@ -242,16 +242,16 @@ namespace Render {
 
         // No existing mesh found
         if (ownedData->vertices.empty()) {
-            Log::Debug("Skipping creation of empty mesh for new section: chunk (%d,%d) section %d",
-                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            /*Log::Debug("Skipping creation of empty mesh for new section: chunk (%d,%d) section %d",
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);*/
             // Don't create a mesh if there's nothing to render and no existing mesh to replace
             return;
         }
 
         // Add new mesh with content
-        Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
+        /*Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
                   ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
-                  ownedData->vertices.size());
+                  ownedData->vertices.size());*/
 
         ChunkMesh cm = ChunkMesh::FromMeshData(ownedData.get());
         meshes.push_back(cm);
@@ -262,7 +262,7 @@ namespace Render {
         auto& meshes = g_chunkMeshes;
         size_t originalSize = meshes.size();
 
-        Log::Debug("RemoveChunkMeshes: Looking for meshes with chunk pos (%d,%d)", pos.x, pos.z);
+        //Log::Debug("RemoveChunkMeshes: Looking for meshes with chunk pos (%d,%d)", pos.x, pos.z);
 
         // **FIXED**: Use safer cleanup approach
         for (auto it = meshes.begin(); it != meshes.end();) {
@@ -291,8 +291,8 @@ namespace Render {
         }
 
         size_t removedCount = originalSize - meshes.size();
-        Log::Info("RemoveChunkMeshes: removed %zu meshes for chunk (%d,%d)",
-                 removedCount, pos.x, pos.z);
+        /*Log::Info("RemoveChunkMeshes: removed %zu meshes for chunk (%d,%d)",
+                 removedCount, pos.x, pos.z);*/
     }
 
 } // namespace Render
