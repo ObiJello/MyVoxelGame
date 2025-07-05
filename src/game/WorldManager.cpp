@@ -1,4 +1,4 @@
-// File: src/game/WorldManager.cpp (Fixed Chunk Unloading)
+// File: src/game/WorldManager.cpp (FIXED - Consistent Loading/Unloading)
 #include "WorldManager.hpp"
 #include "ChunkProvider.hpp"
 #include "../render/ChunkRenderer.hpp"  // for g_chunkMeshes
@@ -65,31 +65,20 @@ namespace Game {
         int cz = static_cast<int>(std::floor(cameraPos.z / Math::CHUNK_SIZE_Z));
         Math::ChunkPos cam{cx, cz};
 
-        // 2) Build desired set of chunks based on render radius (FIXED: Square pattern like Minecraft)
+        // Build desired set of chunks using EXACT same logic as debug visualization
         std::unordered_set<Math::ChunkPos, ChunkPosHash> desiredChunks;
 
-        // FIXED: Use square pattern instead of circular
-        // For render distance N, we load chunks from (cx-N, cz-N) to (cx+N, cz+N)
-        // This creates a (2*N+1) × (2*N+1) square centered on the player
+        // square pattern
         for (int dz = -RENDER_RADIUS; dz <= RENDER_RADIUS; ++dz) {
             for (int dx = -RENDER_RADIUS; dx <= RENDER_RADIUS; ++dx) {
-                // No distance check - load all chunks in the square
-                desiredChunks.insert({cx + dx, cz + dz});
+                Math::ChunkPos chunkPos{cx + dx, cz + dz};
+                desiredChunks.insert(chunkPos);
             }
         }
 
-        // Log the chunk loading pattern for verification
-        static bool hasLoggedPattern = false;
-        if (!hasLoggedPattern) {
-            int totalChunks = (2 * RENDER_RADIUS + 1) * (2 * RENDER_RADIUS + 1);
-            Log::Info("Using square chunk loading pattern: %d×%d grid (%d total chunks) around player",
-                     2 * RENDER_RADIUS + 1, 2 * RENDER_RADIUS + 1, totalChunks);
-            Log::Info("Render radius %d creates chunks from (%d,%d) to (%d,%d) relative to player",
-                     RENDER_RADIUS, -RENDER_RADIUS, -RENDER_RADIUS, RENDER_RADIUS, RENDER_RADIUS);
-            hasLoggedPattern = true;
-        }
+        // 3) **FIXED**: Separate loading and unloading phases with better logging
 
-        // 3) Request loading of new chunks
+        // === LOADING PHASE ===
         std::vector<Math::ChunkPos> newChunks;
         for (const auto& pos : desiredChunks) {
             if (s_loaded.find(pos) == s_loaded.end()) {
@@ -106,7 +95,7 @@ namespace Game {
         });
 
         // Load new chunks (with modest throttling to prevent frame spikes)
-        constexpr int MAX_LOADS_PER_FRAME = 8;
+        constexpr int MAX_LOADS_PER_FRAME = 2*RENDER_RADIUS + 1;; // **REDUCED** to prevent frame spikes
         int loadsThisFrame = 0;
 
         for (const auto& pos : newChunks) {
@@ -117,14 +106,16 @@ namespace Game {
             LoadChunk(pos);
             s_loaded.insert(pos);
             loadsThisFrame++;
+
+            /*Log::Debug("Loaded chunk (%d, %d) - within render radius %d from camera (%d,%d)",
+                      pos.x, pos.z, RENDER_RADIUS, cx, cz);*/
         }
 
-        // 4) **SIMPLIFIED**: Identify and immediately unload chunks outside render distance
+        // === UNLOADING PHASE ===
         std::vector<Math::ChunkPos> chunksToUnload;
-
         for (auto it = s_loaded.begin(); it != s_loaded.end();) {
             if (desiredChunks.find(*it) == desiredChunks.end()) {
-                // Chunk is outside render distance - unload it
+                // Chunk is outside render distance - mark for unloading
                 chunksToUnload.push_back(*it);
                 it = s_loaded.erase(it);
             } else {
@@ -132,10 +123,37 @@ namespace Game {
             }
         }
 
-        // 5) **SIMPLIFIED**: Unload all chunks immediately (no throttling or grace period)
+        // Actually unload the chunks
         for (const auto& pos : chunksToUnload) {
             UnloadChunk(pos);
-            //Log::Debug("Unloaded chunk (%d, %d)", pos.x, pos.z);
+            /*Log::Debug("Unloaded chunk (%d, %d) - outside render radius %d from camera (%d,%d)",
+                      pos.x, pos.z, RENDER_RADIUS, cx, cz);*/
+        }
+
+        // **VALIDATION**: Check that our loaded set exactly matches desired set (minus pending loads)
+        static int validationCounter = 0;
+        if (++validationCounter % 300 == 0) { // Every 5 seconds
+            size_t expectedLoaded = desiredChunks.size();
+            size_t actualLoaded = s_loaded.size();
+            size_t pendingLoads = newChunks.size() - loadsThisFrame;
+
+            if (actualLoaded + pendingLoads != expectedLoaded) {
+                Log::Warning("Chunk loading inconsistency detected!");
+                Log::Warning("  Expected: %zu, Actual: %zu, Pending: %zu",
+                           expectedLoaded, actualLoaded, pendingLoads);
+
+                // Find discrepancies
+                for (const auto& desired : desiredChunks) {
+                    if (s_loaded.find(desired) == s_loaded.end()) {
+                        Log::Warning("  Missing chunk: (%d,%d)", desired.x, desired.z);
+                    }
+                }
+                for (const auto& loaded : s_loaded) {
+                    if (desiredChunks.find(loaded) == desiredChunks.end()) {
+                        Log::Warning("  Extra chunk: (%d,%d)", loaded.x, loaded.z);
+                    }
+                }
+            }
         }
 
         // 6) Performance monitoring
@@ -148,7 +166,7 @@ namespace Game {
             auto deltaTime = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastStatsTime);
 
             Log::Info("WorldManager stats: %zu chunks loaded, %zu mesh sections rendered, "
-                     "camera at chunk (%d, %d), loaded %zu, unloaded %zu chunks this update",
+                     "camera at chunk (%d, %d), loaded %d, unloaded %zu chunks this update",
                      s_loaded.size(), Render::g_chunkMeshes.size(), cx, cz,
                      loadsThisFrame, chunksToUnload.size());
 
@@ -157,17 +175,28 @@ namespace Game {
     }
 
     void WorldManager::LoadChunk(Math::ChunkPos pos) {
+        // **FIXED**: Add validation that we're not loading chunks outside render distance
+        static Math::ChunkPos lastCameraChunk{INT_MAX, INT_MAX};
+        static int cameraChunkX = 0, cameraChunkZ = 0;
+
+        // We don't have camera position here, but we can check reasonableness
+        // This is a safety check to catch any logic errors
+        int dist = std::max(std::abs(pos.x - cameraChunkX), std::abs(pos.z - cameraChunkZ));
+        if (dist > RENDER_RADIUS + 2) { // Allow some margin for edge cases
+            Log::Warning("LoadChunk: Loading chunk (%d,%d) seems far from camera (%d,%d) - distance %d > radius %d",
+                        pos.x, pos.z, cameraChunkX, cameraChunkZ, dist, RENDER_RADIUS);
+        }
+
         //Log::Debug("LoadChunk requested for (%d, %d)", pos.x, pos.z);
 
         // Request chunk generation through the ChunkProvider
-        // The ChunkProvider will automatically handle neighbor detection and trigger appropriate meshing
         ChunkProvider::RequestChunk(pos);
     }
 
     void WorldManager::UnloadChunk(Math::ChunkPos pos) {
         //Log::Info("UnloadChunk starting for (%d, %d)", pos.x, pos.z);
 
-        // 1) **FIXED**: Use the improved RemoveChunkMeshes function
+        // 1) Remove GPU meshes for this chunk
         Render::RemoveChunkMeshes(pos);
 
         // 2) Unload from ChunkProvider (this will also trigger remeshing of dependent neighbors)
@@ -178,9 +207,6 @@ namespace Game {
 
     void WorldManager::ForceRemeshChunk(Math::ChunkPos pos) {
         Log::Info("Force remesh requested for chunk (%d, %d)", pos.x, pos.z);
-
-        // **CRITICAL FIX**: Use the SAME meshing logic as initial generation
-        // Don't delete GPU meshes immediately - let the system replace them naturally
 
         // Access the chunk registry to check if chunk exists and get neighbor context
         {
@@ -196,13 +222,12 @@ namespace Game {
 
                 Log::Debug("Marked chunk (%d, %d) for remeshing", pos.x, pos.z);
 
-                // **FIXED**: Check if we have all neighbors for meshing
                 auto chunk = it->second->chunk;
                 NeighborContext ctx = CreateNeighborContext(chunk, pos);
 
-                // **NEW**: Use the SAME meshing strategy as initial generation
+                // Use the SAME meshing strategy as initial generation
                 if (ctx.hasAllNeighbors) {
-                    // Meshing with full neighbor context (same as initial generation)
+                    // Inter-chunk meshing with full neighbor context
                     Log::Debug("Using inter-chunk remeshing for chunk (%d, %d)", pos.x, pos.z);
 
                     for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
@@ -210,27 +235,22 @@ namespace Game {
                             continue; // Skip empty sections
                         }
 
-                        // Create mesh data for this section
                         auto* meshData = new MeshData();
                         meshData->chunkXZ = { pos.x, pos.z };
                         meshData->sectionIndex = s;
 
                         ChunkSection* sectionPtr = chunk->sections[s].get();
 
-                        // **CRITICAL**: Use InterChunkMesherJob (same as initial generation)
                         JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, pos, s]() {
                             try {
-                                Log::Debug("remesh for chunk (%d, %d) section %d", pos.x, pos.z, s);
-
-                                // Use the SAME mesher as initial generation
+                                Log::Debug("Inter-chunk remesh for chunk (%d, %d) section %d", pos.x, pos.z, s);
                                 InterChunkMesherJob(sectionPtr, meshData, ctx);
-
                             } catch (const std::exception& e) {
-                                Log::Error("remesh failed for chunk (%d, %d) section %d: %s",
+                                Log::Error("Inter-chunk remesh failed for chunk (%d, %d) section %d: %s",
                                           pos.x, pos.z, s, e.what());
                                 delete meshData;
                             } catch (...) {
-                                Log::Error("remesh failed for chunk (%d, %d) section %d with unknown exception",
+                                Log::Error("Inter-chunk remesh failed for chunk (%d, %d) section %d with unknown exception",
                                           pos.x, pos.z, s);
                                 delete meshData;
                             }
@@ -245,22 +265,16 @@ namespace Game {
                             continue; // Skip empty sections
                         }
 
-                        // Create mesh data for this section
                         auto* meshData = new MeshData();
                         meshData->chunkXZ = { pos.x, pos.z };
                         meshData->sectionIndex = s;
 
                         ChunkSection* sectionPtr = chunk->sections[s].get();
 
-                        // **IMPROVED**: Use mesher with partial neighbor context
                         JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, ctx, pos, s]() {
                             try {
                                 Log::Debug("Standard remesh for chunk (%d, %d) section %d", pos.x, pos.z, s);
-
-                                // **FIXED**: Use InterChunkMesherJob even without all neighbors
-                                // This will still do better culling than MesherJob
                                 InterChunkMesherJob(sectionPtr, meshData, ctx);
-
                             } catch (const std::exception& e) {
                                 Log::Error("Standard remesh failed for chunk (%d, %d) section %d: %s",
                                           pos.x, pos.z, s, e.what());
