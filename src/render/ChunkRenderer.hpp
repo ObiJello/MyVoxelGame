@@ -187,8 +187,8 @@ namespace Render {
         std::unique_ptr<Game::MeshData> ownedData(data);
 
         if (ownedData->vertices.empty()) {
-            /*Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);*/
+            Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
             // ownedData automatically deleted when it goes out of scope
             return;
         }

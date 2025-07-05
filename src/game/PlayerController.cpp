@@ -31,39 +31,6 @@ namespace Game {
 
         lastPosition = physics.position;
 
-        // Register for chunk modification notifications
-        WorldAccess::RegisterModificationCallback([](Math::ChunkPos pos) {
-            static std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> pendingRemeshes;
-            static std::mutex remeshMutex;
-
-            auto now = std::chrono::steady_clock::now();
-            uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) << 32) |
-                          static_cast<uint32_t>(pos.z);
-
-            {
-                std::lock_guard<std::mutex> lock(remeshMutex);
-                pendingRemeshes[key] = now;
-            }
-
-            std::thread([key, pos]() {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-                {
-                    std::lock_guard<std::mutex> lock(remeshMutex);
-                    auto it = pendingRemeshes.find(key);
-                    if (it != pendingRemeshes.end()) {
-                        auto elapsed = std::chrono::steady_clock::now() - it->second;
-                        if (elapsed >= std::chrono::milliseconds(45)) {
-                            pendingRemeshes.erase(it);
-                            WorldManager::ForceRemeshChunk(pos);
-                            Log::Debug("Chunk (%d, %d) remeshed after block modification",
-                                      pos.x, pos.z);
-                        }
-                    }
-                }
-            }).detach();
-        });
-
         Log::Info("PlayerController initialized with physics system");
     }
 
