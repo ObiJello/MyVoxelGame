@@ -31,7 +31,7 @@ namespace Game {
         if (it != s_chunkRegistry.end() && it->second &&
             it->second->isGenerated.load()) {
             return it->second->chunk;
-        }
+            }
         return nullptr;
     }
 
@@ -284,11 +284,10 @@ namespace Game {
     void WorldManager::ForceRemeshChunk(Math::ChunkPos pos) {
         Log::Info("Force remesh requested for chunk (%d, %d)", pos.x, pos.z);
 
-        // **CRITICAL FIX**: Don't delete GPU meshes immediately!
-        // Instead, just mark the chunk as needing a new mesh and let the system
-        // generate new meshes. The old meshes will be replaced when new ones arrive.
+        // **CRITICAL FIX**: Use the SAME meshing logic as initial generation
+        // Don't delete GPU meshes immediately - let the system replace them naturally
 
-        // Access the chunk registry to mark the chunk for remeshing
+        // Access the chunk registry to check if chunk exists and get neighbor context
         {
             std::shared_lock<std::shared_mutex> lock(s_registryMutex);
             uint64_t key = MakeChunkKey(pos.x, pos.z);
@@ -302,40 +301,82 @@ namespace Game {
 
                 Log::Debug("Marked chunk (%d, %d) for remeshing", pos.x, pos.z);
 
-                // **NEW**: Directly trigger meshing for each section that exists
+                // **FIXED**: Check if we have all neighbors for enhanced meshing
                 auto chunk = it->second->chunk;
-                for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
-                    if (!chunk->sections[s]) {
-                        continue; // Skip empty sections
-                    }
+                NeighborContext ctx = CreateNeighborContext(chunk, pos);
 
-                    // Create mesh data for this section
-                    auto* meshData = new MeshData();
-                    meshData->chunkXZ = { pos.x, pos.z };
-                    meshData->sectionIndex = s;
+                // **NEW**: Use the SAME meshing strategy as initial generation
+                if (ctx.hasAllNeighbors) {
+                    // Enhanced meshing with full neighbor context (same as initial generation)
+                    Log::Debug("Using enhanced inter-chunk remeshing for chunk (%d, %d)", pos.x, pos.z);
 
-                    ChunkSection* sectionPtr = chunk->sections[s].get();
-
-                    // **CRITICAL**: Use the standard mesher for immediate remesh
-                    // This ensures we get a mesh quickly to replace the old one
-                    JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
-                        try {
-                            //Log::Debug("Remeshing chunk (%d, %d) section %d", pos.x, pos.z, s);
-
-                            // Use enhanced mesher with chunk context
-                            MesherJob(sectionPtr, meshData, chunk.get());
-
-                            //Log::Debug("Remesh completed for chunk (%d, %d) section %d", pos.x, pos.z, s);
-                        } catch (const std::exception& e) {
-                            Log::Error("Remesh failed for chunk (%d, %d) section %d: %s",
-                                      pos.x, pos.z, s, e.what());
-                            delete meshData;
-                        } catch (...) {
-                            Log::Error("Remesh failed for chunk (%d, %d) section %d with unknown exception",
-                                      pos.x, pos.z, s);
-                            delete meshData;
+                    for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
+                        if (!chunk->sections[s]) {
+                            continue; // Skip empty sections
                         }
-                    });
+
+                        // Create mesh data for this section
+                        auto* meshData = new MeshData();
+                        meshData->chunkXZ = { pos.x, pos.z };
+                        meshData->sectionIndex = s;
+
+                        ChunkSection* sectionPtr = chunk->sections[s].get();
+
+                        // **CRITICAL**: Use InterChunkMesherJob (same as initial generation)
+                        JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, pos, s]() {
+                            try {
+                                Log::Debug("Enhanced remesh for chunk (%d, %d) section %d", pos.x, pos.z, s);
+
+                                // Use the SAME enhanced mesher as initial generation
+                                InterChunkMesherJob(sectionPtr, meshData, ctx);
+
+                            } catch (const std::exception& e) {
+                                Log::Error("Enhanced remesh failed for chunk (%d, %d) section %d: %s",
+                                          pos.x, pos.z, s, e.what());
+                                delete meshData;
+                            } catch (...) {
+                                Log::Error("Enhanced remesh failed for chunk (%d, %d) section %d with unknown exception",
+                                          pos.x, pos.z, s);
+                                delete meshData;
+                            }
+                        });
+                    }
+                } else {
+                    // Standard meshing without all neighbors (fallback)
+                    Log::Debug("Using standard remeshing for chunk (%d, %d) - not all neighbors available", pos.x, pos.z);
+
+                    for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
+                        if (!chunk->sections[s]) {
+                            continue; // Skip empty sections
+                        }
+
+                        // Create mesh data for this section
+                        auto* meshData = new MeshData();
+                        meshData->chunkXZ = { pos.x, pos.z };
+                        meshData->sectionIndex = s;
+
+                        ChunkSection* sectionPtr = chunk->sections[s].get();
+
+                        // **IMPROVED**: Use enhanced mesher with partial neighbor context
+                        JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, ctx, pos, s]() {
+                            try {
+                                Log::Debug("Standard remesh for chunk (%d, %d) section %d", pos.x, pos.z, s);
+
+                                // **FIXED**: Use InterChunkMesherJob even without all neighbors
+                                // This will still do better culling than MesherJob
+                                InterChunkMesherJob(sectionPtr, meshData, ctx);
+
+                            } catch (const std::exception& e) {
+                                Log::Error("Standard remesh failed for chunk (%d, %d) section %d: %s",
+                                          pos.x, pos.z, s, e.what());
+                                delete meshData;
+                            } catch (...) {
+                                Log::Error("Standard remesh failed for chunk (%d, %d) section %d with unknown exception",
+                                          pos.x, pos.z, s);
+                                delete meshData;
+                            }
+                        });
+                    }
                 }
             } else {
                 Log::Warning("Cannot remesh chunk (%d, %d) - chunk not found or not generated", pos.x, pos.z);

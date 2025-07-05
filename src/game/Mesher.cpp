@@ -242,14 +242,23 @@ namespace Game {
     }
 
     BlockID Mesher::GetBlockWithNeighbors(const NeighborContext& context,
-                                        int localX, int worldY, int localZ) {
-        // Handle within-chunk coordinates
+                                          int localX, int worldY, int localZ) {
+        // Convert world Y back to the section-local coordinate system for boundary checks
+        int sectionY = worldY - Config::MinY;
+
+        // Handle within-chunk coordinates (including Y bounds)
         if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
-            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z &&
+            sectionY >= 0 && sectionY < Math::CHUNK_TOTAL_HEIGHT) {
             return context.center->GetBlock(localX, worldY, localZ);
+            }
+
+        // Handle cross-chunk coordinates (X and Z only - Y is handled above)
+        if (sectionY < 0 || sectionY >= Math::CHUNK_TOTAL_HEIGHT) {
+            return BlockID::Air; // Out of world bounds vertically
         }
 
-        // Handle cross-chunk coordinates
+        // Determine which neighbor chunk to query
         std::shared_ptr<Chunk> targetChunk = nullptr;
         int targetX = localX;
         int targetZ = localZ;
@@ -276,31 +285,60 @@ namespace Game {
     }
 
     BlockID Mesher::GetBlockStandard(Chunk* chunk, int localX, int worldY, int localZ) {
-        // Bounds check
+        // Check chunk-local bounds for X and Z
         if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
-            localZ < 0 || localZ >= Math::CHUNK_SIZE_Z ||
-            worldY < Config::MinY || worldY > Config::MaxY) {
-            return BlockID::Air;
+            localZ < 0 || localZ >= Math::CHUNK_SIZE_Z) {
+            return BlockID::Air; // Outside chunk bounds horizontally
+            }
+
+        // Check world bounds for Y
+        if (worldY < Config::MinY || worldY > Config::MaxY) {
+            return BlockID::Air; // Outside world bounds vertically
         }
 
         return chunk->GetBlock(localX, worldY, localZ);
     }
 
     bool Mesher::ShouldCullFace(BlockID currentBlock, BlockID neighborBlock) {
+        // Rule 1: Never cull faces adjacent to air
         if (neighborBlock == BlockID::Air) {
-            return false; // Don't cull faces adjacent to air
-        }
-
-        // Get neighbor block properties
-        const EnhancedBlock& neighborEnhanced = EnhancedBlockRegistry::Get(neighborBlock);
-
-        // Don't cull if neighbor is transparent
-        if (neighborEnhanced.isTransparent) {
             return false;
         }
 
-        // Cull if neighbor is opaque
-        return neighborEnhanced.opaque;
+        // Rule 2: Get block properties for both current and neighbor
+        const EnhancedBlock& currentEnhanced = EnhancedBlockRegistry::Get(currentBlock);
+        const EnhancedBlock& neighborEnhanced = EnhancedBlockRegistry::Get(neighborBlock);
+
+        // Rule 3: Special case - transparent blocks against other transparent blocks
+        // Generally, we don't cull between transparent blocks unless they're the same type
+        if (currentEnhanced.isTransparent && neighborEnhanced.isTransparent) {
+            // Same block type - cull (e.g., water against water, glass against glass)
+            if (currentBlock == neighborBlock) {
+                return true;
+            }
+            // Different transparent blocks - don't cull (e.g., water against glass)
+            return false;
+        }
+
+        // Rule 4: Transparent block against opaque block
+        if (currentEnhanced.isTransparent && !neighborEnhanced.isTransparent) {
+            // Only cull if the neighbor is a full solid block
+            return neighborEnhanced.opaque;
+        }
+
+        // Rule 5: Opaque block against transparent block - never cull
+        // (we want to see the face of the opaque block)
+        if (!currentEnhanced.isTransparent && neighborEnhanced.isTransparent) {
+            return false;
+        }
+
+        // Rule 6: Both blocks are opaque - cull the face
+        if (!currentEnhanced.isTransparent && !neighborEnhanced.isTransparent) {
+            return neighborEnhanced.opaque;
+        }
+
+        // Default fallback - don't cull
+        return false;
     }
 
     void Mesher::GetFaceOffset(FaceDirection faceDir, int& dx, int& dy, int& dz) {
