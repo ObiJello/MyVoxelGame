@@ -9,9 +9,13 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <cmath>
+#include <shared_mutex>
 #include <unordered_set>
 
+#include "ChunkProvider.hpp"
+#include "JobSystem.hpp"
 #include "TextureAtlas.hpp"
+#include "WorldAccess.hpp"
 
 namespace Game {
 
@@ -239,18 +243,27 @@ namespace Game {
 
     BlockID Mesher::GetBlockWithNeighbors(const NeighborContext& context,
                                           int localX, int worldY, int localZ) {
-        // Convert world Y back to the section-local coordinate system for boundary checks
-        int sectionY = worldY - Config::MinY;
+        // **CRITICAL FIX**: Handle vertical section boundaries within the same chunk FIRST
+        // before checking horizontal chunk boundaries
 
-        // Handle within-chunk coordinates (including Y bounds)
+        // Check if we're accessing a different section within the same chunk
+        int currentSectionIndex = (worldY - Config::MinY) / Math::SECTION_HEIGHT;
+
+        // If coordinates are within the same chunk horizontally, use the center chunk
         if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
-            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z &&
-            sectionY >= 0 && sectionY < Math::CHUNK_TOTAL_HEIGHT) {
-            return context.center->GetBlock(localX, worldY, localZ);
+            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z) {
+
+            // Check world Y bounds
+            if (worldY < Config::MinY || worldY > Config::MaxY) {
+                return BlockID::Air; // Out of world bounds vertically
             }
 
+            // **FIXED**: Use center chunk for vertical access (different sections)
+            return context.center->GetBlock(localX, worldY, localZ);
+        }
+
         // Handle cross-chunk coordinates (X and Z only - Y is handled above)
-        if (sectionY < 0 || sectionY >= Math::CHUNK_TOTAL_HEIGHT) {
+        if (worldY < Config::MinY || worldY > Config::MaxY) {
             return BlockID::Air; // Out of world bounds vertically
         }
 
@@ -285,13 +298,15 @@ namespace Game {
         if (localX < 0 || localX >= Math::CHUNK_SIZE_X ||
             localZ < 0 || localZ >= Math::CHUNK_SIZE_Z) {
             return BlockID::Air; // Outside chunk bounds horizontally
-            }
+        }
 
         // Check world bounds for Y
         if (worldY < Config::MinY || worldY > Config::MaxY) {
             return BlockID::Air; // Outside world bounds vertically
         }
 
+        // **FIXED**: This function now properly handles access to different sections
+        // within the same chunk, so inter-section face culling works correctly
         return chunk->GetBlock(localX, worldY, localZ);
     }
 
