@@ -1,3 +1,4 @@
+// File: src/render/TextureAtlas.cpp (Enhanced with Mipmap Control)
 #include "TextureAtlas.hpp"
 #include "../core/Log.hpp"
 #include <filesystem>
@@ -14,7 +15,7 @@ namespace Render {
     TextureAtlas g_textureAtlas;
 
     TextureAtlas::TextureAtlas()
-        : textureID(0), isLoaded(false), nextAvailableIndex(0) // Don't reserve index 0 anymore
+        : textureID(0), isLoaded(false), mipmapEnabled(true), nextAvailableIndex(0)
     {
         // Pre-allocate atlas data (RGBA format) for 256x1024 atlas
         atlasData.resize(ATLAS_WIDTH * ATLAS_HEIGHT * 4, 0);
@@ -102,8 +103,51 @@ namespace Render {
         UploadToGPU();
 
         isLoaded = true;
-        Log::Info("Texture atlas initialized successfully");
+        Log::Info("Texture atlas initialized successfully (mipmaps: %s)",
+                 mipmapEnabled ? "enabled" : "disabled");
         return true;
+    }
+
+    // **NEW**: Mipmap control implementation
+    void TextureAtlas::SetMipmapEnabled(bool enabled) {
+        if (mipmapEnabled == enabled) {
+            return; // No change needed
+        }
+
+        mipmapEnabled = enabled;
+
+        if (textureID != 0) {
+            UpdateTextureParameters();
+            Log::Info("Legacy texture atlas mipmaps %s", enabled ? "enabled" : "disabled");
+        }
+    }
+
+    // **NEW**: Update texture parameters
+    void TextureAtlas::UpdateTextureParameters() {
+        if (textureID == 0) {
+            return;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, textureID);
+
+        if (mipmapEnabled) {
+            // Mipmap enabled
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+            // Regenerate mipmaps with current data
+            glGenerateMipmap(GL_TEXTURE_2D);
+        } else {
+            // Mipmap disabled
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+
+        // Keep wrap mode unchanged
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 
     void TextureAtlas::InitializeAtlasData() {
@@ -252,18 +296,13 @@ namespace Render {
         // Upload the atlas data (256x1024)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
 
-        // Set texture parameters
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); // Pixel-perfect for voxels
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        // Generate mipmaps for distant chunks (optional)
-        glGenerateMipmap(GL_TEXTURE_2D);
+        // Set texture parameters based on mipmap setting
+        UpdateTextureParameters();
 
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        Log::Info("Uploaded %dx%d texture atlas to GPU (Texture ID: %u)", ATLAS_WIDTH, ATLAS_HEIGHT, textureID);
+        Log::Info("Uploaded %dx%d texture atlas to GPU (Texture ID: %u, mipmaps: %s)",
+                 ATLAS_WIDTH, ATLAS_HEIGHT, textureID, mipmapEnabled ? "enabled" : "disabled");
     }
 
     AtlasTile TextureAtlas::GetTile(uint16_t atlasIndex) const {

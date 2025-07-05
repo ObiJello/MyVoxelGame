@@ -125,6 +125,32 @@ namespace Debug {
                    Render::TextureAtlas::TILES_PER_COLUMN, Render::TextureAtlas::MAX_TILES);
         ImGui::Spacing();
 
+        // **NEW**: Mipmap controls
+        static bool mipmapEnabled = false; // Default to enabled
+        bool mipmapChanged = ImGui::Checkbox("Enable Mipmaps", &mipmapEnabled);
+
+        if (mipmapChanged) {
+            // Apply mipmap setting to legacy texture atlas
+            if (Render::g_textureAtlas.IsLoaded()) {
+                Render::g_textureAtlas.SetMipmapEnabled(mipmapEnabled);
+                Log::Info("Legacy atlas mipmaps %s", mipmapEnabled ? "enabled" : "disabled");
+            }
+
+            // Apply mipmap setting to AtlasBuilder
+            if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
+                Render::g_atlasBuilder->SetMipmapEnabled(mipmapEnabled);
+                Log::Info("AtlasBuilder mipmaps %s", mipmapEnabled ? "enabled" : "disabled");
+            }
+        }
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Mipmaps improve texture quality at distance\nbut may cause slight blurring.\n\nEnabled: GL_NEAREST_MIPMAP_LINEAR\nDisabled: GL_NEAREST");
+        }
+
+        ImGui::Spacing();
+
         // World statistics
         ImGui::Text("World Statistics");
         ImGui::Separator();

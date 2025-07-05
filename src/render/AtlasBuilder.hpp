@@ -1,4 +1,4 @@
-// File: src/render/AtlasBuilder.hpp
+// File: src/render/AtlasBuilder.hpp (Enhanced with Mipmap Control)
 #pragma once
 
 #include <string>
@@ -82,6 +82,10 @@ namespace Render {
         size_t GetTextureCount() const { return textureSources.size(); }
         size_t GetPackedCount() const { return textureKeyToUV.size(); }
 
+        // **NEW**: Mipmap control
+        void SetMipmapEnabled(bool enabled);
+        bool IsMipmapEnabled() const { return mipmapEnabled; }
+
         // Debug: Save atlas to file
         bool SaveAtlasDebugImage(const std::string& outputPath) const;
 
@@ -94,6 +98,9 @@ namespace Render {
         // Atlas dimensions
         int atlasWidth;
         int atlasHeight;
+
+        // **NEW**: Mipmap state
+        bool mipmapEnabled;
 
         // Texture sources and packed data
         std::vector<TextureSource> textureSources;
@@ -121,6 +128,9 @@ namespace Render {
         // Step 5: Create atlas texture and upload to GPU
         bool CreateAtlasTexture(const std::vector<TextureSource>& sources,
                                const std::vector<PackRect>& packedRects);
+
+        // **NEW**: Update texture parameters (for mipmap changes)
+        void UpdateTextureParameters();
 
         // Helper: Process directory source from JSON
         void ProcessDirectorySource(const nlohmann::json& source,

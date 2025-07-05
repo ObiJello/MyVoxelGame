@@ -1,3 +1,4 @@
+// File: src/render/TextureAtlas.hpp (Enhanced with Mipmap Control)
 #pragma once
 
 #include <string>
@@ -12,7 +13,7 @@ namespace Render {
     struct AtlasTile {
         glm::vec2 uvMin;  // Bottom-left UV (0-1 range)
         glm::vec2 uvMax;  // Top-right UV (0-1 range)
-        
+
         AtlasTile() : uvMin(0.0f), uvMax(0.0f) {}
         AtlasTile(glm::vec2 min, glm::vec2 max) : uvMin(min), uvMax(max) {}
     };
@@ -33,7 +34,7 @@ namespace Render {
         // Initialize the atlas by loading a single atlas texture file
         bool Initialize(const std::string& atlasPath = "assets/textures/atlas.png");
 
-        // Get UV coordinates for a specific atlas index - CHANGED TO uint16_t
+        // Get UV coordinates for a specific atlas index
         AtlasTile GetTile(uint16_t atlasIndex) const;
 
         // Bind the atlas texture for rendering
@@ -48,15 +49,20 @@ namespace Render {
         // Get the number of loaded textures
         size_t GetLoadedTextureCount() const { return loadedTextures.size(); }
 
-        // Register a texture manually (for dynamic textures) - CHANGED TO uint16_t
+        // Register a texture manually (for dynamic textures)
         uint16_t RegisterTexture(const std::string& name, const unsigned char* data, int width, int height);
+
+        // **NEW**: Mipmap control
+        void SetMipmapEnabled(bool enabled);
+        bool IsMipmapEnabled() const { return mipmapEnabled; }
 
     private:
         GLuint textureID;
         bool isLoaded;
-        std::vector<std::string> loadedTextures;  // Track loaded texture names
-        std::unordered_map<std::string, uint16_t> textureNameToIndex; // CHANGED TO uint16_t
-        uint16_t nextAvailableIndex; // CHANGED TO uint16_t
+        bool mipmapEnabled;  // **NEW**: Track mipmap state
+        std::vector<std::string> loadedTextures;
+        std::unordered_map<std::string, uint16_t> textureNameToIndex;
+        uint16_t nextAvailableIndex;
 
         // Atlas pixel data (RGBA format)
         std::vector<unsigned char> atlasData;
@@ -64,22 +70,25 @@ namespace Render {
         // Initialize the atlas texture with default/error patterns
         void InitializeAtlasData();
 
-        // Load a single PNG file and copy it to the atlas at the specified index - CHANGED TO uint16_t
+        // Load a single PNG file and copy it to the atlas at the specified index
         bool LoadTextureToAtlas(const std::string& filePath, uint16_t atlasIndex);
 
-        // Create a checkerboard error texture at the specified atlas index - CHANGED TO uint16_t
+        // Create a checkerboard error texture at the specified atlas index
         void CreateErrorTexture(uint16_t atlasIndex);
 
-        // Create a solid color texture at the specified atlas index - CHANGED TO uint16_t
+        // Create a solid color texture at the specified atlas index
         void CreateSolidTexture(uint16_t atlasIndex, unsigned char r, unsigned char g, unsigned char b, unsigned char a = 255);
 
-        // Copy tile data into the atlas at the specified index - CHANGED TO uint16_t
+        // Copy tile data into the atlas at the specified index
         void CopyTileToAtlas(const unsigned char* tileData, uint16_t atlasIndex, int tileWidth, int tileHeight);
 
         // Upload the atlas data to OpenGL
         void UploadToGPU();
 
-        // Utility: Get atlas pixel coordinates from index - CHANGED TO uint16_t
+        // **NEW**: Update texture parameters (for mipmap changes)
+        void UpdateTextureParameters();
+
+        // Utility: Get atlas pixel coordinates from index
         void GetAtlasCoords(uint16_t atlasIndex, int& x, int& y) const;
     };
 

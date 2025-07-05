@@ -24,7 +24,8 @@ namespace Render {
         , grassColormapID(0)
         , foliageColormapID(0)
         , atlasWidth(DEFAULT_ATLAS_SIZE)
-        , atlasHeight(DEFAULT_ATLAS_SIZE) {
+        , atlasHeight(DEFAULT_ATLAS_SIZE)
+    , mipmapEnabled(false) {  // **NEW**: Default to mipmaps enabled
     }
 
     AtlasBuilder::~AtlasBuilder() {
@@ -449,7 +450,7 @@ namespace Render {
     }
 
     bool AtlasBuilder::CreateAtlasTexture(const std::vector<TextureSource>& sources,
-                                         const std::vector<PackRect>& packedRects) {
+                                     const std::vector<PackRect>& packedRects) {
         Log::Info("Creating atlas texture...");
 
         // Allocate atlas pixel data
@@ -485,26 +486,57 @@ namespace Render {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasWidth, atlasHeight, 0,
                     GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
 
-        // Set texture parameters
-        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        // Generate mipmaps
-        glGenerateMipmap(GL_TEXTURE_2D);
+        // **UPDATED**: Use the new parameter system instead of hardcoded values
+        UpdateTextureParameters();
 
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        Log::Info("✓ Created atlas texture ID %u (%dx%d)",
-                 atlasTextureID, atlasWidth, atlasHeight);
+        Log::Info("✓ Created atlas texture ID %u (%dx%d, mipmaps: %s)",
+                 atlasTextureID, atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
 
         return true;
+    }
+
+    // **NEW**: Mipmap control implementation
+    void AtlasBuilder::SetMipmapEnabled(bool enabled) {
+        if (mipmapEnabled == enabled) {
+            return; // No change needed
+        }
+
+        mipmapEnabled = enabled;
+
+        if (atlasTextureID != 0) {
+            UpdateTextureParameters();
+            Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
+        }
+    }
+
+    // **NEW**: Update texture parameters
+    void AtlasBuilder::UpdateTextureParameters() {
+        if (atlasTextureID == 0) {
+            return;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, atlasTextureID);
+
+        if (mipmapEnabled) {
+            // Mipmap enabled
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+            // Regenerate mipmaps with current data
+            glGenerateMipmap(GL_TEXTURE_2D);
+        } else {
+            // Mipmap disabled
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
+
+        // Keep wrap mode unchanged
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
 
     void AtlasBuilder::CopyTextureToAtlas(const TextureSource& source,
