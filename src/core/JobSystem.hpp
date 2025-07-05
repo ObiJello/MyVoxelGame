@@ -27,6 +27,12 @@ namespace JobSystem {
         ThreadPool(const ThreadPool&) = delete;
         ThreadPool& operator=(const ThreadPool&) = delete;
 
+        // **NEW**: Graceful shutdown method
+        void Stop();
+
+        // **NEW**: Check if stopped
+        bool IsStopped() const { return stop; }
+
     private:
         // Worker entry: each thread runs this function, pulling jobs from the queue.
         void WorkerLoop();

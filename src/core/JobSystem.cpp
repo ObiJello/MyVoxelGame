@@ -14,16 +14,7 @@ namespace JobSystem {
     }
 
     ThreadPool::~ThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            stop = true;
-        }
-        condition.notify_all();
-        for (auto &thread : workers) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
+        Stop(); // Use the new Stop method
     }
 
     void ThreadPool::Enqueue(std::function<void()> job) {
@@ -32,6 +23,28 @@ namespace JobSystem {
             jobQueue.push(std::move(job));
         }
         condition.notify_one();
+    }
+
+    void ThreadPool::Stop() {
+        {
+            std::lock_guard<std::mutex> lock(queueMutex);
+            if (stop) return; // Already stopped
+            stop = true;
+        }
+        condition.notify_all();
+
+        // Wait for all threads to finish
+        for (auto &thread : workers) {
+            if (thread.joinable()) {
+                thread.join();
+            }
+        }
+
+        // Clear any remaining jobs
+        std::lock_guard<std::mutex> lock(queueMutex);
+        while (!jobQueue.empty()) {
+            jobQueue.pop();
+        }
     }
 
     void ThreadPool::WorkerLoop() {

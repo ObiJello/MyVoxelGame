@@ -36,6 +36,8 @@
 #include <filesystem>
 #include <queue>
 
+#include "JobSystem.hpp"
+
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
 #include <unistd.h>
@@ -563,18 +565,12 @@ namespace PlatformMain {
         // Cleanup
         Debug::DebugSystem::Shutdown();
 
-        // Clean up OpenGL resources
-        try {
-            for (auto& cm : Render::g_chunkMeshes) {
-                if (cm.vao != 0) glDeleteVertexArrays(1, &cm.vao);
-                if (cm.vbo != 0) glDeleteBuffers(1, &cm.vbo);
-                if (cm.ebo != 0) glDeleteBuffers(1, &cm.ebo);
-            }
-        } catch (...) {
-            Log::Warning("Error cleaning up chunk meshes during shutdown");
-        }
+        // **NEW**: Stop all background threads BEFORE cleaning up OpenGL resources
+        Log::Info("Stopping background job system...");
+        // Add a way to stop the thread pool gracefully
+        // (You may need to add a Stop() method to JobSystem::ThreadPool)
 
-        // **FIXED**: Clean up mesh queue with proper error handling
+        // **FIXED**: Clean up mesh upload queue with error handling
         {
             std::lock_guard<std::mutex> lock(g_meshQueueMutex);
             int cleanedUp = 0;
@@ -591,12 +587,73 @@ namespace PlatformMain {
             }
         }
 
+        Log::Info("Stopping job system...");
+        try {
+            JobSystem::g_ThreadPool.Stop();
+            Log::Info("Job system stopped successfully");
+        } catch (const std::exception& e) {
+            Log::Error("Exception stopping job system: %s", e.what());
+        } catch (...) {
+            Log::Error("Unknown exception stopping job system");
+        }
+
+        // **FIXED**: Clean up OpenGL resources with better error handling
+        Log::Info("Cleaning up OpenGL resources...");
+        try {
+            // Make sure we have a valid OpenGL context
+            if (glfwGetCurrentContext() == window) {
+                // Clean up chunk meshes
+                size_t meshCount = Render::g_chunkMeshes.size();
+                for (auto& cm : Render::g_chunkMeshes) {
+                    if (cm.vao != 0) {
+                        glDeleteVertexArrays(1, &cm.vao);
+                        cm.vao = 0;
+                    }
+                    if (cm.vbo != 0) {
+                        glDeleteBuffers(1, &cm.vbo);
+                        cm.vbo = 0;
+                    }
+                    if (cm.ebo != 0) {
+                        glDeleteBuffers(1, &cm.ebo);
+                        cm.ebo = 0;
+                    }
+                }
+                Render::g_chunkMeshes.clear();
+                Log::Info("Cleaned up %zu chunk meshes", meshCount);
+
+                // **NEW**: Clean up global rendering resources
+                if (Render::g_atlasBuilder) {
+                    Render::g_atlasBuilder.reset();
+                }
+
+                // Clear texture atlas
+                // Note: TextureAtlas destructor should handle OpenGL cleanup
+
+                // **NEW**: Explicitly clear any remaining OpenGL errors
+                while (glGetError() != GL_NO_ERROR) {
+                    // Clear error queue
+                }
+            } else {
+                Log::Warning("No valid OpenGL context during cleanup - skipping OpenGL resource cleanup");
+            }
+        } catch (const std::exception& e) {
+            Log::Error("Exception during OpenGL cleanup: %s", e.what());
+        } catch (...) {
+            Log::Error("Unknown exception during OpenGL cleanup");
+        }
+
         Log::Info("Voxel engine shutting down");
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 
-        glfwDestroyWindow(window);
-        glfwTerminate();
+        // **FIXED**: Destroy window and terminate GLFW with error handling
+        try {
+            glfwDestroyWindow(window);
+            glfwTerminate();
+        } catch (...) {
+            Log::Error("Exception during GLFW cleanup");
+        }
+
         return 0;
     }
 
