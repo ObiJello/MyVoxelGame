@@ -1,4 +1,4 @@
-// File: src/game/Mesher.hpp (FIXED - Updated Function Signatures)
+// File: src/game/Mesher.hpp (FIXED - Updated Function Signatures for Tinting)
 #pragma once
 
 #include "ChunkSection.hpp"
@@ -85,20 +85,20 @@ namespace Game {
         // Face culling check
         static bool ShouldCullFace(BlockID currentBlock, BlockID neighborBlock);
 
-        // FIXED: Get face offset for face direction
+        // Get face offset for face direction
         static void GetFaceOffset(FaceDirection faceDir, int& dx, int& dy, int& dz);
 
         // Convert model face direction to mesher face direction
         static FaceDirection ModelFaceToMesherFace(FaceDir modelFace);
 
-        // FIXED: Mesh a single element from a block model (now includes currentBlockId)
+        // Mesh a single element from a block model
         static void MeshElement(const Element& element, const BlockModel& model,
                               const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
                               BlockID currentBlockId, MeshData* meshData, bool enableBiomeTinting,
                               const NeighborContext* neighborContext = nullptr,
                               Chunk* chunk = nullptr);
 
-        // FIXED: Mesh a single face of an element (now includes currentBlockId)
+        // Mesh a single face of an element
         static void MeshFace(const Element& element, const FaceDef& faceDef,
                            FaceDir faceDir, const BlockModel& model,
                            const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
@@ -110,7 +110,7 @@ namespace Game {
         // Get face vertices in model space (0-16 range)
         static std::array<glm::vec3, 4> GetFaceVertices(const Element& element, FaceDir faceDir);
 
-        // FIXED: Get UV coordinates for face corners (now includes texture path for dimensions)
+        // Get UV coordinates for face corners
         static std::array<glm::vec2, 4> GetFaceUVs(const FaceDef& faceDef, const std::string& texturePath);
 
         // Convert model space to world space
@@ -118,8 +118,9 @@ namespace Game {
                                          const glm::ivec3& blockPos,
                                          const glm::ivec3& worldBlockPos);
 
-        // Sample biome tinting color (placeholder for now)
-        static glm::vec3 SampleBiomeTinting(int tintIndex, const glm::ivec3& worldPos);
+        // **FIXED**: Sample biome tinting colors (now return vec3 instead of tint index)
+        static glm::vec3 SampleGrassTinting(const glm::ivec3& worldPos);
+        static glm::vec3 SampleFoliageTinting(const glm::ivec3& worldPos);
 
         // Get atlas UVs for a texture
         static bool GetAtlasUVs(const std::string& texturePath,

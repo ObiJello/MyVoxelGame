@@ -1,4 +1,4 @@
-// File: src/game/Mesher.cpp (FIXED - All Structural Issues + Callback Implementation)
+// File: src/game/Mesher.cpp (FIXED - Proper Grass Tinting Based on tintindex)
 #include "Mesher.hpp"
 #include "BlockRegistry.hpp"
 #include "EnhancedBlockRegistry.hpp"
@@ -21,7 +21,6 @@ namespace Game {
     void SetMeshUploadCallback(MeshUploadCallback callback) {
         g_meshUploadCallback = callback;
     }
-
 
     void Mesher::MeshSection(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
         if (!section || !meshData || !parentChunk) {
@@ -156,21 +155,6 @@ namespace Game {
                         const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
                         BlockID currentBlockId, MeshData* meshData, bool enableBiomeTinting) {
 
-        // DEBUG: Log texture resolution process
-        static int debugCounter = 0;
-        bool shouldDebug = (++debugCounter < 10); // Only debug first 10 faces to avoid spam
-
-        if (shouldDebug) {
-            Log::Debug("=== TEXTURE RESOLUTION DEBUG ===");
-            Log::Debug("Face textureRef (raw): '%s'", faceDef.textureRef.c_str());
-
-            // Show what's in the model's texture map
-            Log::Debug("Model texture map contents:");
-            for (const auto& [key, value] : model.textures) {
-                Log::Debug("  '%s' -> '%s'", key.c_str(), value.c_str());
-            }
-        }
-
         // Get face geometry
         glm::vec3 normal = GetFaceNormal(faceDir);
         auto vertices = GetFaceVertices(element, faceDir);
@@ -178,22 +162,39 @@ namespace Game {
         // Resolve texture path - THIS IS THE CRITICAL STEP
         std::string texturePath = model.ResolveTexture(faceDef.textureRef);
 
-        if (shouldDebug) {
-            Log::Debug("After ResolveTexture('%s') -> '%s'", faceDef.textureRef.c_str(), texturePath.c_str());
-        }
+        // **FIXED**: Proper biome tinting based on tintindex
+        glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f); // Default: no tinting (white)
 
-        // FIXED: Get biome tinting as color, not separate
-        glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f);
-        if (faceDef.tintIndex == 0) {
-            // Grass overlay tinting
-            glm::vec3 grassTint = SampleGrassTinting(worldBlockPos);
-            tintColor = glm::vec4(grassTint, 1.0f);
-        } else if (faceDef.tintIndex == 1) {
-            // Foliage tinting (leaves, etc.)
-            glm::vec3 foliageTint = SampleFoliageTinting(worldBlockPos);
-            tintColor = glm::vec4(foliageTint, 1.0f);
+        // Only apply tinting if this face has a valid tintindex
+        if (faceDef.tintIndex >= 0) {
+            if (faceDef.tintIndex == 0) {
+                // Grass overlay tinting (tintindex 0)
+                glm::vec3 grassTint = SampleGrassTinting(worldBlockPos);
+                tintColor = glm::vec4(grassTint, 1.0f);
+
+                // Debug log for grass tinting (remove this later)
+                static int debugCounter = 0;
+                if (++debugCounter < 5) { // Only log first few instances
+                    Log::Debug("Applying grass tint to face with tintindex 0: RGB(%.2f, %.2f, %.2f) at world pos (%d, %d, %d)",
+                              grassTint.r, grassTint.g, grassTint.b,
+                              worldBlockPos.x, worldBlockPos.y, worldBlockPos.z);
+                }
+            } else if (faceDef.tintIndex == 1) {
+                // Foliage tinting (tintindex 1) for leaves, etc.
+                glm::vec3 foliageTint = SampleFoliageTinting(worldBlockPos);
+                tintColor = glm::vec4(foliageTint, 1.0f);
+
+                // Debug log for foliage tinting
+                static int debugCounter2 = 0;
+                if (++debugCounter2 < 5) { // Only log first few instances
+                    Log::Debug("Applying foliage tint to face with tintindex 1: RGB(%.2f, %.2f, %.2f) at world pos (%d, %d, %d)",
+                              foliageTint.r, foliageTint.g, foliageTint.b,
+                              worldBlockPos.x, worldBlockPos.y, worldBlockPos.z);
+                }
+            }
+            // Add more tintindex values here if needed in the future
         }
-        // tintIndex == -1 or other values: no tinting (stays white)
+        // If tintIndex is -1 or any other value, tintColor remains white (no tinting)
 
         // FIXED: Get UV coordinates with proper texture dimensions
         auto uvs = GetFaceUVs(faceDef, texturePath);
@@ -213,16 +214,9 @@ namespace Game {
             // UV coordinates - convert model UV to atlas UV
             glm::vec2 atlasUV;
             bool uvSuccess = GetAtlasUVs(texturePath, uvs[i], atlasUV);
-
-            if (shouldDebug && i == 0) { // Only log for first vertex to avoid spam
-                Log::Debug("GetAtlasUVs('%s', (%.3f,%.3f)) -> success=%s, result=(%.3f,%.3f)",
-                          texturePath.c_str(), uvs[i].x, uvs[i].y,
-                          uvSuccess ? "true" : "false", atlasUV.x, atlasUV.y);
-            }
-
             vertex.uv = atlasUV;
 
-            // FIXED: Store tint color in vertex
+            // **FIXED**: Store tint color in vertex (this will be white if no tinting)
             vertex.color = tintColor;
 
             // Ambient occlusion (placeholder - can be calculated properly later)
@@ -241,10 +235,6 @@ namespace Game {
         meshData->indices.push_back(baseIndex + 0);
         meshData->indices.push_back(baseIndex + 2);
         meshData->indices.push_back(baseIndex + 3);
-
-        if (shouldDebug) {
-            Log::Debug("=== END TEXTURE RESOLUTION DEBUG ===");
-        }
     }
 
     BlockID Mesher::GetBlockWithNeighbors(const NeighborContext& context,
@@ -476,16 +466,46 @@ namespace Game {
         return glm::vec3(worldBlockPos) + normalizedPos;
     }
 
+    // **ENHANCED**: Better grass tinting that varies by position
     glm::vec3 Mesher::SampleGrassTinting(const glm::ivec3& worldPos) {
-        // Sample grass colormap based on biome temperature/humidity
-        float variation = sin(worldPos.x * 0.1f) * cos(worldPos.z * 0.1f) * 0.1f;
-        return glm::vec3(0.4f + variation, 0.8f + variation, 0.4f + variation);
+        // Create position-based variation for more natural look
+        float noiseX = sin(worldPos.x * 0.1f) * 0.1f;
+        float noiseZ = cos(worldPos.z * 0.1f) * 0.1f;
+        float variation = (noiseX + noiseZ) * 0.5f;
+
+        // Base grass green color with subtle variation
+        glm::vec3 baseGrass(0.45f, 0.85f, 0.45f); // Bright grass green
+
+        // Apply subtle variation
+        baseGrass.r += variation * 0.1f;
+        baseGrass.g += variation * 0.05f;
+        baseGrass.b += variation * 0.1f;
+
+        // Clamp to valid range
+        baseGrass = glm::clamp(baseGrass, glm::vec3(0.0f), glm::vec3(1.0f));
+
+        return baseGrass;
     }
 
+    // **ENHANCED**: Better foliage tinting that varies by position
     glm::vec3 Mesher::SampleFoliageTinting(const glm::ivec3& worldPos) {
-        // Sample foliage colormap based on biome temperature/humidity
-        float variation = cos(worldPos.x * 0.15f) * sin(worldPos.z * 0.15f) * 0.1f;
-        return glm::vec3(0.3f + variation, 0.7f + variation, 0.3f + variation);
+        // Create position-based variation for more natural look
+        float noiseX = cos(worldPos.x * 0.15f) * 0.1f;
+        float noiseZ = sin(worldPos.z * 0.15f) * 0.1f;
+        float variation = (noiseX + noiseZ) * 0.5f;
+
+        // Base foliage green color (slightly darker than grass)
+        glm::vec3 baseFoliage(0.35f, 0.75f, 0.35f); // Darker foliage green
+
+        // Apply subtle variation
+        baseFoliage.r += variation * 0.1f;
+        baseFoliage.g += variation * 0.05f;
+        baseFoliage.b += variation * 0.1f;
+
+        // Clamp to valid range
+        baseFoliage = glm::clamp(baseFoliage, glm::vec3(0.0f), glm::vec3(1.0f));
+
+        return baseFoliage;
     }
 
     bool Mesher::GetAtlasUVs(const std::string& texturePath,

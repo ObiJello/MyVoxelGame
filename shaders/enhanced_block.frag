@@ -33,26 +33,6 @@ vec3 sampleBiomeColormap(sampler2D colormap, float temperature, float humidity) 
     return colormapSample.rgb;
 }
 
-// Simple biome tinting based on world position
-vec3 calculateBiomeTint(vec3 worldPos) {
-    if (uEnableBiomeTinting == 0) {
-        return vec3(1.0); // No tinting
-    }
-
-    // For now, use simple positional variation
-    // In a real implementation, this would sample from biome data
-    float posTemperature = uBiomeTemperature + 0.1 * sin(worldPos.x * 0.01);
-    float posHumidity = uBiomeHumidity + 0.1 * cos(worldPos.z * 0.01);
-
-    // Clamp to valid range
-    posTemperature = clamp(posTemperature, 0.0, 1.0);
-    posHumidity = clamp(posHumidity, 0.0, 1.0);
-
-    // Sample grass colormap for basic biome tinting
-    // TODO: Determine tint type based on block type or vertex data
-    return sampleBiomeColormap(uGrassColormap, posTemperature, posHumidity);
-}
-
 void main() {
     // Sample the texture atlas
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
@@ -64,12 +44,6 @@ void main() {
 
     // OPTION 1: Use vertex color (preferred - pre-calculated biome tinting)
     vec3 biomeTint = fragColor.rgb;
-
-    // OPTION 2: Calculate biome tinting in shader (fallback if vertex color is white)
-    if (length(fragColor.rgb - vec3(1.0)) < 0.01) {
-        // Vertex color is white, calculate biome tinting in shader
-        biomeTint = calculateBiomeTint(fragWorldPos);
-    }
 
     // Simple directional lighting calculation
     vec3 normal = normalize(fragNormal);
