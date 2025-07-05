@@ -20,19 +20,6 @@ uniform int uEnableBiomeTinting;     // 0 = disabled, 1 = enabled
 // Output
 out vec4 FragColor;
 
-// Function to sample biome colormap
-vec3 sampleBiomeColormap(sampler2D colormap, float temperature, float humidity) {
-    // Clamp temperature and humidity to valid range
-    temperature = clamp(temperature, 0.0, 1.0);
-    humidity = clamp(humidity, 0.0, 1.0);
-
-    // Sample the colormap at the biome coordinates
-    vec2 biomeCoord = vec2(temperature, humidity);
-    vec4 colormapSample = texture(colormap, biomeCoord);
-
-    return colormapSample.rgb;
-}
-
 void main() {
     // Sample the texture atlas
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);

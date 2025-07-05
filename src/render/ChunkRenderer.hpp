@@ -187,8 +187,8 @@ namespace Render {
         std::unique_ptr<Game::MeshData> ownedData(data);
 
         if (ownedData->vertices.empty()) {
-            Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            /*Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);*/
             // ownedData automatically deleted when it goes out of scope
             return;
         }
@@ -226,9 +226,9 @@ namespace Render {
         }
 
         // No existing mesh found, add new one
-        Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
+        /*Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
                   ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
-                  ownedData->vertices.size());
+                  ownedData->vertices.size());*/
 
         ChunkMesh cm = ChunkMesh::FromMeshData(ownedData.get());
         meshes.push_back(cm);

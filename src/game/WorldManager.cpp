@@ -239,7 +239,7 @@ namespace Game {
         // 5) **SIMPLIFIED**: Unload all chunks immediately (no throttling or grace period)
         for (const auto& pos : chunksToUnload) {
             UnloadChunk(pos);
-            Log::Debug("Unloaded chunk (%d, %d)", pos.x, pos.z);
+            //Log::Debug("Unloaded chunk (%d, %d)", pos.x, pos.z);
         }
 
         // 6) Performance monitoring
@@ -270,7 +270,7 @@ namespace Game {
     }
 
     void WorldManager::UnloadChunk(Math::ChunkPos pos) {
-        Log::Info("UnloadChunk starting for (%d, %d)", pos.x, pos.z);
+        //Log::Info("UnloadChunk starting for (%d, %d)", pos.x, pos.z);
 
         // 1) **FIXED**: Use the improved RemoveChunkMeshes function
         Render::RemoveChunkMeshes(pos);
@@ -278,7 +278,7 @@ namespace Game {
         // 2) Unload from ChunkProvider (this will also trigger remeshing of dependent neighbors)
         ChunkProvider::UnloadChunk(pos);
 
-        Log::Info("UnloadChunk completed for (%d, %d)", pos.x, pos.z);
+        //Log::Info("UnloadChunk completed for (%d, %d)", pos.x, pos.z);
     }
 
     void WorldManager::ForceRemeshChunk(Math::ChunkPos pos) {

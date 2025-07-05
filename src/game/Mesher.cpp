@@ -103,9 +103,9 @@ namespace Game {
             }
         }
 
-        Log::Debug("Meshed section (%d, %d, %d) with %zu vertices, %zu indices",
+        /*Log::Debug("Meshed section (%d, %d, %d) with %zu vertices, %zu indices",
                   chunkPos.x, chunkPos.z, sectionIndex,
-                  meshData->vertices.size(), meshData->indices.size());
+                  meshData->vertices.size(), meshData->indices.size());*/
     }
 
     void Mesher::MeshElement(const Element& element, const BlockModel& model,
