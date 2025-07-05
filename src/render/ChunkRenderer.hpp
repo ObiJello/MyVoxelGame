@@ -216,8 +216,8 @@ namespace Render {
                     meshes.erase(it);
                     return; // Early return - mesh deleted
                 } else {
-                    Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
-                              ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+                    /*Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
+                              ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);*/
 
                     // **FIXED**: Properly clean up the old mesh
                     if (it->vao != 0) {
@@ -269,8 +269,8 @@ namespace Render {
             bool shouldRemove = (it->chunkXZ.x == pos.x && it->chunkXZ.z == pos.z);
 
             if (shouldRemove) {
-                Log::Debug("Removing mesh for chunk (%d,%d) section %d",
-                          it->chunkXZ.x, it->chunkXZ.z, it->sectionIndex);
+                /*Log::Debug("Removing mesh for chunk (%d,%d) section %d",
+                          it->chunkXZ.x, it->chunkXZ.z, it->sectionIndex);*/
 
                 // Clean up OpenGL resources
                 if (it->vao != 0) {

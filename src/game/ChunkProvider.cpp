@@ -373,7 +373,7 @@ namespace Game {
         s_chunkRegistry.erase(it);
 
 
-        Log::Debug("Chunk (%d, %d) unloaded and removed from registry", pos.x, pos.z);
+        //Log::Debug("Chunk (%d, %d) unloaded and removed from registry", pos.x, pos.z);
     }
 
 } // namespace Game
