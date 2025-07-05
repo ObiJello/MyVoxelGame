@@ -577,6 +577,8 @@ namespace Game {
                 texturePath.substr(texturePath.find_last_of('/') + 1)  // "block/stone" -> "stone"
             };
 
+
+
             for (const auto& variant : variations) {
                 if (Render::g_atlasBuilder->GetUVRect(variant, uvRect)) {
                     atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);

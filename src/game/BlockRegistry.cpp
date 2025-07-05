@@ -65,7 +65,7 @@ namespace Game {
         RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");                      // Opaque
         RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");       // Opaque
         RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");              // Opaque
-        RegisterModelBlock(BlockID::Snow, "Snow", true, "snow");                      // Opaque
+        RegisterModelBlock(BlockID::Snow, "Snow", true, "snow_block");                      // Opaque
         RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow"); // Opaque
         RegisterModelBlock(BlockID::Ice, "Ice", false, "ice");                        // FIXED: Transparent
         RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");                  // FIXED: Transparent
@@ -107,10 +107,6 @@ namespace Game {
 
     const BlockModel& BlockRegistry::GetBlockModel(BlockID id) {
         const Block& block = Get(id);
-        if (block.useLegacyTextures) {
-            Log::Warning("Attempted to get model for legacy block: %s", block.name.c_str());
-            return BlockModelRegistry::GetModel(""); // Returns default model
-        }
         return BlockModelRegistry::GetModel(block.modelName);
     }
 

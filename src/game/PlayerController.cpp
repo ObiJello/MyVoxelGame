@@ -316,17 +316,14 @@ namespace Game {
 
     void PlayerController::SelectSlot(int slot) {
         inventory.SetSelectedSlot(slot);
-        Log::Debug("Selected inventory slot %d", inventory.GetSelectedSlot());
     }
 
     void PlayerController::SelectNextSlot() {
         inventory.SelectNextSlot();
-        Log::Debug("Selected inventory slot %d", inventory.GetSelectedSlot());
     }
 
     void PlayerController::SelectPreviousSlot() {
         inventory.SelectPreviousSlot();
-        Log::Debug("Selected inventory slot %d", inventory.GetSelectedSlot());
     }
 
     void PlayerController::ToggleNoclip() {

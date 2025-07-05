@@ -235,6 +235,18 @@ else()
     target_link_libraries(MyVoxelGame PRIVATE X11::X11 OpenGL::GL)
 endif()
 
+# 1) Define a target that always runs and copies assets
+#add_custom_target(copy_assets ALL
+#        COMMENT "Force Copying assets into output folder"
+#        COMMAND ${CMAKE_COMMAND} -E copy_directory
+#        ${PROJECT_SOURCE_DIR}/assets
+#        "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
+#)
+#
+# 2) Make your game executable depend on it
+#add_dependencies(MyVoxelGame copy_assets)
+
+
 # ── Optional: Print configuration summary ──────────────────────────────────────
 message(STATUS "")
 message(STATUS "═══════════════════════════════════════════════════════════════")

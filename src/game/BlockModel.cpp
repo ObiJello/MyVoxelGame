@@ -341,6 +341,7 @@ namespace Game {
     }
 
     const BlockModel& BlockModelRegistry::GetModel(const std::string& name) {
+
         auto it = s_models.find(name);
         if (it != s_models.end()) {
             return it->second;
