@@ -1,10 +1,11 @@
-// File: shaders/enhanced_block.frag
+// File: shaders/enhanced_block.frag (Updated with Color Support)
 #version 330 core
 
 // Input from vertex shader
 in vec3 fragNormal;     // Interpolated normal
 in vec2 fragTexCoord;   // Interpolated texture coordinates
 in vec3 fragWorldPos;   // World position
+in vec4 fragColor;      // Interpolated vertex color (NEW)
 
 // Uniforms
 uniform sampler2D uTextureAtlas;     // The main texture atlas
@@ -61,8 +62,14 @@ void main() {
         discard;
     }
 
-    // Calculate biome tinting
-    vec3 biomeTint = calculateBiomeTint(fragWorldPos);
+    // OPTION 1: Use vertex color (preferred - pre-calculated biome tinting)
+    vec3 biomeTint = fragColor.rgb;
+
+    // OPTION 2: Calculate biome tinting in shader (fallback if vertex color is white)
+    if (length(fragColor.rgb - vec3(1.0)) < 0.01) {
+        // Vertex color is white, calculate biome tinting in shader
+        biomeTint = calculateBiomeTint(fragWorldPos);
+    }
 
     // Simple directional lighting calculation
     vec3 normal = normalize(fragNormal);
@@ -87,5 +94,5 @@ void main() {
     vec3 finalColor = textureColor.rgb * lighting * biomeTint;
 
     // Output final color with original alpha
-    FragColor = vec4(finalColor, textureColor.a);
+    FragColor = vec4(finalColor, textureColor.a * fragColor.a);
 }

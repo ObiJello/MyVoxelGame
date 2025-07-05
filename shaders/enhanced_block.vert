@@ -1,10 +1,11 @@
-// File: shaders/enhanced_block.vert
+// File: shaders/enhanced_block.vert (Updated with Color Support)
 #version 330 core
 
 // Input vertex attributes
 layout (location = 0) in vec3 aPos;       // Vertex position
 layout (location = 1) in vec3 aNormal;    // Face normal
 layout (location = 2) in vec2 aTexCoord;  // Texture coordinates from atlas
+layout (location = 3) in vec4 aColor;     // Vertex color/tint (NEW)
 
 // Uniforms
 uniform mat4 uMVP;  // Model-View-Projection matrix
@@ -13,6 +14,7 @@ uniform mat4 uMVP;  // Model-View-Projection matrix
 out vec3 fragNormal;    // Interpolated normal for lighting
 out vec2 fragTexCoord;  // Interpolated texture coordinates
 out vec3 fragWorldPos;  // World position for biome sampling
+out vec4 fragColor;     // Interpolated vertex color (NEW)
 
 void main() {
     // Transform vertex position to clip space
@@ -26,4 +28,7 @@ void main() {
 
     // Pass world position for biome tinting
     fragWorldPos = aPos;
+
+    // Pass through vertex color for tinting
+    fragColor = aColor;
 }

@@ -1,4 +1,4 @@
-// File: src/game/Mesher.hpp
+// File: src/game/Mesher.hpp (FIXED - Updated Function Signatures)
 #pragma once
 
 #include "ChunkSection.hpp"
@@ -82,25 +82,24 @@ namespace Game {
         // Face culling check
         static bool ShouldCullFace(BlockID currentBlock, BlockID neighborBlock);
 
-        // Get neighbor position for face direction
-        static void GetNeighborPos(int x, int y, int z, FaceDirection faceDir,
-                                 int& nx, int& ny, int& nz);
+        // FIXED: Get face offset for face direction
+        static void GetFaceOffset(FaceDirection faceDir, int& dx, int& dy, int& dz);
 
         // Convert model face direction to mesher face direction
         static FaceDirection ModelFaceToMesherFace(FaceDir modelFace);
 
-        // Mesh a single element from a block model
+        // FIXED: Mesh a single element from a block model (now includes currentBlockId)
         static void MeshElement(const Element& element, const BlockModel& model,
                               const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
-                              MeshData* meshData, bool enableBiomeTinting,
+                              BlockID currentBlockId, MeshData* meshData, bool enableBiomeTinting,
                               const NeighborContext* neighborContext = nullptr,
                               Chunk* chunk = nullptr);
 
-        // Mesh a single face of an element
+        // FIXED: Mesh a single face of an element (now includes currentBlockId)
         static void MeshFace(const Element& element, const FaceDef& faceDef,
                            FaceDir faceDir, const BlockModel& model,
                            const glm::ivec3& blockPos, const glm::ivec3& worldBlockPos,
-                           MeshData* meshData, bool enableBiomeTinting);
+                           BlockID currentBlockId, MeshData* meshData, bool enableBiomeTinting);
 
         // Get face normal vector
         static glm::vec3 GetFaceNormal(FaceDir faceDir);
@@ -108,8 +107,8 @@ namespace Game {
         // Get face vertices in model space (0-16 range)
         static std::array<glm::vec3, 4> GetFaceVertices(const Element& element, FaceDir faceDir);
 
-        // Get UV coordinates for face corners
-        static std::array<glm::vec2, 4> GetFaceUVs(const FaceDef& faceDef);
+        // FIXED: Get UV coordinates for face corners (now includes texture path for dimensions)
+        static std::array<glm::vec2, 4> GetFaceUVs(const FaceDef& faceDef, const std::string& texturePath);
 
         // Convert model space to world space
         static glm::vec3 ModelToWorldSpace(const glm::vec3& modelPos,

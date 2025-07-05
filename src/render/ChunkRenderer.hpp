@@ -56,7 +56,7 @@ namespace Render {
                 GL_STATIC_DRAW
             );
 
-            // 4) Set up vertex attributes: pos (location=0), normal (location=1), texCoord (location=2)
+            // 4) Set up vertex attributes: pos (0), normal (1), texCoord (2), color (3)
             constexpr size_t stride = sizeof(Render::Vertex);
 
             // aPos (location = 0)
@@ -90,6 +90,17 @@ namespace Render {
                 GL_FALSE,
                 (GLsizei)stride,
                 (void*)offsetof(Render::Vertex, uv)
+            );
+
+            // aColor (location = 3) - NEW for biome tinting
+            glEnableVertexAttribArray(3);
+            glVertexAttribPointer(
+                3,
+                4,
+                GL_FLOAT,
+                GL_FALSE,
+                (GLsizei)stride,
+                (void*)offsetof(Render::Vertex, color)
             );
 
             glBindVertexArray(0);

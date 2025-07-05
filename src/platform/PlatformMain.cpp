@@ -150,7 +150,8 @@ namespace PlatformMain {
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
-
+        auto uploadEndTime = std::chrono::high_resolution_clock::now();
+        metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
     // UPDATED: Enhanced rendering with biome tinting support
@@ -467,7 +468,7 @@ namespace PlatformMain {
             // Upload mesh data
             UploadMeshData(metrics);
 
-            // UPDATED: Render scene with enhanced system
+            // Render scene
             RenderScene(camera, blockShader, proj, view, frustum, metrics);
 
             // Render UI elements
