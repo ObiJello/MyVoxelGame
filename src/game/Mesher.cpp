@@ -19,14 +19,18 @@ namespace Game {
         g_meshUploadCallback = callback;
     }
 
+
     void Mesher::MeshSection(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
         if (!section || !meshData || !parentChunk) {
             Log::Warning("Invalid parameters passed to MeshSection");
             return;
         }
 
+        // FIXED: Use the section index from meshData instead of hardcoded 0
+        int sectionIndex = meshData->sectionIndex;
+
         // Call internal implementation without neighbor context
-        MeshSectionInternal(section, meshData, parentChunk->pos, 0, nullptr);
+        MeshSectionInternal(section, meshData, parentChunk->pos, sectionIndex, nullptr);
     }
 
     void Mesher::MeshSectionWithNeighbors(ChunkSection* section, MeshData* meshData,
