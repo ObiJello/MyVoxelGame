@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (Fixed for macOS Bundle Asset Loading)
+// File: src/platform/PlatformMain.cpp (Updated with Mesher Integration)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -8,14 +8,15 @@
 
 // Include game headers
 #include "../game/BlockRegistry.hpp"
-#include "../game/EnhancedBlockRegistry.hpp"  // NEW
-#include "../game/BlockModel.hpp"             // NEW
+#include "../game/EnhancedBlockRegistry.hpp"
+#include "../game/BlockModel.hpp"
 #include "../game/ChunkProvider.hpp"
 #include "../game/WorldManager.hpp"
 #include "../game/PlayerController.hpp"
 #include "../game/WorldAccess.hpp"
 #include "../game/RayCast.hpp"
 #include "../game/Physics.hpp"
+#include "../game/Mesher.hpp"                 // NEW: Include mesher
 
 // Include rendering headers
 #include "../render/Camera.hpp"
@@ -25,14 +26,15 @@
 #include "../render/TextureAtlas.hpp"
 #include "../render/BlockHighlight.hpp"
 #include "../render/Crosshair.hpp"
-#include "../render/AtlasBuilder.hpp"         // NEW
+#include "../render/AtlasBuilder.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <chrono>
-#include <filesystem>  // NEW
+#include <filesystem>
+#include <queue>
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -41,7 +43,17 @@
 
 namespace PlatformMain {
 
-    // NEW: Platform-specific function to get the correct asset path
+    // NEW: Mesh upload queue for thread safety
+    static std::queue<Game::MeshData*> g_meshUploadQueue;
+    static std::mutex g_meshQueueMutex;
+
+    // NEW: Global function to enqueue mesh data from background threads
+    void EnqueueMeshUpload(Game::MeshData* meshData) {
+        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+        g_meshUploadQueue.push(meshData);
+    }
+
+    // Platform-specific function to get the correct asset path
     std::string GetAssetPath(const std::string& relativePath) {
 #ifdef __APPLE__
         // On macOS, check if we're running from a bundle
@@ -147,14 +159,33 @@ namespace PlatformMain {
         return cursorEnabled;
     }
 
+    // NEW: Upload mesh data from the queue
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
+
+        int uploadedThisFrame = 0;
+        constexpr int MAX_UPLOADS_PER_FRAME = 5; // Limit to prevent frame drops
+
+        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+
+        while (!g_meshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
+            Game::MeshData* meshData = g_meshUploadQueue.front();
+            g_meshUploadQueue.pop();
+
+            if (meshData) {
+                // Upload to GPU using the existing ChunkRenderer system
+                Render::UploadMesh(meshData); // This takes ownership and deletes meshData
+                uploadedThisFrame++;
+            }
+        }
+
+        metrics.meshesUploadedThisFrame = uploadedThisFrame;
 
         auto uploadEndTime = std::chrono::high_resolution_clock::now();
         metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
-    // UPDATED: Enhanced rendering with biome tinting support
+    // Enhanced rendering with biome tinting support
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
                     const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
                     Debug::PerformanceMetrics& metrics) {
@@ -243,7 +274,7 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    // UPDATED: Initialize enhanced game systems with proper asset paths
+    // Initialize enhanced game systems with proper asset paths
     void InitializeGameSystems() {
         Log::Info("Initializing game systems...");
 
@@ -251,7 +282,7 @@ namespace PlatformMain {
         Game::BlockRegistry::Init();
         Game::EnhancedBlockRegistry::Init();
 
-        // FIXED: Use platform-specific asset path function
+        // Use platform-specific asset path function
         std::string modelsPath = GetAssetPath("assets/models/block");
 
         // Load block models
@@ -259,12 +290,16 @@ namespace PlatformMain {
             Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
+        // NEW: Set up mesh upload callback for the mesher
+        // This allows background meshing threads to queue mesh data for main thread upload
+        Game::SetMeshUploadCallback(EnqueueMeshUpload);
+
         Log::Info("Game systems initialized successfully");
     }
 
-    // UPDATED: Initialize enhanced shaders with proper asset paths
+    // Initialize enhanced shaders with proper asset paths
     Shader InitializeShaders() {
-        // FIXED: Use platform-specific asset paths
+        // Use platform-specific asset paths
         std::string enhancedVertPath = GetAssetPath("shaders/enhanced_block.vert");
         std::string enhancedFragPath = GetAssetPath("shaders/enhanced_block.frag");
         std::string standardVertPath = GetAssetPath("shaders/block.vert");
@@ -280,7 +315,7 @@ namespace PlatformMain {
         }
     }
 
-    // UPDATED: Initialize enhanced texture systems with proper asset paths
+    // Initialize enhanced texture systems with proper asset paths
     bool InitializeTextureSystem() {
         // Initialize legacy texture atlas first
         std::string atlasPath = GetAssetPath("assets/textures/atlas.png");
@@ -317,9 +352,9 @@ namespace PlatformMain {
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Model System");
+        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Model System and Mesher");
 
-        // UPDATED: Initialize enhanced game systems
+        // Initialize enhanced game systems
         InitializeGameSystems();
 
         // Initialize GLFW
@@ -375,7 +410,7 @@ namespace PlatformMain {
         }
     #endif
 
-        // UPDATED: Initialize enhanced texture systems
+        // Initialize enhanced texture systems
         if (!InitializeTextureSystem()) {
             Log::Error("Failed to initialize texture systems");
             glfwDestroyWindow(window);
@@ -390,13 +425,13 @@ namespace PlatformMain {
             return -5;
         }
 
-        // UPDATED: Initialize crosshair with proper asset path
+        // Initialize crosshair with proper asset path
         std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
         if (!Render::g_crosshair.Initialize(crosshairPath)) {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
 
-        // UPDATED: Compile enhanced shaders
+        // Compile enhanced shaders
         Shader blockShader = InitializeShaders();
 
         // Setup OpenGL state
@@ -420,7 +455,7 @@ namespace PlatformMain {
         Debug::PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        Log::Info("Entering main render loop with enhanced model system");
+        Log::Info("Entering main render loop with enhanced model system and mesher");
 
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {
@@ -465,7 +500,7 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // Upload mesh data
+            // NEW: Upload mesh data from background threads
             UploadMeshData(metrics);
 
             // Render scene
@@ -505,6 +540,15 @@ namespace PlatformMain {
             glDeleteVertexArrays(1, &cm.vao);
             glDeleteBuffers(1, &cm.vbo);
             glDeleteBuffers(1, &cm.ebo);
+        }
+
+        // NEW: Clean up mesh queue
+        {
+            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+            while (!g_meshUploadQueue.empty()) {
+                delete g_meshUploadQueue.front();
+                g_meshUploadQueue.pop();
+            }
         }
 
         Log::Info("Voxel engine shutting down");

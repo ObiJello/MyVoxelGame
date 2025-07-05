@@ -17,6 +17,9 @@ namespace Game {
     // Forward declaration for neighbor context
     struct NeighborContext;
 
+    using MeshUploadCallback = std::function<void(MeshData*)>;
+    void SetMeshUploadCallback(MeshUploadCallback callback);
+
     // Data structure for a meshed chunk section
     struct MeshData {
         std::vector<Render::Vertex> vertices;
