@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "TextureAtlas.hpp"
+
 namespace Game {
 
     // Global mesh upload callback
@@ -318,18 +320,22 @@ namespace Game {
         glm::vec3 max = element.to;
 
         switch (faceDir) {
-            case FaceDir::Up: // +Y face
-                vertices[0] = glm::vec3(min.x, max.y, min.z); // Bottom-left
-                vertices[1] = glm::vec3(max.x, max.y, min.z); // Bottom-right
-                vertices[2] = glm::vec3(max.x, max.y, max.z); // Top-right
-                vertices[3] = glm::vec3(min.x, max.y, max.z); // Top-left
+            case FaceDir::Up: // +Y face (TOP of block)
+                // FIXED: Correct vertex ordering for top face
+                // Order: bottom-left, bottom-right, top-right, top-left (in texture space)
+                // This corresponds to: -Z+X corner, +Z+X corner, +Z-X corner, -Z-X corner
+                vertices[0] = glm::vec3(min.x, max.y, max.z); // Bottom-left in texture space
+                vertices[1] = glm::vec3(max.x, max.y, max.z); // Bottom-right in texture space
+                vertices[2] = glm::vec3(max.x, max.y, min.z); // Top-right in texture space
+                vertices[3] = glm::vec3(min.x, max.y, min.z); // Top-left in texture space
                 break;
 
-            case FaceDir::Down: // -Y face
-                vertices[0] = glm::vec3(min.x, min.y, max.z); // Bottom-left
-                vertices[1] = glm::vec3(max.x, min.y, max.z); // Bottom-right
-                vertices[2] = glm::vec3(max.x, min.y, min.z); // Top-right
-                vertices[3] = glm::vec3(min.x, min.y, min.z); // Top-left
+            case FaceDir::Down: // -Y face (BOTTOM of block)
+                // FIXED: Correct vertex ordering for bottom face (viewed from below)
+                vertices[0] = glm::vec3(min.x, min.y, min.z); // Bottom-left
+                vertices[1] = glm::vec3(max.x, min.y, min.z); // Bottom-right
+                vertices[2] = glm::vec3(max.x, min.y, max.z); // Top-right
+                vertices[3] = glm::vec3(min.x, min.y, max.z); // Top-left
                 break;
 
             case FaceDir::North: // -Z face
@@ -418,17 +424,67 @@ namespace Game {
         // Try to get UVs from AtlasBuilder first
         if (Render::g_atlasBuilder) {
             Render::AtlasUVRect uvRect;
+
+            // Try exact path first
             if (Render::g_atlasBuilder->GetUVRect(texturePath, uvRect)) {
-                // Interpolate within the atlas rect using model UV
                 atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
                 return true;
             }
+
+            // Try with "minecraft:" prefix added
+            std::string prefixedPath = "minecraft:" + texturePath;
+            if (Render::g_atlasBuilder->GetUVRect(prefixedPath, uvRect)) {
+                atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                return true;
+            }
+
+            // Try without "minecraft:" prefix if it exists
+            if (texturePath.rfind("minecraft:", 0) == 0) {
+                std::string unprefixedPath = texturePath.substr(10);
+                if (Render::g_atlasBuilder->GetUVRect(unprefixedPath, uvRect)) {
+                    atlasUV = glm::mix(uvRect.uvMin, uvRect.uvMax, modelUV);
+                    return true;
+                }
+            }
+
+            Log::Warning("Texture '%s' not found in AtlasBuilder", texturePath.c_str());
         }
 
-        // Fallback to legacy atlas system
-        // This would need to be implemented based on your legacy system
-        atlasUV = modelUV; // Simple fallback
-        return false;
+        // Fallback to legacy atlas system for basic blocks
+        if (!Render::g_textureAtlas.IsLoaded()) {
+            Log::Warning("No texture atlas available for: %s", texturePath.c_str());
+            atlasUV = modelUV;
+            return false;
+        }
+
+        // Map common block textures to legacy atlas indices
+        uint16_t atlasIndex = 1008; // Default to air (transparent)
+
+        if (texturePath == "block/stone" || texturePath == "minecraft:block/stone") {
+            atlasIndex = 1; // Stone at index 1
+        } else if (texturePath == "block/dirt" || texturePath == "minecraft:block/dirt") {
+            atlasIndex = 0; // Dirt at index 0
+        } else if (texturePath == "block/grass_block_top" || texturePath == "minecraft:block/grass_block_top") {
+            atlasIndex = 2; // Grass top at index 2
+        } else if (texturePath == "block/grass_block_side" || texturePath == "minecraft:block/grass_block_side") {
+            atlasIndex = 18; // Grass side at index 18
+        } else if (texturePath == "block/bedrock" || texturePath == "minecraft:block/bedrock") {
+            atlasIndex = 5; // Bedrock at index 5
+        } else if (texturePath == "block/sand" || texturePath == "minecraft:block/sand") {
+            atlasIndex = 16; // Sand at index 16
+        } else {
+            Log::Warning("Unknown texture path '%s', using default", texturePath.c_str());
+            atlasIndex = 1; // Default to stone
+        }
+
+        // Get UV coordinates from legacy atlas
+        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
+
+        // Interpolate within the tile using modelUV
+        atlasUV = glm::mix(tile.uvMin, tile.uvMax, modelUV);
+
+        Log::Debug("Using legacy atlas index %u for texture '%s'", atlasIndex, texturePath.c_str());
+        return true;
     }
 
     // Legacy entry points

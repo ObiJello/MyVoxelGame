@@ -56,20 +56,23 @@ namespace Game {
     void EnhancedBlockRegistry::Init() {
         Log::Info("Initializing Enhanced Block Registry...");
 
-        // Start with some model-based blocks
+        // SPECIAL: Air block - always transparent, no model
+        RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
+
+        // Try model-based blocks, but with fallback support
         RegisterModelBlock(BlockID::Stone, "Stone", true, "stone");
         RegisterModelBlock(BlockID::Dirt, "Dirt", true, "dirt");
-        RegisterModelBlock(BlockID::Grass, "Grass", true, "grass_block", true);  // Enable biome tinting
+        RegisterModelBlock(BlockID::Grass, "Grass", true, "grass_block", true);
         RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");
         RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");
         RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");
         RegisterModelBlock(BlockID::Snow, "Snow", true, "snow");
         RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow");
         RegisterModelBlock(BlockID::Ice, "Ice", true, "ice");
-        RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");  // Transparent
+        RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");
         RegisterModelBlock(BlockID::Bedrock, "Bedrock", true, "bedrock");
-        RegisterModelBlock(BlockID::Water, "Water", false, "water");  // Transparent
-        RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves", true);  // Transparent + biome tinting
+        RegisterModelBlock(BlockID::Water, "Water", false, "water");
+        RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves", true);
         RegisterModelBlock(BlockID::CherryLog, "Cherry Log", true, "cherry_log");
         RegisterModelBlock(BlockID::BirchLog, "Birch Log", true, "birch_log");
         RegisterModelBlock(BlockID::AcaciaLog, "Acacia Log", true, "acacia_log");
@@ -82,10 +85,7 @@ namespace Game {
         RegisterModelBlock(BlockID::EmeraldOre, "Emerald Ore", true, "emerald_ore");
         RegisterModelBlock(BlockID::DiamondOre, "Diamond Ore", true, "diamond_ore");
         RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");
-        RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium", true);  // Biome tinting
-
-        // Air is special case - always use legacy (transparent, no model)
-        RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
+        RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium", true);
 
         Log::Info("Enhanced Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));
