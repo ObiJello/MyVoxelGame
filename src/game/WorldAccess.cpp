@@ -1,6 +1,6 @@
-// File: src/game/WorldAccess.cpp - FIXED Y coordinate handling
+// File: src/game/WorldAccess.cpp - MODIFIED for section-level remeshing
 #include "WorldAccess.hpp"
-#include "ChunkProvider.hpp"  // This now includes ChunkData definition
+#include "ChunkProvider.hpp"
 #include "BlockRegistry.hpp"
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <cmath>
 #include <algorithm>
+
+#include "JobSystem.hpp"
 
 namespace Game {
 
@@ -43,7 +45,6 @@ namespace Game {
             return BlockID::Air; // Chunk not loaded
         }
 
-        // FIXED: Pass world Y coordinate, not local Y
         return it->second->chunk->GetBlock(localX, worldY, localZ);
     }
 
@@ -54,6 +55,9 @@ namespace Game {
                         worldX, worldY, worldZ);
             return false;
         }
+
+        // Get old block for comparison
+        BlockID oldBlock = GetBlock(worldX, worldY, worldZ);
 
         // Convert to chunk and local coordinates
         Math::ChunkPos chunkPos;
@@ -73,20 +77,11 @@ namespace Game {
                 return false;
             }
 
-            // FIXED: Pass world Y coordinate, not local Y
             it->second->chunk->SetBlock(localX, worldY, localZ, id);
         }
 
-        // Notify that this chunk was modified
-        NotifyChunkModified(chunkPos);
-
-        // Check if block is on chunk boundary and notify neighboring chunks
-        std::vector<Math::ChunkPos> affectedChunks = GetAffectedChunks(worldX, worldZ);
-        for (const auto& affected : affectedChunks) {
-            if (affected.x != chunkPos.x || affected.z != chunkPos.z) {
-                NotifyChunkModified(affected);
-            }
-        }
+        // MODIFIED: Smart section-level remeshing instead of whole chunk
+        NotifyBlockModified(worldX, worldY, worldZ, oldBlock, id);
 
         Log::Debug("Set block at world (%d, %d, %d) to %s",
                   worldX, worldY, worldZ,
@@ -133,37 +128,213 @@ namespace Game {
                 auto& chunk = it->second->chunk;
 
                 for (const auto* mod : mods) {
+                    // Get old block before modification
+                    BlockID oldBlock = GetBlock(mod->worldX, mod->worldY, mod->worldZ);
+
                     Math::ChunkPos chunkPos;
                     int localX, localY, localZ;
                     WorldToLocal(mod->worldX, mod->worldY, mod->worldZ,
                                 chunkPos, localX, localY, localZ);
 
-                    // FIXED: Pass world Y coordinate, not local Y
                     chunk->SetBlock(localX, mod->worldY, localZ, mod->newId);
                     successCount++;
 
-                    // Track modified chunks
-                    modifiedChunks.insert(chunkKey);
-
-                    // Check for boundary modifications
-                    auto affected = GetAffectedChunks(mod->worldX, mod->worldZ);
-                    for (const auto& pos : affected) {
-                        modifiedChunks.insert(MakeChunkKey(pos.x, pos.z));
-                    }
+                    // MODIFIED: Smart section-level remeshing for each block
+                    NotifyBlockModified(mod->worldX, mod->worldY, mod->worldZ, oldBlock, mod->newId);
                 }
             }
-        }
-
-        // Notify about all modified chunks
-        for (uint64_t key : modifiedChunks) {
-            int32_t x = static_cast<int32_t>(key >> 32);
-            int32_t z = static_cast<int32_t>(key & 0xFFFFFFFF);
-            NotifyChunkModified({x, z});
         }
 
         return successCount;
     }
 
+    // NEW: Smart block modification notification with section-level remeshing
+    void WorldAccess::NotifyBlockModified(int worldX, int worldY, int worldZ, BlockID oldBlock, BlockID newBlock) {
+        // Convert world Y to section
+        int sectionIndex = Chunk::SectionIndexFromGlobalY(worldY);
+        if (sectionIndex < 0) {
+            return; // Out of world bounds
+        }
+
+        // Convert to chunk coordinates
+        Math::ChunkPos chunkPos = WorldToChunkPos(worldX, worldZ);
+
+        // Calculate which sections need remeshing
+        std::vector<std::pair<Math::ChunkPos, int>> sectionsToRemesh;
+
+        // ALWAYS remesh the section containing the changed block
+        sectionsToRemesh.push_back({chunkPos, sectionIndex});
+
+        // Check if we need to remesh adjacent sections
+        int localY = Chunk::LocalYFromGlobalY(worldY);
+
+        // If block is at section boundary, remesh adjacent sections
+        if (localY == 0 && sectionIndex > 0) {
+            // Block is at bottom of section, remesh section below
+            sectionsToRemesh.push_back({chunkPos, sectionIndex - 1});
+        }
+        if (localY == Math::SECTION_HEIGHT - 1 && sectionIndex < Math::SECTIONS_PER_CHUNK - 1) {
+            // Block is at top of section, remesh section above
+            sectionsToRemesh.push_back({chunkPos, sectionIndex + 1});
+        }
+
+        // Check for inter-chunk effects
+        int localX = ((worldX % Math::CHUNK_SIZE_X) + Math::CHUNK_SIZE_X) % Math::CHUNK_SIZE_X;
+        int localZ = ((worldZ % Math::CHUNK_SIZE_Z) + Math::CHUNK_SIZE_Z) % Math::CHUNK_SIZE_Z;
+
+        // If block is at chunk boundary, remesh adjacent chunks' same sections
+        if (localX == 0) {
+            // West boundary
+            sectionsToRemesh.push_back({{chunkPos.x - 1, chunkPos.z}, sectionIndex});
+        }
+        if (localX == Math::CHUNK_SIZE_X - 1) {
+            // East boundary
+            sectionsToRemesh.push_back({{chunkPos.x + 1, chunkPos.z}, sectionIndex});
+        }
+        if (localZ == 0) {
+            // North boundary
+            sectionsToRemesh.push_back({{chunkPos.x, chunkPos.z - 1}, sectionIndex});
+        }
+        if (localZ == Math::CHUNK_SIZE_Z - 1) {
+            // South boundary
+            sectionsToRemesh.push_back({{chunkPos.x, chunkPos.z + 1}, sectionIndex});
+        }
+
+        // Trigger remeshing for affected sections
+        for (const auto& [targetChunkPos, targetSectionIndex] : sectionsToRemesh) {
+            RemeshSingleSection(targetChunkPos, targetSectionIndex);
+        }
+
+        // Still notify callbacks for other systems (but only once per chunk)
+        static std::unordered_set<uint64_t> notifiedChunks;
+        uint64_t chunkKey = MakeChunkKey(chunkPos.x, chunkPos.z);
+        if (notifiedChunks.find(chunkKey) == notifiedChunks.end()) {
+            notifiedChunks.insert(chunkKey);
+
+            std::shared_lock<std::shared_mutex> lock(s_callbackMutex);
+            for (const auto& callback : s_modificationCallbacks) {
+                if (callback) {
+                    callback(chunkPos);
+                }
+            }
+
+            // Clear the notification set periodically to avoid memory leak
+            if (notifiedChunks.size() > 1000) {
+                notifiedChunks.clear();
+            }
+        }
+
+        Log::Debug("Block change at (%d,%d,%d): queued %zu section remeshes",
+                  worldX, worldY, worldZ, sectionsToRemesh.size());
+    }
+
+    // NEW: Remesh a single section instead of whole chunk
+    void WorldAccess::RemeshSingleSection(Math::ChunkPos chunkPos, int sectionIndex) {
+        // Access the chunk registry to check if chunk exists
+        std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+        uint64_t key = MakeChunkKey(chunkPos.x, chunkPos.z);
+        auto it = s_chunkRegistry.find(key);
+
+        if (it == s_chunkRegistry.end() || !it->second || !it->second->chunk) {
+            return; // Chunk not loaded, skip
+        }
+
+        auto chunk = it->second->chunk;
+
+        // Check if section exists and is valid
+        if (sectionIndex < 0 || sectionIndex >= Math::SECTIONS_PER_CHUNK) {
+            return; // Invalid section index
+        }
+
+        if (!chunk->sections[sectionIndex]) {
+            return; // Section doesn't exist (empty), no need to mesh
+        }
+
+        // Create neighbor context for enhanced meshing
+        NeighborContext ctx = CreateNeighborContext(chunk, chunkPos);
+
+        // Create mesh data for this specific section
+        auto* meshData = new MeshData();
+        meshData->chunkXZ = chunkPos;
+        meshData->sectionIndex = sectionIndex;
+
+        ChunkSection* sectionPtr = chunk->sections[sectionIndex].get();
+
+        // Use appropriate meshing strategy based on neighbor availability
+        if (ctx.hasAllNeighbors) {
+            // Enhanced inter-chunk meshing
+            JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, chunkPos, sectionIndex]() {
+                try {
+                    InterChunkMesherJob(sectionPtr, meshData, ctx);
+                } catch (const std::exception& e) {
+                    Log::Error("Enhanced section remesh failed for chunk (%d, %d) section %d: %s",
+                              chunkPos.x, chunkPos.z, sectionIndex, e.what());
+                    delete meshData;
+                } catch (...) {
+                    Log::Error("Enhanced section remesh failed for chunk (%d, %d) section %d with unknown exception",
+                              chunkPos.x, chunkPos.z, sectionIndex);
+                    delete meshData;
+                }
+            });
+        } else {
+            // Standard meshing without all neighbors
+            JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, chunkPos, sectionIndex]() {
+                try {
+                    MesherJob(sectionPtr, meshData, chunk.get());
+                } catch (const std::exception& e) {
+                    Log::Error("Standard section remesh failed for chunk (%d, %d) section %d: %s",
+                              chunkPos.x, chunkPos.z, sectionIndex, e.what());
+                    delete meshData;
+                } catch (...) {
+                    Log::Error("Standard section remesh failed for chunk (%d, %d) section %d with unknown exception",
+                              chunkPos.x, chunkPos.z, sectionIndex);
+                    delete meshData;
+                }
+            });
+        }
+
+        Log::Debug("Queued remesh for section %d of chunk (%d,%d)",
+                  sectionIndex, chunkPos.x, chunkPos.z);
+    }
+
+    // Helper function to create neighbor context (needs to be accessible)
+    NeighborContext WorldAccess::CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos) {
+        NeighborContext ctx(centerChunk);
+        ctx.hasAllNeighbors = true;
+
+        // Neighbor offset table for 4-directional neighbors (X, Z)
+        static constexpr std::array<std::pair<int, int>, 4> NEIGHBOR_OFFSETS = {{
+            {-1,  0}, // West
+            { 1,  0}, // East
+            { 0, -1}, // North
+            { 0,  1}  // South
+        }};
+
+        for (size_t i = 0; i < 4; ++i) {
+            auto [dx, dz] = NEIGHBOR_OFFSETS[i];
+            ctx.neighbors[i] = GetNeighborChunk(pos, dx, dz);
+            if (!ctx.neighbors[i]) {
+                ctx.hasAllNeighbors = false;
+            }
+        }
+
+        return ctx;
+    }
+
+    // Helper function to get neighbor chunk safely
+    std::shared_ptr<Chunk> WorldAccess::GetNeighborChunk(Math::ChunkPos pos, int dx, int dz) {
+        uint64_t key = MakeChunkKey(pos.x + dx, pos.z + dz);
+
+        std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+        auto it = s_chunkRegistry.find(key);
+        if (it != s_chunkRegistry.end() && it->second &&
+            it->second->isGenerated.load()) {
+            return it->second->chunk;
+        }
+        return nullptr;
+    }
+
+    // Rest of the existing functions remain the same...
     bool WorldAccess::IsValidPosition(int worldX, int worldY, int worldZ) {
         return worldY >= Config::MinY && worldY <= Config::MaxY;
     }
@@ -206,20 +377,8 @@ namespace Game {
 
         // Calculate local coordinates within chunk
         localX = ((worldX % Math::CHUNK_SIZE_X) + Math::CHUNK_SIZE_X) % Math::CHUNK_SIZE_X;
-        // FIXED: Y coordinate should remain as world coordinate, not converted to local
-        // The Chunk class now handles world Y coordinates directly
         localY = worldY;
         localZ = ((worldZ % Math::CHUNK_SIZE_Z) + Math::CHUNK_SIZE_Z) % Math::CHUNK_SIZE_Z;
-    }
-
-    void WorldAccess::NotifyChunkModified(Math::ChunkPos pos) {
-        std::shared_lock<std::shared_mutex> lock(s_callbackMutex);
-
-        for (const auto& callback : s_modificationCallbacks) {
-            if (callback) {
-                callback(pos);
-            }
-        }
     }
 
     std::vector<Math::ChunkPos> WorldAccess::GetAffectedChunks(int worldX, int worldZ) {

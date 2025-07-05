@@ -1,12 +1,17 @@
-// File: src/game/WorldAccess.hpp
+// File: src/game/WorldAccess.hpp - MODIFIED header
 #pragma once
 
 #include "Blocks.hpp"
 #include "WorldMath.hpp"
+#include "Mesher.hpp"  // For NeighborContext
 #include <functional>
 #include <vector>
+#include <memory>
 
 namespace Game {
+
+    // Forward declarations
+    class Chunk;
 
     // Callback type for chunk modification notifications
     using ChunkModifiedCallback = std::function<void(Math::ChunkPos)>;
@@ -51,8 +56,15 @@ namespace Game {
                                 Math::ChunkPos& chunkPos,
                                 int& localX, int& localY, int& localZ);
 
-        // Notify all registered callbacks that a chunk was modified
-        static void NotifyChunkModified(Math::ChunkPos pos);
+        // NEW: Smart block modification notification with section-level remeshing
+        static void NotifyBlockModified(int worldX, int worldY, int worldZ, BlockID oldBlock, BlockID newBlock);
+
+        // NEW: Remesh a single section instead of whole chunk
+        static void RemeshSingleSection(Math::ChunkPos chunkPos, int sectionIndex);
+
+        // NEW: Helper functions for neighbor context
+        static NeighborContext CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos);
+        static std::shared_ptr<Chunk> GetNeighborChunk(Math::ChunkPos pos, int dx, int dz);
 
         // Get list of chunks affected by a block modification at chunk boundary
         static std::vector<Math::ChunkPos> GetAffectedChunks(int worldX, int worldZ);
