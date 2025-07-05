@@ -46,7 +46,7 @@ namespace Game {
 
         // Helper to register a block with model-based rendering
         static void RegisterModelBlock(BlockID id, const std::string& name, bool opaque,
-                                     const std::string& modelName, bool enableBiomeTinting = false);
+                                     const std::string& modelName);
 
         // Helper to register a block with legacy texture indices
         static void RegisterLegacyBlock(BlockID id, const std::string& name, bool opaque,

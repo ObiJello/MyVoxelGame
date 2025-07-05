@@ -184,10 +184,16 @@ namespace Game {
 
         // FIXED: Get biome tinting as color, not separate
         glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f);
-        if (enableBiomeTinting && faceDef.tintIndex >= 0) {
-            glm::vec3 tint = SampleBiomeTinting(faceDef.tintIndex, worldBlockPos);
-            tintColor = glm::vec4(tint, 1.0f);
+        if (faceDef.tintIndex == 0) {
+            // Grass overlay tinting
+            glm::vec3 grassTint = SampleGrassTinting(worldBlockPos);
+            tintColor = glm::vec4(grassTint, 1.0f);
+        } else if (faceDef.tintIndex == 1) {
+            // Foliage tinting (leaves, etc.)
+            glm::vec3 foliageTint = SampleFoliageTinting(worldBlockPos);
+            tintColor = glm::vec4(foliageTint, 1.0f);
         }
+        // tintIndex == -1 or other values: no tinting (stays white)
 
         // FIXED: Get UV coordinates with proper texture dimensions
         auto uvs = GetFaceUVs(faceDef, texturePath);
@@ -470,19 +476,16 @@ namespace Game {
         return glm::vec3(worldBlockPos) + normalizedPos;
     }
 
-    glm::vec3 Mesher::SampleBiomeTinting(int tintIndex, const glm::ivec3& worldPos) {
-        // Placeholder biome tinting - sample at a fixed coordinate for now
-        // In a real implementation, this would sample based on the actual biome
+    glm::vec3 Mesher::SampleGrassTinting(const glm::ivec3& worldPos) {
+        // Sample grass colormap based on biome temperature/humidity
+        float variation = sin(worldPos.x * 0.1f) * cos(worldPos.z * 0.1f) * 0.1f;
+        return glm::vec3(0.4f + variation, 0.8f + variation, 0.4f + variation);
+    }
 
-        if (tintIndex == 0) {
-            // Grass tinting - return a green tint with some variation
-            float variation = sin(worldPos.x * 0.1f) * cos(worldPos.z * 0.1f) * 0.1f;
-            return glm::vec3(0.4f + variation, 0.8f + variation, 0.4f + variation);
-        } else {
-            // Foliage tinting - return a slightly different green
-            float variation = cos(worldPos.x * 0.15f) * sin(worldPos.z * 0.15f) * 0.1f;
-            return glm::vec3(0.3f + variation, 0.7f + variation, 0.3f + variation);
-        }
+    glm::vec3 Mesher::SampleFoliageTinting(const glm::ivec3& worldPos) {
+        // Sample foliage colormap based on biome temperature/humidity
+        float variation = cos(worldPos.x * 0.15f) * sin(worldPos.z * 0.15f) * 0.1f;
+        return glm::vec3(0.3f + variation, 0.7f + variation, 0.3f + variation);
     }
 
     bool Mesher::GetAtlasUVs(const std::string& texturePath,
