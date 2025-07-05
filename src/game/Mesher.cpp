@@ -1,4 +1,4 @@
-// File: src/game/Mesher.cpp (FIXED - All Structural Issues)
+// File: src/game/Mesher.cpp (FIXED - All Structural Issues + Callback Implementation)
 #include "Mesher.hpp"
 #include "BlockRegistry.hpp"
 #include "EnhancedBlockRegistry.hpp"
@@ -12,8 +12,15 @@
 
 namespace Game {
 
+    // Global mesh upload callback
+    static MeshUploadCallback g_meshUploadCallback = nullptr;
+
+    void SetMeshUploadCallback(MeshUploadCallback callback) {
+        g_meshUploadCallback = callback;
+    }
+
     void Mesher::MeshSection(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
-if (!section || !meshData || !parentChunk) {
+        if (!section || !meshData || !parentChunk) {
             Log::Warning("Invalid parameters passed to MeshSection");
             return;
         }
@@ -423,11 +430,21 @@ if (!section || !meshData || !parentChunk) {
     // Legacy entry points
     void Mesher::MesherJob(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
         MeshSection(section, meshData, parentChunk);
+
+        // Upload the mesh data using the callback if available
+        if (g_meshUploadCallback && meshData) {
+            g_meshUploadCallback(meshData);
+        }
     }
 
     void Mesher::InterChunkMesherJob(ChunkSection* section, MeshData* meshData,
                                    const NeighborContext& context) {
         MeshSectionWithNeighbors(section, meshData, context);
+
+        // Upload the mesh data using the callback if available
+        if (g_meshUploadCallback && meshData) {
+            g_meshUploadCallback(meshData);
+        }
     }
 
     // Global convenience functions
