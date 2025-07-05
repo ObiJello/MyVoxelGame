@@ -392,15 +392,12 @@ namespace Game {
     std::array<glm::vec3, 4> Mesher::GetFaceVertices(const Element& element, FaceDir faceDir) {
         std::array<glm::vec3, 4> vertices;
 
-        // Get element bounds in model space (0-16)
-        glm::vec3 min = element.from;
-        glm::vec3 max = element.to;
+        // Get element bounds in model space (0-16) - ensure these are EXACT integers
+        glm::vec3 min = glm::round(element.from);  // Round to ensure integer values
+        glm::vec3 max = glm::round(element.to);    // Round to ensure integer values
 
         switch (faceDir) {
             case FaceDir::Up: // +Y face (TOP of block)
-                // FIXED: Correct vertex ordering for top face
-                // Order: bottom-left, bottom-right, top-right, top-left (in texture space)
-                // This corresponds to: -Z+X corner, +Z+X corner, +Z-X corner, -Z-X corner
                 vertices[0] = glm::vec3(min.x, max.y, max.z); // Bottom-left in texture space
                 vertices[1] = glm::vec3(max.x, max.y, max.z); // Bottom-right in texture space
                 vertices[2] = glm::vec3(max.x, max.y, min.z); // Top-right in texture space
@@ -408,7 +405,6 @@ namespace Game {
                 break;
 
             case FaceDir::Down: // -Y face (BOTTOM of block)
-                // FIXED: Correct vertex ordering for bottom face (viewed from below)
                 vertices[0] = glm::vec3(min.x, min.y, min.z); // Bottom-left
                 vertices[1] = glm::vec3(max.x, min.y, min.z); // Bottom-right
                 vertices[2] = glm::vec3(max.x, min.y, max.z); // Top-right
@@ -474,11 +470,23 @@ namespace Game {
     }
 
     glm::vec3 Mesher::ModelToWorldSpace(const glm::vec3& modelPos,
-                                      const glm::ivec3& blockPos,
-                                      const glm::ivec3& worldBlockPos) {
-        // Convert from model space (0-16) to world space
-        glm::vec3 normalizedPos = modelPos / 16.0f; // Normalize to 0-1
-        return glm::vec3(worldBlockPos) + normalizedPos;
+                                  const glm::ivec3& blockPos,
+                                  const glm::ivec3& worldBlockPos) {
+        glm::vec3 result = glm::vec3(worldBlockPos) + (modelPos / 16.0f);
+
+        // Add tiny expansion to create overlap (prevents gaps)
+        const float TINY_OVERLAP = 0.001f; // Very small overlap
+
+        // Expand outward from block center
+        glm::vec3 blockCenter = glm::vec3(worldBlockPos) + glm::vec3(0.5f);
+        glm::vec3 direction = result - blockCenter;
+
+        if (glm::length(direction) > 0.0f) {
+            direction = glm::normalize(direction);
+            result += direction * TINY_OVERLAP;
+        }
+
+        return result;
     }
 
     // **ENHANCED**: Better grass tinting that varies by position

@@ -524,7 +524,7 @@ namespace PlatformMain {
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
-            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.1f, 1000.0f);
+            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.01f, 500.0f);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
