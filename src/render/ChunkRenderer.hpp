@@ -175,8 +175,9 @@ namespace Render {
     // Global container of all uploaded meshes (one per section)
     extern std::vector<ChunkMesh> g_chunkMeshes;
 
-    // **IMPROVED**: Upload mesh with proper replacement logic
-    // **FIXED**: Upload mesh with proper memory ownership
+
+    // **FIXED**: Upload mesh with proper empty mesh handling
+    // **CRITICAL**: Upload mesh with proper memory ownership and empty mesh support
     inline void UploadMesh(Game::MeshData* data) {
         if (!data) {
             Log::Warning("UploadMesh called with null data");
@@ -185,13 +186,6 @@ namespace Render {
 
         // **CRITICAL**: Take ownership immediately to prevent double-delete
         std::unique_ptr<Game::MeshData> ownedData(data);
-
-        if (ownedData->vertices.empty()) {
-            Log::Debug("Skipping upload of empty mesh for chunk (%d,%d) section %d",
-                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
-            // ownedData automatically deleted when it goes out of scope
-            return;
-        }
 
         // Find and replace existing mesh for this chunk/section
         auto& meshes = g_chunkMeshes;
@@ -202,37 +196,65 @@ namespace Render {
                 it->chunkXZ.z == ownedData->chunkXZ.z &&
                 it->sectionIndex == ownedData->sectionIndex) {
 
-                Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
-                          ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+                // **FIXED**: Handle empty meshes properly
+                if (ownedData->vertices.empty()) {
+                    Log::Debug("Removing mesh for fully culled section: chunk (%d,%d) section %d",
+                              ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
 
-                // **FIXED**: Properly clean up the old mesh
-                if (it->vao != 0) {
-                    glDeleteVertexArrays(1, &it->vao);
-                    it->vao = 0;
-                }
-                if (it->vbo != 0) {
-                    glDeleteBuffers(1, &it->vbo);
-                    it->vbo = 0;
-                }
-                if (it->ebo != 0) {
-                    glDeleteBuffers(1, &it->ebo);
-                    it->ebo = 0;
-                }
+                    // **OPTION 1**: Delete the mesh entirely when section is fully culled
+                    if (it->vao != 0) {
+                        glDeleteVertexArrays(1, &it->vao);
+                    }
+                    if (it->vbo != 0) {
+                        glDeleteBuffers(1, &it->vbo);
+                    }
+                    if (it->ebo != 0) {
+                        glDeleteBuffers(1, &it->ebo);
+                    }
 
-                // Replace with new mesh (data is automatically deleted)
-                *it = ChunkMesh::FromMeshData(ownedData.get());
-                return; // Early return - data is automatically cleaned up
+                    // Remove from vector
+                    meshes.erase(it);
+                    return; // Early return - mesh deleted
+                } else {
+                    Log::Debug("Replacing existing mesh for chunk (%d,%d) section %d",
+                              ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+
+                    // **FIXED**: Properly clean up the old mesh
+                    if (it->vao != 0) {
+                        glDeleteVertexArrays(1, &it->vao);
+                        it->vao = 0;
+                    }
+                    if (it->vbo != 0) {
+                        glDeleteBuffers(1, &it->vbo);
+                        it->vbo = 0;
+                    }
+                    if (it->ebo != 0) {
+                        glDeleteBuffers(1, &it->ebo);
+                        it->ebo = 0;
+                    }
+
+                    // Replace with new mesh
+                    *it = ChunkMesh::FromMeshData(ownedData.get());
+                    return; // Early return - data is automatically cleaned up
+                }
             }
         }
 
-        // No existing mesh found, add new one
-        /*Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
+        // No existing mesh found
+        if (ownedData->vertices.empty()) {
+            Log::Debug("Skipping creation of empty mesh for new section: chunk (%d,%d) section %d",
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            // Don't create a mesh if there's nothing to render and no existing mesh to replace
+            return;
+        }
+
+        // Add new mesh with content
+        Log::Debug("Adding new mesh for chunk (%d,%d) section %d with %zu vertices",
                   ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
-                  ownedData->vertices.size());*/
+                  ownedData->vertices.size());
 
         ChunkMesh cm = ChunkMesh::FromMeshData(ownedData.get());
         meshes.push_back(cm);
-        // ownedData automatically deleted when it goes out of scope
     }
 
     // **IMPROVED**: Safer cleanup function for chunk meshes
