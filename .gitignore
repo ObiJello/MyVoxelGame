@@ -18,3 +18,7 @@ build/
 *~
 *.swp
 
+# My own ignore
+
+depreciated/
+

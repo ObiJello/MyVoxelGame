@@ -26,7 +26,7 @@ namespace Game {
         static constexpr int RENDER_RADIUS = 8; // Increased for better inter-chunk culling testing
 
         // Call once per frame with camera world position
-        // Manages chunk loading/unloading and coordinates with the enhanced meshing system
+        // Manages chunk loading/unloading and coordinates with the meshing system
         static void Update(const glm::vec3& cameraPos);
 
         // Force remesh a specific chunk (useful for debugging or after block changes)
@@ -45,10 +45,6 @@ namespace Game {
         // Internal helper functions
         static void LoadChunk(Math::ChunkPos pos);
         static void UnloadChunk(Math::ChunkPos pos);
-
-        // NOTE: Helper functions like MakeChunkKey, GetNeighborChunk, etc. are now
-        // implemented as static functions inside WorldManager.cpp and don't need
-        // to be declared in the header since they're only used internally.
     };
 
 } // namespace Game

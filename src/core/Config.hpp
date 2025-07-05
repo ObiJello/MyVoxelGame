@@ -4,7 +4,7 @@ namespace Config {
     // Window settings
     inline constexpr int  WindowWidth  = 1280;
     inline constexpr int  WindowHeight = 720;
-    inline constexpr const char* WindowTitle = "MyVoxelGame v0.1";
+    inline constexpr const char* WindowTitle = "Obey's Game v0.1";
 
     // OpenGL version
     inline constexpr int OpenGLMajor = 3;

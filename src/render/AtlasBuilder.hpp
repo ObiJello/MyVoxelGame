@@ -1,4 +1,4 @@
-// File: src/render/AtlasBuilder.hpp (Enhanced with Mipmap Control)
+// File: src/render/AtlasBuilder.hpp
 #pragma once
 
 #include <string>

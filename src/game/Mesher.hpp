@@ -58,14 +58,11 @@ namespace Game {
         // Main meshing function - processes a single 16x16x16 section
         static void MeshSection(ChunkSection* section, MeshData* meshData, Chunk* parentChunk);
 
-        // Enhanced meshing with inter-chunk context for better face culling
+        // meshing with inter-chunk context for better face culling
         static void MeshSectionWithNeighbors(ChunkSection* section, MeshData* meshData,
                                            const NeighborContext& context);
 
-        // Legacy entry point for backward compatibility
-        static void MesherJob(ChunkSection* section, MeshData* meshData, Chunk* parentChunk);
-
-        // Enhanced entry point for inter-chunk meshing
+        // Entry point for inter-chunk meshing
         static void InterChunkMesherJob(ChunkSection* section, MeshData* meshData,
                                       const NeighborContext& context);
 

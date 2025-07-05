@@ -1,4 +1,4 @@
-// File: src/game/ChunkProvider.hpp (Enhanced with Inter-Chunk Support)
+// File: src/game/ChunkProvider.hpp
 #pragma once
 
 #include "WorldMath.hpp"
@@ -33,8 +33,7 @@ namespace Game {
     class ChunkProvider {
     public:
         // Enqueue a background job to generate the chunk at chunk-coordinates (pos.x, pos.z).
-        // After filling in block data, this system will automatically handle neighbor detection
-        // and trigger appropriate meshing (standard or enhanced with inter-chunk culling).
+        // After filling in block data, this system will automatically handle neighbor detection and trigger appropriate meshing.
         static void RequestChunk(Math::ChunkPos pos);
 
         // Unload a chunk and trigger remeshing of dependent neighbors

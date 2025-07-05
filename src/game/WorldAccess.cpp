@@ -250,7 +250,7 @@ namespace Game {
             return; // Section doesn't exist (empty), no need to mesh
         }
 
-        // Create neighbor context for enhanced meshing
+        // Create neighbor context for meshing
         NeighborContext ctx = CreateNeighborContext(chunk, chunkPos);
 
         // Create mesh data for this specific section
@@ -262,16 +262,16 @@ namespace Game {
 
         // Use appropriate meshing strategy based on neighbor availability
         if (ctx.hasAllNeighbors) {
-            // Enhanced inter-chunk meshing
+            // inter-chunk meshing
             JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, chunkPos, sectionIndex]() {
                 try {
                     InterChunkMesherJob(sectionPtr, meshData, ctx);
                 } catch (const std::exception& e) {
-                    Log::Error("Enhanced section remesh failed for chunk (%d, %d) section %d: %s",
+                    Log::Error("Section remesh failed for chunk (%d, %d) section %d: %s",
                               chunkPos.x, chunkPos.z, sectionIndex, e.what());
                     delete meshData;
                 } catch (...) {
-                    Log::Error("Enhanced section remesh failed for chunk (%d, %d) section %d with unknown exception",
+                    Log::Error("Section remesh failed for chunk (%d, %d) section %d with unknown exception",
                               chunkPos.x, chunkPos.z, sectionIndex);
                     delete meshData;
                 }

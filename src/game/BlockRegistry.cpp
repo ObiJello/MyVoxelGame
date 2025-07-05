@@ -1,4 +1,4 @@
-// File: src/game/EnhancedBlockRegistry.cpp
+// File: src/game/BlockRegistry.cpp
 #include "BlockRegistry.hpp"
 #include "BlockRegistry.hpp"  // For backward compatibility
 #include "../core/Log.hpp"
@@ -6,7 +6,7 @@
 namespace Game {
 
     // Define the static array
-    std::array<EnhancedBlock, BlockRegistry::Size> BlockRegistry::blockDefinitions{};
+    std::array<Block, BlockRegistry::Size> BlockRegistry::blockDefinitions{};
 
     void BlockRegistry::RegisterModelBlock(BlockID id, const std::string& name, bool opaque,
                                               const std::string& modelName) {
@@ -16,7 +16,7 @@ namespace Game {
             return;
         }
 
-        blockDefinitions[index] = EnhancedBlock{
+        blockDefinitions[index] = Block{
             .name = name,
             .opaque = opaque,
             .modelName = modelName,
@@ -38,7 +38,7 @@ namespace Game {
             return;
         }
 
-        blockDefinitions[index] = EnhancedBlock{
+        blockDefinitions[index] = Block{
             .name = name,
             .opaque = opaque,
             .modelName = "",
@@ -53,7 +53,7 @@ namespace Game {
     }
 
     void BlockRegistry::Init() {
-        Log::Info("Initializing Enhanced Block Registry...");
+        Log::Info("Initializing Block Registry...");
 
         // SPECIAL: Air block - always transparent, no model
         RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
@@ -86,14 +86,14 @@ namespace Game {
         RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");                // Opaque
         RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");    // Opaque
 
-        Log::Info("Enhanced Block Registry initialization complete - %zu blocks registered",
+        Log::Info("Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));
     }
 
-    const EnhancedBlock& BlockRegistry::Get(BlockID id) {
+    const Block& BlockRegistry::Get(BlockID id) {
         size_t idx = static_cast<size_t>(id);
         if (idx >= blockDefinitions.size()) {
-            Log::Error("EnhancedBlockRegistry::Get() - invalid BlockID %u", static_cast<unsigned>(id));
+            Log::Error("BlockRegistry::Get() - invalid BlockID %u", static_cast<unsigned>(id));
             // Return air block as fallback
             return blockDefinitions[0];
         }
@@ -101,12 +101,12 @@ namespace Game {
     }
 
     bool BlockRegistry::UsesModelRendering(BlockID id) {
-        const EnhancedBlock& block = Get(id);
+        const Block& block = Get(id);
         return !block.useLegacyTextures;
     }
 
     const BlockModel& BlockRegistry::GetBlockModel(BlockID id) {
-        const EnhancedBlock& block = Get(id);
+        const Block& block = Get(id);
         if (block.useLegacyTextures) {
             Log::Warning("Attempted to get model for legacy block: %s", block.name.c_str());
             return BlockModelRegistry::GetModel(""); // Returns default model

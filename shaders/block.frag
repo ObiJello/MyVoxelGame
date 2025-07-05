@@ -42,7 +42,7 @@ void main() {
     float ambientStr = 0.3;
 
     // Calculate diffuse lighting
-    float NdotL = max(dot(normal, -sunDir), 0.0);
+    float NdotL = max(dot(normal, -sunDir), 0.15);
     vec3 diffuse = sunCol * NdotL;
 
     // Calculate ambient lighting

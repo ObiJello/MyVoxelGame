@@ -1,4 +1,4 @@
-// File: src/game/ChunkProvider.cpp (Enhanced with Inter-Chunk Face Culling)
+// File: src/game/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
@@ -51,7 +51,7 @@ namespace Game {
     }
 
     // Forward declarations
-    static void EnhancedMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
+    static void MeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
     static void StandardMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
 
     // Create neighbor context for inter-chunk meshing
@@ -104,16 +104,16 @@ namespace Game {
 
         centerIt->second->neighborCount.store(neighborCount);
 
-        // If we have all neighbors and no pending mesh, trigger enhanced meshing
+        // If we have all neighbors and no pending mesh, trigger meshing
         if (neighborCount == 4 && !centerIt->second->hasPendingMesh.exchange(true)) {
             auto chunk = centerIt->second->chunk;
 
-            /*Log::Debug("Triggering enhanced inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
+            /*Log::Debug("Triggering inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
                       pos.x, pos.z);*/
 
-            // Schedule enhanced meshing job
+            // Schedule meshing job
             JobSystem::g_ThreadPool.Enqueue([chunk, pos]() {
-                EnhancedMeshingJob(chunk, pos);
+                MeshingJob(chunk, pos);
             });
         }
     }
@@ -158,15 +158,15 @@ namespace Game {
         return targetChunk->GetBlock(targetX, localY, targetZ);
     }
 
-    // Enhanced meshing job with full inter-chunk face culling
-    static void EnhancedMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
-        //Log::Debug("Starting enhanced inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
+    // meshing job with full inter-chunk face culling
+    static void MeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
+        //Log::Debug("Starting inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
 
         // Create neighbor context
         NeighborContext ctx = CreateNeighborContext(chunk, pos);
 
         if (!ctx.hasAllNeighbors) {
-            Log::Warning("Enhanced meshing called without all neighbors for chunk (%d, %d)", pos.x, pos.z);
+            Log::Warning("meshing called without all neighbors for chunk (%d, %d)", pos.x, pos.z);
             // Fall back to standard meshing without inter-chunk culling
             StandardMeshingJob(chunk, pos);
             return;
@@ -174,7 +174,7 @@ namespace Game {
 
         int totalMeshJobs = 0;
 
-        // Process each non-empty section with enhanced neighbor context
+        // Process each non-empty section with neighbor context
         for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
             if (!chunk->sections[s]) {
                 continue; // Skip empty sections
@@ -187,27 +187,27 @@ namespace Game {
 
             ChunkSection* sectionPtr = chunk->sections[s].get();
 
-            /*Log::Debug("Enqueueing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+            /*Log::Debug("Enqueueing inter-chunk mesher for chunk (%d, %d) section %d",
                       pos.x, pos.z, s);*/
 
-            // Enhanced meshing job with neighbor context
+            // meshing job with neighbor context
             JobSystem::g_ThreadPool.Enqueue([sectionPtr, meshData, ctx, pos, s]() {
                 try {
-                    /*Log::Debug("Executing enhanced inter-chunk mesher for chunk (%d, %d) section %d",
+                    /*Log::Debug("Executing inter-chunk mesher for chunk (%d, %d) section %d",
                               pos.x, pos.z, s);*/
 
-                    // Call the enhanced mesher with neighbor context
+                    // Call the mesher with neighbor context
                     InterChunkMesherJob(sectionPtr, meshData, ctx);
 
-                    /*Log::Debug("Enhanced inter-chunk mesher completed for chunk (%d, %d) section %d with %zu vertices",
+                    /*Log::Debug("inter-chunk mesher completed for chunk (%d, %d) section %d with %zu vertices",
                               pos.x, pos.z, s, meshData->vertices.size());*/
 
                 } catch (const std::exception& e) {
-                    Log::Error("Enhanced inter-chunk mesher failed for chunk (%d, %d) section %d: %s",
+                    Log::Error("inter-chunk mesher failed for chunk (%d, %d) section %d: %s",
                               pos.x, pos.z, s, e.what());
                     delete meshData;
                 } catch (...) {
-                    Log::Error("Enhanced inter-chunk mesher failed for chunk (%d, %d) section %d with unknown exception",
+                    Log::Error("inter-chunk mesher failed for chunk (%d, %d) section %d with unknown exception",
                               pos.x, pos.z, s);
                     delete meshData;
                 }
@@ -216,7 +216,7 @@ namespace Game {
             totalMeshJobs++;
         }
 
-        /*Log::Info("Enhanced inter-chunk meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
+        /*Log::Info("inter-chunk meshing for chunk (%d, %d) complete → %d meshing jobs enqueued",
                  pos.x, pos.z, totalMeshJobs);*/
 
         // Mark mesh as no longer pending
@@ -248,7 +248,7 @@ namespace Game {
 
             JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, meshData, pos, s]() {
                 try {
-                    // Use existing enhanced mesher that works within chunks
+                    // Use existing mesher that works within chunks
                     MesherJob(sectionPtr, meshData, chunk.get());
                 } catch (const std::exception& e) {
                     Log::Error("Standard mesher failed for chunk (%d, %d) section %d: %s",

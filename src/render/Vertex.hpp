@@ -1,4 +1,4 @@
-// File: src/render/Vertex.hpp (Enhanced with Color Support)
+// File: src/render/Vertex.hpp
 #pragma once
 
 #include <glm/glm.hpp>

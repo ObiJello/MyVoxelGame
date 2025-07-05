@@ -23,7 +23,6 @@
 #include "../render/ChunkRenderer.hpp"
 #include "../render/Frustum.hpp"
 #include "../render/Shader.hpp"
-#include "../render/TextureAtlas.hpp"
 #include "../render/BlockHighlight.hpp"
 #include "../render/Crosshair.hpp"
 #include "../render/AtlasBuilder.hpp"
@@ -214,7 +213,7 @@ namespace PlatformMain {
     }
 
 
-    // Enhanced rendering with biome tinting support
+    //rendering
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
                     const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
                     Debug::PerformanceMetrics& metrics) {
@@ -252,13 +251,6 @@ namespace PlatformMain {
             glUniform1f(blockShader.GetUniformLocation("uBiomeHumidity"), 0.6f);    // Moderate
             glUniform1i(blockShader.GetUniformLocation("uEnableBiomeTinting"), 1);  // Enable
 
-        } else {
-            // Fall back to legacy texture atlas
-            Render::g_textureAtlas.Bind(GL_TEXTURE0);
-            glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0);
-
-            // Disable biome tinting for legacy system
-            glUniform1i(blockShader.GetUniformLocation("uEnableBiomeTinting"), 0);
         }
 
         // Render visible chunks
@@ -303,7 +295,7 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    // Initialize enhanced game systems with proper asset paths
+    // Initialize game systems with proper asset paths
     void InitializeGameSystems() {
         Log::Info("Initializing game systems...");
 
@@ -326,27 +318,21 @@ namespace PlatformMain {
         Log::Info("Game systems initialized successfully");
     }
 
-    // Initialize enhanced shaders with proper asset paths
+    // Initialize shaders with proper asset paths
     Shader InitializeShaders() {
         // Use platform-specific asset paths
-        std::string enhancedVertPath = GetAssetPath("shaders/block.vert");
-        std::string enhancedFragPath = GetAssetPath("shaders/block.frag");
+        std::string vertPath = GetAssetPath("shaders/block.vert");
+        std::string fragPath = GetAssetPath("shaders/block.frag");
 
-        // Try to use enhanced shaders if available
-        if (std::filesystem::exists(enhancedVertPath) && std::filesystem::exists(enhancedFragPath)) {
+        // Try to use shaders if available
+        if (std::filesystem::exists(vertPath) && std::filesystem::exists(fragPath)) {
             Log::Info("Using block shaders");
-            return Shader(enhancedVertPath, enhancedFragPath);
+            return Shader(vertPath, fragPath);
         }
     }
 
-    // Initialize enhanced texture systems with proper asset paths
+    // Initialize texture systems with proper asset paths
     bool InitializeTextureSystem() {
-        // Initialize legacy texture atlas first
-        std::string atlasPath = GetAssetPath("assets/textures/atlas.png");
-        if (!Render::g_textureAtlas.Initialize(atlasPath)) {
-            Log::Error("Failed to initialize legacy texture atlas");
-            return false;
-        }
 
         // Initialize AtlasBuilder
         Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
@@ -354,16 +340,15 @@ namespace PlatformMain {
         std::string texturesPath = GetAssetPath("assets/textures");
 
         if (!Render::g_atlasBuilder->BuildFromJSON(atlasJsonPath, texturesPath)) {
-            Log::Warning("AtlasBuilder failed to build from JSON at %s, falling back to legacy system",
+            Log::Warning("AtlasBuilder failed to build from JSON at %s",
                         atlasJsonPath.c_str());
             Render::g_atlasBuilder.reset();
-        } else {
-            Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
-                     Render::g_atlasBuilder->GetAtlasWidth(),
-                     Render::g_atlasBuilder->GetAtlasHeight(),
-                     Render::g_atlasBuilder->GetTextureCount());
+            return false;
         }
-
+        Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
+                 Render::g_atlasBuilder->GetAtlasWidth(),
+                 Render::g_atlasBuilder->GetAtlasHeight(),
+                 Render::g_atlasBuilder->GetTextureCount());
         return true;
     }
 
@@ -376,9 +361,9 @@ namespace PlatformMain {
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Model System and Mesher");
+        Log::Info("Starting MyVoxelGame v0.1");
 
-        // Initialize enhanced game systems
+        // Initialize game systems
         InitializeGameSystems();
 
         // Initialize GLFW
@@ -434,7 +419,7 @@ namespace PlatformMain {
         }
     #endif
 
-        // Initialize enhanced texture systems
+        // Initialize texture systems
         if (!InitializeTextureSystem()) {
             Log::Error("Failed to initialize texture systems");
             glfwDestroyWindow(window);
@@ -455,7 +440,7 @@ namespace PlatformMain {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
         }
 
-        // Compile enhanced shaders
+        // Compile shaders
         Shader blockShader = InitializeShaders();
 
         // Setup OpenGL state
@@ -479,7 +464,7 @@ namespace PlatformMain {
         Debug::PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        Log::Info("Entering main render loop with enhanced model system and mesher");
+        Log::Info("Entering main render loop");
 
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {

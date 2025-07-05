@@ -14,7 +14,6 @@
 
 #include "ChunkProvider.hpp"
 #include "JobSystem.hpp"
-#include "TextureAtlas.hpp"
 #include "WorldAccess.hpp"
 
 namespace Game {
@@ -77,14 +76,8 @@ namespace Game {
                         continue;
                     }
 
-                    // Get enhanced block definition
-                    const EnhancedBlock& enhancedBlock = BlockRegistry::Get(blockId);
-
-                    // Handle legacy blocks differently
-                    if (enhancedBlock.useLegacyTextures) {
-                        // TODO: Implement legacy block meshing if needed
-                        continue;
-                    }
+                    // Get block definition
+                    const Block& block = BlockRegistry::Get(blockId);
 
                     // Get the block model
                     const BlockModel& model = BlockRegistry::GetBlockModel(blockId);
@@ -100,7 +93,7 @@ namespace Game {
                     // FIXED: Mesh all elements uniformly
                     for (const auto& element : model.elements) {
                         MeshElement(element, model, blockPos, worldBlockPos, blockId,
-                                  meshData, enhancedBlock.enableBiomeTinting,
+                                  meshData, block.enableBiomeTinting,
                                   neighborContext, neighborContext ? neighborContext->center.get() : nullptr);
                     }
                 }
@@ -317,12 +310,12 @@ namespace Game {
         }
 
         // Rule 2: Get block properties for both current and neighbor
-        const EnhancedBlock& currentEnhanced = BlockRegistry::Get(currentBlock);
-        const EnhancedBlock& neighborEnhanced = BlockRegistry::Get(neighborBlock);
+        const Block& current = BlockRegistry::Get(currentBlock);
+        const Block& neighbor = BlockRegistry::Get(neighborBlock);
 
         // Rule 3: Special case - transparent blocks against other transparent blocks
         // Generally, we don't cull between transparent blocks unless they're the same type
-        if (currentEnhanced.isTransparent && neighborEnhanced.isTransparent) {
+        if (current.isTransparent && neighbor.isTransparent) {
             // Same block type - cull (e.g., water against water, glass against glass)
             if (currentBlock == neighborBlock) {
                 return true;
@@ -332,20 +325,20 @@ namespace Game {
         }
 
         // Rule 4: Transparent block against opaque block
-        if (currentEnhanced.isTransparent && !neighborEnhanced.isTransparent) {
+        if (current.isTransparent && !neighbor.isTransparent) {
             // Only cull if the neighbor is a full solid block
-            return neighborEnhanced.opaque;
+            return neighbor.opaque;
         }
 
         // Rule 5: Opaque block against transparent block - never cull
         // (we want to see the face of the opaque block)
-        if (!currentEnhanced.isTransparent && neighborEnhanced.isTransparent) {
+        if (!current.isTransparent && neighbor.isTransparent) {
             return false;
         }
 
         // Rule 6: Both blocks are opaque - cull the face
-        if (!currentEnhanced.isTransparent && !neighborEnhanced.isTransparent) {
-            return neighborEnhanced.opaque;
+        if (!current.isTransparent && !neighbor.isTransparent) {
+            return neighbor.opaque;
         }
 
         // Default fallback - don't cull
@@ -489,7 +482,7 @@ namespace Game {
         return result;
     }
 
-    // **ENHANCED**: Better grass tinting that varies by position
+    // grass tinting that varies by position
     glm::vec3 Mesher::SampleGrassTinting(const glm::ivec3& worldPos) {
         // Create position-based variation for more natural look
         float noiseX = sin(worldPos.x * 0.1f) * 0.1f;
@@ -510,7 +503,7 @@ namespace Game {
         return baseGrass;
     }
 
-    // **ENHANCED**: Better foliage tinting that varies by position
+    // tinting that varies by position
     glm::vec3 Mesher::SampleFoliageTinting(const glm::ivec3& worldPos) {
         // Create position-based variation for more natural look
         float noiseX = cos(worldPos.x * 0.15f) * 0.1f;
@@ -599,75 +592,7 @@ namespace Game {
             }
         }
 
-        // Fallback to legacy atlas system for basic blocks
-        if (!Render::g_textureAtlas.IsLoaded()) {
-            if (firstTime) {
-                Log::Warning("No texture atlas available for: %s", texturePath.c_str());
-            }
-            atlasUV = modelUV;
-            return false;
-        }
-
-        // Map common block textures to legacy atlas indices
-        uint16_t atlasIndex = 1008; // Default to air (transparent)
-
-        // Enhanced texture mapping - handle common paths
-        std::string basePath = texturePath;
-
-        // Strip common prefixes to get base name
-        if (basePath.rfind("minecraft:block/", 0) == 0) {
-            basePath = basePath.substr(16); // Remove "minecraft:block/"
-        } else if (basePath.rfind("block/", 0) == 0) {
-            basePath = basePath.substr(6); // Remove "block/"
-        }
-
-        // Map base names to atlas indices
-        if (basePath == "stone") {
-            atlasIndex = 1; // Stone at index 1
-        } else if (basePath == "dirt") {
-            atlasIndex = 0; // Dirt at index 0
-        } else if (basePath == "grass_block_top") {
-            atlasIndex = 2; // Grass top at index 2
-        } else if (basePath == "grass_block_side") {
-            atlasIndex = 18; // Grass side at index 18
-        } else if (basePath == "bedrock") {
-            atlasIndex = 5; // Bedrock at index 5
-        } else if (basePath == "sand") {
-            atlasIndex = 16; // Sand at index 16
-        } else {
-            if (firstTime) {
-                Log::Warning("Unknown texture path '%s' (base: '%s'), using default stone",
-                            texturePath.c_str(), basePath.c_str());
-            }
-            atlasIndex = 1; // Default to stone
-        }
-
-        // Get UV coordinates from legacy atlas
-        Render::AtlasTile tile = Render::g_textureAtlas.GetTile(atlasIndex);
-
-        // Interpolate within the tile using modelUV
-        atlasUV = glm::mix(tile.uvMin, tile.uvMax, modelUV);
-
-        if (firstTime) {
-            Log::Debug("Using legacy atlas index %u for texture '%s' (base: '%s')",
-                      atlasIndex, texturePath.c_str(), basePath.c_str());
-        }
         return true;
-    }
-
-    // Legacy entry points
-     // **FIXED**: Legacy entry points with proper ownership transfer
-    void Mesher::MesherJob(ChunkSection* section, MeshData* meshData, Chunk* parentChunk) {
-        MeshSection(section, meshData, parentChunk);
-
-        // **CRITICAL**: Transfer ownership to callback - callback takes ownership
-        if (g_meshUploadCallback && meshData) {
-            g_meshUploadCallback(meshData);
-            // DON'T delete meshData here - the callback owns it now
-        } else {
-            // No callback registered, clean up ourselves
-            delete meshData;
-        }
     }
 
     void Mesher::InterChunkMesherJob(ChunkSection* section, MeshData* meshData,

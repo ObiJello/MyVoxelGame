@@ -3,7 +3,6 @@
 #include "../core/Log.hpp"
 #include "../game/WorldManager.hpp"
 #include "../game/BlockRegistry.hpp"
-#include "../render/TextureAtlas.hpp"
 #include "../render/ChunkRenderer.hpp"
 #include "../render/Crosshair.hpp"
 #include "../render/AtlasBuilder.hpp"
@@ -87,7 +86,7 @@ namespace Debug {
         int windowWidth, int windowHeight,
         int framebufferWidth, int framebufferHeight) {
 
-        ImGui::Begin("Enhanced Voxel Engine Debug");
+        ImGui::Begin("Voxel Engine Debug");
 
         // Performance metrics
         ImGui::Text("Performance");
@@ -115,27 +114,12 @@ namespace Debug {
         }
         ImGui::Spacing();
 
-        // Texture Atlas information
-        ImGui::Text("Texture Atlas");
-        ImGui::Separator();
-        ImGui::Text("Status: %s", Render::g_textureAtlas.IsLoaded() ? "Loaded" : "Not Loaded");
-        ImGui::Text("Loaded Textures: %zu", Render::g_textureAtlas.GetLoadedTextureCount());
-        ImGui::Text("Atlas Size: %dx%d", Render::TextureAtlas::ATLAS_WIDTH, Render::TextureAtlas::ATLAS_HEIGHT);
-        ImGui::Text("Grid: %dx%d (%d tiles)", Render::TextureAtlas::TILES_PER_ROW,
-                   Render::TextureAtlas::TILES_PER_COLUMN, Render::TextureAtlas::MAX_TILES);
-        ImGui::Spacing();
 
         // **NEW**: Mipmap controls
         static bool mipmapEnabled = false; // Default to enabled
         bool mipmapChanged = ImGui::Checkbox("Enable Mipmaps", &mipmapEnabled);
 
         if (mipmapChanged) {
-            // Apply mipmap setting to legacy texture atlas
-            if (Render::g_textureAtlas.IsLoaded()) {
-                Render::g_textureAtlas.SetMipmapEnabled(mipmapEnabled);
-                Log::Info("Legacy atlas mipmaps %s", mipmapEnabled ? "enabled" : "disabled");
-            }
-
             // Apply mipmap setting to AtlasBuilder
             if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
                 Render::g_atlasBuilder->SetMipmapEnabled(mipmapEnabled);
@@ -426,15 +410,10 @@ namespace Debug {
 
         // Check if we have the new AtlasBuilder system
         if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
-            ImGui::Text("=== NEW ATLAS BUILDER SYSTEM ===");
+            ImGui::Text("=== ATLAS BUILDER SYSTEM ===");
             DrawAtlasBuilderDebug();
-
-            ImGui::Separator();
-            ImGui::Text("=== LEGACY TEXTURE ATLAS ===");
-            DrawLegacyTextureAtlasDebug();
         } else {
-            ImGui::Text("=== LEGACY TEXTURE ATLAS ONLY ===");
-            DrawLegacyTextureAtlasDebug();
+            ImGui::Text("=== ATLAS BUILDER SYSTEM FAILED===");
         }
 
         ImGui::End();
@@ -566,132 +545,6 @@ namespace Debug {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Saves the current atlas texture as a PNG file\nfor debugging texture placement and quality");
         }
-    }
-
-    // Keep the legacy method for backward compatibility
-    void DebugSystem::DrawLegacyTextureAtlasDebug() {
-        if (!Render::g_textureAtlas.IsLoaded()) {
-            ImGui::Text("Legacy texture atlas not loaded");
-            return;
-        }
-
-        ImGui::Text("Legacy Atlas Status: Loaded");
-        ImGui::Text("Atlas Size: %dx%d pixels", Render::TextureAtlas::ATLAS_WIDTH, Render::TextureAtlas::ATLAS_HEIGHT);
-        ImGui::Text("Tile Size: %dx%d pixels", Render::TextureAtlas::TILE_SIZE, Render::TextureAtlas::TILE_SIZE);
-        ImGui::Text("Grid Layout: %dx%d tiles", Render::TextureAtlas::TILES_PER_ROW, Render::TextureAtlas::TILES_PER_COLUMN);
-        ImGui::Text("Total Capacity: %d tiles", Render::TextureAtlas::MAX_TILES);
-        ImGui::Text("Loaded textures: %zu", Render::g_textureAtlas.GetLoadedTextureCount());
-
-        ImGui::Separator();
-
-        ImGui::Text("Legacy Atlas Preview:");
-        GLuint legacyAtlasID = Render::g_textureAtlas.GetTextureID();
-
-        static float legacyZoomLevel = 1.0f;
-        ImGui::SliderFloat("Legacy Zoom", &legacyZoomLevel, 0.5f, 4.0f, "%.1fx");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset Legacy Zoom")) {
-            legacyZoomLevel = 1.0f;
-        }
-
-        float legacyBaseDisplayWidth = 256.0f;
-        float legacyBaseDisplayHeight = 1024.0f;
-        float legacyDisplayWidth = legacyBaseDisplayWidth * legacyZoomLevel;
-        float legacyDisplayHeight = legacyBaseDisplayHeight * legacyZoomLevel;
-
-        ImVec2 legacyScrollRegionSize = ImVec2(400, 500);
-        ImGui::BeginChild("LegacyAtlasScrollRegion", legacyScrollRegionSize, true, ImGuiWindowFlags_HorizontalScrollbar);
-
-        ImTextureID legacyTextureID = (ImTextureID)(uintptr_t)legacyAtlasID;
-        ImVec2 legacyCursorPos = ImGui::GetCursorScreenPos();
-
-        ImGui::Image(legacyTextureID,
-                    ImVec2(legacyDisplayWidth, legacyDisplayHeight),
-                    ImVec2(0, 0), ImVec2(1, 1));
-
-        // Draw grid lines over the legacy atlas (same as before)
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        ImU32 gridColor = IM_COL32(255, 255, 0, 128);
-
-        // Vertical lines
-        for (int x = 0; x <= Render::TextureAtlas::TILES_PER_ROW; ++x) {
-            float lineX = legacyCursorPos.x + (x * legacyDisplayWidth / Render::TextureAtlas::TILES_PER_ROW);
-            drawList->AddLine(
-                ImVec2(lineX, legacyCursorPos.y),
-                ImVec2(lineX, legacyCursorPos.y + legacyDisplayHeight),
-                gridColor, 1.0f
-            );
-        }
-
-        // Horizontal lines
-        for (int y = 0; y <= Render::TextureAtlas::TILES_PER_COLUMN; ++y) {
-            float lineY = legacyCursorPos.y + (y * legacyDisplayHeight / Render::TextureAtlas::TILES_PER_COLUMN);
-            drawList->AddLine(
-                ImVec2(legacyCursorPos.x, lineY),
-                ImVec2(legacyCursorPos.x + legacyDisplayWidth, lineY),
-                gridColor, 1.0f
-            );
-        }
-
-        // Mouse interaction for legacy atlas (same as before)
-        if (ImGui::IsWindowFocused() || ImGui::IsWindowHovered()) {
-            ImVec2 mousePos = ImGui::GetMousePos();
-            if (mousePos.x >= legacyCursorPos.x && mousePos.x <= legacyCursorPos.x + legacyDisplayWidth &&
-                mousePos.y >= legacyCursorPos.y && mousePos.y <= legacyCursorPos.y + legacyDisplayHeight) {
-
-                float relativeX = (mousePos.x - legacyCursorPos.x) / legacyDisplayWidth;
-                float relativeY = (mousePos.y - legacyCursorPos.y) / legacyDisplayHeight;
-
-                int tileX = static_cast<int>(relativeX * Render::TextureAtlas::TILES_PER_ROW);
-                int tileY = static_cast<int>(relativeY * Render::TextureAtlas::TILES_PER_COLUMN);
-
-                tileX = std::max(0, std::min(tileX, Render::TextureAtlas::TILES_PER_ROW - 1));
-                tileY = std::max(0, std::min(tileY, Render::TextureAtlas::TILES_PER_COLUMN - 1));
-
-                int atlasIndex = tileY * Render::TextureAtlas::TILES_PER_ROW + tileX;
-
-                ImGui::SetTooltip("Legacy Atlas Index: %d\nTile Position: (%d, %d)\nUV Range: (%.3f, %.3f) to (%.3f, %.3f)",
-                                 atlasIndex, tileX, tileY,
-                                 static_cast<float>(tileX) / Render::TextureAtlas::TILES_PER_ROW,
-                                 static_cast<float>(tileY) / Render::TextureAtlas::TILES_PER_COLUMN,
-                                 static_cast<float>(tileX + 1) / Render::TextureAtlas::TILES_PER_ROW,
-                                 static_cast<float>(tileY + 1) / Render::TextureAtlas::TILES_PER_COLUMN);
-
-                // Highlight the hovered tile
-                float tileWidth = legacyDisplayWidth / Render::TextureAtlas::TILES_PER_ROW;
-                float tileHeight = legacyDisplayHeight / Render::TextureAtlas::TILES_PER_COLUMN;
-
-                ImVec2 tileTopLeft = ImVec2(
-                    legacyCursorPos.x + tileX * tileWidth,
-                    legacyCursorPos.y + tileY * tileHeight
-                );
-                ImVec2 tileBottomRight = ImVec2(
-                    tileTopLeft.x + tileWidth,
-                    tileTopLeft.y + tileHeight
-                );
-
-                drawList->AddRect(tileTopLeft, tileBottomRight, IM_COL32(255, 0, 0, 255), 0.0f, 0, 2.0f);
-
-                // Draw index number in the center of the tile
-                char indexText[16];
-                snprintf(indexText, sizeof(indexText), "%d", atlasIndex);
-
-                ImVec2 textSize = ImGui::CalcTextSize(indexText);
-                ImVec2 textPos = ImVec2(
-                    tileTopLeft.x + (tileWidth - textSize.x) * 0.5f,
-                    tileTopLeft.y + (tileHeight - textSize.y) * 0.5f
-                );
-
-                drawList->AddRectFilled(
-                    ImVec2(textPos.x - 2, textPos.y - 1),
-                    ImVec2(textPos.x + textSize.x + 2, textPos.y + textSize.y + 1),
-                    IM_COL32(0, 0, 0, 180)
-                );
-                drawList->AddText(textPos, IM_COL32(255, 255, 255, 255), indexText);
-            }
-        }
-
-        ImGui::EndChild();
     }
 
 #else // NDEBUG - Release builds

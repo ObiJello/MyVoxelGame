@@ -66,7 +66,6 @@ namespace Debug {
         static void DrawTextureAtlasDebug();
 
         static void DrawAtlasBuilderDebug();
-        static void DrawLegacyTextureAtlasDebug();
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };

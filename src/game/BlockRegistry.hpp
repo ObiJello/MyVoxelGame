@@ -1,4 +1,4 @@
-// File: src/game/EnhancedBlockRegistry.hpp
+// File: src/game/BlockRegistry.hpp
 #pragma once
 
 #include "Blocks.hpp"
@@ -8,7 +8,7 @@
 
 namespace Game {
 
-    struct EnhancedBlock {
+    struct Block {
         std::string name;
         bool opaque;
         std::string modelName;  // Reference to BlockModel instead of texture indices
@@ -26,11 +26,11 @@ namespace Game {
     public:
         static constexpr size_t Size = static_cast<size_t>(BlockID::Count);
 
-        // Initialize the enhanced block registry
+        // Initialize the block registry
         static void Init();
 
-        // Get enhanced block definition by ID
-        static const EnhancedBlock& Get(BlockID id);
+        // Get block definition by ID
+        static const Block& Get(BlockID id);
 
         // Check if a block uses model-based rendering
         static bool UsesModelRendering(BlockID id);
@@ -38,8 +38,8 @@ namespace Game {
         // Get model for a block (returns default if not found)
         static const BlockModel& GetBlockModel(BlockID id);
 
-        // Backing storage for all enhanced blocks
-        static std::array<EnhancedBlock, Size> blockDefinitions;
+        // Backing storage for all blocks
+        static std::array<Block, Size> blockDefinitions;
 
     private:
         BlockRegistry() = delete;

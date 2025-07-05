@@ -107,7 +107,6 @@ if(APPLE)
             src/core/JobSystem.cpp
             src/render/Shader.cpp
             src/render/ChunkRenderer.cpp
-            src/render/TextureAtlas.cpp
             src/render/BlockHighlight.cpp
             src/render/Crosshair.cpp
             src/render/AtlasBuilder.cpp
@@ -135,7 +134,6 @@ else()
             src/core/JobSystem.cpp
             src/render/Shader.cpp
             src/render/ChunkRenderer.cpp
-            src/render/TextureAtlas.cpp
             src/game/BlockModel.cpp          # ADDED: Block model JSON loader
             src/game/Mesher.cpp
             src/game/ChunkProvider.cpp
