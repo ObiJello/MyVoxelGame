@@ -113,23 +113,22 @@ namespace Render {
 
 
             // Store metadata for later lookups
-            // **CRITICAL FIX**: MeshData.chunkXZ uses .x for X and .y for Z coordinate!
             // We need to store this in ChunkMesh.chunkXZ where .x is X and .z is Z
             cm.chunkXZ.x = data->chunkXZ.x;  // X coordinate
-            cm.chunkXZ.z = data->chunkXZ.z;  // Z coordinate (from MeshData.y!)
+            cm.chunkXZ.z = data->chunkXZ.z;  // Z coordinate
             cm.sectionIndex = data->sectionIndex;
 
             /* **DEBUG**: Log what coordinates we stored
             Log::Debug("FromMeshData: Stored as ChunkMesh coords (%d,%d) section %d",
                       cm.chunkXZ.x, cm.chunkXZ.z, cm.sectionIndex);*/
 
-            // **NEW**: Record upload time
+            // Record upload time
             cm.uploadTime = std::chrono::steady_clock::now();
 
             return cm;
         }
 
-        // **NEW**: Cleanup method
+        // Cleanup method
         void Cleanup() const {
             if (vao != 0) {
                 glDeleteVertexArrays(1, &vao);
@@ -264,7 +263,7 @@ namespace Render {
 
         //Log::Debug("RemoveChunkMeshes: Looking for meshes with chunk pos (%d,%d)", pos.x, pos.z);
 
-        // **FIXED**: Use safer cleanup approach
+        // safer cleanup approach
         for (auto it = meshes.begin(); it != meshes.end();) {
             bool shouldRemove = (it->chunkXZ.x == pos.x && it->chunkXZ.z == pos.z);
 

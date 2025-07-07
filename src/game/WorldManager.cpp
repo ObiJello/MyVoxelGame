@@ -94,18 +94,10 @@ namespace Game {
                 return distA < distB;
         });
 
-        // Load new chunks (with modest throttling to prevent frame spikes)
-        constexpr int MAX_LOADS_PER_FRAME = 2*RENDER_RADIUS + 1;; // **REDUCED** to prevent frame spikes
-        int loadsThisFrame = 0;
 
         for (const auto& pos : newChunks) {
-            if (loadsThisFrame >= MAX_LOADS_PER_FRAME) {
-                break; // Defer remaining loads to next frame
-            }
-
             LoadChunk(pos);
             s_loaded.insert(pos);
-            loadsThisFrame++;
 
             /*Log::Debug("Loaded chunk (%d, %d) - within render radius %d from camera (%d,%d)",
                       pos.x, pos.z, RENDER_RADIUS, cx, cz);*/
@@ -130,32 +122,6 @@ namespace Game {
                       pos.x, pos.z, RENDER_RADIUS, cx, cz);*/
         }
 
-        // **VALIDATION**: Check that our loaded set exactly matches desired set (minus pending loads)
-        static int validationCounter = 0;
-        if (++validationCounter % 300 == 0) { // Every 5 seconds
-            size_t expectedLoaded = desiredChunks.size();
-            size_t actualLoaded = s_loaded.size();
-            size_t pendingLoads = newChunks.size() - loadsThisFrame;
-
-            if (actualLoaded + pendingLoads != expectedLoaded) {
-                Log::Warning("Chunk loading inconsistency detected!");
-                Log::Warning("  Expected: %zu, Actual: %zu, Pending: %zu",
-                           expectedLoaded, actualLoaded, pendingLoads);
-
-                // Find discrepancies
-                for (const auto& desired : desiredChunks) {
-                    if (s_loaded.find(desired) == s_loaded.end()) {
-                        Log::Warning("  Missing chunk: (%d,%d)", desired.x, desired.z);
-                    }
-                }
-                for (const auto& loaded : s_loaded) {
-                    if (desiredChunks.find(loaded) == desiredChunks.end()) {
-                        Log::Warning("  Extra chunk: (%d,%d)", loaded.x, loaded.z);
-                    }
-                }
-            }
-        }
-
         // 6) Performance monitoring
         static int frameCounter = 0;
         static auto lastStatsTime = std::chrono::steady_clock::now();
@@ -166,28 +132,14 @@ namespace Game {
             auto deltaTime = std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - lastStatsTime);
 
             Log::Info("WorldManager stats: %zu chunks loaded, %zu mesh sections rendered, "
-                     "camera at chunk (%d, %d), loaded %d, unloaded %zu chunks this update",
-                     s_loaded.size(), Render::g_chunkMeshes.size(), cx, cz,
-                     loadsThisFrame, chunksToUnload.size());
+                     "camera at chunk (%d, %d), unloaded %zu chunks this update",
+                     s_loaded.size(), Render::g_chunkMeshes.size(), cx, cz, chunksToUnload.size());
 
             lastStatsTime = currentTime;
         }
     }
 
     void WorldManager::LoadChunk(Math::ChunkPos pos) {
-        // **FIXED**: Add validation that we're not loading chunks outside render distance
-        static Math::ChunkPos lastCameraChunk{INT_MAX, INT_MAX};
-        static int cameraChunkX = 0, cameraChunkZ = 0;
-
-        // We don't have camera position here, but we can check reasonableness
-        // This is a safety check to catch any logic errors
-        int dist = std::max(std::abs(pos.x - cameraChunkX), std::abs(pos.z - cameraChunkZ));
-        if (dist > RENDER_RADIUS + 2) { // Allow some margin for edge cases
-            Log::Warning("LoadChunk: Loading chunk (%d,%d) seems far from camera (%d,%d) - distance %d > radius %d",
-                        pos.x, pos.z, cameraChunkX, cameraChunkZ, dist, RENDER_RADIUS);
-        }
-
-        //Log::Debug("LoadChunk requested for (%d, %d)", pos.x, pos.z);
 
         // Request chunk generation through the ChunkProvider
         ChunkProvider::RequestChunk(pos);
@@ -200,9 +152,9 @@ namespace Game {
         Render::RemoveChunkMeshes(pos);
 
         // 2) Unload from ChunkProvider (this will also trigger remeshing of dependent neighbors)
-        ChunkProvider::UnloadChunk(pos);
+        //ChunkProvider::UnloadChunk(pos);
 
-        //Log::Info("UnloadChunk completed for (%d, %d)", pos.x, pos.z);
+        Log::Info("UnloadChunk completed for (%d, %d)", pos.x, pos.z);
     }
 
     void WorldManager::ForceRemeshChunk(Math::ChunkPos pos) {
