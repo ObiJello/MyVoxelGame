@@ -2539,7 +2539,7 @@ template <typename Context> class basic_format_args {
     // otherwise they are stored in args_. This is done to improve cache
     // locality and reduce compiled code size since storing larger objects
     // may require more code (at least on x86-64) even if the same amount of
-    // data is actually copied to stack. It saves ~10% on the bloat test.
+    // data is actually copied to stack. It saves ~10% on the bloat tools.
     const detail::value<Context>* values_;
     const basic_format_arg<Context>* args_;
   };

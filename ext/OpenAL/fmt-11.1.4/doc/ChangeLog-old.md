@@ -2728,7 +2728,7 @@
   specifier (https://github.com/fmtlib/fmt/pull/223):
 
   ```c++
-  fmt::print("{:p}", "test"); // prints pointer value
+  fmt::print("{:p}", "tools"); // prints pointer value
   ```
 
   Thanks @LarsGullik.

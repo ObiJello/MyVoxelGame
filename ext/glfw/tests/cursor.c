@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test provides an interface to the cursor image and cursor mode
+// This tools provides an interface to the cursor image and cursor mode
 // parts of the API.
 //
 // Custom cursor image generation by urraka.

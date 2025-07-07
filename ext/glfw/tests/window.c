@@ -1,5 +1,5 @@
 //========================================================================
-// Window properties test
+// Window properties tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied

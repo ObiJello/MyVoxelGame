@@ -135,7 +135,7 @@ int main(int argc, char **argv)
         return 3;
     }
 
-    /* test inflate data with offset skip */
+    /* tools inflate data with offset skip */
     len -= skip;
     sourcelen = (unsigned long)len;
     ret = puff(NIL, &destlen, source + skip, &sourcelen);

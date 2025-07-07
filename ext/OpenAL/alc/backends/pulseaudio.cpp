@@ -680,7 +680,7 @@ void PulseMainloop::close(pa_stream *stream)
 }
 
 
-/* Used for initial connection test and enumeration. */
+/* Used for initial connection tools and enumeration. */
 auto gGlobalMainloop = PulseMainloop{};
 
 

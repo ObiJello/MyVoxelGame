@@ -4,7 +4,7 @@
 // Created : 2011-05-31
 // Updated : 2011-05-31
 // Licence : This source is under MIT licence
-// File    : test/gtx/random.cpp
+// File    : tools/gtx/random.cpp
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include <glm/glm.hpp>

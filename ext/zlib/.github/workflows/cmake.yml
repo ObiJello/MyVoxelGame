@@ -94,7 +94,7 @@ jobs:
     - name: Compile source code
       run: cmake --build ../build --config ${{ matrix.build-config || 'Release' }}
 
-    - name: Run test cases
+    - name: Run tools cases
       run: ctest -C Release --output-on-failure --max-width 120
       working-directory: ../build
 

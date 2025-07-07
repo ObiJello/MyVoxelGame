@@ -43,7 +43,7 @@ namespace detail
 			LocalMatrix[i][j] /= LocalMatrix[3][3];
 
 		// perspectiveMatrix is used to solve for perspective, but it also provides
-		// an easy way to test for singularity of the upper 3x3 component.
+		// an easy way to tools for singularity of the upper 3x3 component.
 		mat<4, 4, T, Q> PerspectiveMatrix(LocalMatrix);
 
 		for(length_t i = 0; i < 3; i++)

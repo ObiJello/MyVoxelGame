@@ -96,6 +96,15 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
+# ── NEW: Define world parsing sources for region file dumper ──────────────
+set(WORLD_SOURCES
+        src/world/RegionFile.cpp
+        src/world/RegionFileCache.cpp
+        src/world/NBTParser.cpp
+        src/world/RegionDumper.cpp
+)
+# ────────────────────────────────────────────────────────────────────────────
+
 # 6) The game executable (on macOS, it's a bundle)
 if(APPLE)
     add_executable(MyVoxelGame MACOSX_BUNDLE
@@ -120,6 +129,7 @@ if(APPLE)
             src/game/PlayerController.cpp
             src/game/Physics.cpp
             src/game/BlockRegistry.cpp
+            ${WORLD_SOURCES}                 # NEW: Add world parsing sources
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -156,6 +166,7 @@ else()
             src/render/AtlasBuilder.hpp
             src/game/BlockRegistry.cpp
             src/game/BlockRegistry.hpp
+            ${WORLD_SOURCES}                 # NEW: Add world parsing sources
     )
 endif()
 
@@ -169,6 +180,7 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/src/core
         ${PROJECT_SOURCE_DIR}/src/render
         ${PROJECT_SOURCE_DIR}/src/game
+        ${PROJECT_SOURCE_DIR}/src/world      # NEW: World parsing directory
         ${PROJECT_SOURCE_DIR}/ext/glfw/include
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
@@ -189,6 +201,65 @@ target_link_libraries(MyVoxelGame PRIVATE
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
 )
+
+# ── NEW: Create standalone Region Dumper tool ─────────────────────────────
+add_executable(RegionDumper
+        src/tools/RegionDumperMain.cpp
+        ${WORLD_SOURCES}
+        src/core/Log.cpp  # Need logging
+)
+
+# Link required libraries to the region dumper
+target_link_libraries(RegionDumper PRIVATE
+        ZLIB::ZLIBSTATIC
+)
+
+# Set include directories for the region dumper
+target_include_directories(RegionDumper PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src/core
+        ${PROJECT_SOURCE_DIR}/src/world
+        ${PROJECT_SOURCE_DIR}/ext/zlib
+)
+
+# Compiler options for region dumper
+target_compile_features(RegionDumper PRIVATE cxx_std_17)
+
+if(MSVC)
+    target_compile_options(RegionDumper PRIVATE /W4)
+else()
+    target_compile_options(RegionDumper PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+# ── NEW: Create test executable for region dumper ─────────────────────────
+add_executable(TestRegionDumper
+        src/tests/test_region_dumper.cpp
+        ${WORLD_SOURCES}
+        src/core/Log.cpp  # Need logging
+)
+
+# Link required libraries to the test
+target_link_libraries(TestRegionDumper PRIVATE
+        ZLIB::ZLIBSTATIC
+)
+
+# Set include directories for the test
+target_include_directories(TestRegionDumper PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/src/core
+        ${PROJECT_SOURCE_DIR}/src/world
+        ${PROJECT_SOURCE_DIR}/ext/zlib
+)
+
+# Compiler options for test
+target_compile_features(TestRegionDumper PRIVATE cxx_std_17)
+
+if(MSVC)
+    target_compile_options(TestRegionDumper PRIVATE /W4)
+else()
+    target_compile_options(TestRegionDumper PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+# ────────────────────────────────────────────────────────────────────────────
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
 if(APPLE)
@@ -235,17 +306,11 @@ else()
     target_link_libraries(MyVoxelGame PRIVATE X11::X11 OpenGL::GL)
 endif()
 
-# 1) Define a target that always runs and copies assets
-#add_custom_target(copy_assets ALL
-#        COMMENT "Force Copying assets into output folder"
-#        COMMAND ${CMAKE_COMMAND} -E copy_directory
-#        ${PROJECT_SOURCE_DIR}/assets
-#        "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
-#)
-#
-# 2) Make your game executable depend on it
-#add_dependencies(MyVoxelGame copy_assets)
-
+# ── Optional: Install targets ──────────────────────────────────────────────
+install(TARGETS MyVoxelGame DESTINATION bin)
+install(TARGETS RegionDumper DESTINATION bin)
+install(TARGETS TestRegionDumper DESTINATION bin)
+# ────────────────────────────────────────────────────────────────────────────
 
 # ── Optional: Print configuration summary ──────────────────────────────────────
 message(STATUS "")
@@ -264,6 +329,11 @@ if(WIN32 AND BUILD_WIN32_32BIT)
 else()
     message(STATUS "Windows Target:       64-bit")
 endif()
+message(STATUS "")
+message(STATUS "Executables:")
+message(STATUS "  MyVoxelGame:        Main game executable")
+message(STATUS "  RegionDumper:       Minecraft region file parser")
+message(STATUS "  TestRegionDumper:   Region parser test suite")
 message(STATUS "")
 message(STATUS "Dependencies:")
 message(STATUS "  GLFW:               Bundled (ext/glfw)")

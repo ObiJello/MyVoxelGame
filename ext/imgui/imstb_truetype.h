@@ -960,7 +960,7 @@ STBTT_DEF unsigned char * stbtt_GetCodepointSDF(const stbtt_fontinfo *info, floa
 //        glyph/codepoint   --  the character to generate the SDF for
 //        padding           --  extra "pixels" around the character which are filled with the distance to the character (not 0),
 //                                 which allows effects like bit outlines
-//        onedge_value      --  value 0-255 to test the SDF against to reconstruct the character (i.e. the isocontour of the character)
+//        onedge_value      --  value 0-255 to tools the SDF against to reconstruct the character (i.e. the isocontour of the character)
 //        pixel_dist_scale  --  what value the SDF should increase by when moving one SDF "pixel" away from the edge (on the 0..255 scale)
 //                                 if positive, > onedge_value is inside; if negative, < onedge_value is inside
 //        width,height      --  output height & width of the SDF bitmap (including padding)
@@ -3186,7 +3186,7 @@ static void stbtt__fill_active_edges_new(float *scanline, float *scanline_fill, 
                // goal is to measure the area covered by '.' in each pixel
 
                // if x2 is right at the right edge of x1, y_crossing can blow up, github #1057
-               // @TODO: maybe test against sy1 rather than y_bottom?
+               // @TODO: maybe tools against sy1 rather than y_bottom?
                if (y_crossing > y_bottom)
                   y_crossing = y_bottom;
 
@@ -3198,7 +3198,7 @@ static void stbtt__fill_active_edges_new(float *scanline, float *scanline_fill, 
                // area of the triangle (x_top,sy0), (x1+1,sy0), (x1+1,y_crossing)
                scanline[x1] += stbtt__sized_triangle_area(area, x1+1 - x_top);
 
-               // check if final y_crossing is blown up; no test case for this
+               // check if final y_crossing is blown up; no tools case for this
                if (y_final > y_bottom) {
                   int denom = (x2 - (x1+1));
                   y_final = y_bottom;
@@ -4489,7 +4489,7 @@ static int stbtt__compute_crossings_x(float x, float y, int nverts, stbtt_vertex
    orig[0] = x;
    orig[1] = y;
 
-   // test a ray from (-infinity,y) to (x,y)
+   // tools a ray from (-infinity,y) to (x,y)
    for (i=0; i < nverts; ++i) {
       if (verts[i].type == STBTT_vline) {
          int x0 = (int) verts[i-1].x, y0 = (int) verts[i-1].y;
@@ -5006,7 +5006,7 @@ STBTT_DEF int stbtt_CompareUTF8toUTF16_bigendian(const char *s1, int len1, const
 //                     fix stbtt_GetFontOFfsetForIndex (never worked for non-0 input?);
 //                     fixed an assert() bug in the new rasterizer
 //                     replace assert() with STBTT_assert() in new rasterizer
-//   1.06 (2015-07-14) performance improvements (~35% faster on x86 and x64 on test machine)
+//   1.06 (2015-07-14) performance improvements (~35% faster on x86 and x64 on tools machine)
 //                     also more precise AA rasterizer, except if shapes overlap
 //                     remove need for STBTT_sort
 //   1.05 (2015-04-15) fix misplaced definitions for STBTT_STATIC

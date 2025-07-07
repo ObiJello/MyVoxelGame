@@ -24,7 +24,7 @@
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 /// THE SOFTWARE.
 ///
-/// @file test/gtx/gtx_extented_min_max.cpp
+/// @file tools/gtx/gtx_extented_min_max.cpp
 /// @date 2013-10-25 / 2014-11-25
 /// @author Christophe Riccio
 ///////////////////////////////////////////////////////////////////////////////////

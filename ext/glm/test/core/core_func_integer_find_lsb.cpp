@@ -162,7 +162,7 @@ static int ntz7(unsigned x)
 #	pragma warning(pop)
 #endif
 
-// This file has divisions by zero to test isnan
+// This file has divisions by zero to tools isnan
 #if GLM_COMPILER & GLM_COMPILER_VC
 #	pragma warning(push)
 #	pragma warning(disable : 4146)
@@ -391,7 +391,7 @@ int main()
 	TimestampBeg = std::clock();
 	for (std::size_t k = 0; k < Count; ++k)
 	for (i = 0; i < n; i += 2) {
-		if (ntz7_christophe(test[i]) != static_cast<int>(test[i+1])) error(test[i], ntz7(test[i]));}
+		if (ntz7_christophe(tools[i]) != static_cast<int>(tools[i+1])) error(tools[i], ntz7(tools[i]));}
 	TimestampEnd = std::clock();
 
 	std::printf("ntz7_christophe: %d clocks\n", static_cast<int>(TimestampEnd - TimestampBeg));

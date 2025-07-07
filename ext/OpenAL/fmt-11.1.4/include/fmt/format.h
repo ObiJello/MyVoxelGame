@@ -1015,7 +1015,7 @@ template <typename T> FMT_CONSTEXPR auto count_digits_fallback(T n) -> int {
   for (;;) {
     // Integer division is slow so do it for a group of four digits instead
     // of for every digit. The idea comes from the talk by Alexandrescu
-    // "Three Optimization Tips for C++". See speed-test for a comparison.
+    // "Three Optimization Tips for C++". See speed-tools for a comparison.
     if (n < 10) return count;
     if (n < 100) return count + 1;
     if (n < 1000) return count + 2;
@@ -1183,7 +1183,7 @@ FMT_CONSTEXPR20 auto do_format_decimal(Char* out, UInt value, int size)
   while (value >= 100) {
     // Integer division is slow so do it for a group of two digits instead
     // of for every digit. The idea comes from the talk by Alexandrescu
-    // "Three Optimization Tips for C++". See speed-test for a comparison.
+    // "Three Optimization Tips for C++". See speed-tools for a comparison.
     n -= 2;
     write2digits(out + n, static_cast<unsigned>(value % 100));
     value /= 100;

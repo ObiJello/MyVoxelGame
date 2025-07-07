@@ -231,10 +231,10 @@ static void drawAllViews(void)
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // Enable scissor test
+    // Enable scissor tools
     glEnable(GL_SCISSOR_TEST);
 
-    // Enable depth test
+    // Enable depth tools
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
 
@@ -346,10 +346,10 @@ static void drawAllViews(void)
     // Disable face culling
     glDisable(GL_CULL_FACE);
 
-    // Disable depth test
+    // Disable depth tools
     glDisable(GL_DEPTH_TEST);
 
-    // Disable scissor test
+    // Disable scissor tools
     glDisable(GL_SCISSOR_TEST);
 
     // Draw a border around the active view

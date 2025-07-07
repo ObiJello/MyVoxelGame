@@ -1,5 +1,5 @@
 //========================================================================
-// Custom heap allocator test
+// Custom heap allocator tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -118,7 +118,7 @@ int main(void)
     if (!CALL(glfwInit)())
         exit(EXIT_FAILURE);
 
-    GLFWwindow* window = CALL(glfwCreateWindow)(400, 400, "Custom allocator test", NULL, NULL);
+    GLFWwindow* window = CALL(glfwCreateWindow)(400, 400, "Custom allocator tools", NULL, NULL);
     if (!window)
     {
         glfwTerminate();

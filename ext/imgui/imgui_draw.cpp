@@ -1937,7 +1937,7 @@ void ImTriangulator::FlipNodeList()
     _Nodes = prev;
 }
 
-// A triangle is an ear is no other vertex is inside it. We can test reflexes vertices only (see reference algorithm)
+// A triangle is an ear is no other vertex is inside it. We can tools reflexes vertices only (see reference algorithm)
 bool ImTriangulator::IsEar(int i0, int i1, int i2, const ImVec2& v0, const ImVec2& v1, const ImVec2& v2) const
 {
     ImTriangulatorNode** p_end = _Reflexes.Data + _Reflexes.Size;
@@ -4266,7 +4266,7 @@ void ImFont::RenderText(ImDrawList* draw_list, float size, const ImVec2& pos, Im
         float char_width = glyph->AdvanceX * scale;
         if (glyph->Visible)
         {
-            // We don't do a second finer clipping test on the Y axis as we've already skipped anything before clip_rect.y and exit once we pass clip_rect.w
+            // We don't do a second finer clipping tools on the Y axis as we've already skipped anything before clip_rect.y and exit once we pass clip_rect.w
             float x1 = x + glyph->X0 * scale;
             float x2 = x + glyph->X1 * scale;
             float y1 = y + glyph->Y0 * scale;

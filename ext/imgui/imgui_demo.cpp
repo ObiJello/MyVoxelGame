@@ -1386,7 +1386,7 @@ static void DemoWindowWidgetsDataTypes()
         // - integer/float/double
         // To avoid polluting the public API with all possible combinations, we use the ImGuiDataType enum
         // to pass the type, and passing all arguments by pointer.
-        // This is the reason the test code below creates local variables to hold "zero" "one" etc. for each type.
+        // This is the reason the tools code below creates local variables to hold "zero" "one" etc. for each type.
         // In practice, if you frequently use a given type that is not covered by the normal API entry points,
         // you can wrap it yourself inside a 1 line function which can take typed argument as value instead of void*,
         // and then pass their address to the generic function. For example:
@@ -1714,7 +1714,7 @@ static void DemoWindowWidgetsDragsAndSliders()
         ImGui::DragFloat("DragFloat (0 -> +inf)", &drag_f, 0.005f, 0.0f, FLT_MAX, "%.3f", flags);
         ImGui::DragFloat("DragFloat (-inf -> 1)", &drag_f, 0.005f, -FLT_MAX, 1.0f, "%.3f", flags);
         ImGui::DragFloat("DragFloat (-inf -> +inf)", &drag_f, 0.005f, -FLT_MAX, +FLT_MAX, "%.3f", flags);
-        //ImGui::DragFloat("DragFloat (0 -> 0)", &drag_f, 0.005f, 0.0f, 0.0f, "%.3f", flags);           // To test ClampZeroRange
+        //ImGui::DragFloat("DragFloat (0 -> 0)", &drag_f, 0.005f, 0.0f, 0.0f, "%.3f", flags);           // To tools ClampZeroRange
         //ImGui::DragFloat("DragFloat (100 -> 100)", &drag_f, 0.005f, 100.0f, 100.0f, "%.3f", flags);
         ImGui::DragInt("DragInt (0 -> 100)", &drag_i, 0.5f, 0, 100, "%d", flags);
 
@@ -2160,7 +2160,7 @@ static void DemoWindowWidgetsQueryingStatuses()
             ImGui::GetItemRectSize().x, ImGui::GetItemRectSize().y
         );
         ImGui::BulletText(
-            "with Hovering Delay or Stationary test:\n"
+            "with Hovering Delay or Stationary tools:\n"
             "IsItemHovered() = = %d\n"
             "IsItemHovered(_Stationary) = %d\n"
             "IsItemHovered(_DelayShort) = %d\n"
@@ -3037,7 +3037,7 @@ static void DemoWindowWidgetsSelectionAndMultiSelect(ImGuiDemoWindowData* demo_d
                 // features to do this automatically, e.g. a ImGuiTreeNodeFlags_AutoCloseChildNodes etc.
                 static int TreeCloseAndUnselectChildNodes(ExampleTreeNode* node, ImGuiSelectionBasicStorage* selection, int depth = 0)
                 {
-                    // Recursive close (the test for depth == 0 is because we call this on a node that was just closed!)
+                    // Recursive close (the tools for depth == 0 is because we call this on a node that was just closed!)
                     int unselected_count = selection->Contains((ImGuiID)node->UID) ? 1 : 0;
                     if (depth == 0 || TreeNodeGetOpen(node))
                     {
@@ -3253,7 +3253,7 @@ static void DemoWindowWidgetsSelectionAndMultiSelect(ImGuiDemoWindowData* demo_d
                         // (If we used PushID(index) instead, focus wouldn't be restored correctly after deletion).
                         ImGui::PushID(item_id);
 
-                        // Emit a color button, to test that Shift+LeftArrow landing on an item that is not part
+                        // Emit a color button, to tools that Shift+LeftArrow landing on an item that is not part
                         // of the selection scope doesn't erroneously alter our selection.
                         if (show_color_button)
                         {
@@ -3576,7 +3576,7 @@ static void DemoWindowWidgetsText()
         IMGUI_DEMO_MARKER("Widgets/Text/UTF-8 Text");
         if (ImGui::TreeNode("UTF-8 Text"))
         {
-            // UTF-8 test with Japanese characters
+            // UTF-8 tools with Japanese characters
             // (Needs a suitable font? Try "Google Noto" or "Arial Unicode". See docs/FONTS.md for details.)
             // - From C++11 you can use the u8"my text" syntax to encode literal strings as UTF-8
             // - For earlier compiler, you may be able to encode your sources as UTF-8 (e.g. in Visual Studio, you
@@ -4364,7 +4364,7 @@ static void DemoWindowLayout()
                 ImGui::PopStyleColor();
 
             for (int n = 0; n < 50; n++)
-                ImGui::Text("Some test %d", n);
+                ImGui::Text("Some tools %d", n);
             ImGui::EndChild();
             bool child_is_hovered = ImGui::IsItemHovered();
             ImVec2 child_rect_min = ImGui::GetItemRectMin();
@@ -8712,7 +8712,7 @@ struct ExampleAppConsole
         memset(InputBuf, 0, sizeof(InputBuf));
         HistoryPos = -1;
 
-        // "CLASSIFY" is here to provide the test case where "C"+[tab] completes to "CL" and display multiple matches.
+        // "CLASSIFY" is here to provide the tools case where "C"+[tab] completes to "CL" and display multiple matches.
         Commands.push_back("HELP");
         Commands.push_back("HISTORY");
         Commands.push_back("CLEAR");
@@ -8833,7 +8833,7 @@ struct ExampleAppConsole
             // You cannot this code as-is if a filter is active because it breaks the 'cheap random-access' property.
             // We would need random-access on the post-filtered list.
             // A typical application wanting coarse clipping and filtering may want to pre-compute an array of indices
-            // or offsets of items that passed the filtering test, recomputing this array when user changes the filter,
+            // or offsets of items that passed the filtering tools, recomputing this array when user changes the filter,
             // and appending newly elements as they are inserted. This is left as a task to the user until we can manage
             // to improve this example code!
             // If your items are of variable height:
@@ -9438,7 +9438,7 @@ static void ShowExampleAppPropertyEditor(bool* p_open, ImGuiDemoWindowData* demo
 // [SECTION] Example App: Long Text / ShowExampleAppLongText()
 //-----------------------------------------------------------------------------
 
-// Demonstrate/test rendering huge amount of text, and the incidence of clipping.
+// Demonstrate/tools rendering huge amount of text, and the incidence of clipping.
 static void ShowExampleAppLongText(bool* p_open)
 {
     ImGui::SetNextWindowSize(ImVec2(520, 600), ImGuiCond_FirstUseEver);
@@ -10143,7 +10143,7 @@ struct ExampleAppDocuments
         ImGui::SetNextItemShortcut(ImGuiMod_Ctrl | ImGuiKey_W, ImGuiInputFlags_Tooltip);
         if (ImGui::Button("Close"))
             CloseQueue.push_back(doc);
-        ImGui::ColorEdit3("color", &doc->Color.x);  // Useful to test drag and drop and hold-dragged-to-open-tab behavior.
+        ImGui::ColorEdit3("color", &doc->Color.x);  // Useful to tools drag and drop and hold-dragged-to-open-tab behavior.
         ImGui::PopID();
     }
 

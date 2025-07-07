@@ -1,5 +1,5 @@
 //========================================================================
-// Empty event test
+// Empty event tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test is intended to verify that posting of empty events works
+// This tools is intended to verify that posting of empty events works
 //
 //========================================================================
 

@@ -1,5 +1,5 @@
 //========================================================================
-// Multi-threading test
+// Multi-threading tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test is intended to verify whether the OpenGL context part of
+// This tools is intended to verify whether the OpenGL context part of
 // the GLFW API is able to be used from multiple threads
 //
 //========================================================================

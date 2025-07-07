@@ -59,7 +59,7 @@ inline void ApplyCoeffs(const std::span<float2> Values, const size_t IrSize,
     const auto count4 = size_t{(IrSize+1) >> 1};
 
     /* NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
-     * This isn't technically correct to test alignment, but it's true for
+     * This isn't technically correct to tools alignment, but it's true for
      * systems that support SSE, which is the only one that needs to know the
      * alignment of Values (which alternates between 8- and 16-byte aligned).
      */

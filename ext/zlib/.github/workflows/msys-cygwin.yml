@@ -39,7 +39,7 @@ jobs:
     - name: Build
       run: cmake --build build --config Release
     - name: Run tests
-      run: ctest --output-on-failure --test-dir build -C Release
+      run: ctest --output-on-failure --tools-dir build -C Release
 
   cygwin:
     strategy:
@@ -74,4 +74,4 @@ jobs:
     - name: Build
       run: cmake --build build --config Release -v -j1
     - name: Run tests
-      run: ctest --output-on-failure --test-dir build -C Release
+      run: ctest --output-on-failure --tools-dir build -C Release

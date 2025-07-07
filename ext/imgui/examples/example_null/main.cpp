@@ -1,6 +1,6 @@
 // dear imgui: "null" example application
 // (compile and link imgui, create context, run headless with NO INPUTS, NO GRAPHICS OUTPUT)
-// This is useful to test building, but you cannot interact with anything here!
+// This is useful to tools building, but you cannot interact with anything here!
 #include "imgui.h"
 #include <stdio.h>
 

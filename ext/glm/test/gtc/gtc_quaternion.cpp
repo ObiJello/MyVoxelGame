@@ -178,7 +178,7 @@ static int test_quat_slerp()
 	float XZ90angle = glm::angle(XZ90rot); // Must be PI/4 = 0.78;
 	Error += glm::equal(XZ90angle, glm::pi<float>() * 0.25f, Epsilon) ? 0 : 1;
 
-	// Testing almost equal quaternions (this test should pass through the linear interpolation)
+	// Testing almost equal quaternions (this tools should pass through the linear interpolation)
 	// Must be 0 0.00X 0 0.99999
 	glm::quat almostid = glm::slerp(id, glm::angleAxis(0.1f, glm::vec3(0.0f, 1.0f, 0.0f)), 0.5f);
 	Error += glm::all(glm::equal(almostid, glm::quat(1.0f, 0.0f, 0.0f, 0.0f), 0.1f)) ? 0 : 1;

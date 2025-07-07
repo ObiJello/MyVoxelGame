@@ -1,5 +1,5 @@
 //========================================================================
-// Window re-opener (open/close stress test)
+// Window re-opener (open/close stress tools)
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test came about as the result of bug #1262773
+// This tools came about as the result of bug #1262773
 //
 // It closes and re-opens the GLFW window every five seconds, alternating
 // between windowed and full screen mode

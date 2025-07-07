@@ -286,7 +286,7 @@ auto main(std::span<std::string_view> args) -> int
     fputs("\n", stdout);
 
     fmt::println("Pushing a debug group, making some invalid calls, and popping the debug group...");
-    alPushDebugGroupEXT(AL_DEBUG_SOURCE_APPLICATION_EXT, 0, -1, "Error test group");
+    alPushDebugGroupEXT(AL_DEBUG_SOURCE_APPLICATION_EXT, 0, -1, "Error tools group");
     alSpeedOfSound(0.0f);
     /* Can't set the label of the null buffer. */
     alObjectLabelEXT(AL_BUFFER, 0, -1, "The null buffer");

@@ -3,7 +3,7 @@
 //   main-loop inside the main() function. That's because:
 //   - It makes the examples easier to read, keeping the code sequential.
 //   - It permit the use of local variables, making it easier to try things and perform quick
-//     changes when someone needs to quickly test something (vs having to structure the example
+//     changes when someone needs to quickly tools something (vs having to structure the example
 //     in order to pass data around). This is very important because people use those examples
 //     to craft easy-to-past repro when they want to discuss features or report issues.
 //   - It conveys at a glance that this is a no-BS framework, it won't take your main loop away from you.

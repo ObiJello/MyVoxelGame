@@ -188,11 +188,11 @@
 //
 // Keyboard input must be encoded as a single integer value; e.g. a character code
 // and some bitflags that represent shift states. to simplify the interface, SHIFT must
-// be a bitflag, so we can test the shifted state of cursor movements to allow selection,
+// be a bitflag, so we can tools the shifted state of cursor movements to allow selection,
 // i.e. (STB_TEXTEDIT_K_RIGHT|STB_TEXTEDIT_K_SHIFT) should be shifted right-arrow.
 //
 // You can encode other things, such as CONTROL or ALT, in additional bits, and
-// then test for their presence in e.g. STB_TEXTEDIT_K_WORDLEFT. For example,
+// then tools for their presence in e.g. STB_TEXTEDIT_K_WORDLEFT. For example,
 // my Windows implementations add an additional CONTROL bit, and an additional KEYDOWN
 // bit. Then all of the STB_TEXTEDIT_K_ values bitwise-or in the KEYDOWN bit,
 // and I pass both WM_KEYDOWN and WM_CHAR events to the "key" function in the

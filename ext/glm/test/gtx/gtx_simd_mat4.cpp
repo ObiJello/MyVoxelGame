@@ -24,7 +24,7 @@
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 /// THE SOFTWARE.
 ///
-/// @file test/gtx/gtx_simd_mat4.cpp
+/// @file tools/gtx/gtx_simd_mat4.cpp
 /// @date 2010-09-16 / 2014-11-25
 /// @author Christophe Riccio
 ///////////////////////////////////////////////////////////////////////////////////
@@ -297,7 +297,7 @@ int main()
 				return 1;
 	}
 
-	// shuffle test
+	// shuffle tools
 	glm::simdVec4 A(1.0f, 2.0f, 3.0f, 4.0f);
 	glm::simdVec4 B(5.0f, 6.0f, 7.0f, 8.0f);
 	//__m128 C = _mm_shuffle_ps(A.Data, B.Data, _MM_SHUFFLE(1, 0, 1, 0));

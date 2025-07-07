@@ -134,7 +134,7 @@ static int test_mul()
 		for (int i = 0; i < 100; ++i)
 		{
 			glm::vec4 src_pt = glm::vec4(myfrand() * 4.0f, myfrand() * 5.0f, myfrand() * 3.0f,1.0f);
-			// test both multiplication orders        
+			// tools both multiplication orders
 			glm::vec4 dst_pt_m3  = m3 * src_pt; 
 			glm::vec4 dst_pt_dq3 = dq3 * src_pt;
 

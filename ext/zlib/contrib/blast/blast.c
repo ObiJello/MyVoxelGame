@@ -25,7 +25,7 @@
  * 1.2  24 Oct 2012     - Add note about using binary mode in stdio
  *                      - Fix comparisons of differently signed integers
  * 1.3  24 Aug 2013     - Return unused input from blast()
- *                      - Fix test code to correctly report unused input
+ *                      - Fix tools code to correctly report unused input
  *                      - Enable the provision of initial input to blast()
  */
 

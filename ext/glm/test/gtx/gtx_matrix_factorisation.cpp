@@ -95,7 +95,7 @@ int main()
 	//Test QR triangular 2
 	Error += test_qr(glm::dmat4x3(12.0, 6.0, -4.0, -51.0, 167.0, 24.0, 4.0, -68.0, -41.0, 7.0, 2.0, 15.0)) ? 1 : 0;
 
-	//Test RQ triangular 1 : Fails at the triangular test
+	//Test RQ triangular 1 : Fails at the triangular tools
 	Error += test_rq(glm::dmat3x4(12.0, 6.0, -4.0, -51.0, 167.0, 24.0, 4.0, -68.0, -41.0, 7.0, 2.0, 15.0)) ? 1 : 0;
 
 	//Test QR triangular 2

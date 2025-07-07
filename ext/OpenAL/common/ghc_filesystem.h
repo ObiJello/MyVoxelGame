@@ -245,7 +245,7 @@
 #endif
 
 //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-// Behaviour Switches (see README.md, should match the config in test/filesystem_test.cpp):
+// Behaviour Switches (see README.md, should match the config in tools/filesystem_test.cpp):
 //- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 // Enforce C++17 API where possible when compiling for C++20, handles the following cases:
 // * fs::path::u8string() returns std::string instead of std::u8string
@@ -2278,7 +2278,7 @@ GHC_INLINE bool is_symlink_from_INFO(const path &, const WIN32_FIND_DATAW* info,
     // documentation. In practice, dwReserved0 is not reset which
     // causes it to report the incorrect symlink status.
     // Note that microsoft documentation does not say whether there is
-    // a null value for dwReserved0, so we test for symlink directly
+    // a null value for dwReserved0, so we tools for symlink directly
     // instead of returning the tag which requires returning a null
     // value for non-reparse-point files.
     return (info->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && info->dwReserved0 == IO_REPARSE_TAG_SYMLINK;

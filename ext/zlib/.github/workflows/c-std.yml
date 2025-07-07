@@ -124,7 +124,7 @@ jobs:
       if: matrix.builder == 'configure'
       run: make -j2
 
-    - name: Run test cases (configure)
+    - name: Run tools cases (configure)
       if: matrix.builder == 'configure'
       run: |
         make test
@@ -154,7 +154,7 @@ jobs:
       if: matrix.builder == 'cmake'
       run: cmake --build ./build2 --config Release
 
-    - name: Run test cases (cmake)
+    - name: Run tools cases (cmake)
       if: matrix.builder == 'cmake'
       run: ctest ./build2 -C Release --output-on-failure --max-width 120
 
@@ -226,5 +226,5 @@ jobs:
     - name: Compile source code with tests(cmake)
       run: cmake --build ./build2 --config Release -v
 
-    - name: Run test cases (cmake)
+    - name: Run tools cases (cmake)
       run: ctest ./build2 -C Release --output-on-failure --max-width 120

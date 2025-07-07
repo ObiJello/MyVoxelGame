@@ -4,7 +4,7 @@
 // Created : 2013-10-25
 // Updated : 2013-10-25
 // Licence : This source is under MIT licence
-// File    : test/gtx/associated_min_max.cpp
+// File    : tools/gtx/associated_min_max.cpp
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 #include <glm/gtc/type_precision.hpp>

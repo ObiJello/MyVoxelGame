@@ -377,7 +377,7 @@ static int testEigenvalueSort()
 			4, 8, 2, 16
 		)
 	);
-	// Permutations of test input data for exhaustive check, based on `D` (1 <= D <= 4)
+	// Permutations of tools input data for exhaustive check, based on `D` (1 <= D <= 4)
 	static const int permutationCount[] = {
 		0,
 		1,
@@ -454,7 +454,7 @@ static int testCovar(
 	typedef glm::vec<D, T, Q> vec;
 	typedef glm::mat<D, D, T, Q> mat;
 
-	// #1: test expected result with fixed data set
+	// #1: tools expected result with fixed data set
 	std::vector<vec> testData;
 	agarose::fillTestData(testData);
 
@@ -468,7 +468,7 @@ static int testCovar(
 		return failReport(__LINE__);
 	}
 
-	// #2: test function variant consistency with random data
+	// #2: tools function variant consistency with random data
 #if GLM_HAS_CXX11_STL == 1
 	std::default_random_engine rndEng(randomEngineSeed);
 	std::normal_distribution<T> normalDist;
@@ -511,7 +511,7 @@ static int testEigenvectors(T epsilon)
 	typedef glm::vec<D, T, Q> vec;
 	typedef glm::mat<D, D, T, Q> mat;
 
-	// test expected result with fixed data set
+	// tools expected result with fixed data set
 	std::vector<vec> testData;
 	mat covarMat(agarose::expectedCovarData());
 
@@ -537,7 +537,7 @@ static int testEigenvectors(T epsilon)
 	return 0;
 }
 
-// A simple small smoke test:
+// A simple small smoke tools:
 // - a uniformly sampled block
 // - reconstruct main axes
 // - check order of eigenvalues equals order of extends of block in direction of main axes
@@ -660,11 +660,11 @@ int main()
 {
 	int error(0);
 
-	// A small smoke test to fail early with most problems
+	// A small smoke tools to fail early with most problems
 	if(smokeTest())
 		return failReport(__LINE__);
 
-	// test sorting utility.
+	// tools sorting utility.
 	if(testEigenvalueSort<2, float, glm::defaultp>() != 0)
 		error = failReport(__LINE__);
 	if(testEigenvalueSort<2, double, glm::defaultp>() != 0)
@@ -680,8 +680,8 @@ int main()
 	if (error != 0)
 		return error;
 
-	// Note: the random engine uses a fixed seed to create consistent and reproducible test data
-	// test covariance matrix computation from different data sources
+	// Note: the random engine uses a fixed seed to create consistent and reproducible tools data
+	// tools covariance matrix computation from different data sources
 	if(testCovar<2, float, glm::defaultp>(100, 12345) != 0)
 		error = failReport(__LINE__);
 	if(testCovar<2, double, glm::defaultp>(100, 42) != 0)
@@ -697,7 +697,7 @@ int main()
 	if (error != 0)
 		return error;
 
-	// test PCA eigen vector reconstruction
+	// tools PCA eigen vector reconstruction
 	// Expected epsilon precision evaluated separately:
 	// https://github.com/sgrottel/exp-pca-precision
 	if(testEigenvectors<2, float, glm::defaultp>(0.002f) != 0)

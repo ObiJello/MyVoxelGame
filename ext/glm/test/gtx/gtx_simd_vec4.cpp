@@ -24,7 +24,7 @@
 /// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 /// THE SOFTWARE.
 ///
-/// @file test/gtx/gtx_simd_vec4.cpp
+/// @file tools/gtx/gtx_simd_vec4.cpp
 /// @date 2010-09-16 / 2014-11-25
 /// @author Christophe Riccio
 ///////////////////////////////////////////////////////////////////////////////////

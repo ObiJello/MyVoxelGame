@@ -58,7 +58,7 @@
  *                      - Add FIXLCODES #define
  * 1.5   6 Apr 2002     - Minor comment fixes
  * 1.6   7 Aug 2002     - Minor format changes
- * 1.7   3 Mar 2003     - Added test code for distribution
+ * 1.7   3 Mar 2003     - Added tools code for distribution
  *                      - Added zlib-like license
  * 1.8   9 Jan 2004     - Added some comments on no distance codes case
  * 1.9  21 Feb 2008     - Fix bug on 16-bit integer architectures [Pohland]
@@ -72,10 +72,10 @@
  * 2.2  25 Apr 2010     - Fix bug in variable initializations [Oberhumer]
  *                      - Add const where appropriate [Oberhumer]
  *                      - Split if's and ?'s for coverage testing
- *                      - Break out test code to separate file
+ *                      - Break out tools code to separate file
  *                      - Move NIL to puff.h
  *                      - Allow incomplete code only if single code length is 1
- *                      - Add full code coverage test to Makefile
+ *                      - Add full code coverage tools to Makefile
  * 2.3  21 Jan 2013     - Check for invalid code length codes in dynamic blocks
  */
 

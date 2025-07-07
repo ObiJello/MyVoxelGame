@@ -1,4 +1,4 @@
-/* infcover.c -- test zlib's inflate routines with full code coverage
+/* infcover.c -- tools zlib's inflate routines with full code coverage
  * Copyright (C) 2011, 2016, 2024 Mark Adler
  * For conditions of distribution and use, see copyright notice in zlib.h
  */
@@ -233,7 +233,7 @@ local void mem_done(z_stream *strm, char *prefix)
     strm->zfree = Z_NULL;
 }
 
-/* -- inflate test routines -- */
+/* -- inflate tools routines -- */
 
 /* Decode a hexadecimal string, set *len to length, in[] to the bytes.  This
    decodes liberally, in that hex digits can be adjacent, in which case two in

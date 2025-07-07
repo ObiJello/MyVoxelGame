@@ -738,7 +738,7 @@ bool AlsaPlayback::reset()
         /* No mmap */
         CHECK(snd_pcm_hw_params_set_access(mPcmHandle, hp.get(), SND_PCM_ACCESS_RW_INTERLEAVED));
     }
-    /* test and set format (implicitly sets sample bits) */
+    /* tools and set format (implicitly sets sample bits) */
     if(snd_pcm_hw_params_test_format(mPcmHandle, hp.get(), format) < 0)
     {
         struct FormatMap {

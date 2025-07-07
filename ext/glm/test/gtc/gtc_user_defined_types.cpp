@@ -4,7 +4,7 @@
 // Created : 2010-09-16
 // Updated : 2011-05-27
 // Licence : This source is under MIT licence
-// File    : test/gtc/type_ptr.cpp
+// File    : tools/gtc/type_ptr.cpp
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define GLM_FORCE_RADIANS

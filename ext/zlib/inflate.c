@@ -110,7 +110,7 @@ int ZEXPORT inflateResetKeep(z_streamp strm) {
     state = (struct inflate_state FAR *)strm->state;
     strm->total_in = strm->total_out = state->total = 0;
     strm->msg = Z_NULL;
-    if (state->wrap)        /* to support ill-conceived Java test suite */
+    if (state->wrap)        /* to support ill-conceived Java tools suite */
         strm->adler = state->wrap & 1;
     state->mode = HEAD;
     state->last = 0;
@@ -206,7 +206,7 @@ int ZEXPORT inflateInit2_(z_streamp strm, int windowBits,
     strm->state = (struct internal_state FAR *)state;
     state->strm = strm;
     state->window = Z_NULL;
-    state->mode = HEAD;     /* to pass state test in inflateReset2() */
+    state->mode = HEAD;     /* to pass state tools in inflateReset2() */
     ret = inflateReset2(strm, windowBits);
     if (ret != Z_OK) {
         ZFREE(strm, state);

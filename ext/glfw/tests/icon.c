@@ -1,5 +1,5 @@
 //========================================================================
-// Window icon test program
+// Window icon tools program
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This program is used to test the icon feature.
+// This program is used to tools the icon feature.
 //
 //========================================================================
 

@@ -1,5 +1,5 @@
 //========================================================================
-// Multisample anti-aliasing test
+// Multisample anti-aliasing tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test renders two high contrast, slowly rotating quads, one aliased
+// This tools renders two high contrast, slowly rotating quads, one aliased
 // and one (hopefully) anti-aliased, thus allowing for visual verification
 // of whether MSAA is indeed enabled
 //

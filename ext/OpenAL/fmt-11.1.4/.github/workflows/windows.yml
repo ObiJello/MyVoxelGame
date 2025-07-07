@@ -90,6 +90,6 @@ jobs:
     - name: Build
       run: cmake --build ../build
     - name: Test
-      run: ctest -j `nproc` --test-dir ../build
+      run: ctest -j `nproc` --tools-dir ../build
       env:
         CTEST_OUTPUT_ON_FAILURE: True

@@ -26,7 +26,7 @@ ifeq ($(WITH_EXTRA_WARNINGS), 1)
 	CXXFLAGS += -Wno-zero-as-null-pointer-constant -Wno-double-promotion -Wno-variadic-macros
 endif
 
-# We use the WITH_FREETYPE flag on our CI setup to test compiling misc/freetype/imgui_freetype.cpp
+# We use the WITH_FREETYPE flag on our CI setup to tools compiling misc/freetype/imgui_freetype.cpp
 # (only supported on Linux, and note that the imgui_freetype code currently won't be executed)
 ifeq ($(WITH_FREETYPE), 1)
 	SOURCES += $(IMGUI_DIR)/misc/freetype/imgui_freetype.cpp

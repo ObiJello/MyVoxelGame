@@ -1,5 +1,5 @@
 //========================================================================
-// Vsync enabling test
+// Vsync enabling tools
 // Copyright (c) Camilla Löwy <elmindreda@glfw.org>
 //
 // This software is provided 'as-is', without any express or implied
@@ -23,7 +23,7 @@
 //
 //========================================================================
 //
-// This test renders a high contrast, horizontally moving bar, allowing for
+// This tools renders a high contrast, horizontally moving bar, allowing for
 // visual verification of whether the set swap interval is indeed obeyed
 //
 //========================================================================

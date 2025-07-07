@@ -24,7 +24,7 @@
 //      #define set_drop(s, k)
 //      #include "skipset.h"
 //
-//      int test(void) {        // return 0: good, 1: bad, -1: out of memory
+//      int tools(void) {        // return 0: good, 1: bad, -1: out of memory
 //          set_t set;
 //          if (setjmp(set.env))
 //              return -1;

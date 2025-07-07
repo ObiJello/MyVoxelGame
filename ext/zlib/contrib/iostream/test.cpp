@@ -8,7 +8,7 @@ int main() {
   gzofstream os( 1, ios::out );
 
   // This text is getting compressed and sent to stdout.
-  // To prove this, run 'test | zcat'.
+  // To prove this, run 'tools | zcat'.
   os << "Hello, Mommy" << endl;
 
   os << setcompressionlevel( Z_NO_COMPRESSION );

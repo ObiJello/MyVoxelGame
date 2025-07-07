@@ -22,7 +22,7 @@
  * THE SOFTWARE.
  */
 
-/* This file contains a test for generating waveforms and plays them for a
+/* This file contains a tools for generating waveforms and plays them for a
  * given length of time. Intended to inspect the behavior of the mixer by
  * checking the output with a spectrum analyzer and oscilloscope.
  *
@@ -135,9 +135,9 @@ static ALuint CreateWave(enum WaveType type, ALuint seconds, ALuint freq, ALuint
             break;
         case WT_Impulse:
             /* NOTE: Impulse isn't handled using additive synthesis, and is
-             * instead just a non-0 sample. This can be useful to test (other
+             * instead just a non-0 sample. This can be useful to tools (other
              * than resampling, the ALSOFT_DEFAULT_REVERB environment variable
-             * can test the reverb response).
+             * can tools the reverb response).
              */
             data[0] = 1.0f;
             break;
