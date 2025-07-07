@@ -166,7 +166,7 @@ else()
             src/render/AtlasBuilder.hpp
             src/game/BlockRegistry.cpp
             src/game/BlockRegistry.hpp
-            ${WORLD_SOURCES}                 # NEW: Add world parsing sources
+            ${WORLD_SOURCES}
     )
 endif()
 
@@ -235,7 +235,8 @@ endif()
 add_executable(TestRegionDumper
         src/tests/test_region_dumper.cpp
         ${WORLD_SOURCES}
-        src/core/Log.cpp  # Need logging
+        src/core/Log.cpp
+        # Need logging
 )
 
 # Link required libraries to the test

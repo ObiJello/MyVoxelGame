@@ -1,4 +1,5 @@
 // File: src/world/NBTParser.hpp
+// Updated NBT Parser header with debug methods
 #pragma once
 
 #include <string>
@@ -207,6 +208,10 @@ namespace World {
         // Parse NBT data from binary buffer starting at offset
         static NBTTagPtr Parse(const std::vector<uint8_t>& data, size_t& offset);
 
+        // DEBUG: Parse NBT data with extensive debugging output
+        static NBTTagPtr ParseWithDebug(const std::vector<uint8_t>& data);
+        static NBTTagPtr ParseWithDebug(const std::vector<uint8_t>& data, size_t& offset);
+
         // Utility functions for reading big-endian data
         static int16_t ReadInt16BE(const std::vector<uint8_t>& data, size_t& offset);
         static int32_t ReadInt32BE(const std::vector<uint8_t>& data, size_t& offset);
@@ -215,10 +220,14 @@ namespace World {
         static double ReadDoubleBE(const std::vector<uint8_t>& data, size_t& offset);
         static std::string ReadStringBE(const std::vector<uint8_t>& data, size_t& offset);
 
-    private:
         // Helper to convert bytes to float/double with proper endianness
         static float BytesToFloat(uint32_t bytes);
         static double BytesToDouble(uint64_t bytes);
+
+    private:
+        // Enhanced debugging helpers
+        static void LogDataContext(const std::vector<uint8_t>& data, size_t offset,
+                                  const std::string& context = "");
     };
 
 } // namespace World

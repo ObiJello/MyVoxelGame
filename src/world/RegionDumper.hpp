@@ -1,4 +1,5 @@
 // File: src/world/RegionDumper.hpp
+// Updated RegionDumper header with debug methods
 #pragma once
 
 #include "RegionFile.hpp"
@@ -14,7 +15,7 @@ namespace World {
         int localX, localZ;      // Local coordinates within region (0-31)
         int worldX, worldZ;      // World chunk coordinates
         uint32_t length;         // Compressed data length
-        uint8_t version;         // Compression version (1=GZip, 2=ZLib)
+        uint8_t version;         // Compression version (1=GZip, 2=ZLib, 3=Uncompressed)
         std::vector<uint8_t> compressedData;  // Raw compressed data
         std::vector<uint8_t> uncompressedData; // Decompressed NBT data
         NBTTagPtr rootTag;       // Parsed NBT root compound
@@ -40,20 +41,32 @@ namespace World {
         // Read chunk data from region file
         static ChunkData ReadChunkData(RegionFile& regionFile, int localX, int localZ);
 
+        // Enhanced read chunk data with debug support
+        static ChunkData ReadChunkDataWithDebug(RegionFile& regionFile, int localX, int localZ);
+
         // Print chunk header information only (no NBT parsing)
         static void PrintChunkHeaders(RegionFile& regionFile);
 
         // Print detailed chunk NBT data
         static void PrintChunkNBT(const ChunkData& chunkData, bool verbose = false);
 
-        // Decompress chunk data (handles both ZLib and GZip)
+        // Decompress chunk data (handles ZLib, GZip, and uncompressed)
         static bool DecompressChunkData(ChunkData& chunkData);
 
-        // Validate NBT structure for chunk data
+        // Enhanced decompress with debug logging
+        static bool DecompressChunkDataWithDebug(ChunkData& chunkData);
+
+        // Validate NBT structure for chunk data (supports both pre-1.18 and 1.18+ formats)
         static bool ValidateChunkNBT(const NBTTagPtr& rootTag);
+
+        // Enhanced validation with 1.18+ support
+        static bool ValidateChunkNBT118Plus(const NBTTagPtr& rootTag);
 
         // Extract useful information from chunk NBT for verification
         static void ExtractChunkInfo(const NBTTagPtr& rootTag);
+
+        // Enhanced chunk info extraction with 1.18+ support
+        static void ExtractChunkInfo118Plus(const NBTTagPtr& rootTag);
 
     private:
         RegionDumper() = delete; // Static utility class

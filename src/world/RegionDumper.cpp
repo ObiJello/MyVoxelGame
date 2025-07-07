@@ -521,4 +521,341 @@ namespace World {
         worldZ = regionZ * RegionFile::REGION_SIZE + localZ;
     }
 
+    ChunkData RegionDumper::ReadChunkDataWithDebug(RegionFile& regionFile, int localX, int localZ) {
+        ChunkData chunkData;
+        chunkData.localX = localX;
+        chunkData.localZ = localZ;
+
+        // Convert to world coordinates (approximate - we'll get exact coords from NBT)
+        LocalToWorld(0, 0, localX, localZ, chunkData.worldX, chunkData.worldZ);
+
+        Log::Debug("=== Reading chunk data for (%d, %d) ===", localX, localZ);
+
+        // Get chunk location
+        ChunkLoc location = regionFile.GetLocation(localX, localZ);
+        if (location.isEmpty()) {
+            Log::Debug("Chunk (%d, %d) is empty", localX, localZ);
+            return chunkData;
+        }
+
+        Log::Debug("Chunk location: offset=%u, sectors=%u", location.sectorOffset, location.sectorCount);
+
+        // Open file stream
+        auto& fileStream = regionFile.GetFileStream();
+        if (!fileStream.is_open()) {
+            Log::Error("Region file stream is not open");
+            return chunkData;
+        }
+
+        // Seek to chunk data
+        size_t chunkOffset = static_cast<size_t>(location.sectorOffset) * RegionFile::SECTOR_SIZE;
+        Log::Debug("Seeking to chunk offset: %zu", chunkOffset);
+        fileStream.seekg(chunkOffset);
+
+        if (fileStream.fail()) {
+            Log::Error("Failed to seek to chunk offset %zu", chunkOffset);
+            return chunkData;
+        }
+
+        // Read chunk header (4 bytes length + 1 byte version)
+        uint8_t header[5];
+        fileStream.read(reinterpret_cast<char*>(header), 5);
+
+        if (fileStream.gcount() != 5) {
+            Log::Error("Failed to read chunk header for (%d, %d): got %lld bytes, expected 5",
+                      localX, localZ, static_cast<long long>(fileStream.gcount()));
+            return chunkData;
+        }
+
+        // Parse header (big-endian)
+        chunkData.length = (static_cast<uint32_t>(header[0]) << 24) |
+                          (static_cast<uint32_t>(header[1]) << 16) |
+                          (static_cast<uint32_t>(header[2]) << 8) |
+                          static_cast<uint32_t>(header[3]);
+        chunkData.version = header[4];
+
+        Log::Debug("Chunk header: length=%u, version=%u", chunkData.length, chunkData.version);
+
+        // Validate length
+        if (chunkData.length == 0) {
+            Log::Warning("Chunk (%d, %d) has zero length", localX, localZ);
+            return chunkData;
+        }
+
+        if (chunkData.length > 1024 * 1024) { // 1MB sanity check
+            Log::Error("Chunk (%d, %d) has suspiciously large length: %u bytes",
+                      localX, localZ, chunkData.length);
+            return chunkData;
+        }
+
+        // Validate compression version
+        if (chunkData.version != 1 && chunkData.version != 2 && chunkData.version != 3) {
+            Log::Error("Chunk (%d, %d) has unknown compression version: %u",
+                      localX, localZ, chunkData.version);
+            return chunkData;
+        }
+
+        // Read compressed data (length includes version byte, so subtract 1)
+        uint32_t dataLength = chunkData.length - 1;
+        chunkData.compressedData.resize(dataLength);
+
+        Log::Debug("Reading %u bytes of compressed data", dataLength);
+        fileStream.read(reinterpret_cast<char*>(chunkData.compressedData.data()), dataLength);
+
+        if (static_cast<uint32_t>(fileStream.gcount()) != dataLength) {
+            Log::Error("Failed to read chunk data for (%d, %d): expected %u bytes, got %lld",
+                      localX, localZ, dataLength, static_cast<long long>(fileStream.gcount()));
+            return chunkData;
+        }
+
+        Log::Debug("Successfully read %u bytes of compressed data", dataLength);
+
+        // Decompress data
+        if (!DecompressChunkDataWithDebug(chunkData)) {
+            Log::Error("Failed to decompress chunk data for (%d, %d)", localX, localZ);
+            return chunkData;
+        }
+
+        Log::Debug("Decompressed to %zu bytes", chunkData.uncompressedData.size());
+
+        // Log first few bytes of uncompressed data
+        if (!chunkData.uncompressedData.empty()) {
+            std::ostringstream hexDump;
+            size_t dumpSize = std::min(chunkData.uncompressedData.size(), size_t(16));
+            for (size_t i = 0; i < dumpSize; ++i) {
+                hexDump << std::hex << std::setw(2) << std::setfill('0')
+                       << static_cast<unsigned>(chunkData.uncompressedData[i]) << " ";
+            }
+            Log::Debug("First %zu bytes of NBT data: %s", dumpSize, hexDump.str().c_str());
+        }
+
+        // Parse NBT data - we'll use the regular parser for now
+        // (Debug parser would require adding GetLevel() method to Log class)
+        bool useDebugParser = false; // Set to true manually if you want debug parsing
+
+        if (useDebugParser) {
+            Log::Debug("Using debug NBT parser");
+            chunkData.rootTag = NBTParser::ParseWithDebug(chunkData.uncompressedData);
+        } else {
+            chunkData.rootTag = NBTParser::Parse(chunkData.uncompressedData);
+        }
+
+        if (!chunkData.rootTag) {
+            Log::Error("Failed to parse NBT data for chunk (%d, %d)", localX, localZ);
+
+            // Additional debugging when NBT parsing fails
+            if (!chunkData.uncompressedData.empty()) {
+                Log::Debug("NBT parse failure analysis:");
+                Log::Debug("  Data size: %zu bytes", chunkData.uncompressedData.size());
+                Log::Debug("  First byte: 0x%02X (should be 0x0A for TAG_Compound)",
+                          static_cast<unsigned>(chunkData.uncompressedData[0]));
+
+                if (chunkData.uncompressedData.size() >= 3) {
+                    uint16_t nameLength = (static_cast<uint16_t>(chunkData.uncompressedData[1]) << 8) |
+                                         static_cast<uint16_t>(chunkData.uncompressedData[2]);
+                    Log::Debug("  Root name length: %u", nameLength);
+
+                    if (nameLength > 0 && nameLength < 100 && chunkData.uncompressedData.size() >= 3 + nameLength) {
+                        std::string rootName(reinterpret_cast<const char*>(&chunkData.uncompressedData[3]), nameLength);
+                        Log::Debug("  Root name: '%s'", rootName.c_str());
+                    }
+                }
+            }
+
+            return chunkData;
+        }
+
+        // Extract actual world coordinates from NBT
+        auto compound = std::dynamic_pointer_cast<NBTTagCompound>(chunkData.rootTag);
+        if (compound) {
+            // Try to get Level compound (pre-1.18 format)
+            auto levelTag = compound->GetTag("Level");
+            if (levelTag) {
+                auto levelCompound = std::dynamic_pointer_cast<NBTTagCompound>(levelTag);
+                if (levelCompound) {
+                    chunkData.worldX = levelCompound->GetValue<int32_t>("xPos", chunkData.worldX);
+                    chunkData.worldZ = levelCompound->GetValue<int32_t>("zPos", chunkData.worldZ);
+
+                    // Check for 1.18+ yPos
+                    int32_t yPos = levelCompound->GetValue<int32_t>("yPos", INT32_MIN);
+                    if (yPos != INT32_MIN) {
+                        Log::Debug("Found 1.18+ yPos: %d", yPos);
+                    }
+                }
+            } else {
+                // 1.18+ format: coordinates might be at root level
+                chunkData.worldX = compound->GetValue<int32_t>("xPos", chunkData.worldX);
+                chunkData.worldZ = compound->GetValue<int32_t>("zPos", chunkData.worldZ);
+
+                // Check DataVersion to confirm 1.18+
+                int32_t dataVersion = compound->GetValue<int32_t>("DataVersion", -1);
+                if (dataVersion >= 2825) { // 1.18 data version
+                    Log::Debug("Detected 1.18+ chunk format (DataVersion: %d)", dataVersion);
+                }
+            }
+        }
+
+        chunkData.isValid = true;
+        Log::Debug("Successfully parsed chunk (%d, %d) -> world (%d, %d)",
+                  localX, localZ, chunkData.worldX, chunkData.worldZ);
+
+        return chunkData;
+    }
+
+    bool RegionDumper::DecompressChunkDataWithDebug(ChunkData& chunkData) {
+        if (chunkData.compressedData.empty()) {
+            Log::Error("No compressed data to decompress");
+            return false;
+        }
+
+        Log::Debug("Decompressing %zu bytes using version %u",
+                  chunkData.compressedData.size(), chunkData.version);
+
+        // Determine decompression method based on version
+        const char* compressionName = "Unknown";
+        switch (chunkData.version) {
+            case 1: compressionName = "GZip"; break;
+            case 2: compressionName = "ZLib"; break;
+            case 3: compressionName = "Uncompressed"; break;
+        }
+        Log::Debug("Compression type: %s", compressionName);
+
+        if (chunkData.version == 3) {
+            // Uncompressed data
+            chunkData.uncompressedData = chunkData.compressedData;
+            Log::Debug("Data is uncompressed, copying %zu bytes", chunkData.uncompressedData.size());
+            return true;
+        }
+
+        // Decompress using zlib (handles both GZip and ZLib)
+        uLongf destLen = 1024 * 1024; // 1MB initial buffer
+        chunkData.uncompressedData.resize(destLen);
+
+        int result = uncompress(
+            chunkData.uncompressedData.data(),
+            &destLen,
+            chunkData.compressedData.data(),
+            chunkData.compressedData.size()
+        );
+
+        if (result == Z_OK) {
+            chunkData.uncompressedData.resize(destLen);
+            Log::Debug("Decompression successful: %zu -> %lu bytes (ratio: %.2f%%)",
+                      chunkData.compressedData.size(), destLen,
+                      (100.0 * chunkData.compressedData.size()) / destLen);
+            return true;
+        } else {
+            const char* errorMsg = "Unknown error";
+            switch (result) {
+                case Z_MEM_ERROR: errorMsg = "Not enough memory"; break;
+                case Z_BUF_ERROR: errorMsg = "Output buffer too small"; break;
+                case Z_DATA_ERROR: errorMsg = "Input data corrupted"; break;
+            }
+            Log::Error("ZLib decompression failed: %s (code: %d)", errorMsg, result);
+
+            // Try with a larger buffer for Z_BUF_ERROR
+            if (result == Z_BUF_ERROR) {
+                Log::Debug("Retrying with larger buffer (4MB)");
+                destLen = 4 * 1024 * 1024; // 4MB buffer
+                chunkData.uncompressedData.resize(destLen);
+
+                result = uncompress(
+                    chunkData.uncompressedData.data(),
+                    &destLen,
+                    chunkData.compressedData.data(),
+                    chunkData.compressedData.size()
+                );
+
+                if (result == Z_OK) {
+                    chunkData.uncompressedData.resize(destLen);
+                    Log::Info("Decompression successful with larger buffer: %lu bytes", destLen);
+                    return true;
+                } else {
+                    Log::Error("Decompression failed even with larger buffer (code: %d)", result);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    // Enhanced validation for 1.18+ chunks
+    bool RegionDumper::ValidateChunkNBT118Plus(const NBTTagPtr& rootTag) {
+        if (!rootTag) {
+            Log::Warning("Root tag is null");
+            return false;
+        }
+
+        auto rootCompound = std::dynamic_pointer_cast<NBTTagCompound>(rootTag);
+        if (!rootCompound) {
+            Log::Warning("Root tag is not a compound");
+            return false;
+        }
+
+        // Check DataVersion to determine format
+        int32_t dataVersion = rootCompound->GetValue<int32_t>("DataVersion", -1);
+        Log::Debug("Chunk DataVersion: %d", dataVersion);
+
+        if (dataVersion >= 2825) { // 1.18+
+            Log::Debug("Validating 1.18+ chunk format");
+
+            // 1.18+ format validation
+            bool hasXPos = rootCompound->HasTag("xPos");
+            bool hasZPos = rootCompound->HasTag("zPos");
+            bool hasYPos = rootCompound->HasTag("yPos");
+            bool hasStatus = rootCompound->HasTag("Status");
+
+            if (!hasXPos || !hasZPos) {
+                Log::Warning("1.18+ chunk missing position tags (xPos/zPos)");
+                return false;
+            }
+
+            if (hasYPos) {
+                int32_t yPos = rootCompound->GetValue<int32_t>("yPos", 0);
+                Log::Debug("1.18+ chunk yPos: %d", yPos);
+            }
+
+            if (hasStatus) {
+                std::string status = rootCompound->GetValue<std::string>("Status", "unknown");
+                Log::Debug("1.18+ chunk status: %s", status.c_str());
+            }
+
+            // Check for sections
+            auto sectionsTag = rootCompound->GetTag("sections");
+            if (sectionsTag) {
+                auto sectionsList = std::dynamic_pointer_cast<NBTTagList>(sectionsTag);
+                if (sectionsList) {
+                    Log::Debug("1.18+ chunk has %zu sections", sectionsList->value.size());
+                }
+            }
+
+        } else {
+            Log::Debug("Validating pre-1.18 chunk format");
+
+            // Pre-1.18 format validation
+            bool hasLevel = rootCompound->HasTag("Level");
+            if (!hasLevel) {
+                Log::Warning("Pre-1.18 chunk missing 'Level' tag");
+                return false;
+            }
+
+            auto levelTag = std::dynamic_pointer_cast<NBTTagCompound>(rootCompound->GetTag("Level"));
+            if (!levelTag) {
+                Log::Warning("'Level' tag is not a compound");
+                return false;
+            }
+
+            bool hasXPos = levelTag->HasTag("xPos");
+            bool hasZPos = levelTag->HasTag("zPos");
+
+            if (!hasXPos || !hasZPos) {
+                Log::Warning("Pre-1.18 chunk missing position tags (xPos/zPos) in Level");
+                return false;
+            }
+        }
+
+        Log::Debug("NBT validation passed - chunk has required structure");
+        return true;
+    }
+
 } // namespace World
