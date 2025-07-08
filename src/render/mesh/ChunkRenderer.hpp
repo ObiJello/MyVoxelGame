@@ -1,4 +1,4 @@
-// File: src/render/mesh/ChunkRenderer.hpp
+// File: src/render/mesh/ChunkRenderer.hpp (CRITICAL FIXES)
 #pragma once
 
 #include <vector>
@@ -59,58 +59,131 @@ namespace Render {
         GLuint ebo = 0;
         GLsizei indexCount = 0;
 
-        // Construct from vertex/index data
+        // CRITICAL: Safer upload with validation
         void Upload(const std::vector<Render::Vertex>& vertices,
                    const std::vector<uint32_t>& indices) {
+
+            // Clear any existing resources first
+            Cleanup();
+
             if (vertices.empty() || indices.empty()) {
-                // Empty mesh - don't create GPU resources
                 indexCount = 0;
                 return;
             }
 
-            // Generate and bind VAO
-            glGenVertexArrays(1, &vao);
-            glBindVertexArray(vao);
+            // CRITICAL: Validate input data sizes
+            if (vertices.size() > 1000000) { // 1M vertex limit
+                Log::Error("LayerMeshData::Upload: Too many vertices (%zu)", vertices.size());
+                return;
+            }
 
-            // Upload vertex buffer
-            glGenBuffers(1, &vbo);
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER,
-                        vertices.size() * sizeof(Render::Vertex),
-                        vertices.data(), GL_STATIC_DRAW);
+            if (indices.size() > 1500000) { // 1.5M index limit
+                Log::Error("LayerMeshData::Upload: Too many indices (%zu)", indices.size());
+                return;
+            }
 
-            // Upload index buffer
-            glGenBuffers(1, &ebo);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                        indices.size() * sizeof(uint32_t),
-                        indices.data(), GL_STATIC_DRAW);
+            // Log large uploads for monitoring
+            if (vertices.size() > 10000) {
+                Log::Debug("LayerMeshData::Upload: Large mesh - %zu vertices, %zu indices",
+                          vertices.size(), indices.size());
+            }
 
-            // Set up vertex attributes: pos (0), normal (1), texCoord (2), color (3)
-            constexpr size_t stride = sizeof(Render::Vertex);
+            try {
+                // Generate and bind VAO
+                glGenVertexArrays(1, &vao);
+                if (vao == 0) {
+                    Log::Error("Failed to generate VAO");
+                    return;
+                }
+                glBindVertexArray(vao);
 
-            // aPos (location = 0)
-            glEnableVertexAttribArray(0);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride,
-                                (void*)offsetof(Render::Vertex, pos));
+                // Upload vertex buffer
+                glGenBuffers(1, &vbo);
+                if (vbo == 0) {
+                    Log::Error("Failed to generate VBO");
+                    glDeleteVertexArrays(1, &vao);
+                    vao = 0;
+                    return;
+                }
 
-            // aNormal (location = 1)
-            glEnableVertexAttribArray(1);
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride,
-                                (void*)offsetof(Render::Vertex, nrm));
+                glBindBuffer(GL_ARRAY_BUFFER, vbo);
+                glBufferData(GL_ARRAY_BUFFER,
+                            vertices.size() * sizeof(Render::Vertex),
+                            vertices.data(), GL_STATIC_DRAW);
 
-            // aTexCoord (location = 2)
-            glEnableVertexAttribArray(2);
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, (GLsizei)stride,
-                                (void*)offsetof(Render::Vertex, uv));
+                // Check for OpenGL errors after vertex upload
+                GLenum error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    Log::Error("OpenGL error uploading vertices: 0x%x", error);
+                    Cleanup();
+                    return;
+                }
 
-            // aColor (location = 3)
-            glEnableVertexAttribArray(3);
-            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, (GLsizei)stride,
-                                (void*)offsetof(Render::Vertex, color));
+                // Upload index buffer
+                glGenBuffers(1, &ebo);
+                if (ebo == 0) {
+                    Log::Error("Failed to generate EBO");
+                    Cleanup();
+                    return;
+                }
 
-            glBindVertexArray(0);
-            indexCount = static_cast<GLsizei>(indices.size());
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                            indices.size() * sizeof(uint32_t),
+                            indices.data(), GL_STATIC_DRAW);
+
+                // Check for OpenGL errors after index upload
+                error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    Log::Error("OpenGL error uploading indices: 0x%x", error);
+                    Cleanup();
+                    return;
+                }
+
+                // Set up vertex attributes: pos (0), normal (1), texCoord (2), color (3)
+                constexpr size_t stride = sizeof(Render::Vertex);
+
+                // aPos (location = 0)
+                glEnableVertexAttribArray(0);
+                glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride,
+                                    (void*)offsetof(Render::Vertex, pos));
+
+                // aNormal (location = 1)
+                glEnableVertexAttribArray(1);
+                glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, (GLsizei)stride,
+                                    (void*)offsetof(Render::Vertex, nrm));
+
+                // aTexCoord (location = 2)
+                glEnableVertexAttribArray(2);
+                glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, (GLsizei)stride,
+                                    (void*)offsetof(Render::Vertex, uv));
+
+                // aColor (location = 3)
+                glEnableVertexAttribArray(3);
+                glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, (GLsizei)stride,
+                                    (void*)offsetof(Render::Vertex, color));
+
+                // Check for OpenGL errors after vertex attribute setup
+                error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    Log::Error("OpenGL error setting vertex attributes: 0x%x", error);
+                    Cleanup();
+                    return;
+                }
+
+                glBindVertexArray(0);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+                indexCount = static_cast<GLsizei>(indices.size());
+
+                Log::Debug("LayerMeshData uploaded successfully: %zu vertices, %zu indices, VAO=%u",
+                          vertices.size(), indices.size(), vao);
+
+            } catch (const std::exception& e) {
+                Log::Error("Exception in LayerMeshData::Upload: %s", e.what());
+                Cleanup();
+            }
         }
 
         // Cleanup GPU resources
@@ -130,11 +203,38 @@ namespace Render {
             indexCount = 0;
         }
 
-        // Draw this layer (assumes shader is already bound)
+        // Draw this layer (assumes shader is already bound and valid)
         void Draw() const {
             if (indexCount > 0 && vao != 0) {
+                // CRITICAL: Validate OpenGL state before drawing
+                GLint currentProgram;
+                glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
+                if (currentProgram == 0) {
+                    Log::Warning("LayerMeshData::Draw: No shader program bound");
+                    return;
+                }
+
                 glBindVertexArray(vao);
+
+                // Check for OpenGL errors before draw call
+                GLenum error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    Log::Warning("OpenGL error before draw: 0x%x (VAO=%u)", error, vao);
+                    glBindVertexArray(0);
+                    return;
+                }
+
                 glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+
+                // Check for OpenGL errors after draw call
+                error = glGetError();
+                if (error != GL_NO_ERROR) {
+                    static int errorCount = 0;
+                    if (++errorCount % 100 == 1) { // Log every 100th error to avoid spam
+                        Log::Warning("OpenGL error in draw call: 0x%x (logged %d times)", error, errorCount);
+                    }
+                }
+
                 glBindVertexArray(0);
             }
         }
@@ -158,25 +258,48 @@ namespace Render {
         int sectionIndex = 0;
         std::chrono::steady_clock::time_point uploadTime;
 
-        // Construct from layered mesh data
+        // CRITICAL: Enhanced construction with validation
         static ChunkMesh FromLayeredMeshData(const Game::LayeredMeshData* data) {
+            if (!data) {
+                Log::Error("ChunkMesh::FromLayeredMeshData: null data");
+                return ChunkMesh{}; // Return empty mesh
+            }
+
+            // CRITICAL: Validate input data
+            size_t totalVertices = data->GetTotalVertexCount();
+            if (totalVertices > 100000) {
+                Log::Error("ChunkMesh::FromLayeredMeshData: Suspicious vertex count %zu for chunk (%d,%d) section %d",
+                          totalVertices, data->chunkXZ.x, data->chunkXZ.z, data->sectionIndex);
+                return ChunkMesh{}; // Return empty mesh
+            }
+
             ChunkMesh cm;
 
-            // Upload each layer
-            cm.opaque.Upload(data->opaqueVertices, data->opaqueIndices);
-            cm.cutout.Upload(data->cutoutVertices, data->cutoutIndices);
-            cm.translucent.Upload(data->translucentVertices, data->translucentIndices);
+            try {
+                // Upload each layer with validation
+                cm.opaque.Upload(data->opaqueVertices, data->opaqueIndices);
+                cm.cutout.Upload(data->cutoutVertices, data->cutoutIndices);
+                cm.translucent.Upload(data->translucentVertices, data->translucentIndices);
 
-            // Store metadata
-            cm.chunkXZ = data->chunkXZ;
-            cm.sectionIndex = data->sectionIndex;
-            cm.uploadTime = std::chrono::steady_clock::now();
+                // Store metadata
+                cm.chunkXZ = data->chunkXZ;
+                cm.sectionIndex = data->sectionIndex;
+                cm.uploadTime = std::chrono::steady_clock::now();
 
-            // Calculate world offset for this section
-            float worldX = static_cast<float>(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X);
-            float worldY = static_cast<float>(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT));
-            float worldZ = static_cast<float>(data->chunkXZ.z * Game::Math::CHUNK_SIZE_Z);
-            cm.worldOffset = glm::vec3(worldX, worldY, worldZ);
+                // Calculate world offset for this section
+                float worldX = static_cast<float>(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X);
+                float worldY = static_cast<float>(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT));
+                float worldZ = static_cast<float>(data->chunkXZ.z * Game::Math::CHUNK_SIZE_Z);
+                cm.worldOffset = glm::vec3(worldX, worldY, worldZ);
+
+                Log::Debug("ChunkMesh created successfully for chunk (%d,%d) section %d",
+                          data->chunkXZ.x, data->chunkXZ.z, data->sectionIndex);
+
+            } catch (const std::exception& e) {
+                Log::Error("Exception creating ChunkMesh: %s", e.what());
+                cm.Cleanup(); // Clean up any partial state
+                return ChunkMesh{}; // Return empty mesh
+            }
 
             return cm;
         }
@@ -248,7 +371,7 @@ namespace Render {
     // Global container of all uploaded meshes
     extern std::vector<ChunkMesh> g_chunkMeshes;
 
-    // ENHANCED: Upload layered mesh data
+    // ENHANCED: Upload layered mesh data with comprehensive error handling
     inline void UploadLayeredMesh(Game::LayeredMeshData* data) {
         if (!data) {
             Log::Warning("UploadLayeredMesh called with null data");
@@ -256,6 +379,20 @@ namespace Render {
         }
 
         std::unique_ptr<Game::LayeredMeshData> ownedData(data);
+
+        // CRITICAL: Validate the data before processing
+        if (ownedData->sectionIndex < 0 || ownedData->sectionIndex >= Game::Math::SECTIONS_PER_CHUNK) {
+            Log::Error("UploadLayeredMesh: Invalid section index %d", ownedData->sectionIndex);
+            return;
+        }
+
+        // CRITICAL: Check for corrupted vertex counts
+        size_t totalVertices = ownedData->GetTotalVertexCount();
+        if (totalVertices > 100000) {
+            Log::Error("UploadLayeredMesh: Corrupted vertex count %zu for chunk (%d,%d) section %d - discarding",
+                      totalVertices, ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            return;
+        }
 
         // Find and replace existing mesh for this chunk/section
         auto& meshes = g_chunkMeshes;
@@ -279,6 +416,14 @@ namespace Render {
                     it->Cleanup();
                     *it = ChunkMesh::FromLayeredMeshData(ownedData.get());
 
+                    // Validate the new mesh was created successfully
+                    if (!it->HasAnyGeometry()) {
+                        Log::Warning("Failed to create replacement mesh for chunk (%d,%d) section %d",
+                                   ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+                        meshes.erase(it);
+                        return;
+                    }
+
                     Log::Debug("Updated layered mesh for chunk (%d,%d) section %d - "
                               "Opaque: %zu verts, Cutout: %zu verts, Translucent: %zu verts",
                               ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
@@ -292,13 +437,20 @@ namespace Render {
         // No existing mesh found - add new one if it has data
         if (ownedData->HasAnyGeometry()) {
             ChunkMesh cm = ChunkMesh::FromLayeredMeshData(ownedData.get());
-            meshes.push_back(cm);
 
-            Log::Debug("Added new layered mesh for chunk (%d,%d) section %d - "
-                      "Opaque: %zu verts, Cutout: %zu verts, Translucent: %zu verts",
-                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
-                      ownedData->opaqueVertices.size(), ownedData->cutoutVertices.size(),
-                      ownedData->translucentVertices.size());
+            // Validate the mesh was created successfully
+            if (cm.HasAnyGeometry()) {
+                meshes.push_back(cm);
+
+                Log::Debug("Added new layered mesh for chunk (%d,%d) section %d - "
+                          "Opaque: %zu verts, Cutout: %zu verts, Translucent: %zu verts",
+                          ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
+                          ownedData->opaqueVertices.size(), ownedData->cutoutVertices.size(),
+                          ownedData->translucentVertices.size());
+            } else {
+                Log::Warning("Failed to create new mesh for chunk (%d,%d) section %d",
+                           ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
+            }
         }
     }
 

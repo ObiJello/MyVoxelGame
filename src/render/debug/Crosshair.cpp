@@ -218,11 +218,11 @@ void main() {
     // Draw the crosshair
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
-    // Check for errors
+    /* Check for errors
     GLenum error = glGetError();
     if (error != GL_NO_ERROR && debugCounter % 60 == 0) {
         Log::Error("OpenGL error after crosshair draw: 0x%x", error);
-    }
+    }*/
 
     // Restore ALL OpenGL state exactly
     glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);

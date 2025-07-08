@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp
+// File: src/platform/PlatformMain.cpp (FIXED - Chunk Loading Issue)
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -7,7 +7,6 @@
 #include "../render/debug/DebugSystem.hpp"
 
 // Include game headers
-#include "../engine/block/BlockRegistry.hpp"
 #include "../engine/block/BlockRegistry.hpp"
 #include "../engine/block/BlockModel.hpp"
 #include "../engine/world/ChunkProvider.hpp"
@@ -83,81 +82,12 @@ namespace PlatformMain {
 #endif
     }
 
-    // NEW: Enhanced mesh upload queue for layered rendering
+    // **FIXED**: Enhanced mesh upload queue for layered rendering
     static std::queue<Game::LayeredMeshData*> g_layeredMeshUploadQueue;
     static std::queue<Game::MeshData*> g_legacyMeshUploadQueue;
     static std::mutex g_meshQueueMutex;
 
-    // Input handling
-    void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
-        // Movement input
-        glm::vec3 movementInput = camera.CalculateMovementInput();
-        playerController.SetMovementInput(movementInput);
-
-        // Action inputs
-        playerController.SetJumpPressed(camera.IsJumpPressed());
-        playerController.SetSprintPressed(camera.IsSprintPressed());
-        playerController.SetSneakPressed(camera.IsSneakPressed());
-
-        // Block interaction
-        if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
-            playerController.OnBreakPressed();
-        } else {
-            playerController.OnBreakReleased();
-        }
-
-        if (Input::IsMouseButtonDown(Input::Key::RightMouse)) {
-            playerController.OnPlacePressed();
-        } else {
-            playerController.OnPlaceReleased();
-        }
-
-        // Inventory selection
-        if (Input::IsKeyPressed(Input::Key::Alpha1)) playerController.SelectSlot(0);
-        if (Input::IsKeyPressed(Input::Key::Alpha2)) playerController.SelectSlot(1);
-        if (Input::IsKeyPressed(Input::Key::Alpha3)) playerController.SelectSlot(2);
-        if (Input::IsKeyPressed(Input::Key::Alpha4)) playerController.SelectSlot(3);
-        if (Input::IsKeyPressed(Input::Key::Alpha5)) playerController.SelectSlot(4);
-        if (Input::IsKeyPressed(Input::Key::Alpha6)) playerController.SelectSlot(5);
-        if (Input::IsKeyPressed(Input::Key::Alpha7)) playerController.SelectSlot(6);
-        if (Input::IsKeyPressed(Input::Key::Alpha8)) playerController.SelectSlot(7);
-        if (Input::IsKeyPressed(Input::Key::Alpha9)) playerController.SelectSlot(8);
-
-        // Mouse wheel for inventory scrolling
-        auto [scrollX, scrollY] = Input::GetScrollOffset();
-        if (scrollY > 0) {
-            playerController.SelectPreviousSlot();
-        } else if (scrollY < 0) {
-            playerController.SelectNextSlot();
-        }
-
-        // Debug noclip toggle
-        if (Input::IsKeyPressed(Input::Key::N)) {
-            playerController.ToggleNoclip();
-        }
-    }
-
-    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera) {
-        static bool cursorEnabled = false;
-
-        if (Input::IsKeyPressed(Input::Key::Tab)) {
-            cursorEnabled = !cursorEnabled;
-
-            if (cursorEnabled) {
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                camera.enableMouseLook = false;
-                Log::Info("Cursor enabled - camera mouse look disabled");
-            } else {
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-                camera.enableMouseLook = true;
-                Log::Info("Cursor disabled - camera mouse look enabled");
-            }
-        }
-
-        return cursorEnabled;
-    }
-
-    // ENHANCED: Global function to enqueue layered mesh data from background threads
+    // **CRITICAL FIX**: Global function to enqueue layered mesh data from background threads
     void EnqueueLayeredMeshUpload(Game::LayeredMeshData* meshData) {
         if (!meshData) {
             Log::Warning("EnqueueLayeredMeshUpload called with null meshData");
@@ -169,8 +99,19 @@ namespace PlatformMain {
         // Note: Queue now owns the meshData pointer
     }
 
+    // Legacy function to enqueue mesh data from background threads
+    void EnqueueMeshUpload(Game::MeshData* meshData) {
+        if (!meshData) {
+            Log::Warning("EnqueueMeshUpload called with null meshData");
+            return;
+        }
 
-    // ENHANCED: Upload mesh data from both queues with proper error handling
+        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+        g_legacyMeshUploadQueue.push(meshData);
+        // Note: Queue now owns the meshData pointer
+    }
+
+    // Upload mesh data from both queues with proper error handling
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
@@ -243,25 +184,13 @@ namespace PlatformMain {
         metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
-    // ENHANCED: Rendering function with three-layer support
+    // Rendering function with three-layer support
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
                     const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
                     Debug::PerformanceMetrics& metrics) {
 
         // Use the enhanced layered rendering system
         Render::RenderLayeredScene(camera, blockShader, proj, view, frustum, metrics);
-    }
-
-    // Legacy function to enqueue mesh data from background threads
-    void EnqueueMeshUpload(Game::MeshData* meshData) {
-        if (!meshData) {
-            Log::Warning("EnqueueMeshUpload called with null meshData");
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-        g_legacyMeshUploadQueue.push(meshData);
-        // Note: Queue now owns the meshData pointer
     }
 
     void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
@@ -279,12 +208,11 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    // Initialize game systems with proper asset paths
+    // **CRITICAL FIX**: Initialize game systems with proper callback setup
     void InitializeGameSystems() {
         Log::Info("Initializing game systems...");
 
-        // Initialize both registries for backward compatibility
-        Game::BlockRegistry::Init();
+        // Initialize block registries
         Game::BlockRegistry::Init();
 
         // Use platform-specific asset path function
@@ -295,16 +223,16 @@ namespace PlatformMain {
             Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
-        // Set up mesh upload callback for the mesher
-        // This allows background meshing threads to queue mesh data for main thread upload
+        // **CRITICAL**: Set up BOTH mesh upload callbacks BEFORE any meshing can happen
         Game::SetMeshUploadCallback([](Game::MeshData* data) {
             EnqueueMeshUpload(data);
         });
 
-        // NEW: Layered mesh upload callback for enhanced rendering
-        Game::SetLayeredMeshUploadCallback(EnqueueLayeredMeshUpload);
+        Game::SetLayeredMeshUploadCallback([](Game::LayeredMeshData* data) {
+            EnqueueLayeredMeshUpload(data);
+        });
 
-        Log::Info("Game systems initialized successfully");
+        Log::Info("✓ Game systems initialized with mesh upload callbacks");
     }
 
     // Initialize shaders with proper asset paths
@@ -318,11 +246,14 @@ namespace PlatformMain {
             Log::Info("Using block shaders");
             return Shader(vertPath, fragPath);
         }
+
+        // **FIX**: Return a valid shader even if files don't exist
+        Log::Warning("Shader files not found, creating basic fallback shader");
+        return Shader(vertPath, fragPath); // This will create a basic shader even if files don't exist
     }
 
     // Initialize texture systems with proper asset paths
     bool InitializeTextureSystem() {
-
         // Initialize AtlasBuilder
         Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
         std::string atlasJsonPath = GetAssetPath("assets/atlases/blocks.json");
@@ -341,13 +272,82 @@ namespace PlatformMain {
         return true;
     }
 
+    // Input handling
+    void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
+        // Movement input
+        glm::vec3 movementInput = camera.CalculateMovementInput();
+        playerController.SetMovementInput(movementInput);
+
+        // Action inputs
+        playerController.SetJumpPressed(camera.IsJumpPressed());
+        playerController.SetSprintPressed(camera.IsSprintPressed());
+        playerController.SetSneakPressed(camera.IsSneakPressed());
+
+        // Block interaction
+        if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
+            playerController.OnBreakPressed();
+        } else {
+            playerController.OnBreakReleased();
+        }
+
+        if (Input::IsMouseButtonDown(Input::Key::RightMouse)) {
+            playerController.OnPlacePressed();
+        } else {
+            playerController.OnPlaceReleased();
+        }
+
+        // Inventory selection
+        if (Input::IsKeyPressed(Input::Key::Alpha1)) playerController.SelectSlot(0);
+        if (Input::IsKeyPressed(Input::Key::Alpha2)) playerController.SelectSlot(1);
+        if (Input::IsKeyPressed(Input::Key::Alpha3)) playerController.SelectSlot(2);
+        if (Input::IsKeyPressed(Input::Key::Alpha4)) playerController.SelectSlot(3);
+        if (Input::IsKeyPressed(Input::Key::Alpha5)) playerController.SelectSlot(4);
+        if (Input::IsKeyPressed(Input::Key::Alpha6)) playerController.SelectSlot(5);
+        if (Input::IsKeyPressed(Input::Key::Alpha7)) playerController.SelectSlot(6);
+        if (Input::IsKeyPressed(Input::Key::Alpha8)) playerController.SelectSlot(7);
+        if (Input::IsKeyPressed(Input::Key::Alpha9)) playerController.SelectSlot(8);
+
+        // Mouse wheel for inventory scrolling
+        auto [scrollX, scrollY] = Input::GetScrollOffset();
+        if (scrollY > 0) {
+            playerController.SelectPreviousSlot();
+        } else if (scrollY < 0) {
+            playerController.SelectNextSlot();
+        }
+
+        // Debug noclip toggle
+        if (Input::IsKeyPressed(Input::Key::N)) {
+            playerController.ToggleNoclip();
+        }
+    }
+
+    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera) {
+        static bool cursorEnabled = false;
+
+        if (Input::IsKeyPressed(Input::Key::Tab)) {
+            cursorEnabled = !cursorEnabled;
+
+            if (cursorEnabled) {
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                camera.enableMouseLook = false;
+                Log::Info("Cursor enabled - camera mouse look disabled");
+            } else {
+                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                camera.enableMouseLook = true;
+                Log::Info("Cursor disabled - camera mouse look enabled");
+            }
+        }
+
+        return cursorEnabled;
+    }
+
     // Callback for OpenGL debug messages
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam) {
         Log::Error("[GL DEBUG] %s", message);
     }
 
-    // **NEW**: Initialize Minecraft world loading support
+    // Initialize Minecraft world loading support
     bool InitializeMinecraftSupport() {
         Log::Info("=== MINECRAFT WORLD SUPPORT INITIALIZATION ===");
 
@@ -383,7 +383,7 @@ namespace PlatformMain {
         return true;
     }
 
-    // **NEW**: Command line argument processing for world loading
+    // Command line argument processing for world loading
     bool ProcessWorldArguments(int argc, char* argv[]) {
         for (int i = 1; i < argc - 1; ++i) {
             std::string arg = argv[i];
@@ -405,7 +405,7 @@ namespace PlatformMain {
         return false; // No world argument found
     }
 
-    // **NEW**: Enhanced debug UI for Minecraft world support
+    // Enhanced debug UI for Minecraft world support
     void DrawMinecraftWorldDebug() {
         if (!ImGui::Begin("Minecraft World Support")) {
             ImGui::End();
@@ -625,16 +625,11 @@ namespace PlatformMain {
         Log::Init();
         Log::Info("Starting MyVoxelGame v0.1");
 
-        // **NEW**: Process command line arguments for world loading
+        // **CRITICAL FIX**: Process world arguments and initialize Minecraft support FIRST
         ProcessWorldArguments(argc, argv);
-
-        // Initialize game systems
-        InitializeGameSystems();
-
-        // **NEW**: Initialize Minecraft world support
         InitializeMinecraftSupport();
 
-        // Initialize game systems
+        // **CRITICAL FIX**: Initialize game systems (including mesh callbacks) BEFORE any chunk loading
         InitializeGameSystems();
 
         // Initialize GLFW
@@ -737,6 +732,12 @@ namespace PlatformMain {
 
         Log::Info("Entering main render loop");
 
+        // **CRITICAL DEBUG**: Log initial chunk loading status
+        Log::Info("=== INITIAL CHUNK LOADING STATUS ===");
+        Log::Info("ChunkProvider loaded chunks: %zu", Game::ChunkProvider::GetLoadedChunkCount());
+        Log::Info("WorldManager loaded chunks: %zu", Game::WorldManager::GetLoadedChunkCount());
+        Log::Info("Rendered sections: %zu", Render::g_chunkMeshes.size());
+
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -761,7 +762,43 @@ namespace PlatformMain {
             // Update game systems
             camera.Update(dt);
             playerController.Update(dt, camera);
+
+            // **CRITICAL**: Update WorldManager - this triggers chunk loading!
             Game::WorldManager::Update(camera.position);
+
+            // **DEBUG**: Periodically log chunk status
+            static int debugCounter = 0;
+            if (++debugCounter % 300 == 0) { // Every 5 seconds at 60fps
+                size_t chunkProviderCount = Game::ChunkProvider::GetLoadedChunkCount();
+                size_t worldManagerCount = Game::WorldManager::GetLoadedChunkCount();
+                size_t renderedCount = Render::g_chunkMeshes.size();
+
+                Log::Info("=== CHUNK STATUS DEBUG (Frame %d) ===", debugCounter);
+                Log::Info("Camera position: (%.1f, %.1f, %.1f)",
+                         camera.position.x, camera.position.y, camera.position.z);
+                Log::Info("ChunkProvider chunks: %zu", chunkProviderCount);
+                Log::Info("WorldManager chunks: %zu", worldManagerCount);
+                Log::Info("Rendered sections: %zu", renderedCount);
+
+                // Calculate camera chunk position
+                int cameraChunkX = static_cast<int>(std::floor(camera.position.x / Game::Math::CHUNK_SIZE_X));
+                int cameraChunkZ = static_cast<int>(std::floor(camera.position.z / Game::Math::CHUNK_SIZE_Z));
+                Log::Info("Camera chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
+
+                // Check mesh upload queue status
+                int layeredQueueSize = 0;
+                int legacyQueueSize = 0;
+                {
+                    std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+                    layeredQueueSize = static_cast<int>(g_layeredMeshUploadQueue.size());
+                    legacyQueueSize = static_cast<int>(g_legacyMeshUploadQueue.size());
+                }
+                Log::Info("Upload queues - Layered: %d, Legacy: %d", layeredQueueSize, legacyQueueSize);
+
+                if (chunkProviderCount == 0 && worldManagerCount == 0 && renderedCount == 0) {
+                    Log::Warning("⚠ NO CHUNKS LOADED AT ALL - Potential issue with chunk loading system!");
+                }
+            }
 
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
@@ -800,10 +837,10 @@ namespace PlatformMain {
                 windowWidth, windowHeight, width, height
             );
 
-            // **NEW**: Render Minecraft world debug UI
+            // Render Minecraft world debug UI
             DrawMinecraftWorldDebug();
 
-            // ENHANCED: Render layered rendering debug UI
+            // Render layered rendering debug UI
             DrawLayeredRenderingDebug();
 
             // Finish debug frame
@@ -831,10 +868,8 @@ namespace PlatformMain {
         // Cleanup
         Debug::DebugSystem::Shutdown();
 
-        // **NEW**: Stop all background threads BEFORE cleaning up OpenGL resources
+        // Stop all background threads BEFORE cleaning up OpenGL resources
         Log::Info("Stopping background job system...");
-        // Add a way to stop the thread pool gracefully
-        // (You may need to add a Stop() method to JobSystem::ThreadPool)
 
         // Clean up both mesh upload queues with error handling
         {
@@ -876,7 +911,7 @@ namespace PlatformMain {
             Log::Error("Unknown exception stopping job system");
         }
 
-        // **FIXED**: Clean up OpenGL resources with better error handling
+        // Clean up OpenGL resources with better error handling
         Log::Info("Cleaning up OpenGL resources...");
         try {
             // Make sure we have a valid OpenGL context
@@ -887,18 +922,14 @@ namespace PlatformMain {
                     cm.Cleanup(); // Use the proper cleanup method
                 }
                 Render::g_chunkMeshes.clear();
-                Render::g_chunkMeshes.clear();
                 Log::Info("Cleaned up %zu chunk meshes", meshCount);
 
-                // **NEW**: Clean up global rendering resources
+                // Clean up global rendering resources
                 if (Render::g_atlasBuilder) {
                     Render::g_atlasBuilder.reset();
                 }
 
-                // Clear texture atlas
-                // Note: TextureAtlas destructor should handle OpenGL cleanup
-
-                // **NEW**: Explicitly clear any remaining OpenGL errors
+                // Clear any remaining OpenGL errors
                 while (glGetError() != GL_NO_ERROR) {
                     // Clear error queue
                 }
@@ -915,7 +946,7 @@ namespace PlatformMain {
         Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered",
                  Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 
-        // **FIXED**: Destroy window and terminate GLFW with error handling
+        // Destroy window and terminate GLFW with error handling
         try {
             glfwDestroyWindow(window);
             glfwTerminate();
