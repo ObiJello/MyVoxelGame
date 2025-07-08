@@ -11,6 +11,9 @@
 
 namespace World {
 
+    // **NEW**: Thread-safe file access with per-thread file handles
+    static std::mutex s_fileAccessMutex;
+
     // Proper inflate function that handles both zlib and gzip
     bool InflateAll(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
         if (in.empty()) {
@@ -195,7 +198,7 @@ namespace World {
         return true;
     }
 
-    ChunkData RegionDumper::ReadChunkData(RegionFile& regionFile, int localX, int localZ) {
+     ChunkData RegionDumper::ReadChunkData(RegionFile& regionFile, int localX, int localZ) {
         ChunkData chunkData;
         chunkData.localX = localX;
         chunkData.localZ = localZ;
@@ -210,28 +213,42 @@ namespace World {
             return chunkData;
         }
 
-        // Open file stream
-        auto& fileStream = regionFile.GetFileStream();
-        if (!fileStream.is_open()) {
-            Log::Error("Region file stream is not open");
-            return chunkData;
-        }
+        // **CRITICAL FIX**: Create a NEW file stream for this operation instead of reusing
+        // the potentially shared one from RegionFile
+        std::string filePath = regionFile.GetFilePath();
 
-        // Seek to chunk data
-        size_t chunkOffset = static_cast<size_t>(location.sectorOffset) * RegionFile::SECTOR_SIZE;
-        fileStream.seekg(chunkOffset);
+        // **THREAD SAFETY**: Use a separate file handle per read operation
+        std::ifstream localFileStream;
 
-        if (fileStream.fail()) {
-            Log::Error("Failed to seek to chunk offset %zu", chunkOffset);
-            return chunkData;
-        }
+        {
+            // **MUTEX PROTECTION**: Protect file opening and seeking
+            std::lock_guard<std::mutex> lock(s_fileAccessMutex);
+
+            localFileStream.open(filePath, std::ios::binary);
+            if (!localFileStream.is_open()) {
+                Log::Error("Failed to open region file for chunk reading: %s", filePath.c_str());
+                return chunkData;
+            }
+
+            // Seek to chunk data
+            size_t chunkOffset = static_cast<size_t>(location.sectorOffset) * RegionFile::SECTOR_SIZE;
+            localFileStream.seekg(chunkOffset);
+
+            if (localFileStream.fail()) {
+                Log::Error("Failed to seek to chunk offset %zu in %s", chunkOffset, filePath.c_str());
+                return chunkData;
+            }
+        } // End of mutex protection for seek operations
+
+        // **NO MUTEX**: File reading can happen without mutex since each thread has its own stream
 
         // Read chunk header (4 bytes length + 1 byte version)
         uint8_t header[5];
-        fileStream.read(reinterpret_cast<char*>(header), 5);
+        localFileStream.read(reinterpret_cast<char*>(header), 5);
 
-        if (fileStream.gcount() != 5) {
-            Log::Error("Failed to read chunk header for (%d, %d)", localX, localZ);
+        if (localFileStream.gcount() != 5) {
+            Log::Error("Failed to read chunk header for (%d, %d): expected 5 bytes, got %lld",
+                      localX, localZ, static_cast<long long>(localFileStream.gcount()));
             return chunkData;
         }
 
@@ -246,64 +263,70 @@ namespace World {
 
         // Validate length
         if (chunkData.length == 0 || chunkData.length > 1024 * 1024) { // 1MB sanity check
-            Log::Error("Invalid chunk length: %u", chunkData.length);
+            Log::Error("Invalid chunk length: %u for chunk (%d, %d)", chunkData.length, localX, localZ);
             return chunkData;
         }
 
         // Validate compression version
         if (chunkData.version != 1 && chunkData.version != 2 && chunkData.version != 3) {
-            Log::Error("Unknown compression version: %u", chunkData.version);
+            Log::Error("Unknown compression version: %u for chunk (%d, %d)", chunkData.version, localX, localZ);
             return chunkData;
         }
 
         // Read compressed data (length includes version byte, so subtract 1)
         uint32_t dataLength = chunkData.length - 1;
-        chunkData.compressedData.resize(dataLength);
 
-        fileStream.read(reinterpret_cast<char*>(chunkData.compressedData.data()), dataLength);
-
-        if (static_cast<uint32_t>(fileStream.gcount()) != dataLength) {
-            Log::Error("Failed to read chunk data for (%d, %d): expected %u bytes, got %lld",
-                      localX, localZ, dataLength, static_cast<long long>(fileStream.gcount()));
+        // **CRITICAL**: Validate data length before allocation
+        if (dataLength == 0) {
+            Log::Error("Zero data length after header for chunk (%d, %d)", localX, localZ);
             return chunkData;
         }
 
-        Log::Debug("Read %u bytes of compressed data", dataLength);
+        if (dataLength > 10 * 1024 * 1024) { // 10MB sanity check
+            Log::Error("Suspiciously large data length %u for chunk (%d, %d)", dataLength, localX, localZ);
+            return chunkData;
+        }
 
-        // Decompress data using the new inflate function
+        chunkData.compressedData.resize(dataLength);
+
+        // **FIXED**: Check stream state before reading
+        if (!localFileStream.good()) {
+            Log::Error("File stream is in bad state before reading chunk data for (%d, %d)", localX, localZ);
+            return chunkData;
+        }
+
+        localFileStream.read(reinterpret_cast<char*>(chunkData.compressedData.data()), dataLength);
+
+        // **ENHANCED**: Check both bytes read AND stream state
+        std::streamsize bytesRead = localFileStream.gcount();
+        if (bytesRead != static_cast<std::streamsize>(dataLength)) {
+            Log::Error("Failed to read chunk data for (%d, %d): expected %u bytes, got %lld, stream state: good=%d, eof=%d, fail=%d, bad=%d",
+                      localX, localZ, dataLength, static_cast<long long>(bytesRead),
+                      localFileStream.good(), localFileStream.eof(), localFileStream.fail(), localFileStream.bad());
+            return chunkData;
+        }
+
+        // **SAFETY**: Close the local file stream
+        localFileStream.close();
+
+        Log::Debug("Successfully read %u bytes of compressed data for chunk (%d, %d)", dataLength, localX, localZ);
+
+        // Decompress data using the improved inflate function
         if (!DecompressChunkData(chunkData)) {
             Log::Error("Failed to decompress chunk data for (%d, %d)", localX, localZ);
             return chunkData;
         }
 
-        // Debug: Print first 16 bytes of uncompressed data
+        // Debug: Print first 16 bytes of uncompressed data (only if enabled)
+        #ifdef DEBUG_NBT_READING
         if (!chunkData.uncompressedData.empty()) {
-            std::cout << "First 16 bytes of uncompressed NBT:";
+            std::cout << "First 16 bytes of uncompressed NBT for chunk (" << localX << "," << localZ << "):";
             for (size_t i = 0; i < 16 && i < chunkData.uncompressedData.size(); ++i) {
                 printf(" %02X", chunkData.uncompressedData[i]);
             }
             std::cout << std::endl;
-
-            // Check if it starts with TAG_Compound (0x0A)
-            if (chunkData.uncompressedData[0] == 0x0A) {
-                std::cout << "✓ NBT starts with TAG_Compound (0x0A)" << std::endl;
-
-                // Check name length and name
-                if (chunkData.uncompressedData.size() >= 3) {
-                    uint16_t nameLength = (static_cast<uint16_t>(chunkData.uncompressedData[1]) << 8) |
-                                         static_cast<uint16_t>(chunkData.uncompressedData[2]);
-                    std::cout << "Root tag name length: " << nameLength << std::endl;
-
-                    if (nameLength > 0 && nameLength < 100 && chunkData.uncompressedData.size() >= 3 + nameLength) {
-                        std::string rootName(reinterpret_cast<const char*>(&chunkData.uncompressedData[3]), nameLength);
-                        std::cout << "Root tag name: '" << rootName << "'" << std::endl;
-                    }
-                }
-            } else {
-                std::cout << "✗ NBT does not start with TAG_Compound (0x0A), got 0x"
-                         << std::hex << static_cast<unsigned>(chunkData.uncompressedData[0]) << std::dec << std::endl;
-            }
         }
+        #endif
 
         // Parse NBT data
         chunkData.rootTag = NBTParser::Parse(chunkData.uncompressedData);
@@ -331,6 +354,9 @@ namespace World {
         }
 
         chunkData.isValid = true;
+        Log::Debug("Successfully processed chunk (%d, %d) with %zu bytes uncompressed data",
+                  localX, localZ, chunkData.uncompressedData.size());
+
         return chunkData;
     }
 
@@ -398,15 +424,37 @@ namespace World {
         Log::Debug("Decompressing %zu bytes using compression version %u",
                   chunkData.compressedData.size(), chunkData.version);
 
-        if (chunkData.version == 3) {
-            // Uncompressed data
-            chunkData.uncompressedData = chunkData.compressedData;
-            Log::Debug("Data is uncompressed, copying %zu bytes", chunkData.uncompressedData.size());
-            return true;
-        }
+        try {
+            if (chunkData.version == 3) {
+                // Uncompressed data
+                chunkData.uncompressedData = chunkData.compressedData;
+                Log::Debug("Data is uncompressed, copying %zu bytes", chunkData.uncompressedData.size());
+                return true;
+            }
 
-        // Use the new inflate function for versions 1 (GZip) and 2 (ZLib)
-        return InflateAll(chunkData.compressedData, chunkData.uncompressedData);
+            // Use the improved inflate function for versions 1 (GZip) and 2 (ZLib)
+            bool success = InflateAll(chunkData.compressedData, chunkData.uncompressedData);
+
+            if (!success) {
+                Log::Error("Decompression failed for compression version %u", chunkData.version);
+                return false;
+            }
+
+            // Validate decompressed data
+            if (chunkData.uncompressedData.empty()) {
+                Log::Error("Decompression resulted in empty data");
+                return false;
+            }
+
+            return true;
+
+        } catch (const std::exception& e) {
+            Log::Error("Exception during decompression: %s", e.what());
+            return false;
+        } catch (...) {
+            Log::Error("Unknown exception during decompression");
+            return false;
+        }
     }
 
     bool RegionDumper::ValidateChunkNBT(const NBTTagPtr& rootTag) {

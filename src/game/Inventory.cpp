@@ -27,7 +27,7 @@ namespace Game {
         slots[7] = { BlockID::Water, 16 };
         slots[8] = { BlockID::Bedrock, 8 };*/
 
-        slots[0] = { BlockID::Deepslate, 64 };
+        slots[0] = { BlockID::Water, 64 };
         slots[1] = { BlockID::IronOre, 64 };
         slots[2] = { BlockID::GoldOre, 64 };
         slots[3] = { BlockID::EmeraldOre, 64 };
