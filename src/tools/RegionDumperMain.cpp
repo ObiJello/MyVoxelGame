@@ -1,6 +1,6 @@
 // File: src/tools/RegionDumperMain.cpp
-#include "../world/RegionDumper.hpp"
-#include "../world/RegionFileCache.hpp"
+#include "RegionDumper.hpp"
+#include "../engine/world/RegionFileCache.hpp"
 #include "../core/Log.hpp"
 #include <iostream>
 #include <string>

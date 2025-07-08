@@ -1,8 +1,8 @@
 // File: src/game/PlayerController.cpp (Updated with Physics)
 #include "PlayerController.hpp"
 #include "WorldAccess.hpp"
-#include "BlockRegistry.hpp"
-#include "WorldManager.hpp"
+#include "../engine/block/BlockRegistry.hpp"
+#include "../engine/world/WorldManager.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <thread>

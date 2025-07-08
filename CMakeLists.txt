@@ -57,8 +57,8 @@ add_library(imgui
         ext/imgui/imgui_widgets.cpp
         ext/imgui/backends/imgui_impl_glfw.cpp
         ext/imgui/backends/imgui_impl_opengl3.cpp
-        src/debug/DebugSystem.cpp
-        src/debug/DebugSystem.hpp
+        src/render/debug/DebugSystem.cpp
+        src/render/debug/DebugSystem.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
@@ -98,10 +98,10 @@ endif()
 
 # ── NEW: Define world parsing sources for region file dumper ──────────────
 set(WORLD_SOURCES
-        src/world/RegionFile.cpp
-        src/world/RegionFileCache.cpp
-        src/world/NBTParser.cpp
-        src/world/RegionDumper.cpp
+        src/engine/world/RegionFile.cpp
+        src/engine/world/RegionFileCache.cpp
+        src/engine/world/NBTParser.cpp
+        src/tools/RegionDumper.cpp
 )
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -114,21 +114,21 @@ if(APPLE)
             src/platform/Input.cpp
             src/core/Log.cpp
             src/core/JobSystem.cpp
-            src/render/Shader.cpp
-            src/render/ChunkRenderer.cpp
-            src/render/BlockHighlight.cpp
-            src/render/Crosshair.cpp
-            src/render/AtlasBuilder.cpp
-            src/game/BlockModel.cpp          # ADDED: Block model JSON loader
-            src/game/Mesher.cpp
-            src/game/ChunkProvider.cpp
-            src/game/WorldManager.cpp
-            src/game/RayCast.cpp
+            src/render/gfx/Shader.cpp
+            src/render/mesh/ChunkRenderer.cpp
+            src/render/mesh/BlockHighlight.cpp
+            src/render/debug/Crosshair.cpp
+            src/render/atlas/AtlasBuilder.cpp
+            src/engine/block/BlockModel.cpp          # ADDED: Block model JSON loader
+            src/render/mesh/Mesher.cpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/WorldManager.cpp
+            src/engine/Physics/RayCast.cpp
             src/game/WorldAccess.cpp
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
-            src/game/Physics.cpp
-            src/game/BlockRegistry.cpp
+            src/engine/Physics/Physics.cpp
+            src/engine/block/BlockRegistry.cpp
             ${WORLD_SOURCES}                 # NEW: Add world parsing sources
     )
     set_target_properties(MyVoxelGame PROPERTIES
@@ -142,30 +142,30 @@ else()
             src/platform/Input.cpp
             src/core/Log.cpp
             src/core/JobSystem.cpp
-            src/render/Shader.cpp
-            src/render/ChunkRenderer.cpp
-            src/game/BlockModel.cpp          # ADDED: Block model JSON loader
-            src/game/Mesher.cpp
-            src/game/ChunkProvider.cpp
-            src/game/WorldManager.cpp
-            src/game/RayCast.cpp
-            src/game/RayCast.hpp
+            src/render/gfx/Shader.cpp
+            src/render/mesh/ChunkRenderer.cpp
+            src/engine/block/BlockModel.cpp          # ADDED: Block model JSON loader
+            src/render/mesh/Mesher.cpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/WorldManager.cpp
+            src/engine/Physics/RayCast.cpp
+            src/engine/Physics/RayCast.hpp
             src/game/WorldAccess.cpp
             src/game/WorldAccess.hpp
             src/game/Inventory.cpp
             src/game/Inventory.hpp
             src/game/PlayerController.cpp
             src/game/PlayerController.hpp
-            src/render/BlockHighlight.hpp
-            src/render/BlockHighlight.cpp
-            src/game/Physics.cpp
-            src/game/Physics.hpp
-            src/render/Crosshair.cpp
-            src/render/Crosshair.hpp
-            src/render/AtlasBuilder.cpp
-            src/render/AtlasBuilder.hpp
-            src/game/BlockRegistry.cpp
-            src/game/BlockRegistry.hpp
+            src/render/mesh/BlockHighlight.hpp
+            src/render/mesh/BlockHighlight.cpp
+            src/engine/Physics/Physics.cpp
+            src/engine/Physics/Physics.hpp
+            src/render/debug/Crosshair.cpp
+            src/render/debug/Crosshair.hpp
+            src/render/atlas/AtlasBuilder.cpp
+            src/render/atlas/AtlasBuilder.hpp
+            src/engine/block/BlockRegistry.cpp
+            src/engine/block/BlockRegistry.hpp
             ${WORLD_SOURCES}
     )
 endif()

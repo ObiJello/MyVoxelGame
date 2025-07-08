@@ -2,9 +2,9 @@
 #pragma once
 
 #include "Inventory.hpp"
-#include "RayCast.hpp"
-#include "Physics.hpp"  // Add physics system
-#include "../render/Camera.hpp"
+#include "../engine/physics/RayCast.hpp"
+#include "../engine/physics/Physics.hpp"
+#include "../render/gfx/Camera.hpp"
 #include <optional>
 #include <chrono>
 

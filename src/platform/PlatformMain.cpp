@@ -1,31 +1,31 @@
-// File: src/platform/PlatformMain.cpp (Updated with Mesher Integration)
+// File: src/platform/PlatformMain.cpp
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
 #include "Log.hpp"
 #include "Config.hpp"
-#include "../debug/DebugSystem.hpp"
+#include "../render/debug/DebugSystem.hpp"
 
 // Include game headers
-#include "../game/BlockRegistry.hpp"
-#include "../game/BlockRegistry.hpp"
-#include "../game/BlockModel.hpp"
-#include "../game/ChunkProvider.hpp"
-#include "../game/WorldManager.hpp"
+#include "../engine/block/BlockRegistry.hpp"
+#include "../engine/block/BlockRegistry.hpp"
+#include "../engine/block/BlockModel.hpp"
+#include "../engine/world/ChunkProvider.hpp"
+#include "../engine/world/WorldManager.hpp"
 #include "../game/PlayerController.hpp"
 #include "../game/WorldAccess.hpp"
-#include "../game/RayCast.hpp"
-#include "../game/Physics.hpp"
-#include "../game/Mesher.hpp"                 // NEW: Include mesher
+#include "../engine/physics/RayCast.hpp"
+#include "../engine/physics/Physics.hpp"
+#include "../render/mesh/Mesher.hpp"
 
 // Include rendering headers
-#include "../render/Camera.hpp"
-#include "../render/ChunkRenderer.hpp"
-#include "../render/Frustum.hpp"
-#include "../render/Shader.hpp"
-#include "../render/BlockHighlight.hpp"
-#include "../render/Crosshair.hpp"
-#include "../render/AtlasBuilder.hpp"
+#include "../render/gfx/Camera.hpp"
+#include "../render/mesh/ChunkRenderer.hpp"
+#include "../render/gfx/Frustum.hpp"
+#include "../render/gfx/Shader.hpp"
+#include "../render/mesh/BlockHighlight.hpp"
+#include "../render/debug/Crosshair.hpp"
+#include "../render/atlas/AtlasBuilder.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>

@@ -1,3 +1,4 @@
+// File: src/main.cpp
 #include "platform/PlatformMain.hpp"
 
 int main(int argc, char** argv) {

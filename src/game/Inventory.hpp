@@ -1,7 +1,7 @@
 // File: src/game/Inventory.hpp
 #pragma once
 
-#include "Blocks.hpp"
+#include "../engine/block/Blocks.hpp"
 #include <array>
 #include <optional>
 

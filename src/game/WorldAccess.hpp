@@ -1,9 +1,9 @@
-// File: src/game/WorldAccess.hpp - MODIFIED header
+// File: src/game/WorldAccess.hpp
 #pragma once
 
-#include "Blocks.hpp"
+#include "../engine/block/Blocks.hpp"
 #include "WorldMath.hpp"
-#include "Mesher.hpp"  // For NeighborContext
+#include "../render/mesh/Mesher.hpp"
 #include <functional>
 #include <vector>
 #include <memory>

@@ -1,7 +1,7 @@
 // File: src/tests/test_region_dumper.cpp
 // Enhanced test with debug NBT parsing for 1.18+ support
-#include "../world/RegionDumper.hpp"
-#include "../world/RegionFileCache.hpp"
+#include "../tools/RegionDumper.hpp"
+#include "../engine/world/RegionFileCache.hpp"
 #include "../core/Log.hpp"
 #include <iostream>
 #include <iomanip>

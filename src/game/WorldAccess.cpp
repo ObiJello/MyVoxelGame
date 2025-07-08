@@ -1,7 +1,7 @@
-// File: src/game/WorldAccess.cpp - MODIFIED for section-level remeshing
+// File: src/game/WorldAccess.cpp
 #include "WorldAccess.hpp"
-#include "ChunkProvider.hpp"
-#include "BlockRegistry.hpp"
+#include "../engine/world/ChunkProvider.hpp"
+#include "../engine/block/BlockRegistry.hpp"
 #include "../core/Log.hpp"
 #include "../core/Config.hpp"
 #include <shared_mutex>
