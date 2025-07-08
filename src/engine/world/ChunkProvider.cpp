@@ -7,9 +7,12 @@
 #include "JobSystem.hpp"
 #include <unordered_set>
 
+#include "MinecraftChunkLoader.hpp"
+#include "SectionDataUnpacker.hpp"
+
 namespace Game {
 
-    // Single global noise generator
+    // Single global noise generator (kept for fallback generation)
     static FastNoiseLite s_noise;
 
     // CHANGED: Make these symbols have external linkage by removing 'static'
@@ -116,46 +119,6 @@ namespace Game {
                 MeshingJob(chunk, pos);
             });
         }
-    }
-
-    // Advanced block lookup that can access neighboring chunks
-    static BlockID GetBlockWithNeighbors(const NeighborContext& ctx, int localX, int localY, int localZ) {
-        // Handle within-chunk coordinates
-        if (localX >= 0 && localX < Math::CHUNK_SIZE_X &&
-            localZ >= 0 && localZ < Math::CHUNK_SIZE_Z &&
-            localY >= 0 && localY < Math::CHUNK_TOTAL_HEIGHT) {
-            return ctx.center->GetBlock(localX, localY, localZ);
-        }
-
-        // Handle cross-chunk coordinates
-        if (localY < 0 || localY >= Math::CHUNK_TOTAL_HEIGHT) {
-            return BlockID::Air; // Out of world bounds
-        }
-
-        // Determine which neighbor chunk to query
-        std::shared_ptr<Chunk> targetChunk = nullptr;
-        int targetX = localX;
-        int targetZ = localZ;
-
-        if (localX < 0) {
-            targetChunk = ctx.neighbors[0]; // West neighbor
-            targetX = localX + Math::CHUNK_SIZE_X;
-        } else if (localX >= Math::CHUNK_SIZE_X) {
-            targetChunk = ctx.neighbors[1]; // East neighbor
-            targetX = localX - Math::CHUNK_SIZE_X;
-        } else if (localZ < 0) {
-            targetChunk = ctx.neighbors[2]; // North neighbor
-            targetZ = localZ + Math::CHUNK_SIZE_Z;
-        } else if (localZ >= Math::CHUNK_SIZE_Z) {
-            targetChunk = ctx.neighbors[3]; // South neighbor
-            targetZ = localZ - Math::CHUNK_SIZE_Z;
-        }
-
-        if (!targetChunk) {
-            return BlockID::Air; // Neighbor not available
-        }
-
-        return targetChunk->GetBlock(targetX, localY, targetZ);
     }
 
     // meshing job with full inter-chunk face culling
@@ -269,7 +232,7 @@ namespace Game {
     }
 
     void ChunkProvider::RequestChunk(Math::ChunkPos pos) {
-        // Initialize noise generator once
+        // Initialize noise generator once (for fallback generation)
         static bool s_initialized = false;
         if (!s_initialized) {
             s_noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
@@ -288,10 +251,8 @@ namespace Game {
             }
         }
 
-        // Create new chunk and register it
-        auto chunk = std::make_shared<Chunk>();
-        chunk->pos = pos;
-        auto chunkData = std::make_unique<ChunkData>(chunk);
+        // Create new chunk data entry
+        auto chunkData = std::make_unique<ChunkData>(nullptr); // Will be set later
 
         {
             std::unique_lock<std::shared_mutex> lock(s_registryMutex);
@@ -300,45 +261,45 @@ namespace Game {
 
         //Log::Debug("Requesting generation for chunk (%d, %d)", pos.x, pos.z);
 
-        // Enqueue block generation job
-        JobSystem::g_ThreadPool.Enqueue([chunk, pos, key]() {
-            //Log::Debug("Starting block generation for chunk (%d, %d)", pos.x, pos.z);
+        // **ENHANCED**: Enqueue chunk loading job that tries Minecraft data first
+        JobSystem::g_ThreadPool.Enqueue([pos, key]() {
+            //Log::Debug("Starting chunk loading for (%d, %d)", pos.x, pos.z);
 
-                // Generate terrain data
-            int baseWorldX = pos.x * Math::CHUNK_SIZE_X;
-            int baseWorldZ = pos.z * Math::CHUNK_SIZE_Z;
+            std::shared_ptr<Chunk> chunk = nullptr;
 
-            for (int localX = 0; localX < Math::CHUNK_SIZE_X; ++localX) {
-                for (int localZ = 0; localZ < Math::CHUNK_SIZE_Z; ++localZ) {
-                    int worldX = baseWorldX + localX;
-                    int worldZ = baseWorldZ + localZ;
+            try {
+                // **NEW**: Try loading from Minecraft region files first
+                chunk = MinecraftChunkLoader::LoadOrGenerateChunk(pos);
 
-                    float n = s_noise.GetNoise(static_cast<float>(worldX), static_cast<float>(worldZ));
-                    float f = (n + 1.0f) * 0.5f;
-
-                    // FIXED: Generate terrain that properly accounts for negative Y
-                    int height = static_cast<int>(f * 32.0f + 64.0f);
-                    height = std::clamp(height, Config::MinY, Config::MaxY);
-
-                    // Generate bedrock layer at the bottom
-                    for (int worldY = Config::MinY; worldY < Config::MinY + 5; ++worldY) {
-                        chunk->SetBlock(localX, worldY, localZ, BlockID::Bedrock);
-                    }
-
-                    // Generate stone and surface blocks
-                    for (int worldY = Config::MinY + 5; worldY < height; ++worldY) {
-                        BlockID id = (worldY == height - 1) ? BlockID::Grass : BlockID::Stone;
-                        chunk->SetBlock(localX, worldY, localZ, id);
-                    }
+                if (!chunk) {
+                    Log::Error("Both Minecraft loading and fallback generation failed for chunk (%d, %d)",
+                              pos.x, pos.z);
+                    // Remove failed chunk from registry
+                    std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+                    s_chunkRegistry.erase(key);
+                    return;
                 }
-            }
-            //Log::Debug("Block generation complete for chunk (%d, %d)", pos.x, pos.z);
 
-            // Mark as generated and update neighbor relationships
+                // Set chunk position (may have been loaded from different source)
+                chunk->pos = pos;
+
+            } catch (const std::exception& e) {
+                Log::Error("Exception during chunk loading for (%d, %d): %s", pos.x, pos.z, e.what());
+
+                // Remove failed chunk from registry
+                std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+                s_chunkRegistry.erase(key);
+                return;
+            }
+
+            //Log::Debug("Chunk loading complete for (%d, %d)", pos.x, pos.z);
+
+            // Update registry with loaded chunk
             {
                 std::unique_lock<std::shared_mutex> lock(s_registryMutex);
                 auto it = s_chunkRegistry.find(key);
                 if (it != s_chunkRegistry.end()) {
+                    it->second->chunk = chunk;
                     it->second->isGenerated.store(true);
                 }
             }
@@ -349,7 +310,7 @@ namespace Game {
                 UpdateNeighborCounts({pos.x + dx, pos.z + dz});
             }
 
-            //Log::Info("Chunk (%d, %d) generation complete, neighbor relationships updated", pos.x, pos.z);
+            //Log::Info("Chunk (%d, %d) loading complete, neighbor relationships updated", pos.x, pos.z);
         });
     }
 
@@ -372,8 +333,45 @@ namespace Game {
         // This ensures neighbors won't find this chunk when they remesh
         s_chunkRegistry.erase(it);
 
-
         //Log::Debug("Chunk (%d, %d) unloaded and removed from registry", pos.x, pos.z);
+    }
+
+    // **NEW**: Enhanced ChunkProvider functions for Minecraft world support
+    void ChunkProvider::SetMinecraftWorldPath(const std::string& worldPath) {
+        MinecraftChunkLoader::SetWorldPath(worldPath);
+        Log::Info("Set Minecraft world path: %s", worldPath.c_str());
+
+        // Check if the world path exists and has region files
+        std::string regionPath = worldPath + "/region";
+        if (std::filesystem::exists(regionPath)) {
+            Log::Info("Found region directory: %s", regionPath.c_str());
+        } else {
+            Log::Warning("No region directory found at: %s (will use procedural generation)", regionPath.c_str());
+        }
+    }
+
+    std::string ChunkProvider::GetMinecraftWorldPath() {
+        return MinecraftChunkLoader::GetWorldPath();
+    }
+
+    bool ChunkProvider::IsMinecraftChunkAvailable(Math::ChunkPos pos) {
+        std::string worldPath = MinecraftChunkLoader::GetWorldPath();
+        if (worldPath.empty()) {
+            return false;
+        }
+        return MinecraftChunkLoader::ChunkExistsInRegion(pos, worldPath);
+    }
+
+    size_t ChunkProvider::GetLoadedChunkCount() {
+        std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+        return s_chunkRegistry.size();
+    }
+
+    void ChunkProvider::ClearAllChunks() {
+        std::unique_lock<std::shared_mutex> lock(s_registryMutex);
+        size_t clearedCount = s_chunkRegistry.size();
+        s_chunkRegistry.clear();
+        Log::Info("Cleared %zu chunks from registry", clearedCount);
     }
 
 } // namespace Game

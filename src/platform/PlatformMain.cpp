@@ -36,6 +36,8 @@
 #include <queue>
 
 #include "JobSystem.hpp"
+#include "engine/world/RegionFileCache.hpp"
+#include "engine/world/SectionDataUnpacker.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -358,10 +360,207 @@ namespace PlatformMain {
         Log::Error("[GL DEBUG] %s", message);
     }
 
+    // **NEW**: Initialize Minecraft world loading support
+    bool InitializeMinecraftSupport() {
+        Log::Info("=== MINECRAFT WORLD SUPPORT INITIALIZATION ===");
+
+        // Initialize the block state registry for converting Minecraft blocks
+        Game::BlockStateRegistry::Initialize();
+        Log::Info("✓ Block state registry initialized");
+
+        // Check for common Minecraft world locations
+        std::vector<std::string> commonPaths = {
+            "world",                    // Current directory
+            "../world",                 // Parent directory
+            "saves/New World",          // Typical save name
+            "saves/World",              // Another common name
+            std::string(getenv("HOME") ? getenv("HOME") : "") + "/.minecraft/saves/New World",  // Default Minecraft location
+        };
+
+        bool foundWorld = false;
+        for (const auto& path : commonPaths) {
+            if (path.empty()) continue;
+
+            if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                Log::Info("✓ Automatically loaded Minecraft world: %s", path.c_str());
+                foundWorld = true;
+                break;
+            }
+        }
+
+        if (!foundWorld) {
+            Log::Info("No Minecraft world auto-detected, will use procedural generation");
+        }
+
+        Log::Info("=== MINECRAFT WORLD SUPPORT READY ===");
+        return true;
+    }
+
+    // **NEW**: Command line argument processing for world loading
+    bool ProcessWorldArguments(int argc, char* argv[]) {
+        for (int i = 1; i < argc - 1; ++i) {
+            std::string arg = argv[i];
+
+            if (arg == "--world" || arg == "-w") {
+                std::string worldPath = argv[i + 1];
+                Log::Info("Loading Minecraft world from command line: %s", worldPath.c_str());
+
+                if (Game::ChunkProvider::LoadMinecraftWorld(worldPath)) {
+                    Log::Info("✓ Successfully loaded world: %s", worldPath.c_str());
+                    return true;
+                } else {
+                    Log::Error("✗ Failed to load world: %s", worldPath.c_str());
+                    return false;
+                }
+            }
+        }
+
+        return false; // No world argument found
+    }
+
+    // **NEW**: Enhanced debug UI for Minecraft world support
+    void DrawMinecraftWorldDebug() {
+        if (!ImGui::Begin("Minecraft World Support")) {
+            ImGui::End();
+            return;
+        }
+
+        auto stats = Game::ChunkProvider::GetWorldStats();
+
+        ImGui::Text("=== MINECRAFT WORLD STATUS ===");
+        ImGui::Separator();
+
+        if (stats.hasMinecraftWorld) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Minecraft World Loaded");
+            ImGui::Text("World Path: %s", stats.worldPath.c_str());
+
+            // Check if region directory exists
+            std::string regionPath = stats.worldPath + "/region";
+            if (std::filesystem::exists(regionPath)) {
+                // Count region files
+                int regionCount = 0;
+                try {
+                    for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
+                        if (entry.path().extension() == ".mca") {
+                            regionCount++;
+                        }
+                    }
+                } catch (...) {
+                    regionCount = -1;
+                }
+
+                if (regionCount >= 0) {
+                    ImGui::Text("Region Files: %d", regionCount);
+                } else {
+                    ImGui::Text("Region Files: Error counting");
+                }
+            }
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "⚠ No Minecraft World");
+            ImGui::Text("Using procedural generation");
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("Loaded Chunks: %zu", stats.loadedChunks);
+
+        // World loading interface
+        ImGui::Separator();
+        ImGui::Text("=== LOAD MINECRAFT WORLD ===");
+
+        static char worldPathBuffer[512] = "";
+        ImGui::InputText("World Path", worldPathBuffer, sizeof(worldPathBuffer));
+
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) {
+            // In a real implementation, you'd open a file dialog here
+            ImGui::OpenPopup("World Browser");
+        }
+
+        if (ImGui::Button("Load World")) {
+            std::string path = worldPathBuffer;
+            if (!path.empty()) {
+                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                    Log::Info("Successfully loaded world from UI: %s", path.c_str());
+                } else {
+                    Log::Error("Failed to load world from UI: %s", path.c_str());
+                }
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Clear World")) {
+            Game::ChunkProvider::ClearAllChunks();
+            Game::ChunkProvider::SetMinecraftWorldPath("");
+            Log::Info("Cleared world and switched to procedural generation");
+        }
+
+        // Quick load buttons for common locations
+        ImGui::Spacing();
+        ImGui::Text("Quick Load:");
+
+        std::vector<std::pair<std::string, std::string>> quickPaths = {
+            {"Current Dir", "./world"},
+            {"Parent Dir", "../world"},
+            {"Test World", "./saves/TestWorld"}
+        };
+
+        for (const auto& [name, path] : quickPaths) {
+            if (ImGui::Button(name.c_str())) {
+                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                    strncpy(worldPathBuffer, path.c_str(), sizeof(worldPathBuffer) - 1);
+                    worldPathBuffer[sizeof(worldPathBuffer) - 1] = '\0';
+                }
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+
+        // Chunk loading statistics
+        ImGui::Separator();
+        ImGui::Text("=== CHUNK STATISTICS ===");
+
+        // Test specific chunk loading
+        static int testChunkX = 0, testChunkZ = 0;
+        ImGui::InputInt("Test Chunk X", &testChunkX);
+        ImGui::InputInt("Test Chunk Z", &testChunkZ);
+
+        if (ImGui::Button("Test Chunk Availability")) {
+            Game::Math::ChunkPos testPos{testChunkX, testChunkZ};
+            bool available = Game::ChunkProvider::IsMinecraftChunkAvailable(testPos);
+
+            if (available) {
+                Log::Info("Chunk (%d, %d) is available in Minecraft world", testChunkX, testChunkZ);
+            } else {
+                Log::Info("Chunk (%d, %d) not found in Minecraft world (will be generated)", testChunkX, testChunkZ);
+            }
+        }
+
+        // Region file cache statistics
+        ImGui::Spacing();
+        size_t cacheSize = World::RegionFileCache::Instance().GetCacheSize();
+        ImGui::Text("Region File Cache: %zu files", cacheSize);
+
+        if (ImGui::Button("Clear Region Cache")) {
+            World::RegionFileCache::Instance().Clear();
+            Log::Info("Cleared region file cache");
+        }
+
+        ImGui::End();
+    }
+
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
         Log::Info("Starting MyVoxelGame v0.1");
+
+        // **NEW**: Process command line arguments for world loading
+        ProcessWorldArguments(argc, argv);
+
+        // Initialize game systems
+        InitializeGameSystems();
+
+        // **NEW**: Initialize Minecraft world support
+        InitializeMinecraftSupport();
 
         // Initialize game systems
         InitializeGameSystems();
@@ -529,6 +728,9 @@ namespace PlatformMain {
                 windowWidth, windowHeight, width, height
             );
 
+            // **NEW**: Render Minecraft world debug UI
+            DrawMinecraftWorldDebug();
+
             // Finish debug frame
             Debug::DebugSystem::EndFrame();
 
@@ -541,6 +743,15 @@ namespace PlatformMain {
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
+
+        // **ENHANCED**: Cleanup with Minecraft world support
+        Log::Info("Cleaning up Minecraft world support...");
+
+        // Clear region file cache
+        World::RegionFileCache::Instance().Clear();
+
+        // Clear all loaded chunks
+        Game::ChunkProvider::ClearAllChunks();
 
         // Cleanup
         Debug::DebugSystem::Shutdown();

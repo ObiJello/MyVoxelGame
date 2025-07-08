@@ -101,7 +101,7 @@ set(WORLD_SOURCES
         src/engine/world/RegionFile.cpp
         src/engine/world/RegionFileCache.cpp
         src/engine/world/NBTParser.cpp
-        src/tools/RegionDumper.cpp
+        src/engine/world/RegionDumper.cpp
 )
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -119,17 +119,19 @@ if(APPLE)
             src/render/mesh/BlockHighlight.cpp
             src/render/debug/Crosshair.cpp
             src/render/atlas/AtlasBuilder.cpp
-            src/engine/block/BlockModel.cpp          # ADDED: Block model JSON loader
+            src/engine/block/BlockModel.cpp
             src/render/mesh/Mesher.cpp
             src/engine/world/ChunkProvider.cpp
             src/engine/world/WorldManager.cpp
+            src/engine/world/SectionDataUnpacker.cpp
+            src/engine/world/MinecraftChunkLoader.cpp
+            src/engine/world/RegionDumper.cpp
             src/engine/Physics/RayCast.cpp
             src/game/WorldAccess.cpp
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
             src/engine/Physics/Physics.cpp
             src/engine/block/BlockRegistry.cpp
-            ${WORLD_SOURCES}                 # NEW: Add world parsing sources
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -166,7 +168,12 @@ else()
             src/render/atlas/AtlasBuilder.hpp
             src/engine/block/BlockRegistry.cpp
             src/engine/block/BlockRegistry.hpp
-            ${WORLD_SOURCES}
+            src/engine/world/SectionDataUnpacker.cpp
+            src/engine/world/SectionDataUnpacker.hpp
+            src/engine/world/MinecraftChunkLoader.cpp
+            src/engine/world/MinecraftChunkLoader.hpp
+            src/engine/world/RegionDumper.cpp
+            src/engine/world/RegionDumper.hpp
     )
 endif()
 

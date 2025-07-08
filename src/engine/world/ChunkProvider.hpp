@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.hpp
+// File: src/engine/world/ChunkProvider.hpp (Updated)
 #pragma once
 
 #include "../../game/WorldMath.hpp"
@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <shared_mutex>
 #include <atomic>
+#include <string>
+#include <filesystem>
 
 // Path to FastNoiseLite.h (adjust if you put it somewhere else):
 #include "../../../ext/FastNoiseLite.h"
@@ -32,12 +34,92 @@ namespace Game {
 
     class ChunkProvider {
     public:
-        // Enqueue a background job to generate the chunk at chunk-coordinates (pos.x, pos.z).
-        // After filling in block data, this system will automatically handle neighbor detection and trigger appropriate meshing.
+        // Enqueue a background job to generate/load the chunk at chunk-coordinates (pos.x, pos.z).
+        // **ENHANCED**: Now tries to load from Minecraft region files first, falls back to generation
         static void RequestChunk(Math::ChunkPos pos);
 
         // Unload a chunk and trigger remeshing of dependent neighbors
         static void UnloadChunk(Math::ChunkPos pos);
+
+        // **NEW**: Minecraft world support functions
+        // Set the path to a Minecraft world directory (contains 'region' folder)
+        static void SetMinecraftWorldPath(const std::string& worldPath);
+
+        // Get the current Minecraft world path
+        static std::string GetMinecraftWorldPath();
+
+        // Check if a specific chunk exists in Minecraft region files
+        static bool IsMinecraftChunkAvailable(Math::ChunkPos pos);
+
+        // **NEW**: Registry management functions
+        // Get number of currently loaded chunks
+        static size_t GetLoadedChunkCount();
+
+        // Clear all chunks from memory (useful for world switching)
+        static void ClearAllChunks();
+
+        // **NEW**: World loading utilities
+        // Load a Minecraft world from a save directory
+        static bool LoadMinecraftWorld(const std::string& savePath) {
+            // Check if the path exists and has the expected structure
+            if (!std::filesystem::exists(savePath)) {
+                Log::Error("Minecraft world path does not exist: %s", savePath.c_str());
+                return false;
+            }
+
+            std::string regionPath = savePath + "/region";
+            if (!std::filesystem::exists(regionPath)) {
+                Log::Error("No region directory found in world: %s", savePath.c_str());
+                return false;
+            }
+
+            // Count region files
+            int regionFileCount = 0;
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
+                    if (entry.path().extension() == ".mca") {
+                        regionFileCount++;
+                    }
+                }
+            } catch (const std::exception& e) {
+                Log::Error("Error scanning region directory: %s", e.what());
+                return false;
+            }
+
+            if (regionFileCount == 0) {
+                Log::Warning("No .mca files found in region directory: %s", regionPath.c_str());
+                return false;
+            }
+
+            // Clear existing chunks and set new world path
+            ClearAllChunks();
+            SetMinecraftWorldPath(savePath);
+
+            Log::Info("Successfully loaded Minecraft world: %s (%d region files)",
+                     savePath.c_str(), regionFileCount);
+            return true;
+        }
+
+        // **NEW**: Get world statistics
+        struct WorldStats {
+            size_t loadedChunks = 0;
+            size_t minecraftChunks = 0;
+            size_t generatedChunks = 0;
+            std::string worldPath;
+            bool hasMinecraftWorld = false;
+        };
+
+        static WorldStats GetWorldStats() {
+            WorldStats stats;
+            stats.worldPath = GetMinecraftWorldPath();
+            stats.hasMinecraftWorld = !stats.worldPath.empty();
+            stats.loadedChunks = GetLoadedChunkCount();
+
+            // Note: Counting Minecraft vs generated chunks would require
+            // additional tracking in ChunkData structure
+
+            return stats;
+        }
 
     private:
         ChunkProvider() = delete; // Static class

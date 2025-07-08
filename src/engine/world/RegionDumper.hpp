@@ -1,8 +1,8 @@
 // File: src/tools/RegionDumper.hpp
 #pragma once
 
-#include "../engine/world/RegionFile.hpp"
-#include "../engine/world/NBTParser.hpp"
+#include "RegionFile.hpp"
+#include "NBTParser.hpp"
 #include <string>
 #include <vector>
 #include <memory>

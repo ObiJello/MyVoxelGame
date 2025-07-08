@@ -1,7 +1,7 @@
 // File: src/tools/RegionDumper.cpp
 #include "RegionDumper.hpp"
-#include "../engine/world/RegionFileCache.hpp"
-#include "../core/Log.hpp"
+#include "RegionFileCache.hpp"
+#include "../../core/Log.hpp"
 #include <iostream>
 #include <iomanip>
 #include <fstream>
