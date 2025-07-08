@@ -173,6 +173,8 @@ else()
             src/engine/world/SectionDataUnpacker.hpp
             src/engine/world/MinecraftChunkLoader.cpp
             src/engine/world/MinecraftChunkLoader.hpp
+            src/render/mesh/LayeredRenderer.cpp
+            src/render/mesh/FluidMesher.cpp
     )
 endif()
 

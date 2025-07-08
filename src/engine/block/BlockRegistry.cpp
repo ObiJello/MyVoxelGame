@@ -58,36 +58,41 @@ namespace Game {
         // SPECIAL: Air block - always transparent, no model
         RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
 
-        // FIXED: Set proper opacity flags based on Minecraft block properties
-        RegisterModelBlock(BlockID::Stone, "Stone", true, "stone");                   // Opaque
-        RegisterModelBlock(BlockID::Dirt, "Dirt", true, "dirt");                      // Opaque
-        RegisterModelBlock(BlockID::Grass, "Grass", true, "grass_block");             // Opaque
-        RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");                      // Opaque
-        RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");       // Opaque
-        RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");              // Opaque
-        RegisterModelBlock(BlockID::Snow, "Snow", true, "snow_block");                // Opaque
-        RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow"); // Opaque
-        RegisterModelBlock(BlockID::Ice, "Ice", false, "ice");                        // Transparent
-        RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");                  // Transparent
-        RegisterModelBlock(BlockID::Bedrock, "Bedrock", true, "bedrock");             // Opaque
-        RegisterModelBlock(BlockID::Water, "Water", false, "water");                  // Transparent
-        RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves");           // Transparent
-        RegisterModelBlock(BlockID::CherryLog, "Cherry Log", true, "cherry_log");     // Opaque
-        RegisterModelBlock(BlockID::BirchLog, "Birch Log", true, "birch_log");        // Opaque
-        RegisterModelBlock(BlockID::AcaciaLog, "Acacia Log", true, "acacia_log");     // Opaque
-        RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves"); // Transparent
-        RegisterModelBlock(BlockID::CoalOre, "Coal Ore", true, "coal_ore");           // Opaque
-        RegisterModelBlock(BlockID::RedstoneOre, "Redstone Ore", true, "redstone_ore"); // Opaque
-        RegisterModelBlock(BlockID::LapisOre, "Lapis Ore", true, "lapis_ore");        // Opaque
-        RegisterModelBlock(BlockID::IronOre, "Iron Ore", true, "iron_ore");           // Opaque
-        RegisterModelBlock(BlockID::GoldOre, "Gold Ore", true, "gold_ore");           // Opaque
-        RegisterModelBlock(BlockID::EmeraldOre, "Emerald Ore", true, "emerald_ore");  // Opaque
-        RegisterModelBlock(BlockID::DiamondOre, "Diamond Ore", true, "diamond_ore");  // Opaque
-        RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");                // Opaque
-        RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");          // Opaque
-        RegisterModelBlock(BlockID::Deepslate, "Deepslate", true, "deepslate");       // Opaque
-        RegisterModelBlock(BlockID::Lava, "Lava", false, "lava");                     // Transparent
+        // SOLID BLOCKS (Opaque layer)
+        RegisterModelBlock(BlockID::Stone, "Stone", true, "stone");
+        RegisterModelBlock(BlockID::Dirt, "Dirt", true, "dirt");
+        RegisterModelBlock(BlockID::Grass, "Grass", true, "grass_block");
+        RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");
+        RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");
+        RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");
+        RegisterModelBlock(BlockID::Snow, "Snow", true, "snow_block");
+        RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow");
+        RegisterModelBlock(BlockID::Bedrock, "Bedrock", true, "bedrock");
+        RegisterModelBlock(BlockID::CherryLog, "Cherry Log", true, "cherry_log");
+        RegisterModelBlock(BlockID::BirchLog, "Birch Log", true, "birch_log");
+        RegisterModelBlock(BlockID::AcaciaLog, "Acacia Log", true, "acacia_log");
+        RegisterModelBlock(BlockID::CoalOre, "Coal Ore", true, "coal_ore");
+        RegisterModelBlock(BlockID::RedstoneOre, "Redstone Ore", true, "redstone_ore");
+        RegisterModelBlock(BlockID::LapisOre, "Lapis Ore", true, "lapis_ore");
+        RegisterModelBlock(BlockID::IronOre, "Iron Ore", true, "iron_ore");
+        RegisterModelBlock(BlockID::GoldOre, "Gold Ore", true, "gold_ore");
+        RegisterModelBlock(BlockID::EmeraldOre, "Emerald Ore", true, "emerald_ore");
+        RegisterModelBlock(BlockID::DiamondOre, "Diamond Ore", true, "diamond_ore");
+        RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");
+        RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");
+        RegisterModelBlock(BlockID::Deepslate, "Deepslate", true, "deepslate");
 
+        // CUTOUT BLOCKS (Alpha-test layer)
+        RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves");
+        RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves");
+
+        // TRANSLUCENT BLOCKS (Blended layer)
+        RegisterModelBlock(BlockID::Ice, "Ice", false, "ice");
+        RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");
+
+        // FLUID BLOCKS (Special translucent layer)
+        RegisterModelBlock(BlockID::Water, "Water", false, "water_still");
+        RegisterModelBlock(BlockID::Lava, "Lava", false, "lava_still");
 
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",
