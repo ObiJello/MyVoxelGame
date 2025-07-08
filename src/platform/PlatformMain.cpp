@@ -83,6 +83,11 @@ namespace PlatformMain {
 #endif
     }
 
+    // NEW: Enhanced mesh upload queue for layered rendering
+    static std::queue<Game::LayeredMeshData*> g_layeredMeshUploadQueue;
+    static std::queue<Game::MeshData*> g_legacyMeshUploadQueue;
+    static std::mutex g_meshQueueMutex;
+
     // Input handling
     void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
         // Movement input
@@ -152,54 +157,78 @@ namespace PlatformMain {
         return cursorEnabled;
     }
 
-    // NEW: Mesh upload queue for thread safety
-    static std::queue<Game::MeshData*> g_meshUploadQueue;
-    static std::mutex g_meshQueueMutex;
-
-    // **FIXED**: Global function to enqueue mesh data from background threads
-    void EnqueueMeshUpload(Game::MeshData* meshData) {
+    // ENHANCED: Global function to enqueue layered mesh data from background threads
+    void EnqueueLayeredMeshUpload(Game::LayeredMeshData* meshData) {
         if (!meshData) {
-            Log::Warning("EnqueueMeshUpload called with null meshData");
+            Log::Warning("EnqueueLayeredMeshUpload called with null meshData");
             return;
         }
 
         std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-        g_meshUploadQueue.push(meshData);
+        g_layeredMeshUploadQueue.push(meshData);
         // Note: Queue now owns the meshData pointer
     }
 
-    // **FIXED**: Upload mesh data from the queue with proper error handling
+
+    // ENHANCED: Upload mesh data from both queues with proper error handling
     void UploadMeshData(Debug::PerformanceMetrics& metrics) {
         auto uploadStartTime = std::chrono::high_resolution_clock::now();
 
         int uploadedThisFrame = 0;
         constexpr int MAX_UPLOADS_PER_FRAME = 5; // Limit to prevent frame drops
 
-        // **CRITICAL**: Use try-catch to prevent crashes during OpenGL operations
         try {
             std::lock_guard<std::mutex> lock(g_meshQueueMutex);
 
-            while (!g_meshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
-                Game::MeshData* meshData = g_meshUploadQueue.front();
-                g_meshUploadQueue.pop();
+            // Process layered mesh uploads (prioritized)
+            while (!g_layeredMeshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
+                Game::LayeredMeshData* layeredMeshData = g_layeredMeshUploadQueue.front();
+                g_layeredMeshUploadQueue.pop();
+
+                if (layeredMeshData) {
+                    try {
+                        // Upload to GPU using the enhanced layered system
+                        Render::UploadLayeredMesh(layeredMeshData);
+                        uploadedThisFrame++;
+
+                        Log::Debug("Uploaded layered mesh: chunk (%d,%d) section %d - "
+                                  "Opaque: %zu, Cutout: %zu, Translucent: %zu vertices",
+                                  layeredMeshData->chunkXZ.x, layeredMeshData->chunkXZ.z,
+                                  layeredMeshData->sectionIndex,
+                                  layeredMeshData->opaqueVertices.size(),
+                                  layeredMeshData->cutoutVertices.size(),
+                                  layeredMeshData->translucentVertices.size());
+                    } catch (const std::exception& e) {
+                        Log::Error("Failed to upload layered mesh data: %s", e.what());
+                        delete layeredMeshData;
+                    } catch (...) {
+                        Log::Error("Failed to upload layered mesh data: unknown exception");
+                        delete layeredMeshData;
+                    }
+                } else {
+                    Log::Warning("Found null layeredMeshData in upload queue");
+                }
+            }
+
+            // Process legacy mesh uploads (for backward compatibility)
+            while (!g_legacyMeshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
+                Game::MeshData* meshData = g_legacyMeshUploadQueue.front();
+                g_legacyMeshUploadQueue.pop();
 
                 if (meshData) {
                     try {
-                        // Upload to GPU using the existing ChunkRenderer system
-                        // UploadMesh takes ownership and handles deletion
+                        // Upload using legacy system (converts to layered internally)
                         Render::UploadMesh(meshData);
                         uploadedThisFrame++;
                     } catch (const std::exception& e) {
-                        Log::Error("Failed to upload mesh data: %s", e.what());
-                        // Clean up if upload failed
+                        Log::Error("Failed to upload legacy mesh data: %s", e.what());
                         delete meshData;
                     } catch (...) {
-                        Log::Error("Failed to upload mesh data: unknown exception");
-                        // Clean up if upload failed
+                        Log::Error("Failed to upload legacy mesh data: unknown exception");
                         delete meshData;
                     }
                 } else {
-                    Log::Warning("Found null meshData in upload queue");
+                    Log::Warning("Found null meshData in legacy upload queue");
                 }
             }
         } catch (const std::exception& e) {
@@ -214,72 +243,13 @@ namespace PlatformMain {
         metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
     }
 
-
-    //rendering
+    // ENHANCED: Rendering function with three-layer support
     void RenderScene(const Render::Camera& camera, const Shader& blockShader,
                     const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
                     Debug::PerformanceMetrics& metrics) {
 
-        auto renderStartTime = std::chrono::high_resolution_clock::now();
-
-        // Use shader
-        blockShader.Use();
-
-        // Bind textures based on available systems
-        if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
-            // Use AtlasBuilder system
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, Render::g_atlasBuilder->GetAtlasTextureID());
-            glUniform1i(blockShader.GetUniformLocation("uTextureAtlas"), 0);
-
-            // Bind biome colormaps if available
-            GLuint grassColormap = Render::g_atlasBuilder->GetGrassColormapID();
-            GLuint foliageColormap = Render::g_atlasBuilder->GetFoliageColormapID();
-
-            if (grassColormap != 0) {
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, grassColormap);
-                glUniform1i(blockShader.GetUniformLocation("uGrassColormap"), 1);
-            }
-
-            if (foliageColormap != 0) {
-                glActiveTexture(GL_TEXTURE2);
-                glBindTexture(GL_TEXTURE_2D, foliageColormap);
-                glUniform1i(blockShader.GetUniformLocation("uFoliageColormap"), 2);
-            }
-
-            // Set biome parameters
-            glUniform1f(blockShader.GetUniformLocation("uBiomeTemperature"), 0.7f); // Temperate
-            glUniform1f(blockShader.GetUniformLocation("uBiomeHumidity"), 0.6f);    // Moderate
-            glUniform1i(blockShader.GetUniformLocation("uEnableBiomeTinting"), 1);  // Enable
-
-        }
-
-        // Render visible chunks
-        metrics.meshesRenderedThisFrame = 0;
-        metrics.totalVerticesRendered = 0;
-        metrics.totalIndicesRendered = 0;
-
-        for (const auto& cm : Render::g_chunkMeshes) {
-            AABB box = cm.GetAABB();
-
-            if (!frustum.IsBoxVisible(box)) {
-                continue; // Frustum culled
-            }
-
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), cm.worldOffset);
-            glm::mat4 mvp = proj * view * model;
-
-            blockShader.SetMat4("uMVP", mvp);
-            cm.Draw();
-
-            metrics.meshesRenderedThisFrame++;
-            metrics.totalVerticesRendered += cm.indexCount;
-            metrics.totalIndicesRendered += cm.indexCount;
-        }
-
-        auto renderEndTime = std::chrono::high_resolution_clock::now();
-        metrics.renderTime = std::chrono::duration<float, std::milli>(renderEndTime - renderStartTime).count();
+        // Use the enhanced layered rendering system
+        Render::RenderLayeredScene(camera, blockShader, proj, view, frustum, metrics);
     }
 
     void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
@@ -313,9 +283,12 @@ namespace PlatformMain {
             Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
-        // NEW: Set up mesh upload callback for the mesher
+        // Set up mesh upload callback for the mesher
         // This allows background meshing threads to queue mesh data for main thread upload
         Game::SetMeshUploadCallback(EnqueueMeshUpload);
+
+        // NEW: Layered mesh upload callback for enhanced rendering
+        Game::SetLayeredMeshUploadCallback(EnqueueLayeredMeshUpload);
 
         Log::Info("Game systems initialized successfully");
     }
@@ -548,6 +521,91 @@ namespace PlatformMain {
         ImGui::End();
     }
 
+    // debug UI for layered rendering
+    void DrawLayeredRenderingDebug() {
+        if (!ImGui::Begin("Layered Rendering Debug")) {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::Text("=== LAYERED RENDERING SYSTEM ===");
+        ImGui::Separator();
+
+        // Validate layered rendering
+        bool isValid = Render::ValidateLayeredRendering();
+        if (isValid) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Layered Rendering: ACTIVE");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "✗ Layered Rendering: FAILED");
+        }
+
+        // Get statistics
+        auto stats = Render::GetLastRenderStats();
+
+        ImGui::Spacing();
+        ImGui::Text("Render Layer Statistics:");
+        ImGui::Text("  Total Visible Chunks: %d", stats.totalVisibleChunks);
+        ImGui::Text("  Opaque Draw Calls: %d (%zu vertices)", stats.opaqueDrawCalls, stats.opaqueVertices);
+        ImGui::Text("  Cutout Draw Calls: %d (%zu vertices)", stats.cutoutDrawCalls, stats.cutoutVertices);
+        ImGui::Text("  Translucent Draw Calls: %d (%zu vertices)", stats.translucentDrawCalls, stats.translucentVertices);
+
+        if (stats.translucentDrawCalls > 0) {
+            ImGui::Text("  Translucent Sort Time: %.2fms", stats.sortTime);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Queue Status:");
+
+        int layeredQueueSize = 0;
+        int legacyQueueSize = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+            layeredQueueSize = static_cast<int>(g_layeredMeshUploadQueue.size());
+            legacyQueueSize = static_cast<int>(g_legacyMeshUploadQueue.size());
+        }
+
+        ImGui::Text("  Layered Mesh Upload Queue: %d", layeredQueueSize);
+        ImGui::Text("  Legacy Mesh Upload Queue: %d", legacyQueueSize);
+
+        ImGui::Spacing();
+        ImGui::Text("Layer Performance:");
+        int totalDrawCalls = stats.opaqueDrawCalls + stats.cutoutDrawCalls + stats.translucentDrawCalls;
+        size_t totalVertices = stats.opaqueVertices + stats.cutoutVertices + stats.translucentVertices;
+
+        if (totalDrawCalls > 0) {
+            float opaquePercent = (stats.opaqueDrawCalls * 100.0f) / totalDrawCalls;
+            float cutoutPercent = (stats.cutoutDrawCalls * 100.0f) / totalDrawCalls;
+            float translucentPercent = (stats.translucentDrawCalls * 100.0f) / totalDrawCalls;
+
+            ImGui::Text("  Draw Call Distribution:");
+            ImGui::Text("    Opaque: %.1f%%", opaquePercent);
+            ImGui::Text("    Cutout: %.1f%%", cutoutPercent);
+            ImGui::Text("    Translucent: %.1f%%", translucentPercent);
+        }
+
+        ImGui::Separator();
+        ImGui::Text("Fluid Rendering:");
+        if (stats.translucentVertices > 0) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "✓ Fluids detected in translucent layer");
+            ImGui::Text("  Estimated fluid faces: %zu", stats.translucentVertices / 4);
+        } else {
+            ImGui::Text("  No fluid geometry detected");
+        }
+
+        ImGui::Spacing();
+        if (ImGui::Button("Regenerate All Chunks (Layered)")) {
+            Render::RegenerateAllChunksLayered();
+            Log::Info("Regenerated all chunks with layered meshing");
+        }
+
+        if (ImGui::Button("Validate Layered Rendering")) {
+            bool valid = Render::ValidateLayeredRendering();
+            Log::Info("Layered rendering validation: %s", valid ? "PASSED" : "FAILED");
+        }
+
+        ImGui::End();
+    }
+
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
@@ -708,10 +766,10 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // NEW: Upload mesh data from background threads
+            // Upload mesh data from background threads (both types)
             UploadMeshData(metrics);
 
-            // Render scene
+            // Render scene with layered rendering
             RenderScene(camera, blockShader, proj, view, frustum, metrics);
 
             // Render UI elements
@@ -730,6 +788,9 @@ namespace PlatformMain {
 
             // **NEW**: Render Minecraft world debug UI
             DrawMinecraftWorldDebug();
+
+            // ENHANCED: Render layered rendering debug UI
+            DrawLayeredRenderingDebug();
 
             // Finish debug frame
             Debug::DebugSystem::EndFrame();
@@ -761,20 +822,33 @@ namespace PlatformMain {
         // Add a way to stop the thread pool gracefully
         // (You may need to add a Stop() method to JobSystem::ThreadPool)
 
-        // **FIXED**: Clean up mesh upload queue with error handling
+        // Clean up both mesh upload queues with error handling
         {
             std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-            int cleanedUp = 0;
-            while (!g_meshUploadQueue.empty()) {
-                Game::MeshData* meshData = g_meshUploadQueue.front();
-                g_meshUploadQueue.pop();
-                if (meshData) {
-                    delete meshData;
-                    cleanedUp++;
+            int layeredCleanedUp = 0;
+            int legacyCleanedUp = 0;
+
+            while (!g_layeredMeshUploadQueue.empty()) {
+                Game::LayeredMeshData* layeredMeshData = g_layeredMeshUploadQueue.front();
+                g_layeredMeshUploadQueue.pop();
+                if (layeredMeshData) {
+                    delete layeredMeshData;
+                    layeredCleanedUp++;
                 }
             }
-            if (cleanedUp > 0) {
-                Log::Info("Cleaned up %d pending mesh uploads during shutdown", cleanedUp);
+
+            while (!g_legacyMeshUploadQueue.empty()) {
+                Game::MeshData* meshData = g_legacyMeshUploadQueue.front();
+                g_legacyMeshUploadQueue.pop();
+                if (meshData) {
+                    delete meshData;
+                    legacyCleanedUp++;
+                }
+            }
+
+            if (layeredCleanedUp > 0 || legacyCleanedUp > 0) {
+                Log::Info("Cleaned up %d layered and %d legacy mesh uploads during shutdown",
+                         layeredCleanedUp, legacyCleanedUp);
             }
         }
 

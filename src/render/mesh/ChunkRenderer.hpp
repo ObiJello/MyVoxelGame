@@ -1,4 +1,4 @@
-// File: src/render/mesh/ChunkRenderer.hpp (Updated)
+// File: src/render/mesh/ChunkRenderer.hpp (Enhanced with Three Layers)
 #pragma once
 
 #include <vector>
@@ -140,6 +140,12 @@ namespace Render {
             cm.sectionIndex = data->sectionIndex;
             cm.uploadTime = std::chrono::steady_clock::now();
 
+            // Calculate world offset for this section
+            float worldX = static_cast<float>(data->chunkXZ.x * Game::Math::CHUNK_SIZE_X);
+            float worldY = static_cast<float>(Config::MinY + (data->sectionIndex * Game::Math::SECTION_HEIGHT));
+            float worldZ = static_cast<float>(data->chunkXZ.z * Game::Math::CHUNK_SIZE_Z);
+            cm.worldOffset = glm::vec3(worldX, worldY, worldZ);
+
             return cm;
         }
 
@@ -165,7 +171,7 @@ namespace Render {
             }
         }
 
-        // Get AABB for frustum culling (same as before)
+        // Get AABB for frustum culling
         AABB GetAABB() const {
             float worldX = static_cast<float>(chunkXZ.x * Game::Math::CHUNK_SIZE_X);
             float worldY = static_cast<float>(Config::MinY + (sectionIndex * Game::Math::SECTION_HEIGHT));
@@ -200,12 +206,17 @@ namespace Render {
             glm::vec3 center(centerX, centerY, centerZ);
             return glm::length(cameraPos - center);
         }
+
+        // Get total triangle count across all layers
+        size_t GetTotalTriangleCount() const {
+            return (opaque.indexCount + cutout.indexCount + translucent.indexCount) / 3;
+        }
     };
 
     // Global container of all uploaded meshes
     extern std::vector<ChunkMesh> g_chunkMeshes;
 
-    // Upload mesh with proper layer handling
+    // ENHANCED: Upload layered mesh data
     inline void UploadLayeredMesh(Game::LayeredMeshData* data) {
         if (!data) {
             Log::Warning("UploadLayeredMesh called with null data");
@@ -223,11 +234,7 @@ namespace Render {
                 it->sectionIndex == ownedData->sectionIndex) {
 
                 // Check if all layers are empty
-                bool hasAnyData = !ownedData->opaqueVertices.empty() ||
-                                 !ownedData->cutoutVertices.empty() ||
-                                 !ownedData->translucentVertices.empty();
-
-                if (!hasAnyData) {
+                if (!ownedData->HasAnyGeometry()) {
                     Log::Debug("Removing mesh for fully empty section: chunk (%d,%d) section %d",
                               ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex);
 
@@ -239,23 +246,52 @@ namespace Render {
                     // Replace with new mesh
                     it->Cleanup();
                     *it = ChunkMesh::FromLayeredMeshData(ownedData.get());
+
+                    Log::Debug("Updated layered mesh for chunk (%d,%d) section %d - "
+                              "Opaque: %zu verts, Cutout: %zu verts, Translucent: %zu verts",
+                              ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
+                              ownedData->opaqueVertices.size(), ownedData->cutoutVertices.size(),
+                              ownedData->translucentVertices.size());
                     return;
                 }
             }
         }
 
         // No existing mesh found - add new one if it has data
-        bool hasAnyData = !ownedData->opaqueVertices.empty() ||
-                         !ownedData->cutoutVertices.empty() ||
-                         !ownedData->translucentVertices.empty();
-
-        if (hasAnyData) {
+        if (ownedData->HasAnyGeometry()) {
             ChunkMesh cm = ChunkMesh::FromLayeredMeshData(ownedData.get());
             meshes.push_back(cm);
+
+            Log::Debug("Added new layered mesh for chunk (%d,%d) section %d - "
+                      "Opaque: %zu verts, Cutout: %zu verts, Translucent: %zu verts",
+                      ownedData->chunkXZ.x, ownedData->chunkXZ.z, ownedData->sectionIndex,
+                      ownedData->opaqueVertices.size(), ownedData->cutoutVertices.size(),
+                      ownedData->translucentVertices.size());
         }
     }
 
-    // Remove chunk meshes (same as before but with cleanup)
+    // Legacy upload function for backward compatibility
+    inline void UploadMesh(Game::MeshData* data) {
+        if (!data) {
+            Log::Warning("UploadMesh called with null data");
+            return;
+        }
+
+        // Convert legacy MeshData to LayeredMeshData (all goes to opaque layer)
+        auto layeredData = std::make_unique<Game::LayeredMeshData>();
+        layeredData->opaqueVertices = std::move(data->vertices);
+        layeredData->opaqueIndices = std::move(data->indices);
+        layeredData->chunkXZ = data->chunkXZ;
+        layeredData->sectionIndex = data->sectionIndex;
+
+        // Upload using new system
+        UploadLayeredMesh(layeredData.release());
+
+        // Clean up original data
+        delete data;
+    }
+
+    // Remove chunk meshes
     inline void RemoveChunkMeshes(Game::Math::ChunkPos pos) {
         auto& meshes = g_chunkMeshes;
 
@@ -270,5 +306,17 @@ namespace Render {
             }
         }
     }
+
+    // Rendering statistics for performance monitoring
+    struct LayeredRenderStats {
+        int opaqueDrawCalls = 0;
+        int cutoutDrawCalls = 0;
+        int translucentDrawCalls = 0;
+        size_t opaqueVertices = 0;
+        size_t cutoutVertices = 0;
+        size_t translucentVertices = 0;
+        float sortTime = 0.0f;
+        int totalVisibleChunks = 0;
+    };
 
 } // namespace Render
