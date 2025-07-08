@@ -86,6 +86,8 @@ namespace Game {
         RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");                // Opaque
         RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");          // Opaque
         RegisterModelBlock(BlockID::Deepslate, "Deepslate", true, "deepslate");       // Opaque
+        RegisterModelBlock(BlockID::Lava, "Lava", false, "lava");                     // Transparent
+
 
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",

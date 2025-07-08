@@ -36,6 +36,7 @@ namespace Game {
         Gravel       = 25,
         Mycelium     = 26,
         Deepslate    = 27,
+        Lava         = 28,
         Count // Always keep this as the last entry.
     };
 

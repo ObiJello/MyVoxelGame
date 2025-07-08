@@ -48,6 +48,7 @@ namespace Game {
         s_nameToBlockId["minecraft:gravel"] = BlockID::Gravel;
         s_nameToBlockId["minecraft:mycelium"] = BlockID::Mycelium;
         s_nameToBlockId["minecraft:deepslate"] = BlockID::Deepslate;
+        s_nameToBlockId["minecraft:lava"] = BlockID::Lava;
 
         // Add common block variants
         s_nameToBlockId["minecraft:grass"] = BlockID::Grass; // Legacy name
