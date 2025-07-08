@@ -47,6 +47,7 @@ namespace Game {
         s_nameToBlockId["minecraft:diamond_ore"] = BlockID::DiamondOre;
         s_nameToBlockId["minecraft:gravel"] = BlockID::Gravel;
         s_nameToBlockId["minecraft:mycelium"] = BlockID::Mycelium;
+        s_nameToBlockId["minecraft:deepslate"] = BlockID::Deepslate;
 
         // Add common block variants
         s_nameToBlockId["minecraft:grass"] = BlockID::Grass; // Legacy name

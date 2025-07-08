@@ -35,7 +35,7 @@ namespace Game {
         DiamondOre   = 24,
         Gravel       = 25,
         Mycelium     = 26,
-        // … expand later if needed
+        Deepslate    = 27,
         Count // Always keep this as the last entry.
     };
 

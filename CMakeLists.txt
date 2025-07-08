@@ -96,7 +96,7 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
-# ── NEW: Define world parsing sources for region file dumper ──────────────
+# ── FIXED: Define world parsing sources for region file dumper AND main executable ──────────────
 set(WORLD_SOURCES
         src/engine/world/RegionFile.cpp
         src/engine/world/RegionFileCache.cpp
@@ -125,7 +125,7 @@ if(APPLE)
             src/engine/world/WorldManager.cpp
             src/engine/world/SectionDataUnpacker.cpp
             src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/world/RegionDumper.cpp
+            ${WORLD_SOURCES}  # FIXED: Include world parsing sources in main executable
             src/engine/Physics/RayCast.cpp
             src/game/WorldAccess.cpp
             src/game/Inventory.cpp
@@ -150,6 +150,7 @@ else()
             src/render/mesh/Mesher.cpp
             src/engine/world/ChunkProvider.cpp
             src/engine/world/WorldManager.cpp
+            ${WORLD_SOURCES}  # FIXED: Include world parsing sources in main executable
             src/engine/Physics/RayCast.cpp
             src/engine/Physics/RayCast.hpp
             src/game/WorldAccess.cpp
@@ -172,8 +173,6 @@ else()
             src/engine/world/SectionDataUnpacker.hpp
             src/engine/world/MinecraftChunkLoader.cpp
             src/engine/world/MinecraftChunkLoader.hpp
-            src/engine/world/RegionDumper.cpp
-            src/engine/world/RegionDumper.hpp
     )
 endif()
 
