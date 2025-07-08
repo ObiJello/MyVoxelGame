@@ -252,6 +252,18 @@ namespace PlatformMain {
         Render::RenderLayeredScene(camera, blockShader, proj, view, frustum, metrics);
     }
 
+    // Legacy function to enqueue mesh data from background threads
+    void EnqueueMeshUpload(Game::MeshData* meshData) {
+        if (!meshData) {
+            Log::Warning("EnqueueMeshUpload called with null meshData");
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
+        g_legacyMeshUploadQueue.push(meshData);
+        // Note: Queue now owns the meshData pointer
+    }
+
     void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
         const auto& hit = playerController.GetCurrentHit();
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
@@ -285,7 +297,9 @@ namespace PlatformMain {
 
         // Set up mesh upload callback for the mesher
         // This allows background meshing threads to queue mesh data for main thread upload
-        Game::SetMeshUploadCallback(EnqueueMeshUpload);
+        Game::SetMeshUploadCallback([](Game::MeshData* data) {
+            EnqueueMeshUpload(data);
+        });
 
         // NEW: Layered mesh upload callback for enhanced rendering
         Game::SetLayeredMeshUploadCallback(EnqueueLayeredMeshUpload);
@@ -870,19 +884,9 @@ namespace PlatformMain {
                 // Clean up chunk meshes
                 size_t meshCount = Render::g_chunkMeshes.size();
                 for (auto& cm : Render::g_chunkMeshes) {
-                    if (cm.vao != 0) {
-                        glDeleteVertexArrays(1, &cm.vao);
-                        cm.vao = 0;
-                    }
-                    if (cm.vbo != 0) {
-                        glDeleteBuffers(1, &cm.vbo);
-                        cm.vbo = 0;
-                    }
-                    if (cm.ebo != 0) {
-                        glDeleteBuffers(1, &cm.ebo);
-                        cm.ebo = 0;
-                    }
+                    cm.Cleanup(); // Use the proper cleanup method
                 }
+                Render::g_chunkMeshes.clear();
                 Render::g_chunkMeshes.clear();
                 Log::Info("Cleaned up %zu chunk meshes", meshCount);
 

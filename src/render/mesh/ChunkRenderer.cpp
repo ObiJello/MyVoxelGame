@@ -4,10 +4,104 @@
 #include "debug/DebugSystem.hpp"
 #include "gfx/Camera.hpp"
 #include "gfx/Shader.hpp"
+#include "../gfx/Frustum.hpp"
+#include "../../core/Log.hpp"
+#include <chrono>
+#include <algorithm>
 
 namespace Render {
     // Define the global vector
     std::vector<ChunkMesh> g_chunkMeshes;
+
+    // Static storage for last render stats
+    static LayeredRenderStats s_lastRenderStats;
+
+    LayeredRenderStats GetLastRenderStats() {
+        return s_lastRenderStats;
+    }
+
+    bool ValidateLayeredRendering() {
+        int totalChunks = static_cast<int>(g_chunkMeshes.size());
+
+        if (totalChunks == 0) {
+            return true; // No chunks to validate
+        }
+
+        int chunksWithOpaque = 0;
+        int chunksWithCutout = 0;
+        int chunksWithTranslucent = 0;
+
+        for (const auto& chunk : g_chunkMeshes) {
+            if (chunk.opaque.HasGeometry()) {
+                chunksWithOpaque++;
+            }
+            if (chunk.cutout.HasGeometry()) {
+                chunksWithCutout++;
+            }
+            if (chunk.translucent.HasGeometry()) {
+                chunksWithTranslucent++;
+            }
+        }
+
+        // Basic validation - at least some chunks should have opaque geometry
+        return chunksWithOpaque > 0;
+    }
+
+    void RegenerateAllChunksLayered() {
+        Log::Info("Regenerating all chunks with layered meshing...");
+
+        // Clear existing meshes
+        for (auto& chunk : g_chunkMeshes) {
+            chunk.Cleanup();
+        }
+        g_chunkMeshes.clear();
+
+        Log::Info("Cleared existing chunk meshes, world manager will regenerate them");
+    }
+
+    void RenderLayeredScene(const Camera& camera, const Shader& blockShader,
+                           const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
+                           Debug::PerformanceMetrics& metrics) {
+        auto renderStart = std::chrono::high_resolution_clock::now();
+
+        // Bind texture atlas and colormaps
+        if (g_atlasBuilder && g_atlasBuilder->GetAtlasTextureID() != 0) {
+            // Main texture atlas
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, g_atlasBuilder->GetAtlasTextureID());
+            blockShader.SetMat4("uTextureAtlas", glm::mat4(1.0f)); // Set atlas uniform
+
+            // Biome colormaps
+            GLuint grassColormap = g_atlasBuilder->GetGrassColormapID();
+            GLuint foliageColormap = g_atlasBuilder->GetFoliageColormapID();
+
+            if (grassColormap != 0) {
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, grassColormap);
+            }
+
+            if (foliageColormap != 0) {
+                glActiveTexture(GL_TEXTURE2);
+                glBindTexture(GL_TEXTURE_2D, foliageColormap);
+            }
+        }
+
+        // Perform three-layer rendering
+        LayeredRenderStats layeredStats = RenderLayeredChunks(camera, blockShader, proj, view, frustum);
+        s_lastRenderStats = layeredStats;
+
+        // Update performance metrics for the debug system
+        metrics.meshesRenderedThisFrame = layeredStats.opaqueDrawCalls +
+                                        layeredStats.cutoutDrawCalls +
+                                        layeredStats.translucentDrawCalls;
+        metrics.totalVerticesRendered = layeredStats.opaqueVertices +
+                                      layeredStats.cutoutVertices +
+                                      layeredStats.translucentVertices;
+        metrics.totalIndicesRendered = metrics.totalVerticesRendered; // Approximate
+
+        auto renderEnd = std::chrono::high_resolution_clock::now();
+        metrics.renderTime = std::chrono::duration<float, std::milli>(renderEnd - renderStart).count();
+    }
 
      // Sort chunks back-to-front for translucent rendering
     void SortChunksBackToFront(std::vector<ChunkMesh*>& chunks, const glm::vec3& cameraPos) {

@@ -1,4 +1,4 @@
-// File: src/render/mesh/ChunkRenderer.hpp (Enhanced with Three Layers)
+// File: src/render/mesh/ChunkRenderer.hpp
 #pragma once
 
 #include <vector>
@@ -12,6 +12,40 @@
 #include <chrono>
 
 namespace Render {
+
+    // Forward declarations
+    class Camera;
+    class Shader;
+    struct Frustum;
+    namespace Debug { struct PerformanceMetrics; }
+
+    // Rendering statistics for performance monitoring
+    struct LayeredRenderStats {
+        int opaqueDrawCalls = 0;
+        int cutoutDrawCalls = 0;
+        int translucentDrawCalls = 0;
+        size_t opaqueVertices = 0;
+        size_t cutoutVertices = 0;
+        size_t translucentVertices = 0;
+        float sortTime = 0.0f;
+        int totalVisibleChunks = 0;
+    };
+
+    // Enhanced layered rendering functions
+    void RenderLayeredScene(const Camera& camera, const Shader& blockShader,
+                           const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
+                           Debug::PerformanceMetrics& metrics);
+
+    LayeredRenderStats RenderLayeredChunks(const Camera& camera, const Shader& blockShader,
+                                          const glm::mat4& proj, const glm::mat4& view,
+                                          const Frustum& frustum);
+
+    LayeredRenderStats GetLastRenderStats();
+    bool ValidateLayeredRendering();
+    void RegenerateAllChunksLayered();
+
+    // Global atlas builder reference
+    extern std::unique_ptr<AtlasBuilder> g_atlasBuilder;
 
     // Enumeration for different render layers
     enum class RenderLayer {
@@ -306,17 +340,5 @@ namespace Render {
             }
         }
     }
-
-    // Rendering statistics for performance monitoring
-    struct LayeredRenderStats {
-        int opaqueDrawCalls = 0;
-        int cutoutDrawCalls = 0;
-        int translucentDrawCalls = 0;
-        size_t opaqueVertices = 0;
-        size_t cutoutVertices = 0;
-        size_t translucentVertices = 0;
-        float sortTime = 0.0f;
-        int totalVisibleChunks = 0;
-    };
 
 } // namespace Render
