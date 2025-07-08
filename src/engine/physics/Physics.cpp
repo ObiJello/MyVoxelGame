@@ -1,11 +1,12 @@
 // File: src/engine/physics/Physics.cpp
 #include "Physics.hpp"
-#include "../../game/WorldAccess.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
 #include <algorithm>
 #include <cmath>
+
+#include "world/ChunkProvider.hpp"
 
 namespace Game {
 
@@ -38,7 +39,7 @@ namespace Game {
         // FIXED: Only apply gravity if not in noclip mode AND the chunk below player is loaded
         if (!physics.noclip) {
             // Check if the chunk containing the player is loaded before applying gravity
-            bool chunkLoaded = WorldAccess::IsChunkLoadedAt(
+            /*bool chunkLoaded = ChunkProvider::IsChunkLoadedAt(
                 static_cast<int>(std::floor(physics.position.x)),
                 static_cast<int>(std::floor(physics.position.z))
             );
@@ -57,7 +58,7 @@ namespace Game {
                     Log::Debug("Delaying gravity - chunk not loaded at player position (%.1f, %.1f)",
                               physics.position.x, physics.position.z);
                 }
-            }
+            }*/
         }
 
         // Handle movement
@@ -294,17 +295,17 @@ namespace Game {
         int blockZ = static_cast<int>(std::floor(position.z));
 
         // Check if the block at player position is water
-        try {
-            BlockID blockId = WorldAccess::GetBlock(blockX, blockY, blockZ);
+        /*try {
+            BlockID blockId = World::GetBlock(blockX, blockY, blockZ);
             return blockId == BlockID::Water;
         } catch (...) {
             return false;
-        }
+        }*/
     }
 
     bool DefaultBlockCollisionCheck(int x, int y, int z) {
-        try {
-            BlockID blockId = WorldAccess::GetBlock(x, y, z);
+        /*try {
+            BlockID blockId = World::GetBlock(x, y, z);
             if (blockId == BlockID::Air) {
                 return false;
             }
@@ -314,7 +315,7 @@ namespace Game {
         } catch (...) {
             // If we can't access the block, assume it's solid for safety
             return true;
-        }
+        }*/
     }
 
 } // namespace Game

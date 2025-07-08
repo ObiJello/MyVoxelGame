@@ -1,8 +1,6 @@
 // File: src/game/PlayerController.cpp (Updated with Physics)
 #include "PlayerController.hpp"
-#include "WorldAccess.hpp"
 #include "../engine/block/BlockRegistry.hpp"
-#include "../engine/world/WorldManager.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <thread>
@@ -210,7 +208,7 @@ namespace Game {
 
         bool placementSuccessful = false;
         try {
-            placementSuccessful = WorldAccess::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
+            //placementSuccessful = World::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
         } catch (const std::exception& e) {
             Log::Error("Exception during block placement: %s", e.what());
             placementSuccessful = false;
@@ -238,8 +236,7 @@ namespace Game {
 
         BlockID brokenBlock = BlockID::Air;
         try {
-            brokenBlock = WorldAccess::GetBlock(
-                breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+            //brokenBlock = World:GetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception getting block for breaking: %s", e.what());
             isBreaking = false;
@@ -263,8 +260,7 @@ namespace Game {
 
         bool breakingSuccessful = false;
         try {
-            breakingSuccessful = WorldAccess::SetBlock(breakingBlockPos.x, breakingBlockPos.y,
-                                                     breakingBlockPos.z, BlockID::Air);
+            //breakingSuccessful = World::SetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z, BlockID::Air);
         } catch (const std::exception& e) {
             Log::Error("Exception during block breaking: %s", e.what());
             breakingSuccessful = false;
@@ -295,13 +291,13 @@ namespace Game {
     }
 
     bool PlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
-        if (!WorldAccess::IsValidPosition(pos.x, pos.y, pos.z)) {
+        /*if (!World::IsValidPosition(pos.x, pos.y, pos.z)) {
             return false;
-        }
+        }*/
 
         BlockID existing = BlockID::Air;
         try {
-            existing = WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+            //existing = World::GetBlock(pos.x, pos.y, pos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception checking block at placement position: %s", e.what());
             return false;
@@ -348,7 +344,7 @@ namespace Game {
 
     BlockID PlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
         try {
-            return WorldAccess::GetBlock(pos.x, pos.y, pos.z);
+            //return World::GetBlock(pos.x, pos.y, pos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception getting breaking block type: %s", e.what());
             return BlockID::Air;

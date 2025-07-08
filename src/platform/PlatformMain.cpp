@@ -10,16 +10,12 @@
 #include "../engine/block/BlockRegistry.hpp"
 #include "../engine/block/BlockModel.hpp"
 #include "../engine/world/ChunkProvider.hpp"
-#include "../engine/world/WorldManager.hpp"
 #include "../game/PlayerController.hpp"
-#include "../game/WorldAccess.hpp"
 #include "../engine/physics/RayCast.hpp"
 #include "../engine/physics/Physics.hpp"
-#include "../render/mesh/Mesher.hpp"
 
 // Include rendering headers
 #include "../render/gfx/Camera.hpp"
-#include "../render/mesh/ChunkRenderer.hpp"
 #include "../render/gfx/Frustum.hpp"
 #include "../render/gfx/Shader.hpp"
 #include "../render/mesh/BlockHighlight.hpp"
@@ -82,117 +78,6 @@ namespace PlatformMain {
 #endif
     }
 
-    // **FIXED**: Enhanced mesh upload queue for layered rendering
-    static std::queue<Game::LayeredMeshData*> g_layeredMeshUploadQueue;
-    static std::queue<Game::MeshData*> g_legacyMeshUploadQueue;
-    static std::mutex g_meshQueueMutex;
-
-    // **CRITICAL FIX**: Global function to enqueue layered mesh data from background threads
-    void EnqueueLayeredMeshUpload(Game::LayeredMeshData* meshData) {
-        if (!meshData) {
-            Log::Warning("EnqueueLayeredMeshUpload called with null meshData");
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-        g_layeredMeshUploadQueue.push(meshData);
-        // Note: Queue now owns the meshData pointer
-    }
-
-    // Legacy function to enqueue mesh data from background threads
-    void EnqueueMeshUpload(Game::MeshData* meshData) {
-        if (!meshData) {
-            Log::Warning("EnqueueMeshUpload called with null meshData");
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-        g_legacyMeshUploadQueue.push(meshData);
-        // Note: Queue now owns the meshData pointer
-    }
-
-    // Upload mesh data from both queues with proper error handling
-    void UploadMeshData(Debug::PerformanceMetrics& metrics) {
-        auto uploadStartTime = std::chrono::high_resolution_clock::now();
-
-        int uploadedThisFrame = 0;
-        constexpr int MAX_UPLOADS_PER_FRAME = 5; // Limit to prevent frame drops
-
-        try {
-            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-
-            // Process layered mesh uploads (prioritized)
-            while (!g_layeredMeshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
-                Game::LayeredMeshData* layeredMeshData = g_layeredMeshUploadQueue.front();
-                g_layeredMeshUploadQueue.pop();
-
-                if (layeredMeshData) {
-                    try {
-                        // Upload to GPU using the enhanced layered system
-                        Render::UploadLayeredMesh(layeredMeshData);
-                        uploadedThisFrame++;
-
-                        Log::Debug("Uploaded layered mesh: chunk (%d,%d) section %d - "
-                                  "Opaque: %zu, Cutout: %zu, Translucent: %zu vertices",
-                                  layeredMeshData->chunkXZ.x, layeredMeshData->chunkXZ.z,
-                                  layeredMeshData->sectionIndex,
-                                  layeredMeshData->opaqueVertices.size(),
-                                  layeredMeshData->cutoutVertices.size(),
-                                  layeredMeshData->translucentVertices.size());
-                    } catch (const std::exception& e) {
-                        Log::Error("Failed to upload layered mesh data: %s", e.what());
-                        delete layeredMeshData;
-                    } catch (...) {
-                        Log::Error("Failed to upload layered mesh data: unknown exception");
-                        delete layeredMeshData;
-                    }
-                } else {
-                    Log::Warning("Found null layeredMeshData in upload queue");
-                }
-            }
-
-            // Process legacy mesh uploads (for backward compatibility)
-            while (!g_legacyMeshUploadQueue.empty() && uploadedThisFrame < MAX_UPLOADS_PER_FRAME) {
-                Game::MeshData* meshData = g_legacyMeshUploadQueue.front();
-                g_legacyMeshUploadQueue.pop();
-
-                if (meshData) {
-                    try {
-                        // Upload using legacy system (converts to layered internally)
-                        Render::UploadMesh(meshData);
-                        uploadedThisFrame++;
-                    } catch (const std::exception& e) {
-                        Log::Error("Failed to upload legacy mesh data: %s", e.what());
-                        delete meshData;
-                    } catch (...) {
-                        Log::Error("Failed to upload legacy mesh data: unknown exception");
-                        delete meshData;
-                    }
-                } else {
-                    Log::Warning("Found null meshData in legacy upload queue");
-                }
-            }
-        } catch (const std::exception& e) {
-            Log::Error("Error in UploadMeshData: %s", e.what());
-        } catch (...) {
-            Log::Error("Unknown error in UploadMeshData");
-        }
-
-        metrics.meshesUploadedThisFrame = uploadedThisFrame;
-
-        auto uploadEndTime = std::chrono::high_resolution_clock::now();
-        metrics.meshUploadTime = std::chrono::duration<float, std::milli>(uploadEndTime - uploadStartTime).count();
-    }
-
-    // Rendering function with three-layer support
-    void RenderScene(const Render::Camera& camera, const Shader& blockShader,
-                    const glm::mat4& proj, const glm::mat4& view, const Frustum& frustum,
-                    Debug::PerformanceMetrics& metrics) {
-
-        // Use the enhanced layered rendering system
-        Render::RenderLayeredScene(camera, blockShader, proj, view, frustum, metrics);
-    }
-
     void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
         const auto& hit = playerController.GetCurrentHit();
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
@@ -223,16 +108,7 @@ namespace PlatformMain {
             Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
-        // **CRITICAL**: Set up BOTH mesh upload callbacks BEFORE any meshing can happen
-        Game::SetMeshUploadCallback([](Game::MeshData* data) {
-            EnqueueMeshUpload(data);
-        });
-
-        Game::SetLayeredMeshUploadCallback([](Game::LayeredMeshData* data) {
-            EnqueueLayeredMeshUpload(data);
-        });
-
-        Log::Info("✓ Game systems initialized with mesh upload callbacks");
+        Log::Info("✓ Game systems initialized");
     }
 
     // Initialize shaders with proper asset paths
@@ -535,91 +411,6 @@ namespace PlatformMain {
         ImGui::End();
     }
 
-    // debug UI for layered rendering
-    void DrawLayeredRenderingDebug() {
-        if (!ImGui::Begin("Layered Rendering Debug")) {
-            ImGui::End();
-            return;
-        }
-
-        ImGui::Text("=== LAYERED RENDERING SYSTEM ===");
-        ImGui::Separator();
-
-        // Validate layered rendering
-        bool isValid = Render::ValidateLayeredRendering();
-        if (isValid) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Layered Rendering: ACTIVE");
-        } else {
-            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "✗ Layered Rendering: FAILED");
-        }
-
-        // Get statistics
-        auto stats = Render::GetLastRenderStats();
-
-        ImGui::Spacing();
-        ImGui::Text("Render Layer Statistics:");
-        ImGui::Text("  Total Visible Chunks: %d", stats.totalVisibleChunks);
-        ImGui::Text("  Opaque Draw Calls: %d (%zu vertices)", stats.opaqueDrawCalls, stats.opaqueVertices);
-        ImGui::Text("  Cutout Draw Calls: %d (%zu vertices)", stats.cutoutDrawCalls, stats.cutoutVertices);
-        ImGui::Text("  Translucent Draw Calls: %d (%zu vertices)", stats.translucentDrawCalls, stats.translucentVertices);
-
-        if (stats.translucentDrawCalls > 0) {
-            ImGui::Text("  Translucent Sort Time: %.2fms", stats.sortTime);
-        }
-
-        ImGui::Separator();
-        ImGui::Text("Queue Status:");
-
-        int layeredQueueSize = 0;
-        int legacyQueueSize = 0;
-        {
-            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-            layeredQueueSize = static_cast<int>(g_layeredMeshUploadQueue.size());
-            legacyQueueSize = static_cast<int>(g_legacyMeshUploadQueue.size());
-        }
-
-        ImGui::Text("  Layered Mesh Upload Queue: %d", layeredQueueSize);
-        ImGui::Text("  Legacy Mesh Upload Queue: %d", legacyQueueSize);
-
-        ImGui::Spacing();
-        ImGui::Text("Layer Performance:");
-        int totalDrawCalls = stats.opaqueDrawCalls + stats.cutoutDrawCalls + stats.translucentDrawCalls;
-        size_t totalVertices = stats.opaqueVertices + stats.cutoutVertices + stats.translucentVertices;
-
-        if (totalDrawCalls > 0) {
-            float opaquePercent = (stats.opaqueDrawCalls * 100.0f) / totalDrawCalls;
-            float cutoutPercent = (stats.cutoutDrawCalls * 100.0f) / totalDrawCalls;
-            float translucentPercent = (stats.translucentDrawCalls * 100.0f) / totalDrawCalls;
-
-            ImGui::Text("  Draw Call Distribution:");
-            ImGui::Text("    Opaque: %.1f%%", opaquePercent);
-            ImGui::Text("    Cutout: %.1f%%", cutoutPercent);
-            ImGui::Text("    Translucent: %.1f%%", translucentPercent);
-        }
-
-        ImGui::Separator();
-        ImGui::Text("Fluid Rendering:");
-        if (stats.translucentVertices > 0) {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 1.0f, 1.0f), "✓ Fluids detected in translucent layer");
-            ImGui::Text("  Estimated fluid faces: %zu", stats.translucentVertices / 4);
-        } else {
-            ImGui::Text("  No fluid geometry detected");
-        }
-
-        ImGui::Spacing();
-        if (ImGui::Button("Regenerate All Chunks (Layered)")) {
-            Render::RegenerateAllChunksLayered();
-            Log::Info("Regenerated all chunks with layered meshing");
-        }
-
-        if (ImGui::Button("Validate Layered Rendering")) {
-            bool valid = Render::ValidateLayeredRendering();
-            Log::Info("Layered rendering validation: %s", valid ? "PASSED" : "FAILED");
-        }
-
-        ImGui::End();
-    }
-
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
@@ -629,7 +420,7 @@ namespace PlatformMain {
         ProcessWorldArguments(argc, argv);
         InitializeMinecraftSupport();
 
-        // **CRITICAL FIX**: Initialize game systems (including mesh callbacks) BEFORE any chunk loading
+        // **CRITICAL FIX**: Initialize game systems BEFORE any chunk loading
         InitializeGameSystems();
 
         // Initialize GLFW
@@ -732,12 +523,6 @@ namespace PlatformMain {
 
         Log::Info("Entering main render loop");
 
-        // **CRITICAL DEBUG**: Log initial chunk loading status
-        Log::Info("=== INITIAL CHUNK LOADING STATUS ===");
-        Log::Info("ChunkProvider loaded chunks: %zu", Game::ChunkProvider::GetLoadedChunkCount());
-        Log::Info("WorldManager loaded chunks: %zu", Game::WorldManager::GetLoadedChunkCount());
-        Log::Info("Rendered sections: %zu", Render::g_chunkMeshes.size());
-
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
@@ -763,43 +548,6 @@ namespace PlatformMain {
             camera.Update(dt);
             playerController.Update(dt, camera);
 
-            // **CRITICAL**: Update WorldManager - this triggers chunk loading!
-            Game::WorldManager::Update(camera.position);
-
-            // **DEBUG**: Periodically log chunk status
-            static int debugCounter = 0;
-            if (++debugCounter % 300 == 0) { // Every 5 seconds at 60fps
-                size_t chunkProviderCount = Game::ChunkProvider::GetLoadedChunkCount();
-                size_t worldManagerCount = Game::WorldManager::GetLoadedChunkCount();
-                size_t renderedCount = Render::g_chunkMeshes.size();
-
-                Log::Info("=== CHUNK STATUS DEBUG (Frame %d) ===", debugCounter);
-                Log::Info("Camera position: (%.1f, %.1f, %.1f)",
-                         camera.position.x, camera.position.y, camera.position.z);
-                Log::Info("ChunkProvider chunks: %zu", chunkProviderCount);
-                Log::Info("WorldManager chunks: %zu", worldManagerCount);
-                Log::Info("Rendered sections: %zu", renderedCount);
-
-                // Calculate camera chunk position
-                int cameraChunkX = static_cast<int>(std::floor(camera.position.x / Game::Math::CHUNK_SIZE_X));
-                int cameraChunkZ = static_cast<int>(std::floor(camera.position.z / Game::Math::CHUNK_SIZE_Z));
-                Log::Info("Camera chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
-
-                // Check mesh upload queue status
-                int layeredQueueSize = 0;
-                int legacyQueueSize = 0;
-                {
-                    std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-                    layeredQueueSize = static_cast<int>(g_layeredMeshUploadQueue.size());
-                    legacyQueueSize = static_cast<int>(g_legacyMeshUploadQueue.size());
-                }
-                Log::Info("Upload queues - Layered: %d, Legacy: %d", layeredQueueSize, legacyQueueSize);
-
-                if (chunkProviderCount == 0 && worldManagerCount == 0 && renderedCount == 0) {
-                    Log::Warning("⚠ NO CHUNKS LOADED AT ALL - Potential issue with chunk loading system!");
-                }
-            }
-
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
 
@@ -817,12 +565,6 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // Upload mesh data from background threads (both types)
-            UploadMeshData(metrics);
-
-            // Render scene with layered rendering
-            RenderScene(camera, blockShader, proj, view, frustum, metrics);
-
             // Render UI elements
             RenderBlockHighlight(playerController, viewProj);
 
@@ -839,9 +581,6 @@ namespace PlatformMain {
 
             // Render Minecraft world debug UI
             DrawMinecraftWorldDebug();
-
-            // Render layered rendering debug UI
-            DrawLayeredRenderingDebug();
 
             // Finish debug frame
             Debug::DebugSystem::EndFrame();
@@ -871,35 +610,6 @@ namespace PlatformMain {
         // Stop all background threads BEFORE cleaning up OpenGL resources
         Log::Info("Stopping background job system...");
 
-        // Clean up both mesh upload queues with error handling
-        {
-            std::lock_guard<std::mutex> lock(g_meshQueueMutex);
-            int layeredCleanedUp = 0;
-            int legacyCleanedUp = 0;
-
-            while (!g_layeredMeshUploadQueue.empty()) {
-                Game::LayeredMeshData* layeredMeshData = g_layeredMeshUploadQueue.front();
-                g_layeredMeshUploadQueue.pop();
-                if (layeredMeshData) {
-                    delete layeredMeshData;
-                    layeredCleanedUp++;
-                }
-            }
-
-            while (!g_legacyMeshUploadQueue.empty()) {
-                Game::MeshData* meshData = g_legacyMeshUploadQueue.front();
-                g_legacyMeshUploadQueue.pop();
-                if (meshData) {
-                    delete meshData;
-                    legacyCleanedUp++;
-                }
-            }
-
-            if (layeredCleanedUp > 0 || legacyCleanedUp > 0) {
-                Log::Info("Cleaned up %d layered and %d legacy mesh uploads during shutdown",
-                         layeredCleanedUp, legacyCleanedUp);
-            }
-        }
 
         Log::Info("Stopping job system...");
         try {
@@ -916,13 +626,6 @@ namespace PlatformMain {
         try {
             // Make sure we have a valid OpenGL context
             if (glfwGetCurrentContext() == window) {
-                // Clean up chunk meshes
-                size_t meshCount = Render::g_chunkMeshes.size();
-                for (auto& cm : Render::g_chunkMeshes) {
-                    cm.Cleanup(); // Use the proper cleanup method
-                }
-                Render::g_chunkMeshes.clear();
-                Log::Info("Cleaned up %zu chunk meshes", meshCount);
 
                 // Clean up global rendering resources
                 if (Render::g_atlasBuilder) {
@@ -943,8 +646,6 @@ namespace PlatformMain {
         }
 
         Log::Info("Voxel engine shutting down");
-        Log::Info("Final statistics: %zu chunks loaded, %zu sections rendered",
-                 Game::WorldManager::GetLoadedChunkCount(), Render::g_chunkMeshes.size());
 
         // Destroy window and terminate GLFW with error handling
         try {

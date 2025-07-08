@@ -115,23 +115,20 @@ if(APPLE)
             src/core/Log.cpp
             src/core/JobSystem.cpp
             src/render/gfx/Shader.cpp
-            src/render/mesh/ChunkRenderer.cpp
             src/render/mesh/BlockHighlight.cpp
             src/render/debug/Crosshair.cpp
             src/render/atlas/AtlasBuilder.cpp
             src/engine/block/BlockModel.cpp
-            src/render/mesh/Mesher.cpp
             src/engine/world/ChunkProvider.cpp
-            src/engine/world/WorldManager.cpp
             src/engine/world/SectionDataUnpacker.cpp
             src/engine/world/MinecraftChunkLoader.cpp
-            ${WORLD_SOURCES}  # FIXED: Include world parsing sources in main executable
+            src/engine/world/World.cpp
             src/engine/Physics/RayCast.cpp
-            src/game/WorldAccess.cpp
-            src/game/Inventory.cpp
-            src/game/PlayerController.cpp
             src/engine/Physics/Physics.cpp
             src/engine/block/BlockRegistry.cpp
+            ${WORLD_SOURCES}
+            src/game/Inventory.cpp
+            src/game/PlayerController.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -145,16 +142,12 @@ else()
             src/core/Log.cpp
             src/core/JobSystem.cpp
             src/render/gfx/Shader.cpp
-            src/render/mesh/ChunkRenderer.cpp
-            src/engine/block/BlockModel.cpp          # ADDED: Block model JSON loader
-            src/render/mesh/Mesher.cpp
+            src/engine/block/BlockModel.cpp
             src/engine/world/ChunkProvider.cpp
-            src/engine/world/WorldManager.cpp
-            ${WORLD_SOURCES}  # FIXED: Include world parsing sources in main executable
+            src/engine/world/ChunkProvider.hpp
+            ${WORLD_SOURCES}
             src/engine/Physics/RayCast.cpp
             src/engine/Physics/RayCast.hpp
-            src/game/WorldAccess.cpp
-            src/game/WorldAccess.hpp
             src/game/Inventory.cpp
             src/game/Inventory.hpp
             src/game/PlayerController.cpp
@@ -173,6 +166,8 @@ else()
             src/engine/world/SectionDataUnpacker.hpp
             src/engine/world/MinecraftChunkLoader.cpp
             src/engine/world/MinecraftChunkLoader.hpp
+            src/engine/world/World.cpp
+            src/engine/world/World.hpp
     )
 endif()
 
@@ -186,12 +181,13 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/src/core
         ${PROJECT_SOURCE_DIR}/src/render
         ${PROJECT_SOURCE_DIR}/src/game
-        ${PROJECT_SOURCE_DIR}/src/world      # NEW: World parsing directory
+        ${PROJECT_SOURCE_DIR}/src/engine
+        ${PROJECT_SOURCE_DIR}/src/world
         ${PROJECT_SOURCE_DIR}/ext/glfw/include
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/stb_image
-        ${PROJECT_SOURCE_DIR}/ext/zlib           # for zconf.h, zlib.h
+        ${PROJECT_SOURCE_DIR}/ext/zlib
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends

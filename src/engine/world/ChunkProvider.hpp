@@ -3,7 +3,6 @@
 
 #include "../../game/WorldMath.hpp"
 #include "Chunk.hpp"
-#include "../../render/mesh/Mesher.hpp"
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>

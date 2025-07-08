@@ -1,9 +1,7 @@
 // File: src/render/debug/DebugSystem.cpp
 #include "DebugSystem.hpp"
 #include "../core/Log.hpp"
-#include "../engine/world/WorldManager.hpp"
 #include "../engine/block/BlockRegistry.hpp"
-#include "../mesh/ChunkRenderer.hpp"
 #include "Crosshair.hpp"
 #include "../atlas/AtlasBuilder.hpp"
 #include "../core/Config.hpp"
@@ -141,8 +139,8 @@ namespace Debug {
         glm::vec3 camPos = camera.position;
         ImGui::Text("Camera Position: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
         ImGui::Text("Camera Rotation: Yaw=%.1f°, Pitch=%.1f°", camera.yaw, camera.pitch);
-        ImGui::Text("Loaded Chunks: %zu", Game::WorldManager::GetLoadedChunkCount());
-        ImGui::Text("Rendered Sections: %d / %zu", metrics.meshesRenderedThisFrame, Render::g_chunkMeshes.size());
+        //ImGui::Text("Loaded Chunks: %zu", GetLoadedChunkCount());
+        //ImGui::Text("Rendered Sections: %d / %zu", metrics.meshesRenderedThisFrame, g_chunkMeshes.size());
         ImGui::Text("Meshes Uploaded This Frame: %d", metrics.meshesUploadedThisFrame);
         ImGui::Spacing();
 
@@ -151,8 +149,7 @@ namespace Debug {
         ImGui::Separator();
         ImGui::Text("Total Vertices Rendered: %zu", metrics.totalVerticesRendered);
         ImGui::Text("Total Indices Rendered: %zu", metrics.totalIndicesRendered);
-        ImGui::Text("Frustum Culled Sections: %zu",
-                   Render::g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
+        //ImGui::Text("Frustum Culled Sections: %zu", g_chunkMeshes.size() - metrics.meshesRenderedThisFrame);
 
         // Physics information
         ImGui::Spacing();
@@ -245,7 +242,7 @@ namespace Debug {
         if (ImGui::Button("Force Remesh Current Chunk")) {
             int chunkX = static_cast<int>(std::floor(camPos.x / Game::Math::CHUNK_SIZE_X));
             int chunkZ = static_cast<int>(std::floor(camPos.z / Game::Math::CHUNK_SIZE_Z));
-            Game::WorldManager::ForceRemeshChunk({chunkX, chunkZ});
+            //ForceRemeshChunk({chunkX, chunkZ});
             Log::Info("Force remesh requested for chunk (%d, %d)", chunkX, chunkZ);
         }
 
@@ -273,14 +270,14 @@ namespace Debug {
         int cameraChunkX = static_cast<int>(std::floor(camera.position.x / Game::Math::CHUNK_SIZE_X));
         int cameraChunkZ = static_cast<int>(std::floor(camera.position.z / Game::Math::CHUNK_SIZE_Z));
 
-        auto loadedChunks = Game::WorldManager::GetLoadedChunks();
+        //auto loadedChunks = GetLoadedChunks();
         std::unordered_set<uint64_t> loadedChunkSet;
 
-        for (const auto& chunk : loadedChunks) {
+        /*for (const auto& chunk : loadedChunks) {
             uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(chunk.x)) << 32) |
                           static_cast<uint32_t>(chunk.z);
             loadedChunkSet.insert(key);
-        }
+        }*/
 
         const int vizRadius = 12;
         const float circleRadius = 8.0f;

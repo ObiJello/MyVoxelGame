@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.cpp (Updated for Layered Meshing)
+// File: src/engine/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
@@ -52,26 +52,6 @@ namespace Game {
         return nullptr;
     }
 
-    // Forward declarations for enhanced meshing
-    static void LayeredMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
-    static void StandardLayeredMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos);
-
-    // Create neighbor context for inter-chunk meshing
-    static NeighborContext CreateNeighborContext(std::shared_ptr<Chunk> centerChunk, Math::ChunkPos pos) {
-        NeighborContext ctx(centerChunk);
-        ctx.hasAllNeighbors = true;
-
-        for (size_t i = 0; i < 4; ++i) {
-            auto [dx, dz] = NEIGHBOR_OFFSETS[i];
-            ctx.neighbors[i] = GetNeighborChunk(pos, dx, dz);
-            if (!ctx.neighbors[i]) {
-                ctx.hasAllNeighbors = false;
-            }
-        }
-
-        return ctx;
-    }
-
     // Register dependency relationships between chunks
     static void RegisterDependency(uint64_t sourceKey, uint64_t dependentKey) {
         std::unique_lock<std::shared_mutex> lock(s_registryMutex);
@@ -105,138 +85,6 @@ namespace Game {
         }
 
         centerIt->second->neighborCount.store(neighborCount);
-
-        // If we have all neighbors and no pending mesh, trigger layered meshing
-        if (neighborCount == 4 && !centerIt->second->hasPendingMesh.exchange(true)) {
-            auto chunk = centerIt->second->chunk;
-
-            Log::Debug("Triggering layered inter-chunk meshing for chunk (%d, %d) with all 4 neighbors",
-                      pos.x, pos.z);
-
-            // Schedule enhanced layered meshing job
-            JobSystem::g_ThreadPool.Enqueue([chunk, pos]() {
-                LayeredMeshingJob(chunk, pos);
-            });
-        }
-    }
-
-    // ENHANCED: Layered meshing job with full inter-chunk face culling and fluid support
-    static void LayeredMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
-        Log::Debug("Starting layered inter-chunk meshing for chunk (%d, %d)", pos.x, pos.z);
-
-        // Create neighbor context
-        NeighborContext ctx = CreateNeighborContext(chunk, pos);
-
-        if (!ctx.hasAllNeighbors) {
-            Log::Warning("Layered meshing called without all neighbors for chunk (%d, %d)", pos.x, pos.z);
-            // Fall back to standard layered meshing without inter-chunk culling
-            StandardLayeredMeshingJob(chunk, pos);
-            return;
-        }
-
-        int totalMeshJobs = 0;
-
-        // Process each non-empty section with neighbor context using LAYERED meshing
-        for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
-            if (!chunk->sections[s]) {
-                continue; // Skip empty sections
-            }
-
-            // ENHANCED: Allocate LayeredMeshData for this section
-            auto* layeredMeshData = new LayeredMeshData();
-            layeredMeshData->chunkXZ = { pos.x, pos.z };
-            layeredMeshData->sectionIndex = s;
-
-            ChunkSection* sectionPtr = chunk->sections[s].get();
-
-            Log::Debug("Enqueueing layered mesher for chunk (%d, %d) section %d",
-                      pos.x, pos.z, s);
-
-            // ENHANCED: Layered meshing job with neighbor context and fluid support
-            JobSystem::g_ThreadPool.Enqueue([sectionPtr, layeredMeshData, ctx, pos, s]() {
-                try {
-                    Log::Debug("Executing layered mesher for chunk (%d, %d) section %d",
-                              pos.x, pos.z, s);
-
-                    // Call the enhanced layered mesher with neighbor context
-                    LayeredMesherJob(sectionPtr, layeredMeshData, ctx);
-
-                    Log::Debug("Layered mesher completed for chunk (%d, %d) section %d with "
-                              "opaque: %zu verts, cutout: %zu verts, translucent: %zu verts",
-                              pos.x, pos.z, s,
-                              layeredMeshData->opaqueVertices.size(),
-                              layeredMeshData->cutoutVertices.size(),
-                              layeredMeshData->translucentVertices.size());
-
-                } catch (const std::exception& e) {
-                    Log::Error("Layered mesher failed for chunk (%d, %d) section %d: %s",
-                              pos.x, pos.z, s, e.what());
-                    delete layeredMeshData;
-                } catch (...) {
-                    Log::Error("Layered mesher failed for chunk (%d, %d) section %d with unknown exception",
-                              pos.x, pos.z, s);
-                    delete layeredMeshData;
-                }
-            });
-
-            totalMeshJobs++;
-        }
-
-        Log::Info("Layered meshing for chunk (%d, %d) complete → %d layered meshing jobs enqueued",
-                 pos.x, pos.z, totalMeshJobs);
-
-        // Mark mesh as no longer pending
-        {
-            std::shared_lock<std::shared_mutex> lock(s_registryMutex);
-            uint64_t key = MakeChunkKey(pos.x, pos.z);
-            auto it = s_chunkRegistry.find(key);
-            if (it != s_chunkRegistry.end()) {
-                it->second->hasPendingMesh.store(false);
-            }
-        }
-    }
-
-    // ENHANCED: Standard layered meshing fallback for chunks without all neighbors
-    static void StandardLayeredMeshingJob(std::shared_ptr<Chunk> chunk, Math::ChunkPos pos) {
-        Log::Debug("Starting standard layered meshing for chunk (%d, %d)", pos.x, pos.z);
-
-        int meshJobsEnqueued = 0;
-        for (int s = 0; s < Math::SECTIONS_PER_CHUNK; ++s) {
-            if (!chunk->sections[s]) {
-                continue;
-            }
-
-            // ENHANCED: Use LayeredMeshData instead of MeshData
-            auto* layeredMeshData = new LayeredMeshData();
-            layeredMeshData->chunkXZ = { pos.x, pos.z };
-            layeredMeshData->sectionIndex = s;
-
-            ChunkSection* sectionPtr = chunk->sections[s].get();
-
-            JobSystem::g_ThreadPool.Enqueue([chunk, sectionPtr, layeredMeshData, pos, s]() {
-                try {
-                    // Create a neighbor context with just the center chunk
-                    NeighborContext ctx(chunk);
-                    ctx.hasAllNeighbors = false; // Mark that we don't have all neighbors
-
-                    // Use layered meshing even without full neighbor context
-                    LayeredMesherJob(sectionPtr, layeredMeshData, ctx);
-                } catch (const std::exception& e) {
-                    Log::Error("Standard layered mesher failed for chunk (%d, %d) section %d: %s",
-                              pos.x, pos.z, s, e.what());
-                    delete layeredMeshData;
-                } catch (...) {
-                    Log::Error("Standard layered mesher failed for chunk (%d, %d) section %d with unknown exception",
-                              pos.x, pos.z, s);
-                    delete layeredMeshData;
-                }
-            });
-
-            meshJobsEnqueued++;
-        }
-
-        Log::Info("Standard layered meshing for chunk (%d, %d) complete → %d layered meshing jobs enqueued",
-                 pos.x, pos.z, meshJobsEnqueued);
     }
 
     void ChunkProvider::RequestChunk(Math::ChunkPos pos) {

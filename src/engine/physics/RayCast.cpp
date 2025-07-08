@@ -1,6 +1,5 @@
 // File: src/engine/physics/Raycast.cpp
 #include "RayCast.hpp"
-#include "../../game/WorldAccess.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
@@ -151,11 +150,11 @@ namespace Game {
     }
 
     BlockID Raycast::GetBlockAtWorldPos(const glm::vec3& pos) {
-        return WorldAccess::GetBlock(
+        /*World::GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),
             static_cast<int>(std::floor(pos.z))
-        );
+        );*/
     }
 
     bool Raycast::IsBlockSolid(BlockID id) {
