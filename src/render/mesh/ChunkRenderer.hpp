@@ -10,14 +10,12 @@
 #include "../../game/WorldMath.hpp"
 #include "../../core/Config.hpp"
 #include <chrono>
+#include <memory>
+#include "../gfx/Camera.hpp"
+#include "../gfx/Shader.hpp"
+#include "../debug/DebugSystem.hpp"
 
 namespace Render {
-
-    // Forward declarations
-    class Camera;
-    class Shader;
-    struct Frustum;
-    namespace Debug { struct PerformanceMetrics; }
 
     // Rendering statistics for performance monitoring
     struct LayeredRenderStats {

@@ -1,13 +1,12 @@
 // File: src/render/mesh/ChunkRenderer.cpp
 #include "ChunkRenderer.hpp"
 
-#include "debug/DebugSystem.hpp"
-#include "gfx/Camera.hpp"
-#include "gfx/Shader.hpp"
+#include "../gfx/Shader.hpp"
+#include "../gfx/Camera.hpp"
 #include "../gfx/Frustum.hpp"
+#include "../debug/DebugSystem.hpp"
+#include "ChunkRenderer.hpp"
 #include "../../core/Log.hpp"
-#include <chrono>
-#include <algorithm>
 
 namespace Render {
     // Define the global vector
