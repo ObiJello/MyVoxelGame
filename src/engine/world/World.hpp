@@ -1,9 +1,10 @@
-// File: src/engine/world/World.hpp (FIXED - Simulation Focus)
+// File: src/engine/world/World.hpp
 #pragma once
 
 #include "../block/Blocks.hpp"
 #include "../../game/WorldMath.hpp"
 #include "Chunk.hpp"
+#include "IBlockAccess.hpp"
 #include <shared_mutex>
 
 #include "glm/vec3.hpp"
@@ -13,7 +14,7 @@ namespace Game {
     // Forward declarations
     class ChunkProvider;
 
-    class World {
+    class World : public IBlockAccess {
     public:
         World();
         ~World() = default;
@@ -21,12 +22,23 @@ namespace Game {
         // === CORE SIMULATION INTERFACE ===
 
         // Block access methods (primary world interface)
-        BlockID GetBlock(int worldX, int worldY, int worldZ) const;
+        BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
 
         // Batch block operations
         void SetBlocks(const std::vector<std::tuple<int, int, int, BlockID>>& blocks);
         std::vector<BlockID> GetBlocks(const std::vector<std::tuple<int, int, int>>& positions) const;
+
+        // === IBlockAccess IMPLEMENTATION ===
+
+        // Chunk loading state queries
+        bool IsChunkLoaded(int chunkX, int chunkZ) const override;
+        bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
+
+        // Convenience methods for physics and other systems
+        bool IsBlockSolid(int worldX, int worldY, int worldZ) const override;
+        bool IsBlockFluid(int worldX, int worldY, int worldZ) const override;
+        bool IsValidPosition(int worldX, int worldY, int worldZ) const override;
 
         // === COORDINATE UTILITIES ===
 
@@ -43,10 +55,6 @@ namespace Game {
 
         // === SIMULATION QUERIES ===
 
-        // Check if specific chunks are loaded (read-only)
-        bool IsChunkLoaded(int chunkX, int chunkZ) const;
-        bool IsPositionLoaded(int worldX, int worldY, int worldZ) const;
-
         // Get loaded chunk count for statistics
         size_t GetLoadedChunkCount() const;
 
@@ -59,10 +67,8 @@ namespace Game {
         int GetLightLevel(int worldX, int worldY, int worldZ) const;
         void UpdateLighting(int worldX, int worldY, int worldZ);
 
-        // Physics queries
-        bool IsBlockSolid(int worldX, int worldY, int worldZ) const;
+        // Physics queries (already declared in IBlockAccess, but kept for backwards compatibility)
         bool IsBlockTransparent(int worldX, int worldY, int worldZ) const;
-        bool IsBlockFluid(int worldX, int worldY, int worldZ) const;
 
     private:
         mutable std::shared_mutex worldMutex;

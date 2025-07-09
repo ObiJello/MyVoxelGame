@@ -1,4 +1,4 @@
-// File: src/engine/physics/Physics.hpp
+// File: src/engine/physics/Physics.hpp (UPDATED - Added missing declarations)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -9,6 +9,8 @@ namespace Game {
     // Forward declarations
     class Chunk;
     class ChunkManager;
+    struct IBlockAccess;  // Forward declare the interface
+    enum class BlockID : uint16_t;  // Forward declare BlockID
 
     // AABB structure for collision detection
     struct AABB {
@@ -124,7 +126,11 @@ namespace Game {
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
                        float deltaTime, BlockCollisionFunction blockCollisionCheck);
 
-    // Default block collision checker (uses WorldAccess)
+    // Default block collision checker (uses global block access)
     bool DefaultBlockCollisionCheck(int x, int y, int z);
+
+    // Global block access functions (implemented by World class)
+    void SetGlobalBlockAccess(const IBlockAccess* blockAccess);
+    BlockID GetBlock(int x, int y, int z);
 
 } // namespace Game

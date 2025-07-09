@@ -1,14 +1,18 @@
-// File: src/engine/world/World.cpp (FIXED - Delegates to ChunkProvider)
+// File: src/engine/world/World.cpp (UPDATED - IBlockAccess Implementation)
 #include "World.hpp"
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
-#include "block/BlockRegistry.hpp"
+#include "../block/BlockRegistry.hpp"
+#include "../physics/Physics.hpp"
 
 namespace Game {
 
     World::World() {
         Log::Info("World simulation system initialized");
+
+        // Set this World instance as the global block access for physics
+        SetGlobalBlockAccess(this);
     }
 
     // === CORE SIMULATION INTERFACE ===
@@ -88,6 +92,40 @@ namespace Game {
         return results;
     }
 
+    // === IBlockAccess IMPLEMENTATION ===
+
+    bool World::IsChunkLoaded(int chunkX, int chunkZ) const {
+        return GetChunkDirect(chunkX, chunkZ) != nullptr;
+    }
+
+    bool World::IsPositionLoaded(int worldX, int worldY, int worldZ) const {
+        if (!IsValidPosition(worldX, worldY, worldZ)) {
+            return false;
+        }
+
+        Math::ChunkPos chunkPos = WorldToChunkPos(worldX, worldZ);
+        return IsChunkLoaded(chunkPos.x, chunkPos.z);
+    }
+
+    bool World::IsBlockSolid(int worldX, int worldY, int worldZ) const {
+        BlockID blockId = GetBlock(worldX, worldY, worldZ);
+        if (blockId == BlockID::Air) {
+            return false;
+        }
+
+        const Block& block = BlockRegistry::Get(blockId);
+        return block.opaque;
+    }
+
+    bool World::IsBlockFluid(int worldX, int worldY, int worldZ) const {
+        BlockID blockId = GetBlock(worldX, worldY, worldZ);
+        return blockId == BlockID::Water || blockId == BlockID::Lava;
+    }
+
+    bool World::IsValidPosition(int worldX, int worldY, int worldZ) const {
+        return World::IsValidPosition(worldX, worldY, worldZ); // Call static version
+    }
+
     // === COORDINATE UTILITIES ===
 
     bool World::IsValidPosition(int x, int y, int z) {
@@ -125,19 +163,6 @@ namespace Game {
     }
 
     // === SIMULATION QUERIES ===
-
-    bool World::IsChunkLoaded(int chunkX, int chunkZ) const {
-        return GetChunkDirect(chunkX, chunkZ) != nullptr;
-    }
-
-    bool World::IsPositionLoaded(int worldX, int worldY, int worldZ) const {
-        if (!IsValidPosition(worldX, worldY, worldZ)) {
-            return false;
-        }
-
-        Math::ChunkPos chunkPos = WorldToChunkPos(worldX, worldZ);
-        return IsChunkLoaded(chunkPos.x, chunkPos.z);
-    }
 
     size_t World::GetLoadedChunkCount() const {
         // Delegate to ChunkProvider for this information
@@ -182,23 +207,8 @@ namespace Game {
         // Would propagate light changes through neighbors
     }
 
-    bool World::IsBlockSolid(int worldX, int worldY, int worldZ) const {
-        BlockID blockId = GetBlock(worldX, worldY, worldZ);
-        if (blockId == BlockID::Air) {
-            return false;
-        }
-
-        const Block& block = BlockRegistry::Get(blockId);
-        return block.opaque;
-    }
-
     bool World::IsBlockTransparent(int worldX, int worldY, int worldZ) const {
         return !IsBlockSolid(worldX, worldY, worldZ);
-    }
-
-    bool World::IsBlockFluid(int worldX, int worldY, int worldZ) const {
-        BlockID blockId = GetBlock(worldX, worldY, worldZ);
-        return blockId == BlockID::Water || blockId == BlockID::Lava;
     }
 
     // === INTERNAL CHUNK ACCESS ===

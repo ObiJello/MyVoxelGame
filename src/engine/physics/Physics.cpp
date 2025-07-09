@@ -6,9 +6,19 @@
 #include <algorithm>
 #include <cmath>
 
-#include "world/ChunkProvider.hpp"
+#include "../world/ChunkProvider.hpp"
+#include "../../game/WorldMath.hpp"
+#include "world/IBlockAccess.hpp"
 
 namespace Game {
+
+    // Global block access instance (set by World class)
+    static const IBlockAccess* g_blockAccess = nullptr;
+
+    // Function to set the global block access (called by World)
+    void SetGlobalBlockAccess(const IBlockAccess* blockAccess) {
+        g_blockAccess = blockAccess;
+    }
 
     void UpdatePlayerPhysics(PlayerPhysics& physics,
                             const glm::vec3& movementInput,
@@ -39,10 +49,16 @@ namespace Game {
         // FIXED: Only apply gravity if not in noclip mode AND the chunk below player is loaded
         if (!physics.noclip) {
             // Check if the chunk containing the player is loaded before applying gravity
-            bool chunkLoaded = ChunkProvider::IsChunkLoadedAt(
-                static_cast<int>(std::floor(physics.position.x)),
-                static_cast<int>(std::floor(physics.position.z))
-            );
+            int chunkX = static_cast<int>(std::floor(physics.position.x / Math::CHUNK_SIZE_X));
+            int chunkZ = static_cast<int>(std::floor(physics.position.z / Math::CHUNK_SIZE_Z));
+
+            bool chunkLoaded = false;
+            if (g_blockAccess) {
+                chunkLoaded = g_blockAccess->IsChunkLoaded(chunkX, chunkZ);
+            } else {
+                // Fallback: check using ChunkProvider directly
+                chunkLoaded = ChunkProvider::IsChunkLoaded({chunkX, chunkZ});
+            }
 
             if (chunkLoaded) {
                 ApplyGravity(physics, deltaTime);
@@ -315,6 +331,16 @@ namespace Game {
         } catch (...) {
             // If we can't access the block, assume it's solid for safety
             return true;
+        }
+    }
+
+    // FIXED: Implement GetBlock function using IBlockAccess
+    BlockID GetBlock(int x, int y, int z) {
+        if (g_blockAccess) {
+            return g_blockAccess->GetBlock(x, y, z);
+        } else {
+            Log::Warning("No block access set for physics system");
+            return BlockID::Air;
         }
     }
 

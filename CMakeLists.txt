@@ -180,6 +180,7 @@ else()
             src/render/mesh/ChunkMeshData.hpp
             src/render/mesh/ChunkRenderer.cpp
             src/render/mesh/ChunkRenderer.hpp
+            src/engine/world/IBlockAccess.hpp
     )
 endif()
 

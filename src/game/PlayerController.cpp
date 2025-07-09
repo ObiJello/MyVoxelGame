@@ -1,6 +1,7 @@
-// File: src/game/PlayerController.cpp (Updated with Physics)
+// File: src/game/PlayerController.cpp
 #include "PlayerController.hpp"
 #include "../engine/block/BlockRegistry.hpp"
+#include "world/World.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <thread>
@@ -15,6 +16,7 @@ namespace Game {
         , breakingBlockPos(0)
         , placeButtonHeld(false)
         , placeCooldownTimer(0.0f)
+        , world(nullptr) // Will be set later
     {
         // Initialize inventory with default blocks
         inventory.InitializeDefaults();
@@ -30,6 +32,11 @@ namespace Game {
         lastPosition = physics.position;
 
         Log::Info("PlayerController initialized with physics system");
+    }
+
+    void PlayerController::SetWorld(World* worldPtr) {
+        world = worldPtr;
+        Log::Debug("PlayerController world reference set");
     }
 
     void PlayerController::Update(float deltaTime, Render::Camera& camera) {
@@ -176,6 +183,11 @@ namespace Game {
     }
 
     void PlayerController::TryPlaceBlock() {
+        if (!world) {
+            Log::Warning("Cannot place block - no world reference");
+            return;
+        }
+
         if (!currentHit.has_value()) {
             return;
         }
@@ -208,7 +220,7 @@ namespace Game {
 
         bool placementSuccessful = false;
         try {
-            //placementSuccessful = World::SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
+            placementSuccessful = world->SetBlock(placePos.x, placePos.y, placePos.z, selectedBlock);
         } catch (const std::exception& e) {
             Log::Error("Exception during block placement: %s", e.what());
             placementSuccessful = false;
@@ -230,13 +242,18 @@ namespace Game {
     }
 
     void PlayerController::FinishBreaking() {
+        if (!world) {
+            Log::Warning("Cannot break block - no world reference");
+            return;
+        }
+
         if (!currentHit.has_value()) {
             return;
         }
 
         BlockID brokenBlock = BlockID::Air;
         try {
-            //brokenBlock = World:GetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+            brokenBlock = world->GetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception getting block for breaking: %s", e.what());
             isBreaking = false;
@@ -260,7 +277,7 @@ namespace Game {
 
         bool breakingSuccessful = false;
         try {
-            //breakingSuccessful = World::SetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z, BlockID::Air);
+            breakingSuccessful = world->SetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z, BlockID::Air);
         } catch (const std::exception& e) {
             Log::Error("Exception during block breaking: %s", e.what());
             breakingSuccessful = false;
@@ -291,13 +308,17 @@ namespace Game {
     }
 
     bool PlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
-        /*if (!World::IsValidPosition(pos.x, pos.y, pos.z)) {
+        if (!world) {
             return false;
-        }*/
+        }
+
+        if (!world->IsValidPosition(pos.x, pos.y, pos.z)) {
+            return false;
+        }
 
         BlockID existing = BlockID::Air;
         try {
-            //existing = World::GetBlock(pos.x, pos.y, pos.z);
+            existing = world->GetBlock(pos.x, pos.y, pos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception checking block at placement position: %s", e.what());
             return false;
@@ -343,8 +364,12 @@ namespace Game {
     }
 
     BlockID PlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
+        if (!world) {
+            return BlockID::Air;
+        }
+
         try {
-            //return World::GetBlock(pos.x, pos.y, pos.z);
+            return world->GetBlock(pos.x, pos.y, pos.z);
         } catch (const std::exception& e) {
             Log::Error("Exception getting breaking block type: %s", e.what());
             return BlockID::Air;

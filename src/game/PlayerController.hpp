@@ -1,4 +1,4 @@
-// File: src/game/PlayerController.hpp (Updated with Physics)
+// File: src/game/PlayerController.hpp
 #pragma once
 
 #include "Inventory.hpp"
@@ -10,6 +10,9 @@
 
 namespace Game {
 
+    // Forward declaration
+    class World;
+
     class PlayerController {
     public:
         // Configuration
@@ -18,6 +21,9 @@ namespace Game {
         static constexpr float PLACE_COOLDOWN = 0.1f; // Cooldown between block placements
 
         PlayerController();
+
+        // Set the world reference (must be called after world is created)
+        void SetWorld(World* world);
 
         // Update the player controller (call once per frame)
         void Update(float deltaTime, Render::Camera& camera);
@@ -76,6 +82,7 @@ namespace Game {
         Inventory inventory;
         PlayerPhysics physics;  // Player physics state
         std::optional<RaycastHit> currentHit;
+        World* world; // Reference to the world for block access
 
         // Movement input state
         glm::vec3 movementInput{0.0f};

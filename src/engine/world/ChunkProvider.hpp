@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.hpp (UPDATED - Added GetChunkIfLoaded)
+// File: src/engine/world/ChunkProvider.hpp
 #pragma once
 
 #include "../../game/WorldMath.hpp"
@@ -47,6 +47,11 @@ namespace Game {
 
         // **NEW**: Check if chunk is loaded and generated
         static bool IsChunkLoaded(Math::ChunkPos pos);
+
+        // **NEW**: Overload for coordinate pair (for physics system compatibility)
+        static bool IsChunkLoaded(int chunkX, int chunkZ) {
+            return IsChunkLoaded({chunkX, chunkZ});
+        }
 
         // **NEW**: Get chunk with optional loading request
         static std::shared_ptr<Chunk> GetChunkWithLoad(Math::ChunkPos pos, bool requestIfMissing = true);

@@ -1,8 +1,9 @@
-// File: src/engine/physics/Raycast.cpp
+// File: src/engine/physics/RayCast.cpp (FIXED)
 #include "RayCast.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
+#include "Physics.hpp"  // Include for GetBlock function
 #include <cmath>
 #include <algorithm>
 
@@ -150,11 +151,12 @@ namespace Game {
     }
 
     BlockID Raycast::GetBlockAtWorldPos(const glm::vec3& pos) {
-        /*World::GetBlock(
+        // Use the global GetBlock function from physics system
+        return GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),
             static_cast<int>(std::floor(pos.z))
-        );*/
+        );
     }
 
     bool Raycast::IsBlockSolid(BlockID id) {

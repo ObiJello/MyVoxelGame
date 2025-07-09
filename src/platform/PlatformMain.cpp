@@ -10,6 +10,7 @@
 #include "../engine/block/BlockRegistry.hpp"
 #include "../engine/block/BlockModel.hpp"
 #include "../engine/world/ChunkProvider.hpp"
+#include "../engine/world/World.hpp"
 #include "../game/PlayerController.hpp"
 #include "../engine/physics/RayCast.hpp"
 #include "../engine/physics/Physics.hpp"
@@ -382,7 +383,12 @@ namespace PlatformMain {
         camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
         camera.physicsControlled = true;
 
+        // Create World instance (this will set up the global block access)
+        Game::World gameWorld;
+
+        // Create PlayerController and link it to the world
         Game::PlayerController playerController;
+        playerController.SetWorld(&gameWorld);
 
         // Initialize debug system
         Debug::DebugSystem::Initialize(window);
