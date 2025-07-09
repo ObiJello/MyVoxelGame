@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.hpp (Updated)
+// File: src/engine/world/ChunkProvider.hpp (UPDATED - Added GetChunkIfLoaded)
 #pragma once
 
 #include "../../game/WorldMath.hpp"
@@ -33,12 +33,31 @@ namespace Game {
 
     class ChunkProvider {
     public:
+        // === CHUNK LIFECYCLE MANAGEMENT ===
+
         // Enqueue a background job to generate/load the chunk at chunk-coordinates (pos.x, pos.z).
         // **ENHANCED**: Now tries to load from Minecraft region files first, falls back to generation
         static void RequestChunk(Math::ChunkPos pos);
 
         // Unload a chunk and trigger remeshing of dependent neighbors
         static void UnloadChunk(Math::ChunkPos pos);
+
+        // **NEW**: Get chunk if already loaded (no loading) - for World class
+        static std::shared_ptr<Chunk> GetChunkIfLoaded(Math::ChunkPos pos);
+
+        // **NEW**: Check if chunk is loaded and generated
+        static bool IsChunkLoaded(Math::ChunkPos pos);
+
+        // **NEW**: Get chunk with optional loading request
+        static std::shared_ptr<Chunk> GetChunkWithLoad(Math::ChunkPos pos, bool requestIfMissing = true);
+
+        // === CHUNK AREA MANAGEMENT ===
+
+        // Update chunks around player position (requests missing chunks)
+        static void UpdateLoadedChunks(Math::ChunkPos playerChunk, int viewDistance);
+
+        // Unload chunks outside view distance
+        static void UnloadDistantChunks(Math::ChunkPos playerChunk, int unloadDistance);
 
         // **NEW**: Minecraft world support functions
         // Set the path to a Minecraft world directory (contains 'region' folder)
@@ -119,6 +138,10 @@ namespace Game {
 
             return stats;
         }
+
+        // **NEW**: Registry access helpers (public for internal use)
+        static uint64_t MakeChunkKey(Math::ChunkPos pos);
+        static Math::ChunkPos KeyToChunkPos(uint64_t key);
 
     private:
         ChunkProvider() = delete; // Static class

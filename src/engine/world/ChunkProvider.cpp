@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.cpp
+// File: src/engine/world/ChunkProvider.cpp (UPDATED - New access methods)
 #include "ChunkProvider.hpp"
 #include "Log.hpp"
 #include <memory>
@@ -27,14 +27,16 @@ namespace Game {
         { 0,  1}  // South
     }};
 
+    // === INTERNAL HELPER FUNCTIONS ===
+
     // Helper function to create a unique key from chunk coordinates
-    static uint64_t MakeChunkKey(int32_t x, int32_t z) {
-        return (static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32) |
-               static_cast<uint32_t>(z);
+    uint64_t ChunkProvider::MakeChunkKey(Math::ChunkPos pos) {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) << 32) |
+               static_cast<uint32_t>(pos.z);
     }
 
     // Helper function to get chunk coordinates from key
-    static Math::ChunkPos KeyToChunkPos(uint64_t key) {
+    Math::ChunkPos ChunkProvider::KeyToChunkPos(uint64_t key) {
         int32_t x = static_cast<int32_t>(key >> 32);
         int32_t z = static_cast<int32_t>(key & 0xFFFFFFFF);
         return {x, z};
@@ -42,7 +44,7 @@ namespace Game {
 
     // Thread-safe neighbor lookup with bounds checking
     static std::shared_ptr<Chunk> GetNeighborChunk(Math::ChunkPos pos, int dx, int dz) {
-        uint64_t key = MakeChunkKey(pos.x + dx, pos.z + dz);
+        uint64_t key = ChunkProvider::MakeChunkKey({pos.x + dx, pos.z + dz});
 
         std::shared_lock<std::shared_mutex> lock(s_registryMutex);
         auto it = s_chunkRegistry.find(key);
@@ -63,7 +65,7 @@ namespace Game {
 
     // Update neighbor counts and trigger remeshing when appropriate
     static void UpdateNeighborCounts(Math::ChunkPos pos) {
-        uint64_t centerKey = MakeChunkKey(pos.x, pos.z);
+        uint64_t centerKey = ChunkProvider::MakeChunkKey(pos);
 
         std::unique_lock<std::shared_mutex> lock(s_registryMutex);
         auto centerIt = s_chunkRegistry.find(centerKey);
@@ -74,7 +76,7 @@ namespace Game {
         // Count available neighbors for center chunk
         int neighborCount = 0;
         for (auto [dx, dz] : NEIGHBOR_OFFSETS) {
-            uint64_t neighborKey = MakeChunkKey(pos.x + dx, pos.z + dz);
+            uint64_t neighborKey = ChunkProvider::MakeChunkKey({pos.x + dx, pos.z + dz});
             auto neighborIt = s_chunkRegistry.find(neighborKey);
             if (neighborIt != s_chunkRegistry.end() && neighborIt->second->isGenerated.load()) {
                 neighborCount++;
@@ -87,6 +89,103 @@ namespace Game {
         centerIt->second->neighborCount.store(neighborCount);
     }
 
+    // === PUBLIC CHUNK ACCESS METHODS ===
+
+    std::shared_ptr<Chunk> ChunkProvider::GetChunkIfLoaded(Math::ChunkPos pos) {
+        uint64_t key = MakeChunkKey(pos);
+
+        std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+        auto it = s_chunkRegistry.find(key);
+
+        if (it != s_chunkRegistry.end() && it->second->isGenerated.load()) {
+            return it->second->chunk;
+        }
+
+        return nullptr; // Chunk not loaded or not generated
+    }
+
+    bool ChunkProvider::IsChunkLoaded(Math::ChunkPos pos) {
+        return GetChunkIfLoaded(pos) != nullptr;
+    }
+
+    std::shared_ptr<Chunk> ChunkProvider::GetChunkWithLoad(Math::ChunkPos pos, bool requestIfMissing) {
+        // First try to get chunk if already loaded
+        auto chunk = GetChunkIfLoaded(pos);
+        if (chunk) {
+            return chunk;
+        }
+
+        // If not loaded and we should request it, do so
+        if (requestIfMissing) {
+            RequestChunk(pos);
+        }
+
+        // Return null for now - caller should check again later
+        // In a more advanced implementation, we might wait for the chunk to load
+        return nullptr;
+    }
+
+    // === CHUNK AREA MANAGEMENT ===
+
+    void ChunkProvider::UpdateLoadedChunks(Math::ChunkPos playerChunk, int viewDistance) {
+        Log::Debug("Updating chunks around player chunk (%d, %d) with view distance %d",
+                  playerChunk.x, playerChunk.z, viewDistance);
+
+        int chunksRequested = 0;
+
+        // Request chunks around player position
+        for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+            for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
+                Math::ChunkPos chunkPos = {playerChunk.x + dx, playerChunk.z + dz};
+
+                // Check if chunk is within circular view distance
+                float distance = std::sqrt(dx * dx + dz * dz);
+                if (distance <= viewDistance) {
+                    if (!IsChunkLoaded(chunkPos)) {
+                        RequestChunk(chunkPos);
+                        chunksRequested++;
+                    }
+                }
+            }
+        }
+
+        if (chunksRequested > 0) {
+            Log::Debug("Requested %d new chunks for loading", chunksRequested);
+        }
+    }
+
+    void ChunkProvider::UnloadDistantChunks(Math::ChunkPos playerChunk, int unloadDistance) {
+        std::vector<Math::ChunkPos> chunksToUnload;
+
+        {
+            std::shared_lock<std::shared_mutex> lock(s_registryMutex);
+
+            for (const auto& [key, chunkData] : s_chunkRegistry) {
+                Math::ChunkPos chunkPos = KeyToChunkPos(key);
+
+                float distance = std::sqrt(
+                    std::pow(chunkPos.x - playerChunk.x, 2) +
+                    std::pow(chunkPos.z - playerChunk.z, 2)
+                );
+
+                if (distance > unloadDistance) {
+                    chunksToUnload.push_back(chunkPos);
+                }
+            }
+        }
+
+        // Unload distant chunks
+        for (const auto& chunkPos : chunksToUnload) {
+            UnloadChunk(chunkPos);
+        }
+
+        if (!chunksToUnload.empty()) {
+            Log::Debug("Unloaded %zu distant chunks", chunksToUnload.size());
+        }
+    }
+
+    // === EXISTING METHODS (unchanged) ===
+
     void ChunkProvider::RequestChunk(Math::ChunkPos pos) {
         // Initialize noise generator once (for fallback generation)
         static bool s_initialized = false;
@@ -96,7 +195,7 @@ namespace Game {
             s_initialized = true;
         }
 
-        uint64_t key = MakeChunkKey(pos.x, pos.z);
+        uint64_t key = MakeChunkKey(pos);
 
         // Check if chunk already exists
         {
@@ -170,7 +269,7 @@ namespace Game {
     }
 
     void ChunkProvider::UnloadChunk(Math::ChunkPos pos) {
-        uint64_t key = MakeChunkKey(pos.x, pos.z);
+        uint64_t key = MakeChunkKey(pos);
 
         std::unique_lock<std::shared_mutex> lock(s_registryMutex);
         auto it = s_chunkRegistry.find(key);

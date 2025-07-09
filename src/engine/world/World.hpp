@@ -1,51 +1,91 @@
-// File: src/engine/world/World.hpp
+// File: src/engine/world/World.hpp (FIXED - Simulation Focus)
 #pragma once
 
 #include "../block/Blocks.hpp"
 #include "../../game/WorldMath.hpp"
-#include "ChunkProvider.hpp"
 #include "Chunk.hpp"
-#include <memory>
 #include <shared_mutex>
 
+#include "glm/vec3.hpp"
+
 namespace Game {
+
+    // Forward declarations
+    class ChunkProvider;
 
     class World {
     public:
         World();
         ~World() = default;
 
-        // Block access methods
+        // === CORE SIMULATION INTERFACE ===
+
+        // Block access methods (primary world interface)
         BlockID GetBlock(int worldX, int worldY, int worldZ) const;
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
 
+        // Batch block operations
+        void SetBlocks(const std::vector<std::tuple<int, int, int, BlockID>>& blocks);
+        std::vector<BlockID> GetBlocks(const std::vector<std::tuple<int, int, int>>& positions) const;
+
+        // === COORDINATE UTILITIES ===
+
         // Validation
         static bool IsValidPosition(int x, int y, int z);
-
-        // Chunk management
-        void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance);
-
-        // Get chunk at chunk coordinates
-        std::shared_ptr<Chunk> GetChunk(int chunkX, int chunkZ) const;
-
-        // Check if chunk is loaded
-        bool IsChunkLoaded(int chunkX, int chunkZ) const;
+        static bool IsValidChunkPosition(int chunkX, int chunkZ);
 
         // World coordinate conversion
         static Math::ChunkPos WorldToChunkPos(int worldX, int worldZ);
         static void WorldToLocal(int worldX, int worldY, int worldZ,
                                 int& chunkX, int& chunkZ,
                                 int& localX, int& localY, int& localZ);
+        static glm::ivec3 WorldToLocalCoords(int worldX, int worldY, int worldZ);
+
+        // === SIMULATION QUERIES ===
+
+        // Check if specific chunks are loaded (read-only)
+        bool IsChunkLoaded(int chunkX, int chunkZ) const;
+        bool IsPositionLoaded(int worldX, int worldY, int worldZ) const;
+
+        // Get loaded chunk count for statistics
+        size_t GetLoadedChunkCount() const;
+
+        // === FUTURE SIMULATION FEATURES ===
+
+        // Tick simulation (entities, redstone, fluids, etc.)
+        void Tick(float deltaTime);
+
+        // Lighting system interface
+        int GetLightLevel(int worldX, int worldY, int worldZ) const;
+        void UpdateLighting(int worldX, int worldY, int worldZ);
+
+        // Physics queries
+        bool IsBlockSolid(int worldX, int worldY, int worldZ) const;
+        bool IsBlockTransparent(int worldX, int worldY, int worldZ) const;
+        bool IsBlockFluid(int worldX, int worldY, int worldZ) const;
 
     private:
         mutable std::shared_mutex worldMutex;
 
-        // Helper methods
-        std::shared_ptr<Chunk> GetOrLoadChunk(int chunkX, int chunkZ) const;
+        // === INTERNAL CHUNK ACCESS ===
 
-        // Chunk coordinate helpers
+        // Get chunk directly (no loading) - thread-safe
+        std::shared_ptr<Chunk> GetChunkDirect(int chunkX, int chunkZ) const;
+
+        // Coordinate helpers
         static int WorldToChunkCoord(int worldCoord);
         static int WorldToLocalCoord(int worldCoord);
+
+        // === FUTURE SIMULATION STATE ===
+
+        // World time and weather
+        int64_t worldTime = 0;
+        float timeOfDay = 0.0f;
+        bool isRaining = false;
+
+        // Performance tracking
+        mutable size_t blockAccessCount = 0;
+        mutable size_t chunkAccessCount = 0;
     };
 
 } // namespace Game
