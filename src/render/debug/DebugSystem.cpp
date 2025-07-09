@@ -8,6 +8,9 @@
 #include <unordered_set>
 #include <cmath>
 
+#include "engine/world/ChunkProvider.hpp"
+#include "engine/world/RegionFileCache.hpp"
+
 
 namespace Debug {
 
@@ -74,6 +77,7 @@ namespace Debug {
                            windowWidth, windowHeight, framebufferWidth, framebufferHeight);
         DrawChunkVisualization(camera, frustum);
         DrawTextureAtlasDebug();
+        DrawMinecraftWorldDebug();
     }
 
     void DebugSystem::DrawMainDebugWindow(
@@ -397,7 +401,6 @@ namespace Debug {
         ImGui::End();
     }
 
-    // Replace the existing DrawTextureAtlasDebug method with this updated version:
     void DebugSystem::DrawTextureAtlasDebug() {
         if (!ImGui::Begin("Texture Atlas Debug")) {
             // Window is collapsed or not visible, skip all content
@@ -542,6 +545,136 @@ namespace Debug {
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Saves the current atlas texture as a PNG file\nfor debugging texture placement and quality");
         }
+    }
+
+     // Debug UI for Minecraft world support
+    void DrawMinecraftWorldDebug() {
+        if (!ImGui::Begin("Minecraft World Support")) {
+            ImGui::End();
+            return;
+        }
+
+        auto stats = Game::ChunkProvider::GetWorldStats();
+
+        ImGui::Text("=== MINECRAFT WORLD STATUS ===");
+        ImGui::Separator();
+
+        if (stats.hasMinecraftWorld) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Minecraft World Loaded");
+            ImGui::Text("World Path: %s", stats.worldPath.c_str());
+
+            // Check if region directory exists
+            std::string regionPath = stats.worldPath + "/region";
+            if (std::filesystem::exists(regionPath)) {
+                // Count region files
+                int regionCount = 0;
+                try {
+                    for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
+                        if (entry.path().extension() == ".mca") {
+                            regionCount++;
+                        }
+                    }
+                } catch (...) {
+                    regionCount = -1;
+                }
+
+                if (regionCount >= 0) {
+                    ImGui::Text("Region Files: %d", regionCount);
+                } else {
+                    ImGui::Text("Region Files: Error counting");
+                }
+            }
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "⚠ No Minecraft World");
+            ImGui::Text("Using procedural generation");
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("Loaded Chunks: %zu", stats.loadedChunks);
+
+        // World loading interface
+        ImGui::Separator();
+        ImGui::Text("=== LOAD MINECRAFT WORLD ===");
+
+        static char worldPathBuffer[512] = "";
+        ImGui::InputText("World Path", worldPathBuffer, sizeof(worldPathBuffer));
+
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) {
+            // In a real implementation, you'd open a file dialog here
+            ImGui::OpenPopup("World Browser");
+        }
+
+        if (ImGui::Button("Load World")) {
+            std::string path = worldPathBuffer;
+            if (!path.empty()) {
+                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                    Log::Info("Successfully loaded world from UI: %s", path.c_str());
+                } else {
+                    Log::Error("Failed to load world from UI: %s", path.c_str());
+                }
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Clear World")) {
+            Game::ChunkProvider::ClearAllChunks();
+            Game::ChunkProvider::SetMinecraftWorldPath("");
+            Log::Info("Cleared world and switched to procedural generation");
+        }
+
+        // Quick load buttons for common locations
+        ImGui::Spacing();
+        ImGui::Text("Quick Load:");
+
+        std::vector<std::pair<std::string, std::string>> quickPaths = {
+            {"Current Dir", "./world"},
+            {"Parent Dir", "../world"},
+            {"Test World", "./saves/TestWorld"}
+        };
+
+        for (const auto& [name, path] : quickPaths) {
+            if (ImGui::Button(name.c_str())) {
+                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                    strncpy(worldPathBuffer, path.c_str(), sizeof(worldPathBuffer) - 1);
+                    worldPathBuffer[sizeof(worldPathBuffer) - 1] = '\0';
+                }
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+
+        // Chunk loading statistics
+        ImGui::Separator();
+        ImGui::Text("=== CHUNK STATISTICS ===");
+
+        // Test specific chunk loading
+        static int testChunkX = 0, testChunkZ = 0;
+        ImGui::InputInt("Test Chunk X", &testChunkX);
+        ImGui::InputInt("Test Chunk Z", &testChunkZ);
+
+        if (ImGui::Button("Test Chunk Availability")) {
+            Game::Math::ChunkPos testPos{testChunkX, testChunkZ};
+            bool available = Game::ChunkProvider::IsMinecraftChunkAvailable(testPos);
+
+            if (available) {
+                Log::Info("Chunk (%d, %d) is available in Minecraft world", testChunkX, testChunkZ);
+            } else {
+                Log::Info("Chunk (%d, %d) not found in Minecraft world (will be generated)", testChunkX, testChunkZ);
+            }
+        }
+
+        // Region file cache statistics
+        ImGui::Spacing();
+        size_t cacheSize = World::RegionFileCache::Instance().GetCacheSize();
+        ImGui::Text("Region File Cache: %zu files", cacheSize);
+
+        if (ImGui::Button("Clear Region Cache")) {
+            World::RegionFileCache::Instance().Clear();
+            Log::Info("Cleared region file cache");
+        }
+
+        ImGui::End();
     }
 
 #else // NDEBUG - Release builds

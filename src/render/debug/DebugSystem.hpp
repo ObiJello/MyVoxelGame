@@ -67,6 +67,8 @@ namespace Debug {
 
         static void DrawAtlasBuilderDebug();
 
+        static void DrawMinecraftWorldDebug();
+
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };
 

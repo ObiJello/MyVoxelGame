@@ -39,7 +39,7 @@ namespace Game {
         // FIXED: Only apply gravity if not in noclip mode AND the chunk below player is loaded
         if (!physics.noclip) {
             // Check if the chunk containing the player is loaded before applying gravity
-            bool chunkLoaded = IsChunkLoadedAt(
+            bool chunkLoaded = ChunkProvider::IsChunkLoadedAt(
                 static_cast<int>(std::floor(physics.position.x)),
                 static_cast<int>(std::floor(physics.position.z))
             );
