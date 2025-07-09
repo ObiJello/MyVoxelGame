@@ -548,7 +548,7 @@ namespace Debug {
     }
 
      // Debug UI for Minecraft world support
-    void DrawMinecraftWorldDebug() {
+    void DebugSystem::DrawMinecraftWorldDebug() {
         if (!ImGui::Begin("Minecraft World Support")) {
             ImGui::End();
             return;
