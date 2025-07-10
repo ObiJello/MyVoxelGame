@@ -42,8 +42,8 @@ namespace Game {
 
         // === COORDINATE UTILITIES ===
 
-        // Validation
-        static bool IsValidPosition(int x, int y, int z);
+        // Validation - renamed for clarity
+        static bool IsValidWorldPosition(int x, int y, int z);
         static bool IsValidChunkPosition(int chunkX, int chunkZ);
 
         // World coordinate conversion

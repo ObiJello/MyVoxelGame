@@ -64,13 +64,14 @@ namespace Game {
     class SectionDataUnpacker {
     public:
         // Main entry point: unpack all sections from a chunk's NBT data
-        static bool UnpackChunkSections(const World::NBTTagPtr& chunkNBT, Chunk& chunk);
+        // FIXED: Use ::World::NBTTagPtr to refer to the global World namespace
+        static bool UnpackChunkSections(const ::World::NBTTagPtr& chunkNBT, Chunk& chunk);
 
         // Unpack a single section from NBT
-        static bool UnpackSection(const World::NBTTagPtr& sectionNBT, Chunk& chunk, int sectionY);
+        static bool UnpackSection(const ::World::NBTTagPtr& sectionNBT, Chunk& chunk, int sectionY);
 
         // Parse palette from section NBT
-        static std::vector<BlockState> ParsePalette(const World::NBTTagPtr& paletteList);
+        static std::vector<BlockState> ParsePalette(const ::World::NBTTagPtr& paletteList);
 
         // Unpack packed block data using palette
         static bool UnpackBlockData(const std::vector<uint64_t>& packedData,

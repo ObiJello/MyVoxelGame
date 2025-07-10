@@ -1,4 +1,4 @@
-// File: src/engine/world/World.cpp (UPDATED - IBlockAccess Implementation)
+// File: src/engine/world/World.cpp
 #include "World.hpp"
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
@@ -123,12 +123,13 @@ namespace Game {
     }
 
     bool World::IsValidPosition(int worldX, int worldY, int worldZ) const {
-        return World::IsValidPosition(worldX, worldY, worldZ); // Call static version
+        // Interface implementation - delegate to static utility
+        return IsValidWorldPosition(worldX, worldY, worldZ);
     }
 
     // === COORDINATE UTILITIES ===
 
-    bool World::IsValidPosition(int x, int y, int z) {
+    bool World::IsValidWorldPosition(int x, int y, int z) {
         return y >= Config::MinY && y <= Config::MaxY;
         // Note: X and Z coordinates are theoretically unlimited in Minecraft
     }
