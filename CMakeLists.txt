@@ -175,6 +175,17 @@ else()
             src/engine/world/ChunkProvider.hpp
             src/engine/world/Chunk.cpp
             src/engine/world/Chunk.hpp
+            src/render/mesh/ChunkRenderer.cpp
+            src/render/mesh/ChunkRenderer.hpp
+            src/render/mesh/MeshManager.cpp
+            src/render/mesh/MeshManager.hpp
+            src/render/mesh/ChunkMeshData.cpp
+            src/render/mesh/ChunkMeshData.hpp
+            src/render/mesh/FluidMeshBuilder.cpp
+            src/render/mesh/FluidMeshBuilder.hpp
+            src/render/mesh/Mesher.cpp
+            src/render/mesh/Mesher.hpp
+            src/render/mesh/SectionMesh.hpp
     )
 endif()
 
