@@ -1,4 +1,4 @@
-// File: src/engine/physics/Physics.cpp
+// File: src/engine/physics/Physics.cpp (UPDATED - New PhysicsContext System)
 #include "Physics.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
@@ -11,25 +11,36 @@
 
 namespace Game {
 
-    // Global block access instance (set by World class)
-    static const IBlockAccess* g_blockAccess = nullptr;
-
-    // Function to set the global block access (called by World)
-    void SetGlobalBlockAccess(const IBlockAccess* blockAccess) {
-        g_blockAccess = blockAccess;
+    // **NEW**: PhysicsContext implementation
+    BlockID PhysicsContext::GetBlock(int x, int y, int z) const {
+        if (!blockAccess) {
+            Log::Warning("No block access available in PhysicsContext");
+            return BlockID::Air;
+        }
+        return blockAccess->GetBlock(x, y, z);
     }
 
+    bool PhysicsContext::IsBlockSolid(int x, int y, int z) const {
+        if (!blockAccess) {
+            return false;
+        }
+        return blockAccess->IsBlockSolid(x, y, z);
+    }
+
+    bool PhysicsContext::IsChunkLoaded(int chunkX, int chunkZ) const {
+        if (!blockAccess) {
+            return false;
+        }
+        return blockAccess->IsChunkLoaded(chunkX, chunkZ);
+    }
+
+    // **NEW**: Main physics update function with PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,
                             const glm::vec3& movementInput,
                             bool jumpPressed,
                             bool sneakPressed,
                             float deltaTime,
-                            BlockCollisionFunction blockCollisionCheck) {
-
-        // Use default collision checker if none provided
-        if (!blockCollisionCheck) {
-            blockCollisionCheck = DefaultBlockCollisionCheck;
-        }
+                            const PhysicsContext& context) {
 
         physics.totalTime += deltaTime;
 
@@ -40,30 +51,23 @@ namespace Game {
         UpdateBaseSpeed(physics);
 
         // Check if player is in water
-        physics.isInWater = IsInWater(physics.position, blockCollisionCheck);
+        physics.isInWater = IsInWater(physics.position, context);
 
         // Handle jumping
-        HandleJump(physics, jumpPressed, blockCollisionCheck);
+        HandleJump(physics, jumpPressed, context);
 
-        // FIXED: Only apply gravity if not in noclip mode AND the chunk below player is loaded
+        // Only apply gravity if not in noclip mode AND the chunk below player is loaded
         if (!physics.noclip) {
             // Check if the chunk containing the player is loaded before applying gravity
             int chunkX = static_cast<int>(std::floor(physics.position.x / Math::CHUNK_SIZE_X));
             int chunkZ = static_cast<int>(std::floor(physics.position.z / Math::CHUNK_SIZE_Z));
 
-            bool chunkLoaded = false;
-            if (g_blockAccess) {
-                chunkLoaded = g_blockAccess->IsChunkLoaded(chunkX, chunkZ);
-            } else {
-                // Fallback: check using ChunkProvider directly
-                chunkLoaded = idk::IsChunkLoaded({chunkX, chunkZ});
-            }
+            bool chunkLoaded = context.IsChunkLoaded(chunkX, chunkZ);
 
             if (chunkLoaded) {
-                ApplyGravity(physics, deltaTime);
+                ApplyGravity(physics, deltaTime, context);
             } else {
                 // Chunk not loaded yet - don't apply gravity to prevent falling through world
-                // Keep vertical velocity at 0 and stay floating until chunk loads
                 physics.velocity.y = 0.0f;
                 physics.isOnGround = false;
 
@@ -77,10 +81,10 @@ namespace Game {
         }
 
         // Handle movement
-        HandleMovement(physics, movementInput, deltaTime, blockCollisionCheck);
+        HandleMovement(physics, movementInput, deltaTime, context);
     }
 
-    void ApplyGravity(PlayerPhysics& physics, float deltaTime) {
+    void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context) {
         // Use different gravity if in water
         float currentGravity = physics.isInWater ? PlayerPhysics::WATER_GRAVITY : PlayerPhysics::GRAVITY;
         physics.velocity.y += currentGravity * deltaTime;
@@ -92,7 +96,7 @@ namespace Game {
         }
     }
 
-    void HandleJump(PlayerPhysics& physics, bool jumpPressed, BlockCollisionFunction blockCollisionCheck) {
+    void HandleJump(PlayerPhysics& physics, bool jumpPressed, const PhysicsContext& context) {
         if (jumpPressed && physics.isOnGround && !physics.noclip) {
             float jumpVelocity = physics.isInWater ? PlayerPhysics::WATER_JUMP_VELOCITY : PlayerPhysics::JUMP_VELOCITY;
             physics.velocity.y = jumpVelocity;
@@ -145,7 +149,7 @@ namespace Game {
     }
 
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
-                       float deltaTime, BlockCollisionFunction blockCollisionCheck) {
+                       float deltaTime, const PhysicsContext& context) {
 
         // Store previous onGround state
         physics.wasOnGround = physics.isOnGround;
@@ -153,7 +157,7 @@ namespace Game {
         // Calculate movement speed
         float speed = physics.isInWater ? PlayerPhysics::WATER_WALK_SPEED : physics.currentSpeed;
 
-        // FIXED: In noclip mode, allow free movement in all directions including vertical
+        // In noclip mode, allow free movement in all directions including vertical
         if (physics.noclip) {
             // Use full 3D movement input (including Y from Space/Shift keys)
             glm::vec3 totalMovement = movementInput * speed;
@@ -176,7 +180,7 @@ namespace Game {
         // Handle vertical movement first to update onGround
         glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
 
-        if (!CheckCollision(newPosition, physics, blockCollisionCheck)) {
+        if (!CheckCollision(newPosition, physics, context)) {
             physics.position.y = newPosition.y;
             if (movement.y != 0.0f) {
                 physics.isOnGround = false; // If we're moving vertically and no collision, we're in the air
@@ -194,7 +198,7 @@ namespace Game {
         // Additional check: If movement.y == 0, we need to check if the player is on the ground
         if (movement.y == 0.0f) {
             glm::vec3 testPosition = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
-            if (CheckCollision(testPosition, physics, blockCollisionCheck)) {
+            if (CheckCollision(testPosition, physics, context)) {
                 physics.isOnGround = true;
             } else {
                 physics.isOnGround = false;
@@ -210,13 +214,13 @@ namespace Game {
         if (physics.isSneaking && physics.isOnGround) {
             // Check X axis movement
             glm::vec3 testPosX = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
-            if (!HasSupportBelow(testPosX, physics, blockCollisionCheck)) {
+            if (!HasSupportBelow(testPosX, physics, context)) {
                 movement.x = 0.0f; // No support below, prevent movement along X
             }
 
             // Check Z axis movement
             glm::vec3 testPosZ = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
-            if (!HasSupportBelow(testPosZ, physics, blockCollisionCheck)) {
+            if (!HasSupportBelow(testPosZ, physics, context)) {
                 movement.z = 0.0f; // No support below, prevent movement along Z
             }
         }
@@ -224,19 +228,19 @@ namespace Game {
         // Handle horizontal movement with collision detection
         // X axis
         newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
-        if (!CheckCollision(newPosition, physics, blockCollisionCheck)) {
+        if (!CheckCollision(newPosition, physics, context)) {
             physics.position.x = newPosition.x;
         }
 
         // Z axis
         newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
-        if (!CheckCollision(newPosition, physics, blockCollisionCheck)) {
+        if (!CheckCollision(newPosition, physics, context)) {
             physics.position.z = newPosition.z;
         }
     }
 
     bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
-                       BlockCollisionFunction blockCollisionCheck) {
+                       const PhysicsContext& context) {
 
         // Create AABB at the new position
         float height = physics.GetCurrentHeight();
@@ -256,7 +260,7 @@ namespace Game {
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
-                    if (blockCollisionCheck(x, y, z)) {
+                    if (context.IsBlockSolid(x, y, z)) {
                         // Block is solid, check AABB intersection
                         AABB blockAABB(
                             glm::vec3(x + 0.5f, y + 0.5f, z + 0.5f),
@@ -275,7 +279,7 @@ namespace Game {
     }
 
     bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
-                        BlockCollisionFunction blockCollisionCheck) {
+                        const PhysicsContext& context) {
 
         float halfWidth = PlayerPhysics::WIDTH / 2.0f;
         float offsets[] = { -halfWidth + PlayerPhysics::OVERHANG_MARGIN,
@@ -293,7 +297,7 @@ namespace Game {
                 int blockY = static_cast<int>(std::floor(cornerPosition.y));
                 int blockZ = static_cast<int>(std::floor(cornerPosition.z));
 
-                if (blockCollisionCheck(blockX, blockY, blockZ)) {
+                if (context.IsBlockSolid(blockX, blockY, blockZ)) {
                     return true;
                 }
             }
@@ -302,44 +306,18 @@ namespace Game {
         return false;
     }
 
-    bool IsInWater(const glm::vec3& position, BlockCollisionFunction blockCollisionCheck) {
-        // For simplicity, we'll check if the player's position contains water
-        // In a more complete implementation, you'd check the specific block type
+    bool IsInWater(const glm::vec3& position, const PhysicsContext& context) {
+        // Check if the player's position contains water
         int blockX = static_cast<int>(std::floor(position.x));
         int blockY = static_cast<int>(std::floor(position.y));
         int blockZ = static_cast<int>(std::floor(position.z));
 
         // Check if the block at player position is water
         try {
-            BlockID blockId = GetBlock(blockX, blockY, blockZ);
+            BlockID blockId = context.GetBlock(blockX, blockY, blockZ);
             return blockId == BlockID::Water;
         } catch (...) {
             return false;
-        }
-    }
-
-    bool DefaultBlockCollisionCheck(int x, int y, int z) {
-        try {
-            BlockID blockId = GetBlock(x, y, z);
-            if (blockId == BlockID::Air) {
-                return false;
-            }
-
-            const Block& block = BlockRegistry::Get(blockId);
-            return block.opaque; // Use opaque flag as solid indicator
-        } catch (...) {
-            // If we can't access the block, assume it's solid for safety
-            return true;
-        }
-    }
-
-    // Implement GetBlock function using IBlockAccess
-    BlockID GetBlock(int x, int y, int z) {
-        if (g_blockAccess) {
-            return g_blockAccess->GetBlock(x, y, z);
-        } else {
-            Log::Warning("No block access set for physics system");
-            return BlockID::Air;
         }
     }
 

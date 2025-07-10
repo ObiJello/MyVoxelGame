@@ -1,4 +1,4 @@
-// File: src/engine/physics/Physics.hpp (UPDATED - Added missing declarations)
+// File: src/engine/physics/Physics.hpp (UPDATED - Remove global dependencies)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -95,42 +95,45 @@ namespace Game {
         }
     };
 
+    // **NEW**: Physics context that holds the world reference
+    struct PhysicsContext {
+        const IBlockAccess* blockAccess = nullptr;
+
+        // Helper methods that use the block access
+        BlockID GetBlock(int x, int y, int z) const;
+        bool IsBlockSolid(int x, int y, int z) const;
+        bool IsChunkLoaded(int chunkX, int chunkZ) const;
+    };
+
     // Function to check if a block is solid for collision
     using BlockCollisionFunction = std::function<bool(int x, int y, int z)>;
 
-    // Main physics update function
+    // **UPDATED**: Main physics update function now takes PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,
                             const glm::vec3& movementInput,
                             bool jumpPressed,
                             bool sneakPressed,
                             float deltaTime,
-                            BlockCollisionFunction blockCollisionCheck = nullptr);
+                            const PhysicsContext& context);
 
-    // Collision detection functions
+    // **UPDATED**: Collision detection functions now take PhysicsContext
     bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
-                       BlockCollisionFunction blockCollisionCheck);
+                       const PhysicsContext& context);
 
     bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
-                        BlockCollisionFunction blockCollisionCheck);
+                        const PhysicsContext& context);
 
-    bool IsInWater(const glm::vec3& position, BlockCollisionFunction blockCollisionCheck);
+    bool IsInWater(const glm::vec3& position, const PhysicsContext& context);
 
-    // Movement helper functions
+    // **UPDATED**: Movement helper functions now take PhysicsContext
     void HandleJump(PlayerPhysics& physics, bool jumpPressed,
-                   BlockCollisionFunction blockCollisionCheck);
+                   const PhysicsContext& context);
 
     void UpdateBaseSpeed(PlayerPhysics& physics);
 
-    void ApplyGravity(PlayerPhysics& physics, float deltaTime);
+    void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context);
 
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
-                       float deltaTime, BlockCollisionFunction blockCollisionCheck);
-
-    // Default block collision checker (uses global block access)
-    bool DefaultBlockCollisionCheck(int x, int y, int z);
-
-    // Global block access functions (implemented by World class)
-    void SetGlobalBlockAccess(const IBlockAccess* blockAccess);
-    BlockID GetBlock(int x, int y, int z);
+                       float deltaTime, const PhysicsContext& context);
 
 } // namespace Game
