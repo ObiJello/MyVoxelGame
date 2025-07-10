@@ -8,7 +8,7 @@ namespace Game {
 
     // Forward declarations
     class Chunk;
-    class ChunkManager;
+    class ChunkProvider;
     struct IBlockAccess;  // Forward declare the interface
     enum class BlockID : uint16_t;  // Forward declare BlockID
 

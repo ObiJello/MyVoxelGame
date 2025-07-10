@@ -169,6 +169,12 @@ else()
             src/render/mesh/ChunkMeshData.cpp
             src/render/mesh/ChunkMeshData.hpp
             src/engine/world/IBlockAccess.hpp
+            src/engine/world/World.cpp
+            src/engine/world/World.hpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/ChunkProvider.hpp
+            src/engine/world/Chunk.cpp
+            src/engine/world/Chunk.hpp
     )
 endif()
 
