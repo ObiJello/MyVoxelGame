@@ -732,6 +732,20 @@ namespace PlatformMain {
             camera.Update(dt);
             playerController.Update(dt, camera);
 
+            // **NEW**: Update chunk loading around player
+            // Get player chunk position
+            glm::vec3 playerPos = playerController.GetPhysics().position;
+            int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
+            int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
+            Game::Math::ChunkPos playerChunk{playerChunkX, playerChunkZ};
+
+            // Load chunks around player (view distance of 8 chunks)
+            static constexpr int VIEW_DISTANCE = 8;
+            static constexpr int UNLOAD_DISTANCE = 12; // Unload beyond 12 chunks
+
+            Game::ChunkProvider::UpdateLoadedChunks(playerChunk, VIEW_DISTANCE);
+            Game::ChunkProvider::UnloadDistantChunks(playerChunk, UNLOAD_DISTANCE);
+
             // **NEW**: Update chunk mesh system
             g_chunkMeshManager->Update(playerController);
 

@@ -102,8 +102,6 @@ namespace Render {
         auto endTime = std::chrono::high_resolution_clock::now();
         stats.renderTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         stats.chunksRendered = validMeshes.size();
-
-        Log::Debug("Rendered %d chunks in %.2fms", stats.chunksRendered, stats.renderTimeMs);
     }
 
     void ChunkRenderer::Render(const std::vector<std::pair<ChunkMesh*, glm::ivec2>>& meshesWithPositions,

@@ -128,8 +128,6 @@ namespace Game {
     // === CHUNK AREA MANAGEMENT ===
 
     void ChunkProvider::UpdateLoadedChunks(Math::ChunkPos playerChunk, int viewDistance) {
-        Log::Debug("Updating chunks around player chunk (%d, %d) with view distance %d",
-                  playerChunk.x, playerChunk.z, viewDistance);
 
         int chunksRequested = 0;
 

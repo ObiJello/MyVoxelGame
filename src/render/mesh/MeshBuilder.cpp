@@ -253,48 +253,55 @@ namespace Render {
         glm::vec3 from = element.from / 16.0f;
         glm::vec3 to = element.to / 16.0f;
 
-        // Generate face vertices based on direction
+        // Generate face vertices with CORRECT counter-clockwise winding order
+        // All vertices are ordered counter-clockwise when viewed from OUTSIDE the face
         switch (faceDir) {
-            case Game::FaceDir::Up: // +Y (top)
-                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::Up: // +Y (top face)
+                // Counter-clockwise from outside (looking down at top)
+                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ)); // 0: back-left
+                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));   // 1: front-left
+                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 2: front-right
+                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 3: back-right
                 break;
 
-            case Game::FaceDir::Down: // -Y (bottom)
-                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::Down: // -Y (bottom face)
+                // Counter-clockwise from outside (looking up at bottom)
+                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));   // 0: front-left
+                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ)); // 1: back-left
+                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 2: back-right
+                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 3: front-right
                 break;
 
-            case Game::FaceDir::North: // -Z (front)
-                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::North: // -Z (front face)
+                // Counter-clockwise from outside (looking at front face)
+                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ)); // 0: bottom-left
+                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 1: top-left
+                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));     // 2: top-right
+                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 3: bottom-right
                 break;
 
-            case Game::FaceDir::South: // +Z (back)
-                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::South: // +Z (back face)
+                // Counter-clockwise from outside (looking at back face)
+                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 0: bottom-right
+                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));       // 1: top-right
+                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 2: top-left
+                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));   // 3: bottom-left
                 break;
 
-            case Game::FaceDir::West: // -X (left)
-                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::West: // -X (left face)
+                // Counter-clockwise from outside (looking at left face)
+                positions.push_back(glm::vec3(from.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));   // 0: bottom-front
+                positions.push_back(glm::vec3(from.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 1: top-front
+                positions.push_back(glm::vec3(from.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 2: top-back
+                positions.push_back(glm::vec3(from.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ)); // 3: bottom-back
                 break;
 
-            case Game::FaceDir::East: // +X (right)
-                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));
-                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));
+            case Game::FaceDir::East: // +X (right face)
+                // Counter-clockwise from outside (looking at right face)
+                positions.push_back(glm::vec3(to.x, from.y, from.z) + glm::vec3(worldX, worldY, worldZ));   // 0: bottom-back
+                positions.push_back(glm::vec3(to.x, to.y, from.z) + glm::vec3(worldX, worldY, worldZ));     // 1: top-back
+                positions.push_back(glm::vec3(to.x, to.y, to.z) + glm::vec3(worldX, worldY, worldZ));       // 2: top-front
+                positions.push_back(glm::vec3(to.x, from.y, to.z) + glm::vec3(worldX, worldY, worldZ));     // 3: bottom-front
                 break;
         }
 
@@ -302,20 +309,22 @@ namespace Render {
     }
 
     std::vector<glm::vec2> MeshBuilder::GenerateFaceUVs(const Game::FaceDef& faceDef,
-                                                       const AtlasUVRect& atlasUV) {
+                                                   const AtlasUVRect& atlasUV) {
         std::vector<glm::vec2> uvs;
         uvs.reserve(4);
 
         // Convert face UV from [0,16] pixel space to [0,1] normalized space
-        glm::vec2 uvMin = faceDef.uv / 16.0f;
+        glm::vec2 uvMin = glm::vec2(faceDef.uv.x, faceDef.uv.y) / 16.0f;
         glm::vec2 uvMax = glm::vec2(faceDef.uv.z, faceDef.uv.w) / 16.0f;
 
-        // Standard quad UV mapping (0,0 is top-left in texture space)
+        // CORRECTED: Standard quad UV mapping that matches vertex order
+        // The vertex order is: bottom-left, top-left, top-right, bottom-right (counter-clockwise)
+        // UV coordinates: (0,0) = top-left of texture, (1,1) = bottom-right of texture
         std::vector<glm::vec2> localUVs = {
-            {uvMin.x, uvMin.y}, // Bottom-left
-            {uvMax.x, uvMin.y}, // Bottom-right
-            {uvMax.x, uvMax.y}, // Top-right
-            {uvMin.x, uvMax.y}  // Top-left
+            {uvMin.x, uvMax.y}, // Vertex 0: bottom-left -> bottom-left of texture
+            {uvMin.x, uvMin.y}, // Vertex 1: top-left -> top-left of texture
+            {uvMax.x, uvMin.y}, // Vertex 2: top-right -> top-right of texture
+            {uvMax.x, uvMax.y}  // Vertex 3: bottom-right -> bottom-right of texture
         };
 
         // Interpolate to atlas coordinates
