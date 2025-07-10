@@ -1,9 +1,10 @@
-// File: src/render/debug/DebugSystem.hpp
+// File: src/render/debug/DebugSystem.hpp (ENHANCED - Added Mesh System Debug)
 #pragma once
 
 #include "../gfx/Camera.hpp"
 #include "../gfx/Frustum.hpp"
 #include "../game/PlayerController.hpp"
+#include "../Vertex.hpp" // **NEW**: Include for vertex size calculations
 
 #ifndef NDEBUG
 #include "imgui.h"
@@ -22,6 +23,13 @@ namespace Debug {
         size_t totalVerticesRendered = 0;
         size_t totalIndicesRendered = 0;
 
+        // **NEW**: Enhanced mesh system metrics
+        int opaqueMeshesRendered = 0;
+        int cutoutMeshesRendered = 0;
+        int translucentMeshesRendered = 0;
+        float meshBuildTimeMs = 0.0f;
+        size_t totalMeshMemoryBytes = 0;
+
         // Rolling averages
         static constexpr int SAMPLE_COUNT = 60;
         float frameTimes[SAMPLE_COUNT] = {0};
@@ -30,6 +38,18 @@ namespace Debug {
         void AddFrameTimeSample(float time);
         float GetAverageFrameTime() const;
         float GetFPS() const;
+
+        // **NEW**: Reset per-frame metrics
+        void ResetFrameMetrics() {
+            meshesUploadedThisFrame = 0;
+            meshesRenderedThisFrame = 0;
+            totalVerticesRendered = 0;
+            totalIndicesRendered = 0;
+            opaqueMeshesRendered = 0;
+            cutoutMeshesRendered = 0;
+            translucentMeshesRendered = 0;
+            meshBuildTimeMs = 0.0f;
+        }
     };
 
     class DebugSystem {
@@ -64,10 +84,11 @@ namespace Debug {
 
         static void DrawChunkVisualization(const Render::Camera& camera, const Frustum& frustum);
         static void DrawTextureAtlasDebug();
-
         static void DrawAtlasBuilderDebug();
-
         static void DrawMinecraftWorldDebug();
+
+        // **NEW**: Enhanced mesh system debug window
+        static void DrawMeshSystemDebug();
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };
