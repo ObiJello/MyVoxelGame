@@ -581,4 +581,12 @@ namespace Game {
         return worldY >= Config::MinY && worldY <= Config::MaxY;
     }
 
+    std::shared_ptr<Chunk> ChunkProvider::GetLoadedChunk(int chunkX, int chunkZ) const {
+        Math::ChunkPos pos{chunkX, chunkZ};
+
+        std::lock_guard<std::mutex> lock(m_chunksMutex);
+        auto it = m_loadedChunks.find(pos);
+        return (it != m_loadedChunks.end()) ? it->second : nullptr;
+    }
+
 } // namespace Game

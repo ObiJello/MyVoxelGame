@@ -283,19 +283,28 @@ namespace Render {
                 return;
             }
 
-            // Get chunk data (this would need to be implemented in World)
-            // For now, create empty mesh as placeholder
+            // **FIXED**: Get chunk data through proper interface
+            const Chunk* chunk = m_world->GetChunkForMeshing(job.chunkPos.x, job.chunkPos.z);
+            if (!chunk) {
+                Log::Debug("Could not get chunk data for meshing (%d, %d)", job.chunkPos.x, job.chunkPos.z);
+                result.success = false;
+                EnqueueResult(std::move(result));
+                return;
+            }
+
+            // Initialize result mesh
             result.mesh = SectionMesh(job.chunkPos, job.sectionY);
 
-            // In full implementation:
-            // auto chunk = m_world->GetChunk(job.chunkPos.x, job.chunkPos.z);
-            // if (chunk) {
-            //     m_mesher.BuildSectionMesh(*chunk, job.sectionY, result.mesh);
-            //     result.success = true;
-            // }
-
-            // For now, mark as successful with empty mesh
+            // **CRITICAL**: Actually build the mesh using your mesher
+            m_mesher.BuildSectionMesh(*chunk, job.sectionY, result.mesh);
             result.success = true;
+
+            // Log mesh stats for debugging
+            size_t totalVerts = result.mesh.GetTotalVertexCount();
+            if (totalVerts > 0) {
+                Log::Debug("Built mesh for section (%d, %d, %d): %zu vertices",
+                          job.chunkPos.x, job.sectionY, job.chunkPos.z, totalVerts);
+            }
 
         } catch (const std::exception& e) {
             Log::Error("Exception in mesh compile task for section (%d, %d, %d): %s",

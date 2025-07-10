@@ -52,6 +52,12 @@ namespace Game {
         const std::string& GetMinecraftWorldPath() const;
         bool HasMinecraftWorld() const;
 
+        // **NEW**: Provide chunk access for mesh system
+        std::shared_ptr<Chunk> GetChunk(int chunkX, int chunkZ) const;
+
+        // **NEW**: Convenience method for mesh manager
+        const Chunk* GetChunkForMeshing(int chunkX, int chunkZ) const;
+
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;

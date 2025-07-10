@@ -59,9 +59,14 @@ namespace Game {
         if (section) {
             section->Set(localX, sectionY, localZ, blockId);
 
-            // Mark section as dirty for mesh rebuilding
+            // **CRITICAL FIX**: Mark section as dirty for mesh rebuilding
             if (onSectionDirty) {
                 onSectionDirty(sectionIndex);
+            }
+
+            // **NEW**: Also notify mesh system directly for immediate rebuilding
+            if (Render::g_meshManager) {
+                Render::g_meshManager->MarkSectionDirty(pos, sectionIndex);
             }
         }
     }

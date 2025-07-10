@@ -92,6 +92,9 @@ namespace Game {
         static int WorldYToSectionIndex(int worldY);
         static int WorldYToChunkLocalY(int worldY);
 
+        // **NEW**: Get already loaded chunk (don't trigger loading)
+        std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
+
     private:
         // Chunk storage
         mutable std::mutex m_chunksMutex;
