@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cmath>
 
-#include "../world/ChunkProvider.hpp"
 #include "../../game/WorldMath.hpp"
 #include "world/IBlockAccess.hpp"
 
@@ -57,7 +56,7 @@ namespace Game {
                 chunkLoaded = g_blockAccess->IsChunkLoaded(chunkX, chunkZ);
             } else {
                 // Fallback: check using ChunkProvider directly
-                chunkLoaded = ChunkProvider::IsChunkLoaded({chunkX, chunkZ});
+                chunkLoaded = idk::IsChunkLoaded({chunkX, chunkZ});
             }
 
             if (chunkLoaded) {

@@ -8,7 +8,6 @@
 #include <unordered_set>
 #include <cmath>
 
-#include "engine/world/ChunkProvider.hpp"
 #include "engine/world/RegionFileCache.hpp"
 
 namespace Debug {
@@ -162,7 +161,7 @@ namespace Debug {
         int cameraChunkZ = static_cast<int>(std::floor(camPos.z / Game::Math::CHUNK_SIZE_Z));
         ImGui::Text("Current Chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
 
-        size_t loadedChunks = Game::ChunkProvider::GetLoadedChunkCount();
+        size_t loadedChunks = Game::idk::GetLoadedChunkCount();
         ImGui::Text("Loaded Chunks: %zu", loadedChunks);
         ImGui::Spacing();
 
@@ -421,7 +420,7 @@ namespace Debug {
                 Game::Math::ChunkPos chunkPos = {cameraChunkX + dx, cameraChunkZ + dz};
 
                 // Check if chunk is loaded
-                bool isGenerated = Game::ChunkProvider::IsChunkLoaded(chunkPos);
+                bool isGenerated = Game::idk::IsChunkLoaded(chunkPos);
 
                 bool inFrustum = false;
                 if (isGenerated) {
@@ -646,7 +645,7 @@ namespace Debug {
             return;
         }
 
-        auto stats = Game::ChunkProvider::GetWorldStats();
+        auto stats = Game::idk::GetWorldStats();
 
         ImGui::Text("=== MINECRAFT WORLD STATUS ===");
         ImGui::Separator();
@@ -700,7 +699,7 @@ namespace Debug {
         if (ImGui::Button("Load World")) {
             std::string path = worldPathBuffer;
             if (!path.empty()) {
-                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                if (Game::idk::LoadMinecraftWorld(path)) {
                     Log::Info("Successfully loaded world from UI: %s", path.c_str());
                 } else {
                     Log::Error("Failed to load world from UI: %s", path.c_str());
@@ -710,8 +709,8 @@ namespace Debug {
 
         ImGui::SameLine();
         if (ImGui::Button("Clear World")) {
-            Game::ChunkProvider::ClearAllChunks();
-            Game::ChunkProvider::SetMinecraftWorldPath("");
+            Game::idk::ClearAllChunks();
+            Game::idk::SetMinecraftWorldPath("");
             Log::Info("Cleared world and switched to procedural generation");
         }
 
@@ -727,7 +726,7 @@ namespace Debug {
 
         for (const auto& [name, path] : quickPaths) {
             if (ImGui::Button(name.c_str())) {
-                if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+                if (Game::idk::LoadMinecraftWorld(path)) {
                     strncpy(worldPathBuffer, path.c_str(), sizeof(worldPathBuffer) - 1);
                     worldPathBuffer[sizeof(worldPathBuffer) - 1] = '\0';
                 }
@@ -747,7 +746,7 @@ namespace Debug {
 
         if (ImGui::Button("Test Chunk Availability")) {
             Game::Math::ChunkPos testPos{testChunkX, testChunkZ};
-            bool available = Game::ChunkProvider::IsMinecraftChunkAvailable(testPos);
+            bool available = Game::idk::IsMinecraftChunkAvailable(testPos);
 
             if (available) {
                 Log::Info("Chunk (%d, %d) is available in Minecraft world", testChunkX, testChunkZ);

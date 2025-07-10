@@ -2,7 +2,6 @@
 #pragma once
 
 #include "../../game/WorldMath.hpp"
-#include "Chunk.hpp"
 #include "RegionFileCache.hpp"
 #include "SectionDataUnpacker.hpp"
 #include "NBTParser.hpp"

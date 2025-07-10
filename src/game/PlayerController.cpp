@@ -1,7 +1,6 @@
 // File: src/game/PlayerController.cpp
 #include "PlayerController.hpp"
 #include "../engine/block/BlockRegistry.hpp"
-#include "world/World.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <thread>

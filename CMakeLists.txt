@@ -116,17 +116,11 @@ if(APPLE)
             src/core/JobSystem.cpp
             src/render/gfx/Shader.cpp
             src/render/mesh/BlockHighlight.cpp
-            src/render/mesh/MeshBuilder.cpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/mesh/ChunkRenderer.cpp
             src/render/debug/Crosshair.cpp
             src/render/atlas/AtlasBuilder.cpp
             src/engine/block/BlockModel.cpp
-            src/engine/world/ChunkProvider.cpp
             src/engine/world/SectionDataUnpacker.cpp
             src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/world/World.cpp
             src/engine/Physics/RayCast.cpp
             src/engine/Physics/Physics.cpp
             src/engine/block/BlockRegistry.cpp
@@ -147,8 +141,6 @@ else()
             src/core/JobSystem.cpp
             src/render/gfx/Shader.cpp
             src/engine/block/BlockModel.cpp
-            src/engine/world/ChunkProvider.cpp
-            src/engine/world/ChunkProvider.hpp
             ${WORLD_SOURCES}
             src/engine/Physics/RayCast.cpp
             src/engine/Physics/RayCast.hpp
@@ -170,16 +162,12 @@ else()
             src/engine/world/SectionDataUnpacker.hpp
             src/engine/world/MinecraftChunkLoader.cpp
             src/engine/world/MinecraftChunkLoader.hpp
-            src/engine/world/World.cpp
-            src/engine/world/World.hpp
             src/render/mesh/MeshBuilder.cpp
             src/render/mesh/MeshBuilder.hpp
             src/render/mesh/FluidMeshBuilder.cpp
             src/render/mesh/FluidMeshBuilder.hpp
             src/render/mesh/ChunkMeshData.cpp
             src/render/mesh/ChunkMeshData.hpp
-            src/render/mesh/ChunkRenderer.cpp
-            src/render/mesh/ChunkRenderer.hpp
             src/engine/world/IBlockAccess.hpp
     )
 endif()
