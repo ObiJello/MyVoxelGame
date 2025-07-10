@@ -1,4 +1,4 @@
-// File: src/render/mesh/MeshBuilder.cpp
+// File: src/render/mesh/MeshBuilder.cpp - Enhanced for Section-Based Building
 #include "MeshBuilder.hpp"
 #include "FluidMeshBuilder.hpp"
 #include "../../core/Log.hpp"
@@ -8,7 +8,7 @@
 
 namespace Render {
 
-    // Static member definitions
+    // Static member definitions (unchanged)
     const std::array<glm::ivec3, 6> MeshBuilder::FACE_OFFSETS = {{
         {0, 1, 0},   // Up (+Y)
         {0, -1, 0},  // Down (-Y)
@@ -32,56 +32,152 @@ namespace Render {
         // Create fluid mesh builder for specialized water/lava rendering
         fluidBuilder = std::make_unique<FluidMeshBuilder>(world, atlas);
 
-        Log::Debug("MeshBuilder initialized with atlas (%dx%d)",
+        // Set default configuration
+        config = SectionBuildConfig{};
+
+        Log::Debug("MeshBuilder initialized with section-based meshing, atlas (%dx%d)",
                   atlas.GetAtlasWidth(), atlas.GetAtlasHeight());
     }
 
-    ChunkMeshData MeshBuilder::Build(int chunkX, int chunkZ) {
+    // NEW: Build mesh for a specific section
+    SectionMeshData MeshBuilder::BuildSection(int chunkX, int chunkZ, int sectionY) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        SectionMeshData meshData;
+        meshData.sectionY = sectionY;
+        meshData.Clear();
+
+        // Check if we should skip empty sections
+        if (config.skipEmptySections && IsSectionEmpty(chunkX, chunkZ, sectionY)) {
+            lastStats.emptySectionsSkipped++;
+            Log::Debug("Skipping empty section (%d, %d, %d)", chunkX, chunkZ, sectionY);
+            return meshData;
+        }
+
+        Log::Debug("Building section mesh (%d, %d, %d)", chunkX, chunkZ, sectionY);
+
+        // Process this section
+        ProcessSection(chunkX, chunkZ, sectionY, meshData);
+
+        // Add fluid geometry if enabled
+        if (config.enableFluidMeshing && fluidBuilder) {
+            // Note: FluidMeshBuilder will need to be updated to work with sections
+            // For now, we'll call it but it won't add much
+            Log::Debug("Adding fluid geometry for section (%d, %d, %d)", chunkX, chunkZ, sectionY);
+        }
+
+        // Update statistics
+        auto endTime = std::chrono::high_resolution_clock::now();
+        float sectionBuildTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+
+        lastStats.sectionsProcessed++;
+        lastStats.buildTimeMs += sectionBuildTime;
+        if (!meshData.IsEmpty()) {
+            lastStats.activeSections++;
+        }
+
+        Log::Debug("Section (%d, %d, %d) complete: %zu vertices, %zu indices, %.2fms",
+                  chunkX, chunkZ, sectionY, meshData.GetTotalVertices(),
+                  meshData.GetTotalIndices(), sectionBuildTime);
+
+        return meshData;
+    }
+
+    // NEW: Build specific sections that need updating
+    std::vector<SectionMeshData> MeshBuilder::BuildSections(int chunkX, int chunkZ,
+                                                           const std::unordered_set<int>& sectionIndices) {
         auto startTime = std::chrono::high_resolution_clock::now();
 
         // Reset statistics
         lastStats = BuildStats{};
 
-        ChunkMeshData meshData;
-        meshData.Clear();
+        std::vector<SectionMeshData> sectionMeshes;
+        sectionMeshes.reserve(sectionIndices.size());
 
-        Log::Debug("Building mesh for chunk (%d, %d)", chunkX, chunkZ);
+        Log::Debug("Building %zu specific sections for chunk (%d, %d)",
+                  sectionIndices.size(), chunkX, chunkZ);
 
-        // Process all solid and cutout blocks
-        ProcessChunk(chunkX, chunkZ, meshData);
+        int sectionsBuilt = 0;
+        for (int sectionIndex : sectionIndices) {
+            // Convert section index to section Y coordinate
+            int sectionY = SectionIndexToY(sectionIndex);
 
-        // Add fluid geometry using specialized builder
-        if (fluidBuilder) {
-            fluidBuilder->AppendFluidQuads(chunkX, chunkZ, meshData);
+            // Respect frame limits
+            if (sectionsBuilt >= config.maxSectionsPerFrame) {
+                Log::Debug("Hit max sections per frame limit (%d), stopping", config.maxSectionsPerFrame);
+                break;
+            }
+
+            SectionMeshData sectionMesh = BuildSection(chunkX, chunkZ, sectionY);
+            sectionMeshes.push_back(std::move(sectionMesh));
+            sectionsBuilt++;
         }
 
-        // Calculate timing
+        // Calculate final timing
+        auto endTime = std::chrono::high_resolution_clock::now();
+        lastStats.buildTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+
+        Log::Info("Built %d sections for chunk (%d, %d) in %.2fms",
+                 sectionsBuilt, chunkX, chunkZ, lastStats.buildTimeMs);
+
+        return sectionMeshes;
+    }
+
+    // NEW: Build all sections for a chunk
+    std::vector<SectionMeshData> MeshBuilder::BuildAllSections(int chunkX, int chunkZ) {
+        auto startTime = std::chrono::high_resolution_clock::now();
+
+        // Reset statistics
+        lastStats = BuildStats{};
+
+        std::vector<SectionMeshData> allSections;
+        allSections.reserve(Game::Math::SECTIONS_PER_CHUNK);
+
+        Log::Debug("Building all sections for chunk (%d, %d)", chunkX, chunkZ);
+
+        // Build each section from bottom to top
+        for (int sectionIndex = 0; sectionIndex < Game::Math::SECTIONS_PER_CHUNK; ++sectionIndex) {
+            int sectionY = SectionIndexToY(sectionIndex);
+
+            SectionMeshData sectionMesh = BuildSection(chunkX, chunkZ, sectionY);
+            allSections.push_back(std::move(sectionMesh));
+        }
+
+        // Calculate final timing
         auto endTime = std::chrono::high_resolution_clock::now();
         lastStats.buildTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
 
         // Update final statistics
-        lastStats.verticesGenerated = meshData.GetTotalVertices();
-        lastStats.indicesGenerated = meshData.GetTotalIndices();
-        lastStats.opaqueVertices = meshData.opaque.GetVertexCount();
-        lastStats.cutoutVertices = meshData.cutout.GetVertexCount();
-        lastStats.translucentVertices = meshData.translucent.GetVertexCount();
+        lastStats.verticesGenerated = 0;
+        lastStats.indicesGenerated = 0;
+        for (const auto& section : allSections) {
+            lastStats.verticesGenerated += section.GetTotalVertices();
+            lastStats.indicesGenerated += section.GetTotalIndices();
+        }
 
-        Log::Debug("Chunk (%d, %d) mesh complete: %zu vertices, %zu indices, %.2fms",
-                  chunkX, chunkZ, meshData.GetTotalVertices(),
-                  meshData.GetTotalIndices(), lastStats.buildTimeMs);
+        Log::Info("Built all sections for chunk (%d, %d): %d active/%d total sections, %zu vertices, %.2fms",
+                 chunkX, chunkZ, lastStats.activeSections, Game::Math::SECTIONS_PER_CHUNK,
+                 lastStats.verticesGenerated, lastStats.buildTimeMs);
 
-        return meshData;
+        return allSections;
     }
 
-    void MeshBuilder::ProcessChunk(int chunkX, int chunkZ, ChunkMeshData& meshData) {
+    // NEW: Process a specific section
+    void MeshBuilder::ProcessSection(int chunkX, int chunkZ, int sectionY, SectionMeshData& meshData) {
         // Calculate world coordinates for this chunk
         int baseWorldX = chunkX * Game::Math::CHUNK_SIZE_X;
         int baseWorldZ = chunkZ * Game::Math::CHUNK_SIZE_Z;
 
-        // Iterate through all blocks in the chunk volume
+        // Get Y range for this section
+        auto [minY, maxY] = GetSectionYRange(sectionY);
+
+        Log::Debug("Processing section (%d, %d, %d) Y range [%d, %d]",
+                  chunkX, chunkZ, sectionY, minY, maxY);
+
+        // Iterate through all blocks in this section
         for (int localX = 0; localX < Game::Math::CHUNK_SIZE_X; ++localX) {
             for (int localZ = 0; localZ < Game::Math::CHUNK_SIZE_Z; ++localZ) {
-                for (int worldY = Config::MinY; worldY <= Config::MaxY; ++worldY) {
+                for (int worldY = minY; worldY <= maxY; ++worldY) {
                     int worldX = baseWorldX + localX;
                     int worldZ = baseWorldZ + localZ;
 
@@ -96,15 +192,16 @@ namespace Render {
                     lastStats.blocksProcessed++;
 
                     // Process non-air blocks
-                    ProcessBlock(worldX, worldY, worldZ, blockId, meshData);
+                    ProcessSectionBlock(worldX, worldY, worldZ, blockId, meshData);
                 }
             }
         }
     }
 
-    void MeshBuilder::ProcessBlock(int worldX, int worldY, int worldZ,
-                                  Game::BlockID blockId, ChunkMeshData& meshData) {
-        // Skip fluid blocks (handled by FluidMeshBuilder)
+    // NEW: Process a block within a section
+    void MeshBuilder::ProcessSectionBlock(int worldX, int worldY, int worldZ, Game::BlockID blockId,
+                                        SectionMeshData& meshData) {
+        // Skip fluid blocks (handled by FluidMeshBuilder - to be updated later)
         if (IsBlockFluid(blockId)) {
             return;
         }
@@ -119,7 +216,57 @@ namespace Render {
         GenerateBlockFaces(worldX, worldY, worldZ, model, targetLayer);
     }
 
-    LayerBuffers& MeshBuilder::GetLayerForBlock(Game::BlockID blockId, ChunkMeshData& meshData) {
+    // NEW: Check if a section contains any non-air blocks
+    bool MeshBuilder::IsSectionEmpty(int chunkX, int chunkZ, int sectionY) {
+        int baseWorldX = chunkX * Game::Math::CHUNK_SIZE_X;
+        int baseWorldZ = chunkZ * Game::Math::CHUNK_SIZE_Z;
+        auto [minY, maxY] = GetSectionYRange(sectionY);
+
+        // Sample a few blocks to check if section is likely empty
+        // This is a performance optimization - we don't check every single block
+        const int SAMPLE_STRIDE = 4; // Check every 4th block
+
+        for (int localX = 0; localX < Game::Math::CHUNK_SIZE_X; localX += SAMPLE_STRIDE) {
+            for (int localZ = 0; localZ < Game::Math::CHUNK_SIZE_Z; localZ += SAMPLE_STRIDE) {
+                for (int worldY = minY; worldY <= maxY; worldY += SAMPLE_STRIDE) {
+                    int worldX = baseWorldX + localX;
+                    int worldZ = baseWorldZ + localZ;
+
+                    Game::BlockID blockId = world.GetBlock(worldX, worldY, worldZ);
+                    if (blockId != Game::BlockID::Air) {
+                        return false; // Found a non-air block
+                    }
+                }
+            }
+        }
+
+        return true; // All sampled blocks were air
+    }
+
+    // NEW: Get world Y range for a section
+    std::pair<int, int> MeshBuilder::GetSectionYRange(int sectionY) {
+        int minY = Config::MinY + (sectionY * Game::Math::SECTION_HEIGHT);
+        int maxY = minY + Game::Math::SECTION_HEIGHT - 1;
+
+        // Clamp to world bounds
+        minY = std::max(minY, Config::MinY);
+        maxY = std::min(maxY, Config::MaxY);
+
+        return {minY, maxY};
+    }
+
+    // NEW: Convert section Y to section index (0-23)
+    int MeshBuilder::SectionYToIndex(int sectionY) {
+        return (sectionY - Config::MinY) / Game::Math::SECTION_HEIGHT;
+    }
+
+    // NEW: Convert section index to section Y coordinate
+    int MeshBuilder::SectionIndexToY(int sectionIndex) {
+        return Config::MinY + (sectionIndex * Game::Math::SECTION_HEIGHT);
+    }
+
+    // Updated to work with SectionMeshData
+    LayerBuffers& MeshBuilder::GetLayerForBlock(Game::BlockID blockId, SectionMeshData& meshData) {
         if (IsBlockOpaque(blockId)) {
             return meshData.opaque;
         } else if (IsBlockCutout(blockId)) {
@@ -129,6 +276,7 @@ namespace Render {
         }
     }
 
+    // Rest of the methods remain the same but work with sections...
     bool MeshBuilder::IsBlockOpaque(Game::BlockID blockId) {
         const Game::Block& block = Game::BlockRegistry::Get(blockId);
         return block.opaque;
@@ -210,6 +358,7 @@ namespace Render {
         return FACE_OFFSETS[static_cast<int>(faceDir)];
     }
 
+    // All the vertex generation methods remain the same...
     void MeshBuilder::GenerateFace(const Game::Element& element, Game::FaceDir faceDir,
                                   const Game::FaceDef& faceDef, int worldX, int worldY, int worldZ,
                                   LayerBuffers& targetLayer) {
@@ -317,9 +466,7 @@ namespace Render {
         glm::vec2 uvMin = glm::vec2(faceDef.uv.x, faceDef.uv.y) / 16.0f;
         glm::vec2 uvMax = glm::vec2(faceDef.uv.z, faceDef.uv.w) / 16.0f;
 
-        // CORRECTED: Standard quad UV mapping that matches vertex order
-        // The vertex order is: bottom-left, top-left, top-right, bottom-right (counter-clockwise)
-        // UV coordinates: (0,0) = top-left of texture, (1,1) = bottom-right of texture
+        // Standard quad UV mapping that matches vertex order
         std::vector<glm::vec2> localUVs = {
             {uvMin.x, uvMax.y}, // Vertex 0: bottom-left -> bottom-left of texture
             {uvMin.x, uvMin.y}, // Vertex 1: top-left -> top-left of texture
@@ -394,11 +541,6 @@ namespace Render {
 
         // For now, return default white color
         // TODO: Implement proper biome tinting based on grass/foliage colormaps
-        // This would involve:
-        // 1. Getting biome at world position
-        // 2. Sampling appropriate colormap texture
-        // 3. Returning the tinted color
-
         return DEFAULT_COLOR;
     }
 

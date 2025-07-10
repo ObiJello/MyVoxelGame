@@ -54,20 +54,32 @@ namespace PlatformMain {
     struct ChunkMeshManager {
         // Global mesh storage - maps chunk positions to GPU mesh data
         std::unordered_map<uint64_t, std::unique_ptr<Render::ChunkMesh>> loadedMeshes;
-        mutable std::mutex meshMutex;  // **FIX**: Make mutex mutable for const methods
+        mutable std::mutex meshMutex;
 
-        // Mesh generation system
+        // Section-based mesh generation system
         std::unique_ptr<Render::MeshBuilder> meshBuilder;
         std::unique_ptr<Render::ChunkRenderer> chunkRenderer;
 
         // Performance tracking
         std::chrono::steady_clock::time_point lastMeshUpdate;
+        int sectionsBuiltThisFrame = 0;
         int meshesBuiltThisFrame = 0;
-        float totalMeshBuildTime = 0.0f;
+        float totalSectionBuildTime = 0.0f;
 
         // Configuration
-        static constexpr int MAX_MESHES_PER_FRAME = 2;  // Limit to prevent frame drops
-        static constexpr float MAX_MESH_BUILD_TIME_MS = 5.0f; // Max time per frame for meshing
+        static constexpr int MAX_SECTIONS_PER_FRAME = 8;    // Limit sections built per frame
+        static constexpr int MAX_CHUNKS_PER_FRAME = 3;      // Limit chunks processed per frame
+        static constexpr float MAX_SECTION_BUILD_TIME_MS = 8.0f; // Max time per frame for section building
+
+        // Section building strategy
+        enum class BuildStrategy {
+            NEAREST_FIRST,     // Build sections closest to player first
+            BOTTOM_UP,         // Build from bedrock upward
+            VISIBLE_FIRST,     // Build visible sections first
+            DIRTY_ONLY         // Only build sections marked as dirty
+        };
+
+        BuildStrategy currentStrategy = BuildStrategy::NEAREST_FIRST;
 
         // Convert chunk coordinates to key
         uint64_t MakeChunkKey(int chunkX, int chunkZ) {
@@ -75,62 +87,268 @@ namespace PlatformMain {
                    static_cast<uint32_t>(chunkZ);
         }
 
-        // Initialize the mesh system
-        bool Initialize(Game::World& world, Render::AtlasBuilder& atlas, Shader& blockShader) {  // **FIX**: Use Shader without namespace (it's in global scope)
-            Log::Info("Initializing Chunk Mesh System...");
+        // Convert key back to coordinates
+        std::pair<int, int> KeyToChunkCoords(uint64_t key) {
+            int chunkX = static_cast<int32_t>(key >> 32);
+            int chunkZ = static_cast<int32_t>(key & 0xFFFFFFFF);
+            return {chunkX, chunkZ};
+        }
 
-            // Create mesh builder
+        // Initialize the enhanced mesh system
+        bool Initialize(Game::World& world, Render::AtlasBuilder& atlas, Shader& blockShader) {
+            Log::Info("Initializing Enhanced Section-Based Mesh System...");
+
+            // Create mesh builder with section support
             meshBuilder = std::make_unique<Render::MeshBuilder>(world, atlas);
             if (!meshBuilder) {
-                Log::Error("Failed to create MeshBuilder");
+                Log::Error("Failed to create section-based MeshBuilder");
                 return false;
             }
 
+            // Configure mesh builder for optimal section building
+            Render::MeshBuilder::SectionBuildConfig config;
+            config.skipEmptySections = true;
+            config.includeNeighborData = true;
+            config.maxSectionsPerFrame = MAX_SECTIONS_PER_FRAME;
+            config.enableFluidMeshing = true;
+            meshBuilder->SetConfig(config);
+
             // Create chunk renderer
             chunkRenderer = std::make_unique<Render::ChunkRenderer>();
-            if (!chunkRenderer->Initialize(blockShader, atlas)) {  // **FIX**: Pass Shader directly
+            if (!chunkRenderer->Initialize(blockShader, atlas)) {
                 Log::Error("Failed to initialize ChunkRenderer");
                 return false;
             }
 
-            // Configure renderer for optimal performance
-            Render::ChunkRenderer::Config config;
-            config.enableDepthTesting = true;
-            config.enableFaceCulling = true;
-            config.enableBlending = true;
-            config.sortTransparentMeshes = true;
-            config.maxRenderDistance = 256.0f;
-            chunkRenderer->SetConfig(config);
+            // Configure renderer for section-based rendering
+            Render::ChunkRenderer::Config rendererConfig;
+            rendererConfig.enableDepthTesting = true;
+            rendererConfig.enableFaceCulling = true;
+            rendererConfig.enableBlending = true;
+            rendererConfig.sortTransparentMeshes = true;
+            rendererConfig.maxRenderDistance = 256.0f;
+            chunkRenderer->SetConfig(rendererConfig);
 
             lastMeshUpdate = std::chrono::steady_clock::now();
 
-            Log::Info("✓ Chunk Mesh System initialized successfully");
+            Log::Info("✓ Enhanced Section-Based Mesh System initialized successfully");
             return true;
         }
 
-        // Update mesh system - called every frame
+        // Update mesh system - processes sections efficiently
         void Update(const Game::PlayerController& playerController) {
             auto now = std::chrono::steady_clock::now();
             float deltaTime = std::chrono::duration<float, std::milli>(now - lastMeshUpdate).count();
             lastMeshUpdate = now;
 
             // Reset frame counters
+            sectionsBuiltThisFrame = 0;
             meshesBuiltThisFrame = 0;
-            totalMeshBuildTime = 0.0f;
+            totalSectionBuildTime = 0.0f;
 
             // Get player chunk position
             glm::vec3 playerPos = playerController.GetPhysics().position;
             int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
             int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
-            // Update meshes around player
-            UpdateMeshesAroundPlayer(playerChunkX, playerChunkZ);
+            Log::Debug("Updating meshes around player chunk (%d, %d)", playerChunkX, playerChunkZ);
+
+            // Process sections around player based on strategy
+            ProcessSectionsAroundPlayer(playerChunkX, playerChunkZ, playerPos);
 
             // Clean up distant meshes
-            CleanupDistantMeshes(playerChunkX, playerChunkZ, 12); // Cleanup beyond 12 chunks
+            CleanupDistantMeshes(playerChunkX, playerChunkZ, 12);
         }
 
-        // Render all visible chunks
+        // Process sections around player using current strategy
+        void ProcessSectionsAroundPlayer(int playerChunkX, int playerChunkZ, const glm::vec3& playerPos) {
+            const int MESH_RADIUS = 8; // Process chunks within 8 chunks of player
+
+            // Get candidate chunks sorted by distance
+            std::vector<std::pair<float, std::pair<int, int>>> candidateChunks;
+
+            for (int dx = -MESH_RADIUS; dx <= MESH_RADIUS; dx++) {
+                for (int dz = -MESH_RADIUS; dz <= MESH_RADIUS; dz++) {
+                    int chunkX = playerChunkX + dx;
+                    int chunkZ = playerChunkZ + dz;
+
+                    // Calculate distance to player
+                    float chunkCenterX = chunkX * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
+                    float chunkCenterZ = chunkZ * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
+                    float distance = glm::length(glm::vec2(chunkCenterX - playerPos.x, chunkCenterZ - playerPos.z));
+
+                    candidateChunks.push_back({distance, {chunkX, chunkZ}});
+                }
+            }
+
+            // Sort by distance (nearest first)
+            std::sort(candidateChunks.begin(), candidateChunks.end());
+
+            // Process chunks up to frame limits
+            int chunksProcessed = 0;
+            for (const auto& [distance, coords] : candidateChunks) {
+                if (chunksProcessed >= MAX_CHUNKS_PER_FRAME ||
+                    sectionsBuiltThisFrame >= MAX_SECTIONS_PER_FRAME ||
+                    totalSectionBuildTime >= MAX_SECTION_BUILD_TIME_MS) {
+                    break;
+                }
+
+                auto [chunkX, chunkZ] = coords;
+                if (ProcessChunkSections(chunkX, chunkZ, playerPos)) {
+                    chunksProcessed++;
+                }
+            }
+
+            if (sectionsBuiltThisFrame > 0) {
+                Log::Debug("Built %d sections across %d chunks in %.2fms",
+                          sectionsBuiltThisFrame, chunksProcessed, totalSectionBuildTime);
+            }
+        }
+
+        // Process sections for a specific chunk
+        bool ProcessChunkSections(int chunkX, int chunkZ, const glm::vec3& playerPos) {
+            // Check if chunk is loaded
+            auto chunk = Game::ChunkProvider::GetChunkIfLoaded({chunkX, chunkZ});
+            if (!chunk) {
+                return false;
+            }
+
+            // Get or create chunk mesh
+            uint64_t key = MakeChunkKey(chunkX, chunkZ);
+            Render::ChunkMesh* chunkMesh = GetOrCreateChunkMesh(key, chunkX, chunkZ);
+            if (!chunkMesh) {
+                return false;
+            }
+
+            // Get sections that need rebuilding
+            auto dirtySections = chunk->GetDirtySections();
+            if (dirtySections.empty()) {
+                return false; // Nothing to do
+            }
+
+            Log::Debug("Processing %zu dirty sections for chunk (%d, %d)",
+                      dirtySections.size(), chunkX, chunkZ);
+
+            // Build sections based on current strategy
+            auto sectionsToProcess = SelectSectionsToProcess(dirtySections, playerPos, chunkX, chunkZ);
+
+            bool processedAnySections = false;
+            for (int sectionIndex : sectionsToProcess) {
+                if (sectionsBuiltThisFrame >= MAX_SECTIONS_PER_FRAME ||
+                    totalSectionBuildTime >= MAX_SECTION_BUILD_TIME_MS) {
+                    break;
+                }
+
+                if (BuildSection(chunkX, chunkZ, sectionIndex, chunkMesh)) {
+                    chunk->ClearSectionDirty(sectionIndex);
+                    chunk->MarkSectionMeshed(sectionIndex);
+                    processedAnySections = true;
+                }
+            }
+
+            return processedAnySections;
+        }
+
+        // Select which sections to process based on strategy
+        std::vector<int> SelectSectionsToProcess(const std::unordered_set<int>& dirtySections,
+                                               const glm::vec3& playerPos, int chunkX, int chunkZ) {
+            std::vector<int> sectionsToProcess(dirtySections.begin(), dirtySections.end());
+
+            switch (currentStrategy) {
+                case BuildStrategy::NEAREST_FIRST: {
+                    // Sort by distance to player
+                    int playerSectionY = Game::Chunk::SectionIndexFromGlobalY(static_cast<int>(playerPos.y));
+                    std::sort(sectionsToProcess.begin(), sectionsToProcess.end(),
+                        [playerSectionY](int a, int b) {
+                            return std::abs(a - playerSectionY) < std::abs(b - playerSectionY);
+                        });
+                    break;
+                }
+
+                case BuildStrategy::BOTTOM_UP:
+                    // Sort from bottom to top
+                    std::sort(sectionsToProcess.begin(), sectionsToProcess.end());
+                    break;
+
+                case BuildStrategy::VISIBLE_FIRST:
+                    // TODO: Implement visibility-based sorting using frustum culling
+                    // For now, fall back to nearest first
+                    int playerSectionY = Game::Chunk::SectionIndexFromGlobalY(static_cast<int>(playerPos.y));
+                    std::sort(sectionsToProcess.begin(), sectionsToProcess.end(),
+                        [playerSectionY](int a, int b) {
+                            return std::abs(a - playerSectionY) < std::abs(b - playerSectionY);
+                        });
+                    break;
+
+                case BuildStrategy::DIRTY_ONLY:
+                    // No sorting, process in arbitrary order
+                    break;
+            }
+
+            return sectionsToProcess;
+        }
+
+        // Build a specific section
+        bool BuildSection(int chunkX, int chunkZ, int sectionIndex, Render::ChunkMesh* chunkMesh) {
+            auto startTime = std::chrono::high_resolution_clock::now();
+
+            // Convert section index to section Y coordinate
+            int sectionY = Config::MinY / Game::Math::SECTION_HEIGHT + sectionIndex;
+
+            Log::Debug("Building section %d (Y=%d) for chunk (%d, %d)",
+                      sectionIndex, sectionY, chunkX, chunkZ);
+
+            try {
+                // Build section mesh data
+                Render::SectionMeshData sectionData = meshBuilder->BuildSection(chunkX, chunkZ, sectionY);
+
+                // Upload to GPU if not empty
+                if (!sectionData.IsEmpty()) {
+                    chunkMesh->UploadSection(sectionIndex, sectionData);
+                    Log::Debug("Uploaded section %d: %zu vertices, %zu indices",
+                              sectionIndex, sectionData.GetTotalVertices(), sectionData.GetTotalIndices());
+                } else {
+                    Log::Debug("Section %d is empty, skipping upload", sectionIndex);
+                }
+
+                // Update statistics
+                auto endTime = std::chrono::high_resolution_clock::now();
+                float buildTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+
+                sectionsBuiltThisFrame++;
+                totalSectionBuildTime += buildTime;
+
+                return true;
+
+            } catch (const std::exception& e) {
+                Log::Error("Exception building section %d for chunk (%d, %d): %s",
+                          sectionIndex, chunkX, chunkZ, e.what());
+                return false;
+            }
+        }
+
+        // Get or create chunk mesh
+        Render::ChunkMesh* GetOrCreateChunkMesh(uint64_t key, int chunkX, int chunkZ) {
+            std::lock_guard<std::mutex> lock(meshMutex);
+
+            auto it = loadedMeshes.find(key);
+            if (it != loadedMeshes.end()) {
+                return it->second.get();
+            }
+
+            // Create new chunk mesh
+            auto chunkMesh = std::make_unique<Render::ChunkMesh>();
+            chunkMesh->chunkX = chunkX;
+            chunkMesh->chunkZ = chunkZ;
+
+            Render::ChunkMesh* result = chunkMesh.get();
+            loadedMeshes[key] = std::move(chunkMesh);
+
+            Log::Debug("Created new chunk mesh for (%d, %d)", chunkX, chunkZ);
+            return result;
+        }
+
+        // Render all visible chunks using section-based rendering
         void Render(const Render::Camera& camera, const Frustum& frustum, const glm::mat4& viewProj) {
             if (!chunkRenderer) {
                 return;
@@ -138,16 +356,14 @@ namespace PlatformMain {
 
             std::lock_guard<std::mutex> lock(meshMutex);
 
-            // Collect visible meshes
+            // Collect visible chunk meshes and their sections
             std::vector<Render::ChunkMesh*> visibleMeshes;
             std::vector<glm::vec3> chunkCenters;
 
-            for (const auto& [key, mesh] : loadedMeshes) {
-                if (!mesh || mesh->IsEmpty()) continue;
+            for (const auto& [key, chunkMesh] : loadedMeshes) {
+                if (!chunkMesh || chunkMesh->IsEmpty()) continue;
 
-                // Extract chunk coordinates from key
-                int chunkX = static_cast<int32_t>(key >> 32);
-                int chunkZ = static_cast<int32_t>(key & 0xFFFFFFFF);
+                auto [chunkX, chunkZ] = KeyToChunkCoords(key);
 
                 // Calculate chunk center
                 glm::vec3 chunkCenter(
@@ -170,144 +386,23 @@ namespace PlatformMain {
                 );
 
                 if (frustum.IsBoxVisible(chunkAABB)) {
-                    visibleMeshes.push_back(mesh.get());
+                    visibleMeshes.push_back(chunkMesh.get());
                     chunkCenters.push_back(chunkCenter);
                 }
             }
 
-            // Render all visible meshes
-            chunkRenderer->Render(visibleMeshes, chunkCenters, camera, viewProj);
-
-            // Update debug statistics
-            auto stats = chunkRenderer->GetStats();
-            Debug::PerformanceMetrics* metrics = nullptr; // TODO: Get metrics from somewhere
-            if (metrics) {
-                metrics->meshesRenderedThisFrame = stats.chunksRendered;
-                metrics->totalVerticesRendered = stats.totalIndices / 3 * 3; // Rough estimate
-                metrics->totalIndicesRendered = stats.totalIndices;
-            }
+            // Render all visible chunks with their sections
+            chunkRenderer->RenderSectionBasedChunks(visibleMeshes, chunkCenters, camera, viewProj);
         }
 
-        // Get mesh statistics
-        struct MeshStats {
-            size_t totalMeshes = 0;
-            size_t totalMemoryBytes = 0;
-            int meshesBuiltThisFrame = 0;
-            float meshBuildTimeMs = 0.0f;
-            size_t opaqueMeshes = 0;
-            size_t cutoutMeshes = 0;
-            size_t translucentMeshes = 0;
-        };
-
-        MeshStats GetStats() const {
-            std::lock_guard<std::mutex> lock(meshMutex);  // **FIX**: Now works with mutable mutex
-
-            MeshStats stats;
-            stats.totalMeshes = loadedMeshes.size();
-            stats.meshesBuiltThisFrame = meshesBuiltThisFrame;
-            stats.meshBuildTimeMs = totalMeshBuildTime;
-
-            for (const auto& [key, mesh] : loadedMeshes) {
-                if (mesh) {
-                    stats.totalMemoryBytes += mesh->GetTotalMemoryUsage();
-                    if (!mesh->opaque.IsEmpty()) stats.opaqueMeshes++;
-                    if (!mesh->cutout.IsEmpty()) stats.cutoutMeshes++;
-                    if (!mesh->translucent.IsEmpty()) stats.translucentMeshes++;
-                }
-            }
-
-            return stats;
-        }
-
-    private:
-        void UpdateMeshesAroundPlayer(int playerChunkX, int playerChunkZ) {
-            const int MESH_RADIUS = 8; // Generate meshes within 8 chunks of player
-
-            // Check chunks around player
-            for (int dx = -MESH_RADIUS; dx <= MESH_RADIUS; dx++) {
-                for (int dz = -MESH_RADIUS; dz <= MESH_RADIUS; dz++) {
-                    int chunkX = playerChunkX + dx;
-                    int chunkZ = playerChunkZ + dz;
-
-                    // Skip if we've already built too many meshes this frame
-                    if (meshesBuiltThisFrame >= MAX_MESHES_PER_FRAME ||
-                        totalMeshBuildTime >= MAX_MESH_BUILD_TIME_MS) {
-                        return;
-                    }
-
-                    // Check if we need to build/update mesh for this chunk
-                    RequestMeshUpdate(chunkX, chunkZ);
-                }
-            }
-        }
-
-        void RequestMeshUpdate(int chunkX, int chunkZ) {
-            uint64_t key = MakeChunkKey(chunkX, chunkZ);
-
-            // Check if chunk is loaded and if we already have a mesh
-            auto chunk = Game::ChunkProvider::GetChunkIfLoaded({chunkX, chunkZ});
-            if (!chunk) {
-                return; // Chunk not loaded yet
-            }
-
-            bool needsRebuild = false;
-
-            {
-                std::lock_guard<std::mutex> lock(meshMutex);
-                auto it = loadedMeshes.find(key);
-                if (it == loadedMeshes.end()) {
-                    needsRebuild = true; // No mesh exists
-                } else {
-                    // TODO: Check if chunk has been modified since last mesh build
-                    // For now, we'll assume mesh is still valid
-                    needsRebuild = false;
-                }
-            }
-
-            if (needsRebuild) {
-                BuildMeshForChunk(chunkX, chunkZ);
-            }
-        }
-
-        void BuildMeshForChunk(int chunkX, int chunkZ) {
-            if (!meshBuilder) {
-                return;
-            }
-
-            auto startTime = std::chrono::high_resolution_clock::now();
-
-            // Build mesh data
-            Render::ChunkMeshData meshData = meshBuilder->Build(chunkX, chunkZ);
-
-            // Create GPU mesh and upload
-            auto chunkMesh = std::make_unique<Render::ChunkMesh>();
-            chunkMesh->UploadAll(meshData);
-
-            auto endTime = std::chrono::high_resolution_clock::now();
-            float buildTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-            // Store the mesh
-            {
-                std::lock_guard<std::mutex> lock(meshMutex);
-                uint64_t key = MakeChunkKey(chunkX, chunkZ);
-                loadedMeshes[key] = std::move(chunkMesh);
-            }
-
-            // Update statistics
-            meshesBuiltThisFrame++;
-            totalMeshBuildTime += buildTime;
-
-            Log::Debug("Built mesh for chunk (%d, %d) in %.2fms", chunkX, chunkZ, buildTime);
-        }
-
+        // Cleanup distant meshes
         void CleanupDistantMeshes(int playerChunkX, int playerChunkZ, int maxDistance) {
-            std::lock_guard<std::mutex> lock(meshMutex);  // **FIX**: Now works with mutable mutex
+            std::lock_guard<std::mutex> lock(meshMutex);
 
             std::vector<uint64_t> toRemove;
 
-            for (const auto& [key, mesh] : loadedMeshes) {
-                int chunkX = static_cast<int32_t>(key >> 32);
-                int chunkZ = static_cast<int32_t>(key & 0xFFFFFFFF);
+            for (const auto& [key, chunkMesh] : loadedMeshes) {
+                auto [chunkX, chunkZ] = KeyToChunkCoords(key);
 
                 int dx = chunkX - playerChunkX;
                 int dz = chunkZ - playerChunkZ;
@@ -325,6 +420,54 @@ namespace PlatformMain {
             if (!toRemove.empty()) {
                 Log::Debug("Cleaned up %zu distant chunk meshes", toRemove.size());
             }
+        }
+
+        // Get enhanced mesh statistics
+        struct EnhancedMeshStats {
+            size_t totalChunks = 0;
+            size_t totalSections = 0;
+            size_t activeSections = 0;
+            size_t totalMemoryBytes = 0;
+            int sectionsBuiltThisFrame = 0;
+            float sectionBuildTimeMs = 0.0f;
+            size_t opaqueSections = 0;
+            size_t cutoutSections = 0;
+            size_t translucentSections = 0;
+        };
+
+        EnhancedMeshStats GetStats() const {
+            std::lock_guard<std::mutex> lock(meshMutex);
+
+            EnhancedMeshStats stats;
+            stats.totalChunks = loadedMeshes.size();
+            stats.sectionsBuiltThisFrame = sectionsBuiltThisFrame;
+            stats.sectionBuildTimeMs = totalSectionBuildTime;
+
+            for (const auto& [key, chunkMesh] : loadedMeshes) {
+                if (chunkMesh) {
+                    auto chunkStats = chunkMesh->GetStats();
+                    stats.activeSections += chunkStats.activeSections;
+                    stats.totalMemoryBytes += chunkStats.totalMemoryBytes;
+
+                    // Count sections by type
+                    for (const auto& section : chunkMesh->sections) {
+                        if (section && !section->IsEmpty()) {
+                            if (!section->opaque.IsEmpty()) stats.opaqueSections++;
+                            if (!section->cutout.IsEmpty()) stats.cutoutSections++;
+                            if (!section->translucent.IsEmpty()) stats.translucentSections++;
+                        }
+                    }
+                }
+            }
+
+            stats.totalSections = stats.totalChunks * Game::Math::SECTIONS_PER_CHUNK;
+            return stats;
+        }
+
+        // Change building strategy
+        void SetBuildStrategy(BuildStrategy strategy) {
+            currentStrategy = strategy;
+            Log::Info("Changed section build strategy to: %d", static_cast<int>(strategy));
         }
     };
 

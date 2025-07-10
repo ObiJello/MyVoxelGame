@@ -1,4 +1,4 @@
-// File: src/render/mesh/MeshBuilder.hpp
+// File: src/render/mesh/MeshBuilder.hpp - Enhanced for Section-Based Building
 #pragma once
 
 #include "../Vertex.hpp"
@@ -10,6 +10,7 @@
 #include <vector>
 #include <cstdint>
 #include <memory>
+#include <unordered_set>
 
 namespace Render {
 
@@ -32,11 +33,13 @@ namespace Render {
         bool IsEmpty() const { return verts.empty(); }
     };
 
-    // Complete mesh data for a chunk, separated into rendering layers
-    struct ChunkMeshData {
-        LayerBuffers opaque;      // Solid blocks (depth write, no blend)
-        LayerBuffers cutout;      // Alpha-test blocks (leaves, grass)
-        LayerBuffers translucent; // Blended blocks (glass, water, ice)
+    // Section mesh data before GPU upload (CPU-side buffers)
+    struct SectionMeshData {
+        LayerBuffers opaque;      // Solid blocks layer
+        LayerBuffers cutout;      // Alpha-test blocks layer
+        LayerBuffers translucent; // Blended blocks layer
+
+        int sectionY = 0;         // Section Y coordinate
 
         void Clear() {
             opaque.Clear();
@@ -62,11 +65,19 @@ namespace Render {
         MeshBuilder(Game::World& world, AtlasBuilder& atlas);
         ~MeshBuilder() = default;
 
-        // Main entry point: build mesh data for a chunk
-        ChunkMeshData Build(int chunkX, int chunkZ);
+        // NEW: Build mesh for a specific section of a chunk
+        SectionMeshData BuildSection(int chunkX, int chunkZ, int sectionY);
+
+        // NEW: Build mesh for specific sections that need updating
+        std::vector<SectionMeshData> BuildSections(int chunkX, int chunkZ,
+                                                   const std::unordered_set<int>& sectionIndices);
+
+        // NEW: Build all sections for a chunk (returns up to 24 sections)
+        std::vector<SectionMeshData> BuildAllSections(int chunkX, int chunkZ);
 
         // Get statistics from last build operation
         struct BuildStats {
+            int sectionsProcessed = 0;
             int blocksProcessed = 0;
             int facesGenerated = 0;
             int verticesGenerated = 0;
@@ -77,24 +88,53 @@ namespace Render {
             int opaqueVertices = 0;
             int cutoutVertices = 0;
             int translucentVertices = 0;
+
+            // Section-specific stats
+            int emptySectionsSkipped = 0;
+            int activeSections = 0;
         };
 
         const BuildStats& GetLastBuildStats() const { return lastStats; }
+
+        // Configuration for section building
+        struct SectionBuildConfig {
+            bool skipEmptySections = true;      // Skip sections with no blocks
+            bool includeNeighborData = true;    // Include neighbor blocks for face culling
+            int maxSectionsPerFrame = 4;        // Limit sections built per frame
+            bool enableFluidMeshing = true;     // Include fluid geometry
+        };
+
+        void SetConfig(const SectionBuildConfig& config) { this->config = config; }
+        const SectionBuildConfig& GetConfig() const { return config; }
 
     private:
         Game::World& world;
         AtlasBuilder& atlas;
         BuildStats lastStats;
+        SectionBuildConfig config;
 
         // Fluid mesh builder for specialized water/lava rendering
         std::unique_ptr<FluidMeshBuilder> fluidBuilder;
 
-        // Core mesh building methods
-        void ProcessChunk(int chunkX, int chunkZ, ChunkMeshData& meshData);
-        void ProcessBlock(int worldX, int worldY, int worldZ, Game::BlockID blockId, ChunkMeshData& meshData);
+        // NEW: Section-based mesh building methods
+        void ProcessSection(int chunkX, int chunkZ, int sectionY, SectionMeshData& meshData);
+        void ProcessSectionBlock(int worldX, int worldY, int worldZ, Game::BlockID blockId,
+                               SectionMeshData& meshData);
+
+        // NEW: Check if a section contains any non-air blocks
+        bool IsSectionEmpty(int chunkX, int chunkZ, int sectionY);
+
+        // NEW: Get world Y range for a section
+        std::pair<int, int> GetSectionYRange(int sectionY);
+
+        // NEW: Convert section Y to section index (0-23)
+        int SectionYToIndex(int sectionY);
+
+        // NEW: Convert section index to section Y coordinate
+        int SectionIndexToY(int sectionIndex);
 
         // Block classification for render layers
-        LayerBuffers& GetLayerForBlock(Game::BlockID blockId, ChunkMeshData& meshData);
+        LayerBuffers& GetLayerForBlock(Game::BlockID blockId, SectionMeshData& meshData);
         bool IsBlockOpaque(Game::BlockID blockId);
         bool IsBlockCutout(Game::BlockID blockId);
         bool IsBlockTranslucent(Game::BlockID blockId);
