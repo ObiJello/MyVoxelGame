@@ -333,7 +333,7 @@ namespace Game {
         }
     }
 
-    // FIXED: Implement GetBlock function using IBlockAccess
+    // Implement GetBlock function using IBlockAccess
     BlockID GetBlock(int x, int y, int z) {
         if (g_blockAccess) {
             return g_blockAccess->GetBlock(x, y, z);

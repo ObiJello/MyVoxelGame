@@ -34,6 +34,8 @@
 #include "JobSystem.hpp"
 #include "engine/world/RegionFileCache.hpp"
 #include "engine/world/SectionDataUnpacker.hpp"
+#include "mesh/ChunkRenderer.hpp"
+#include "mesh/MeshManager.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -381,6 +383,29 @@ namespace PlatformMain {
         // Create PlayerController
         Game::PlayerController playerController;
 
+        // **NEW**: Initialize the mesh system
+        Game::World world;
+        world.Initialize();
+
+        // Initialize mesh system with the world
+        Render::MeshManagerConfig meshConfig;
+        meshConfig.maxMeshesPerFrame = 3;        // Limit uploads per frame
+        meshConfig.maxBuildTimeMs = 8.0f;        // Max time per frame for processing
+        meshConfig.meshRadius = 12;              // Mesh distance around player
+        meshConfig.enableAsyncBuilding = true;   // Use background threads
+        meshConfig.highPriorityRadius = 64.0f;   // High priority radius
+
+        Render::InitializeMeshSystem(&world, meshConfig);
+
+        // Initialize chunk renderer
+        if (!Render::InitializeChunkRenderer()) {
+            Log::Error("Failed to initialize chunk renderer");
+            return -6;
+        }
+
+        // Set world reference for player controller
+        playerController.SetWorld(&world);
+
         // Initialize debug system
         Debug::DebugSystem::Initialize(window);
 
@@ -414,17 +439,18 @@ namespace PlatformMain {
             // Update game systems
             camera.Update(dt);
             playerController.Update(dt, camera);
+            world.Update(dt);  // Make sure world is updated
 
-            // **NEW**: Update chunk loading around player
-            // Get player chunk position
+            // **NEW**: Update mesh system
+            Render::UpdateMeshSystem(dt);
+
+            // Get player chunk position for chunk loading
             glm::vec3 playerPos = playerController.GetPhysics().position;
             int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
             int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
-            Game::Math::ChunkPos playerChunk{playerChunkX, playerChunkZ};
 
-            // Load chunks around player (view distance of 8 chunks)
-            static constexpr int VIEW_DISTANCE = 8;
-            static constexpr int UNLOAD_DISTANCE = 12; // Unload beyond 12 chunks
+            // Update chunk loading around player
+            world.UpdateLoadedChunks(playerChunkX, playerChunkZ, 8);
 
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
@@ -442,6 +468,9 @@ namespace PlatformMain {
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
+
+            // Render chunks using the new system
+            Render::RenderChunksAll(camera, frustum);
 
             // Render UI elements
             RenderBlockHighlight(playerController, viewProj);
@@ -471,10 +500,14 @@ namespace PlatformMain {
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }
 
-        // **ENHANCED**: Cleanup with Enhanced Mesher System
-        Log::Info("Cleaning up Enhanced Mesher System...");
+        // Shutdown mesh system first (stops background threads)
+        Render::ShutdownMeshSystem();
 
-        Log::Info("Cleaning up Minecraft world support...");
+        // Shutdown chunk renderer
+        Render::ShutdownChunkRenderer();
+
+        // Shutdown world
+        world.Shutdown();
 
         // Clear region file cache
         World::RegionFileCache::Instance().Clear();
@@ -482,10 +515,7 @@ namespace PlatformMain {
         // Cleanup
         Debug::DebugSystem::Shutdown();
 
-        // Stop all background threads BEFORE cleaning up OpenGL resources
         Log::Info("Stopping background job system...");
-
-        Log::Info("Stopping job system...");
         try {
             JobSystem::g_ThreadPool.Stop();
             Log::Info("Job system stopped successfully");

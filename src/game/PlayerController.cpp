@@ -1,6 +1,8 @@
 // File: src/game/PlayerController.cpp
 #include "PlayerController.hpp"
 #include "../engine/block/BlockRegistry.hpp"
+#include "../engine/world/World.hpp"
+#include "../render/mesh/MeshManager.hpp"
 #include "../core/Log.hpp"
 #include <glm/glm.hpp>
 #include <thread>
@@ -41,13 +43,18 @@ namespace Game {
     void PlayerController::Update(float deltaTime, Render::Camera& camera) {
         // Update physics state based on input
         physics.isSneaking = sneakPressed;
-        physics.isSprinting = sprintPressed && !sneakPressed; // Can't sprint while sneaking
+        physics.isSprinting = sprintPressed && !sneakPressed;
 
         // Update physics simulation
         UpdatePhysics(deltaTime);
 
         // Update camera position to follow player
         UpdateCamera(camera);
+
+        // **NEW**: Update mesh system with player position
+        if (Render::g_meshManager) {
+            Render::g_meshManager->SetPlayerPosition(physics.position);
+        }
 
         // Update raycast from camera position
         UpdateRaycast(camera);
@@ -230,6 +237,9 @@ namespace Game {
             stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
             placeCooldownTimer = PLACE_COOLDOWN;
 
+            // **NEW**: Mark surrounding sections for remeshing
+            MarkSurroundingSectionsForRemesh(placePos);
+
             const Block& block = BlockRegistry::Get(selectedBlock);
             Log::Info("Placed %s at (%d, %d, %d)",
                      block.name.c_str(), placePos.x, placePos.y, placePos.z);
@@ -292,6 +302,9 @@ namespace Game {
 
             stats.blocksBroken++;
             stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
+
+            // **NEW**: Mark surrounding sections for remeshing
+            MarkSurroundingSectionsForRemesh(breakingBlockPos);
 
             const Block& block = BlockRegistry::Get(brokenBlock);
             Log::Info("Broke %s at (%d, %d, %d)",
@@ -372,6 +385,55 @@ namespace Game {
         } catch (const std::exception& e) {
             Log::Error("Exception getting breaking block type: %s", e.what());
             return BlockID::Air;
+        }
+    }
+
+    void PlayerController::MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos) {
+        if (!Render::g_meshManager) {
+            return;
+        }
+
+        // Convert world position to chunk coordinates
+        int chunkX = static_cast<int>(std::floor(static_cast<float>(worldPos.x) / Game::Math::CHUNK_SIZE_X));
+        int chunkZ = static_cast<int>(std::floor(static_cast<float>(worldPos.z) / Game::Math::CHUNK_SIZE_Z));
+
+        // Convert world Y to section index
+        int sectionY = (worldPos.y - Config::MinY) / Game::Math::SECTION_HEIGHT;
+
+        Game::Math::ChunkPos chunkPos{chunkX, chunkZ};
+
+        // Mark the section containing the changed block
+        Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
+
+        // Check if we need to mark neighboring sections/chunks
+        int localX = worldPos.x - (chunkX * Game::Math::CHUNK_SIZE_X);
+        int localZ = worldPos.z - (chunkZ * Game::Math::CHUNK_SIZE_Z);
+        int localY = (worldPos.y - Config::MinY) % Game::Math::SECTION_HEIGHT;
+
+        // Mark neighboring chunks if block is on chunk boundary
+        if (localX == 0) {
+            Game::Math::ChunkPos westChunk{chunkX - 1, chunkZ};
+            Render::g_meshManager->MarkSectionDirty(westChunk, sectionY);
+        }
+        if (localX == Game::Math::CHUNK_SIZE_X - 1) {
+            Game::Math::ChunkPos eastChunk{chunkX + 1, chunkZ};
+            Render::g_meshManager->MarkSectionDirty(eastChunk, sectionY);
+        }
+        if (localZ == 0) {
+            Game::Math::ChunkPos northChunk{chunkX, chunkZ - 1};
+            Render::g_meshManager->MarkSectionDirty(northChunk, sectionY);
+        }
+        if (localZ == Game::Math::CHUNK_SIZE_Z - 1) {
+            Game::Math::ChunkPos southChunk{chunkX, chunkZ + 1};
+            Render::g_meshManager->MarkSectionDirty(southChunk, sectionY);
+        }
+
+        // Mark neighboring sections if block is on section boundary
+        if (localY == 0 && sectionY > 0) {
+            Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY - 1);
+        }
+        if (localY == Game::Math::SECTION_HEIGHT - 1 && sectionY < Game::Math::SECTIONS_PER_CHUNK - 1) {
+            Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY + 1);
         }
     }
 

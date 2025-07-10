@@ -112,6 +112,7 @@ namespace Game {
         void TryPlaceBlock();
         void FinishBreaking();
         bool CanPlaceBlockAt(const glm::ivec3& pos);
+        void MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos);
         BlockID GetBreakingBlockType(const glm::ivec3& pos);
     };
 

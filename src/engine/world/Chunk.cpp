@@ -63,11 +63,6 @@ namespace Game {
             if (onSectionDirty) {
                 onSectionDirty(sectionIndex);
             }
-
-            // **NEW**: Also notify mesh system directly for immediate rebuilding
-            if (Render::g_meshManager) {
-                Render::g_meshManager->MarkSectionDirty(pos, sectionIndex);
-            }
         }
     }
 
