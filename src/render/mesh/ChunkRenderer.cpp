@@ -28,7 +28,8 @@ namespace Render {
 
     void ChunkRenderer::Render(const std::vector<ChunkMesh*>& meshes,
                               const std::vector<glm::vec3>& chunkPositions,
-                              const Camera& camera) {
+                              const Camera& camera,
+                          const glm::mat4& viewProjectionMatrix) {
         if (!blockShader || !atlas) {
             Log::Warning("ChunkRenderer not properly initialized");
             return;
@@ -72,7 +73,7 @@ namespace Render {
 
         // Bind shader and set uniforms
         blockShader->Use();
-        SetupShaderUniforms(camera);
+        SetupShaderUniforms(camera, viewProjectionMatrix);
         BindTextures();
 
         // Render opaque pass (front-to-back for early Z rejection)
@@ -105,7 +106,7 @@ namespace Render {
     }
 
     void ChunkRenderer::Render(const std::vector<std::pair<ChunkMesh*, glm::ivec2>>& meshesWithPositions,
-                              const Camera& camera) {
+                              const Camera& camera, const glm::mat4& viewProjectionMatrix) {
         // Convert chunk coordinates to world positions
         std::vector<ChunkMesh*> meshes;
         std::vector<glm::vec3> positions;
@@ -115,7 +116,7 @@ namespace Render {
             positions.push_back(CalculateChunkCenter(chunkCoords));
         }
 
-        Render(meshes, positions, camera);
+        Render(meshes, positions, camera, viewProjectionMatrix);
     }
 
     void ChunkRenderer::SetupRenderState() {
@@ -188,18 +189,9 @@ namespace Render {
         glDepthMask(GL_TRUE);
     }
 
-    void ChunkRenderer::SetupShaderUniforms(const Camera& camera) {
-        // Calculate view and projection matrices
-        glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 projection = glm::perspective(
-            glm::radians(camera.fov),
-            1.0f, // Aspect ratio should be set by caller
-            0.01f, 500.0f
-        );
-        glm::mat4 mvp = projection * view;
-
+    void ChunkRenderer::SetupShaderUniforms(const Camera& camera, const glm::mat4& viewProjectionMatrix) {
         // Set MVP matrix uniform
-        blockShader->SetMat4("uMVP", mvp);
+        blockShader->SetMat4("uMVP", viewProjectionMatrix);
 
         // Set other uniforms that might be used
         GLint texLoc = blockShader->GetUniformLocation("uTextureAtlas");

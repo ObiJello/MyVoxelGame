@@ -52,11 +52,13 @@ namespace Render {
         // Main render function - renders all chunks in the correct order
         void Render(const std::vector<ChunkMesh*>& meshes,
                    const std::vector<glm::vec3>& chunkPositions,
-                   const Camera& camera);
+                   const Camera& camera,
+                   const glm::mat4& viewProjectionMatrix);
 
         // Alternative render function with chunk positions inferred
         void Render(const std::vector<std::pair<ChunkMesh*, glm::ivec2>>& meshesWithPositions,
-                   const Camera& camera);
+                   const Camera& camera,
+                    const glm::mat4& viewProjectionMatrix);
 
         // Get rendering statistics from last frame
         const RenderStats& GetStats() const { return stats; }
@@ -89,7 +91,7 @@ namespace Render {
         void RenderTranslucentPass(const std::vector<ChunkRenderData>& sortedMeshes);
 
         // Shader uniform setup
-        void SetupShaderUniforms(const Camera& camera);
+        void SetupShaderUniforms(const Camera& camera, const glm::mat4& viewProjectionMatrix);
         void BindTextures();
 
         // Distance-based sorting for transparency

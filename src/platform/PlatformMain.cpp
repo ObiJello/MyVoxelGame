@@ -131,7 +131,7 @@ namespace PlatformMain {
         }
 
         // Render all visible chunks
-        void Render(const Render::Camera& camera, const Frustum& frustum) {
+        void Render(const Render::Camera& camera, const Frustum& frustum, const glm::mat4& viewProj) {
             if (!chunkRenderer) {
                 return;
             }
@@ -176,7 +176,7 @@ namespace PlatformMain {
             }
 
             // Render all visible meshes
-            chunkRenderer->Render(visibleMeshes, chunkCenters, camera);
+            chunkRenderer->Render(visibleMeshes, chunkCenters, camera, viewProj);
 
             // Update debug statistics
             auto stats = chunkRenderer->GetStats();
@@ -380,7 +380,7 @@ namespace PlatformMain {
         Frustum frustum = Frustum::FromMatrix(viewProj);
 
         // Render all chunks using the new system
-        g_chunkMeshManager->Render(camera, frustum);
+        g_chunkMeshManager->Render(camera, frustum, viewProj);
     }
 
     void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
