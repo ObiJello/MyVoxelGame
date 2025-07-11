@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "mesh/MeshManager.hpp"
+#include "physics/RayCast.hpp"
+
 namespace Game {
 
     World::World() {

@@ -1,4 +1,4 @@
-// File: src/game/PlayerController.cpp
+// File: src/game/PlayerController.cpp (FIXED)
 #include "PlayerController.hpp"
 #include "../engine/block/BlockRegistry.hpp"
 #include "../engine/world/World.hpp"
@@ -82,8 +82,12 @@ namespace Game {
     }
 
     void PlayerController::UpdatePhysics(float deltaTime) {
-        // Apply physics simulation - FIXED: Now passes sneakPressed parameter
-        UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime);
+        // **FIXED**: Create physics context with world block access
+        PhysicsContext context;
+        context.blockAccess = world; // World implements IBlockAccess
+
+        // Apply physics simulation with context
+        UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime, context);
 
         // Reset single-frame inputs
         jumpPressed = false;

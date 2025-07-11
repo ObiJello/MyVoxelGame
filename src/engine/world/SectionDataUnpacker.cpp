@@ -1,6 +1,7 @@
 // File: src/engine/world/SectionDataUnpacker.cpp
 #include "SectionDataUnpacker.hpp"
 #include "ChunkSection.hpp"
+#include "Chunk.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Config.hpp"
 #include <algorithm>

@@ -96,6 +96,9 @@ namespace Game {
         std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
 
     private:
+        // internal helper to guard world‐Y bounds
+        bool IsValidPosition(int worldX, int worldY, int worldZ) const;
+
         // Chunk storage
         mutable std::mutex m_chunksMutex;
         std::unordered_map<Math::ChunkPos, std::shared_ptr<Chunk>, ChunkPosHash> m_loadedChunks;

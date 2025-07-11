@@ -35,6 +35,7 @@ namespace Game {
         bool IsValidLocalPosition(int localX, int localY, int localZ) const;
         int WorldYToSectionIndex(int worldY) const;
         int WorldYToLocalY(int worldY) const;
+        bool IsWithinChunkBounds(int localX, int localY, int localZ) const;
 
         // Statistics
         size_t GetBlockCount() const;

@@ -32,6 +32,18 @@ namespace Render {
         int maxQuadsPerSection = 16384;    // Safety limit
     };
 
+    // Render layer classification
+    enum class RenderLayer {
+        Opaque,      // Solid blocks (stone, dirt, wood)
+        Cutout,      // Alpha-test blocks (leaves, grass, flowers)
+        Translucent  // Blended blocks (glass, water, ice)
+    };
+
+    // Helper functions for render layer classification
+    RenderLayer ClassifyBlock(Game::BlockID blockId);
+    bool IsBlockOpaque(Game::BlockID blockId);
+    bool IsBlockTranslucent(Game::BlockID blockId);
+
     // Core meshing class - turns block data into renderable geometry
     class Mesher {
     public:
@@ -94,17 +106,5 @@ namespace Render {
         int WorldYToChunkY(int worldY) const;
         glm::vec3 LocalToWorldPos(const Game::Math::ChunkPos& chunkPos, int localX, int localY, int localZ) const;
     };
-
-    // Render layer classification
-    enum class RenderLayer {
-        Opaque,      // Solid blocks (stone, dirt, wood)
-        Cutout,      // Alpha-test blocks (leaves, grass, flowers)
-        Translucent  // Blended blocks (glass, water, ice)
-    };
-
-    // Helper functions for render layer classification
-    RenderLayer ClassifyBlock(Game::BlockID blockId);
-    bool IsBlockOpaque(Game::BlockID blockId);
-    bool IsBlockTranslucent(Game::BlockID blockId);
 
 } // namespace Render

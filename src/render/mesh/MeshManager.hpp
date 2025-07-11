@@ -12,6 +12,8 @@
 #include <future>
 #include <chrono>
 
+#include "world/World.hpp"
+
 namespace Render {
 
     // Forward declarations
@@ -129,8 +131,8 @@ namespace Render {
         Game::World* m_world = nullptr;
 
         // Threading and job management
-        std::mutex m_jobQueueMutex;
-        std::mutex m_resultQueueMutex;
+        mutable std::mutex m_jobQueueMutex;
+        mutable std::mutex m_resultQueueMutex;
         std::queue<MeshJob> m_pendingJobs;
         std::queue<MeshJob> m_highPriorityJobs;
         std::queue<MeshResult> m_completedResults;
@@ -141,10 +143,10 @@ namespace Render {
 
         // Player tracking for prioritization
         glm::vec3 m_playerPosition{0.0f};
-        std::mutex m_playerMutex;
+        mutable std::mutex m_playerMutex;
 
         // Dirty tracking
-        std::mutex m_dirtyMutex;
+        mutable std::mutex m_dirtyMutex;
         std::unordered_set<uint64_t> m_dirtySections;  // Packed chunk+section coordinates
 
         // Frame timing

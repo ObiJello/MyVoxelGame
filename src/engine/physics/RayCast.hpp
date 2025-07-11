@@ -1,4 +1,4 @@
-// File: src/engine/physics/Raycast.hpp
+// File: src/engine/physics/RayCast.hpp (FIXED)
 #pragma once
 
 #include <glm/glm.hpp>
@@ -7,6 +7,9 @@
 #include "../../game/WorldMath.hpp"
 
 namespace Game {
+
+    // Forward declarations
+    struct IBlockAccess;
 
     // Represents the result of a raycast hit on a block
     struct RaycastHit {
@@ -36,5 +39,8 @@ namespace Game {
         // Check if a block is solid (can be hit by raycast)
         static bool IsBlockSolid(BlockID id);
     };
+
+    // **NEW**: Global block access management for raycast system
+    void SetGlobalBlockAccess(const IBlockAccess* blockAccess);
 
 } // namespace Game

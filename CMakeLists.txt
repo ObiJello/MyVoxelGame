@@ -127,6 +127,16 @@ if(APPLE)
             ${WORLD_SOURCES}
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
+            src/engine/world/World.cpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/Chunk.cpp
+            src/render/mesh/ChunkRenderer.cpp
+            src/render/mesh/MeshManager.cpp
+            src/render/mesh/ChunkMeshData.cpp
+            src/render/mesh/FluidMeshBuilder.cpp
+            src/render/mesh/Mesher.cpp
+            src/render/mesh/FluidMeshBuilder.cpp
+            src/render/mesh/ChunkMeshData.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -144,37 +154,14 @@ else()
             ${WORLD_SOURCES}
             src/engine/Physics/RayCast.cpp
             src/engine/Physics/RayCast.hpp
+            src/engine/Physics/Physics.cpp
+            src/engine/Physics/Physics.hpp
             src/game/Inventory.cpp
             src/game/Inventory.hpp
             src/game/PlayerController.cpp
             src/game/PlayerController.hpp
             src/render/mesh/BlockHighlight.hpp
             src/render/mesh/BlockHighlight.cpp
-            src/engine/Physics/Physics.cpp
-            src/engine/Physics/Physics.hpp
-            src/render/debug/Crosshair.cpp
-            src/render/debug/Crosshair.hpp
-            src/render/atlas/AtlasBuilder.cpp
-            src/render/atlas/AtlasBuilder.hpp
-            src/engine/block/BlockRegistry.cpp
-            src/engine/block/BlockRegistry.hpp
-            src/engine/world/SectionDataUnpacker.cpp
-            src/engine/world/SectionDataUnpacker.hpp
-            src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/world/MinecraftChunkLoader.hpp
-            src/render/mesh/MeshBuilder.cpp
-            src/render/mesh/MeshBuilder.hpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/FluidMeshBuilder.hpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/mesh/ChunkMeshData.hpp
-            src/engine/world/IBlockAccess.hpp
-            src/engine/world/World.cpp
-            src/engine/world/World.hpp
-            src/engine/world/ChunkProvider.cpp
-            src/engine/world/ChunkProvider.hpp
-            src/engine/world/Chunk.cpp
-            src/engine/world/Chunk.hpp
             src/render/mesh/ChunkRenderer.cpp
             src/render/mesh/ChunkRenderer.hpp
             src/render/mesh/MeshManager.cpp
@@ -186,6 +173,27 @@ else()
             src/render/mesh/Mesher.cpp
             src/render/mesh/Mesher.hpp
             src/render/mesh/SectionMesh.hpp
+            src/render/mesh/FluidMeshBuilder.cpp
+            src/render/mesh/FluidMeshBuilder.hpp
+            src/render/mesh/ChunkMeshData.cpp
+            src/render/mesh/ChunkMeshData.hpp
+            src/render/debug/Crosshair.cpp
+            src/render/debug/Crosshair.hpp
+            src/render/atlas/AtlasBuilder.cpp
+            src/render/atlas/AtlasBuilder.hpp
+            src/engine/block/BlockRegistry.cpp
+            src/engine/block/BlockRegistry.hpp
+            src/engine/world/SectionDataUnpacker.cpp
+            src/engine/world/SectionDataUnpacker.hpp
+            src/engine/world/MinecraftChunkLoader.cpp
+            src/engine/world/MinecraftChunkLoader.hpp
+            src/engine/world/IBlockAccess.hpp
+            src/engine/world/World.cpp
+            src/engine/world/World.hpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/ChunkProvider.hpp
+            src/engine/world/Chunk.cpp
+            src/engine/world/Chunk.hpp
     )
 endif()
 

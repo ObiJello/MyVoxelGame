@@ -225,13 +225,24 @@ namespace Render {
         int processed = 0;
 
         while (processed < m_config.maxMeshesPerFrame) {
-            MeshResult result;
-            if (!DequeueResult(result)) {
-                break; // No more results
+            // Try to get a result from the queue
+            std::optional<MeshResult> result;
+
+            {
+                std::lock_guard<std::mutex> lock(m_resultQueueMutex);
+
+                if (m_completedResults.empty()) {
+                    break; // No more results
+                }
+
+                // Move the result out of the queue
+                result = std::move(m_completedResults.front());
+                m_completedResults.pop();
             }
 
-            if (result.success) {
-                UploadMeshResult(result);
+            // Process the result outside the lock
+            if (result && result->success) {
+                UploadMeshResult(*result);
                 m_stats.meshesUploadedThisFrame++;
             }
 
@@ -284,7 +295,7 @@ namespace Render {
             }
 
             // **FIXED**: Get chunk data through proper interface
-            const Chunk* chunk = m_world->GetChunkForMeshing(job.chunkPos.x, job.chunkPos.z);
+            const Game::Chunk* chunk = m_world->GetChunkForMeshing(job.chunkPos.x, job.chunkPos.z);
             if (!chunk) {
                 Log::Debug("Could not get chunk data for meshing (%d, %d)", job.chunkPos.x, job.chunkPos.z);
                 result.success = false;

@@ -3,11 +3,29 @@
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
-#include "Physics.hpp"  // Include for GetBlock function
+#include "Physics.hpp"  
 #include <cmath>
 #include <algorithm>
+#include "world/IBlockAccess.hpp"
 
 namespace Game {
+
+    // **FIXED**: Global block access pointer for raycast system
+    static const IBlockAccess* g_raycastBlockAccess = nullptr;
+
+    // **NEW**: Set the global block access for raycast system
+    void SetGlobalBlockAccess(const IBlockAccess* blockAccess) {
+        g_raycastBlockAccess = blockAccess;
+    }
+
+    // **NEW**: Get block using global access
+    static BlockID GetBlock(int worldX, int worldY, int worldZ) {
+        if (g_raycastBlockAccess) {
+            return g_raycastBlockAccess->GetBlock(worldX, worldY, worldZ);
+        }
+        Log::Warning("No global block access available for raycast");
+        return BlockID::Air;
+    }
 
     std::optional<RaycastHit> Raycast::CastRay(
         const glm::vec3& origin,
@@ -151,7 +169,7 @@ namespace Game {
     }
 
     BlockID Raycast::GetBlockAtWorldPos(const glm::vec3& pos) {
-        // Use the global GetBlock function from physics system
+        // **FIXED**: Use the global block access instead of undefined function
         return GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),

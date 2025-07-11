@@ -64,6 +64,8 @@ namespace Game {
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
+        Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
+        void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
 
         // Statistics
         mutable size_t m_blockAccessCount = 0;

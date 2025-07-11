@@ -74,7 +74,7 @@ namespace Render {
         SetupRenderPass(m_opaqueConfig);
 
         // Render the layer
-        RenderLayer(RenderLayer::Opaque, camera, opaqueSections);
+        RenderLayerPass(RenderLayer::Opaque, camera, opaqueSections);
 
         m_stats.opaqueSections = static_cast<int>(opaqueSections.size());
 
@@ -112,7 +112,7 @@ namespace Render {
         SetupRenderPass(m_cutoutConfig);
 
         // Render the layer
-        RenderLayer(RenderLayer::Cutout, camera, cutoutSections);
+        RenderLayerPass(RenderLayer::Cutout, camera, cutoutSections);
 
         m_stats.cutoutSections = static_cast<int>(cutoutSections.size());
 
@@ -150,7 +150,7 @@ namespace Render {
         SetupRenderPass(m_translucentConfig);
 
         // Render the layer
-        RenderLayer(RenderLayer::Translucent, camera, translucentSections);
+        RenderLayerPass(RenderLayer::Translucent, camera, translucentSections);
 
         m_stats.translucentSections = static_cast<int>(translucentSections.size());
 
@@ -245,7 +245,7 @@ namespace Render {
         Log::Debug("Prepared %zu visible sections in %.2f ms", m_visibleSections.size(), m_stats.frustumCullTimeMs);
     }
 
-    void ChunkRenderer::RenderLayer(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
+    void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
         if (sections.empty() || !m_blockShader) {
             return;
         }

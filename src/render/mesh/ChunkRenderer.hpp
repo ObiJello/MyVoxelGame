@@ -2,6 +2,7 @@
 #pragma once
 
 #include "MeshManager.hpp"
+#include "Mesher.hpp"
 #include "../gfx/Camera.hpp"
 #include "../gfx/Frustum.hpp"
 #include "../gfx/Shader.hpp"
@@ -128,7 +129,7 @@ namespace Render {
 
         // Core rendering methods
         void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
-        void RenderLayer(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections);
+        void RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections);
         void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
 
         // Culling and sorting

@@ -76,7 +76,6 @@ namespace Debug {
         DrawChunkVisualization(camera, frustum);
         DrawTextureAtlasDebug();
         DrawMinecraftWorldDebug();
-        DrawMeshSystemDebug(); // **NEW**: Add mesh system debug window
     }
 
     void DebugSystem::DrawMainDebugWindow(
@@ -254,106 +253,6 @@ namespace Debug {
         ImGui::End();
     }
 
-    // **NEW**: Dedicated mesh system debug window
-    void DebugSystem::DrawMeshSystemDebug() {
-        if (!ImGui::Begin("Enhanced Mesh System")) {
-            ImGui::End();
-            return;
-        }
-
-        ImGui::Text("=== ENHANCED MESH SYSTEM STATUS ===");
-        ImGui::Separator();
-
-        // Note: In a real implementation, you'd get these stats from the mesh manager
-        // For now, we'll show placeholder information
-
-        ImGui::Text("System Status: Active");
-        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Three-Layer Rendering");
-        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Fluid Mesh Builder");
-        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Frustum Culling");
-        ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Distance-Based Sorting");
-
-        ImGui::Spacing();
-        ImGui::Text("Render Layers");
-        ImGui::Separator();
-
-        // Render layer information
-        ImGui::Text("Opaque Layer:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Solid blocks (stone, dirt, etc.)");
-
-        ImGui::Text("Cutout Layer:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "Alpha-test blocks (leaves, grass)");
-
-        ImGui::Text("Translucent Layer:");
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Blended blocks (glass, water, ice)");
-
-        ImGui::Spacing();
-        ImGui::Text("Fluid System");
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.3f, 0.6f, 1.0f, 1.0f), "Water Rendering: Enhanced");
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.1f, 1.0f), "Lava Rendering: Enhanced");
-        ImGui::Text("Features:");
-        ImGui::BulletText("Sloped fluid surfaces");
-        ImGui::BulletText("Proper transparency");
-        ImGui::BulletText("Flow detection");
-        ImGui::BulletText("Side quad culling");
-
-        ImGui::Spacing();
-        ImGui::Text("Performance Features");
-        ImGui::Separator();
-        ImGui::BulletText("Face culling optimization");
-        ImGui::BulletText("Frustum culling");
-        ImGui::BulletText("Layer-based rendering");
-        ImGui::BulletText("Distance-based mesh cleanup");
-        ImGui::BulletText("Threaded mesh generation");
-        ImGui::BulletText("Frame-time limited building");
-
-        ImGui::Spacing();
-        ImGui::Text("Mesh Generation Settings");
-        ImGui::Separator();
-
-        static int maxMeshesPerFrame = 2;
-        if (ImGui::SliderInt("Max Meshes Per Frame", &maxMeshesPerFrame, 1, 10)) {
-            // In real implementation, you'd update the mesh manager config
-            Log::Debug("Max meshes per frame set to: %d", maxMeshesPerFrame);
-        }
-
-        static float maxBuildTimeMs = 5.0f;
-        if (ImGui::SliderFloat("Max Build Time (ms)", &maxBuildTimeMs, 1.0f, 20.0f, "%.1f")) {
-            // In real implementation, you'd update the mesh manager config
-            Log::Debug("Max build time set to: %.1f ms", maxBuildTimeMs);
-        }
-
-        static int meshRadius = 8;
-        if (ImGui::SliderInt("Mesh Radius", &meshRadius, 4, 16)) {
-            // In real implementation, you'd update the mesh manager config
-            Log::Debug("Mesh radius set to: %d chunks", meshRadius);
-        }
-
-        ImGui::Spacing();
-        if (ImGui::CollapsingHeader("Technical Details")) {
-            ImGui::Text("Vertex Format:");
-            ImGui::BulletText("Position: vec3 (world coordinates)");
-            ImGui::BulletText("Normal: vec3 (face normal)");
-            ImGui::BulletText("UV: vec2 (atlas coordinates)");
-            ImGui::BulletText("Color: vec4 (biome tinting)");
-            ImGui::BulletText("AO: uint8 (ambient occlusion)");
-
-            ImGui::Spacing();
-            ImGui::Text("Memory Layout:");
-            ImGui::BulletText("Vertex size: %zu bytes", sizeof(Render::Vertex));
-            ImGui::BulletText("Index size: 4 bytes (uint32_t)");
-            ImGui::BulletText("Separate VBOs per layer");
-            ImGui::BulletText("Indexed rendering");
-        }
-
-        ImGui::End();
-    }
-
-    // [Keep all other existing methods unchanged]
     bool DebugSystem::IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos) {
         float worldX = static_cast<float>(chunkPos.x * Game::Math::CHUNK_SIZE_X);
         float worldZ = static_cast<float>(chunkPos.z * Game::Math::CHUNK_SIZE_Z);

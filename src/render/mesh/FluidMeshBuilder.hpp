@@ -8,6 +8,9 @@
 
 namespace Render {
 
+    // Block face enum for fluid builder (matching Mesher.hpp)
+    enum class BlockFace : int;
+
     // Fluid meshing configuration
     struct FluidMeshConfig {
         bool enableFluidSlopes = true;        // Create sloped fluid surfaces
@@ -83,8 +86,5 @@ namespace Render {
         bool GetFluidTextureUV(const std::string& texturePath, glm::vec4& uvRect);
         glm::vec2 GetFlowTextureOffset(Game::BlockID fluidType) const;
     };
-
-    // Block face enum for fluid builder (matching Mesher.hpp)
-    enum class BlockFace : int;
 
 } // namespace Render

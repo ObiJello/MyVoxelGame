@@ -87,9 +87,6 @@ namespace Debug {
         static void DrawAtlasBuilderDebug();
         static void DrawMinecraftWorldDebug();
 
-        // **NEW**: Enhanced mesh system debug window
-        static void DrawMeshSystemDebug();
-
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };
 
