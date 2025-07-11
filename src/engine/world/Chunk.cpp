@@ -12,14 +12,15 @@ namespace Game {
         }
     }
 
-    // Block access (local coordinates within chunk)
-    BlockID Chunk::GetBlock(int localX, int localY, int localZ) const {
-        if (!IsWithinChunkBounds(localX, localY, localZ)) {
+    // Block access (local X/Z coordinates, world Y coordinate)
+    BlockID Chunk::GetBlock(int localX, int worldY, int localZ) const {
+        if (!IsWithinChunkBounds(localX, worldY, localZ)) {
             return BlockID::Air;
         }
 
-        int sectionIndex = localY / SECTION_HEIGHT;
-        int sectionY = localY % SECTION_HEIGHT;
+        // Convert world Y to section coordinates
+        int sectionIndex = (worldY - Config::MinY) / SECTION_HEIGHT;
+        int sectionY = (worldY - Config::MinY) % SECTION_HEIGHT;
 
         const ChunkSection* section = GetSection(sectionIndex);
         if (!section) {
@@ -29,18 +30,19 @@ namespace Game {
         return section->GetBlockID(localX, sectionY, localZ);
     }
 
-    void Chunk::SetBlock(int localX, int localY, int localZ, BlockID blockId) {
-        if (!IsWithinChunkBounds(localX, localY, localZ)) {
-            Log::Warning("Attempted to set block at invalid local position (%d, %d, %d) in chunk (%d, %d)",
-                        localX, localY, localZ, pos.x, pos.z);
+    void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId) {
+        if (!IsWithinChunkBounds(localX, worldY, localZ)) {
+            Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
+                        localX, worldY, localZ, pos.x, pos.z);
             return;
         }
 
-        int sectionIndex = localY / SECTION_HEIGHT;
-        int sectionY = localY % SECTION_HEIGHT;
+        // Convert world Y to section coordinates
+        int sectionIndex = (worldY - Config::MinY) / SECTION_HEIGHT;
+        int sectionY = (worldY - Config::MinY) % SECTION_HEIGHT;
 
         // Get the old block to check if we're actually changing anything
-        BlockID oldBlockId = GetBlock(localX, localY, localZ);
+        BlockID oldBlockId = GetBlock(localX, worldY, localZ);
         if (oldBlockId == blockId) {
             return; // No change needed
         }
@@ -99,16 +101,26 @@ namespace Game {
         return sections[sectionIndex] != nullptr;
     }
 
-    // Utility functions
-    bool Chunk::IsWithinChunkBounds(int localX, int localY, int localZ) const {
+    // **FIXED**: Use world Y coordinates consistently
+    bool Chunk::IsWithinChunkBounds(int localX, int worldY, int localZ) const {
         return localX >= 0 && localX < SIZE_X &&
-               localY >= 0 && localY < (SECTION_COUNT * SECTION_HEIGHT) &&
+               worldY >= MIN_WORLD_Y && worldY <= MAX_WORLD_Y &&
                localZ >= 0 && localZ < SIZE_Z;
+    }
+
+    // **NEW**: Validation method for external use
+    bool Chunk::IsValidLocalPosition(int localX, int worldY, int localZ) const {
+        return IsWithinChunkBounds(localX, worldY, localZ);
+    }
+
+    // **NEW**: Convert world Y to section index
+    int Chunk::WorldYToSectionIndex(int worldY) const {
+        return (worldY - Config::MinY) / SECTION_HEIGHT;
     }
 
     // Statistics
     size_t Chunk::GetBlockCount() const {
-        return SIZE_X * (SECTION_COUNT * SECTION_HEIGHT) * SIZE_Z;
+        return SIZE_X * TOTAL_HEIGHT * SIZE_Z;
     }
 
     size_t Chunk::GetNonAirBlockCount() const {
@@ -146,10 +158,11 @@ namespace Game {
     }
 
     // Private helper functions
-    void Chunk::LocalYToSectionCoords(int sectionLocalY, int& sectionIndex, int& sectionY) const {
-        // Input is chunk-local Y (0 to 383), output section index and section-local Y
-        sectionIndex = sectionLocalY / SECTION_HEIGHT;
-        sectionY = sectionLocalY % SECTION_HEIGHT;
+    void Chunk::WorldYToSectionCoords(int worldY, int& sectionIndex, int& sectionY) const {
+        // Input is world Y (-64 to 319), output section index and section-local Y
+        int chunkLocalY = worldY - Config::MinY;
+        sectionIndex = chunkLocalY / SECTION_HEIGHT;
+        sectionY = chunkLocalY % SECTION_HEIGHT;
 
         // Clamp to valid ranges
         sectionIndex = std::clamp(sectionIndex, 0, SECTION_COUNT - 1);

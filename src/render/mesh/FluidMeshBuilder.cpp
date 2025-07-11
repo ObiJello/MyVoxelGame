@@ -25,7 +25,6 @@ namespace Render {
         // Get fluid type
         Game::BlockID fluidType = chunk.GetBlock(localX, localY + 64, localZ);
 
-
         if (!IsFluid(fluidType)) {
             return;
         }
@@ -163,7 +162,6 @@ namespace Render {
             case Game::BlockID::Water:
                 if (face == BlockFace::PositiveY || face == BlockFace::NegativeY) {
                     // Top and bottom faces use "still" texture
-
                     return "block/water_still";
                 } else {
                     // Side faces use "flow" texture
@@ -233,10 +231,13 @@ namespace Render {
         return m_config.fluidHeight;
     }
 
-    bool FluidMeshBuilder::IsFluidFaceExposed(const Game::Chunk& chunk, int x, int y, int z, BlockFace face) {
+    bool FluidMeshBuilder::IsFluidFaceExposed(const Game::Chunk& chunk, int localX, int worldY, int localZ, BlockFace face) {
         if (!m_config.enableFluidCulling) {
             return true;  // Always render if culling disabled
         }
+
+        // **SIMPLIFIED**: All coordinates are now consistent - no more conversion needed!
+        Game::BlockID currentFluid = chunk.GetBlock(localX, worldY, localZ);
 
         // Get neighbor position
         static const glm::ivec3 offsets[] = {
@@ -249,20 +250,40 @@ namespace Render {
         };
 
         glm::ivec3 offset = offsets[static_cast<int>(face)];
-        int nx = x + offset.x;
-        int ny = y + offset.y;
-        int nz = z + offset.z;
+        int neighborLocalX = localX + offset.x;
+        int neighborWorldY = worldY + offset.y;
+        int neighborLocalZ = localZ + offset.z;
 
-        // Check bounds
-        if (nx < 0 || nx >= 16 || ny < 0 || ny >= Game::Math::CHUNK_TOTAL_HEIGHT || nz < 0 || nz >= 16) {
+        // Check bounds using the chunk's validation method
+        if (!chunk.IsWithinChunkBounds(neighborLocalX, neighborWorldY, neighborLocalZ)) {
             return true; // Assume exposed at chunk boundaries
         }
 
-        Game::BlockID neighbor = chunk.GetBlock(nx, ny, nz);
-        Game::BlockID currentFluid = chunk.GetBlock(x, y, z);
+        Game::BlockID neighbor = chunk.GetBlock(neighborLocalX, neighborWorldY, neighborLocalZ);
 
-        // Face is exposed if neighbor is not the same fluid type
-        return neighbor == Game::BlockID::Air || !IsSameFluid(neighbor, currentFluid);
+        // **THIS IS THE FINAL CULLING DECISION POINT**
+        // Enable this debug logging temporarily to see what's happening:
+        /*static int debugCount = 0;
+        if (debugCount < 20 && IsFluid(currentFluid)) {
+            Log::Debug("FACE CULLING: pos=(%d,%d,%d) face=%d current=%d neighbor=%d sameFluid=%s -> expose=%s",
+                      localX, worldY, localZ, (int)face, (int)currentFluid, (int)neighbor,
+                      IsSameFluid(neighbor, currentFluid) ? "YES" : "NO",
+                      (neighbor == Game::BlockID::Air || !IsSameFluid(neighbor, currentFluid)) ? "YES" : "NO");
+            debugCount++;
+        }*/
+
+        // Face is exposed if neighbor is AIR or NOT the same fluid type
+        if (neighbor == Game::BlockID::Air) {
+            return true; // Always expose to air
+        }
+
+        // **KEY DECISION**: Cull face if neighbor is the same fluid type
+        if (IsSameFluid(neighbor, currentFluid)) {
+            return false; // ⭐ THIS SHOULD CULL THE FACE ⭐
+        }
+
+        // Expose to different blocks (including different fluid types)
+        return true;
     }
 
     bool FluidMeshBuilder::IsFluid(Game::BlockID blockId) const {

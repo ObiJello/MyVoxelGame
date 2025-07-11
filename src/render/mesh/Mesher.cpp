@@ -59,14 +59,17 @@ namespace Render {
             return;
         }
 
-        // Process all blocks in this 16x16x16 section
+        // **UPDATED**: Process all blocks in this 16x16x16 section using world Y coordinates
         for (int localX = 0; localX < 16; ++localX) {
-            for (int localY = 0; localY < 16; ++localY) {
+            for (int sectionLocalY = 0; sectionLocalY < 16; ++sectionLocalY) {
                 for (int localZ = 0; localZ < 16; ++localZ) {
-                    Game::BlockID blockId = section->GetBlockID(localX, localY, localZ);
+                    // **NEW**: Convert section-local Y to world Y coordinate
+                    int worldY = sectionY * 16 + sectionLocalY + Config::MinY;
+
+                    Game::BlockID blockId = section->GetBlockID(localX, sectionLocalY, localZ);
 
                     if (blockId != Game::BlockID::Air) {
-                        ProcessBlock(chunk, localX, localY, localZ, sectionY, outMesh);
+                        ProcessBlock(chunk, localX, worldY, localZ, sectionY, outMesh);
                     }
                 }
             }
@@ -96,17 +99,11 @@ namespace Render {
                   outMesh.GetTotalVertexCount(), totalTime);
     }
 
-    void Mesher::ProcessBlock(const Game::Chunk& chunk, int localX, int localY, int localZ,
+    void Mesher::ProcessBlock(const Game::Chunk& chunk, int localX, int worldY, int localZ,
                              int sectionY, SectionMesh& mesh) {
 
-        // Calculate world Y coordinate
-        int worldY = sectionY * 16 + localY + Config::MinY;
-
-        // Get block ID
-        const Game::ChunkSection* section = chunk.GetSection(sectionY);
-        if (!section) return;
-
-        Game::BlockID blockId = section->GetBlockID(localX, localY, localZ);
+        // **UPDATED**: Use new chunk interface with world Y coordinates
+        Game::BlockID blockId = chunk.GetBlock(localX, worldY, localZ);
         if (blockId == Game::BlockID::Air) return;
 
         // Handle fluid blocks separately
@@ -135,8 +132,7 @@ namespace Render {
 
                 // Check if face should be culled
                 if (m_config.enableFaceCulling) {
-                    int chunkLocalY = worldY - Config::MinY;
-                    if (ShouldCullFace(chunk, localX, chunkLocalY, localZ, blockFace, blockId)) {
+                    if (ShouldCullFace(chunk, localX, worldY, localZ, blockFace, blockId)) {
                         m_lastStats.facesCulled++;
                         continue;
                     }
@@ -263,10 +259,10 @@ namespace Render {
         });
     }
 
-    bool Mesher::ShouldCullFace(const Game::Chunk& chunk, int x, int y, int z,
+    bool Mesher::ShouldCullFace(const Game::Chunk& chunk, int localX, int worldY, int localZ,
                                BlockFace face, Game::BlockID currentBlock) {
-        // Get neighbor block
-        Game::BlockID neighborBlock = GetNeighborBlock(chunk, x, y, z, face);
+        // Get neighbor block using the updated coordinate system
+        Game::BlockID neighborBlock = GetNeighborBlock(chunk, localX, worldY, localZ, face);
 
         // Don't cull if neighbor is air
         if (neighborBlock == Game::BlockID::Air) {
@@ -277,35 +273,35 @@ namespace Render {
         return IsBlockOpaque(neighborBlock);
     }
 
-    // **UPDATED**: Now supports cross-chunk neighbor lookup
-    Game::BlockID Mesher::GetNeighborBlock(const Game::Chunk& chunk, int x, int y, int z,
+    // **UPDATED**: Now supports cross-chunk neighbor lookup with consistent coordinates
+    Game::BlockID Mesher::GetNeighborBlock(const Game::Chunk& chunk, int localX, int worldY, int localZ,
                                           BlockFace face) {
         glm::ivec3 offset = FACE_OFFSETS[static_cast<int>(face)];
-        glm::ivec3 neighborPos = glm::ivec3(x, y, z) + offset;
+
+        // Calculate neighbor position
+        int neighborLocalX = localX + offset.x;
+        int neighborWorldY = worldY + offset.y;
+        int neighborLocalZ = localZ + offset.z;
 
         // Check if neighbor is within current chunk bounds
-        if (neighborPos.x >= 0 && neighborPos.x < 16 &&
-            neighborPos.y >= 0 && neighborPos.y < Game::Math::CHUNK_TOTAL_HEIGHT &&
-            neighborPos.z >= 0 && neighborPos.z < 16) {
-
-            // Neighbor is within same chunk
-            return chunk.GetBlock(neighborPos.x, neighborPos.y, neighborPos.z);
+        if (chunk.IsWithinChunkBounds(neighborLocalX, neighborWorldY, neighborLocalZ)) {
+            // **UPDATED**: Use new chunk interface
+            return chunk.GetBlock(neighborLocalX, neighborWorldY, neighborLocalZ);
         }
 
         // **NEW**: Cross-chunk neighbor lookup
         if (m_world) {
             // Convert to world coordinates
-            int worldX = chunk.pos.x * Game::Math::CHUNK_SIZE_X + neighborPos.x;
-            int worldY = neighborPos.y + Config::MinY;
-            int worldZ = chunk.pos.z * Game::Math::CHUNK_SIZE_Z + neighborPos.z;
+            int worldX = chunk.pos.x * Game::Math::CHUNK_SIZE_X + neighborLocalX;
+            int worldZ = chunk.pos.z * Game::Math::CHUNK_SIZE_Z + neighborLocalZ;
 
             // Check world bounds
-            if (worldY < Config::MinY || worldY > Config::MaxY) {
+            if (neighborWorldY < Config::MinY || neighborWorldY > Config::MaxY) {
                 return Game::BlockID::Air;
             }
 
             // Get block from world (this handles cross-chunk access)
-            Game::BlockID neighborBlock = m_world->GetBlock(worldX, worldY, worldZ);
+            Game::BlockID neighborBlock = m_world->GetBlock(worldX, neighborWorldY, worldZ);
 
             return neighborBlock;
         }
@@ -393,7 +389,7 @@ namespace Render {
         return FACE_NORMALS[static_cast<int>(face)];
     }
 
-    uint8_t Mesher::CalculateAmbientOcclusion(const Game::Chunk& chunk, int x, int y, int z,
+    uint8_t Mesher::CalculateAmbientOcclusion(const Game::Chunk& chunk, int localX, int worldY, int localZ,
                                              BlockFace face, int vertexIndex) {
         if (!m_config.enableAmbientOcclusion) {
             return 255; // Full brightness
@@ -404,15 +400,11 @@ namespace Render {
         return 255;
     }
 
-    int Mesher::WorldYToChunkY(int worldY) const {
-        return worldY - Config::MinY;
-    }
-
     glm::vec3 Mesher::LocalToWorldPos(const Game::Math::ChunkPos& chunkPos,
-                                     int localX, int localY, int localZ) const {
+                                     int localX, int worldY, int localZ) const {
         return glm::vec3(
             chunkPos.x * Game::Math::CHUNK_SIZE_X + localX,
-            localY,
+            worldY,  // **UPDATED**: worldY is used directly now
             chunkPos.z * Game::Math::CHUNK_SIZE_Z + localZ
         );
     }

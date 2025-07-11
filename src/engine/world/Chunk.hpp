@@ -25,9 +25,9 @@ namespace Game {
         Chunk();
         ~Chunk() = default;
 
-        // Block access (local coordinates within chunk)
-        BlockID GetBlock(int localX, int localY, int localZ) const;
-        void SetBlock(int localX, int localY, int localZ, BlockID blockId);
+        // Block access (local X/Z coordinates, world Y coordinate)
+        BlockID GetBlock(int localX, int worldY, int localZ) const;
+        void SetBlock(int localX, int worldY, int localZ, BlockID blockId);
 
         // Section management
         ChunkSection* GetSection(int sectionIndex);
@@ -36,10 +36,11 @@ namespace Game {
         bool HasSection(int sectionIndex) const;
 
         // Utility functions
-        bool IsValidLocalPosition(int localX, int localY, int localZ) const;
+        bool IsValidLocalPosition(int localX, int worldY, int localZ) const;
         int WorldYToSectionIndex(int worldY) const;
-        int WorldYToLocalY(int worldY) const;
-        bool IsWithinChunkBounds(int localX, int localY, int localZ) const;
+
+        // **FIXED**: Use world Y coordinates consistently
+        bool IsWithinChunkBounds(int localX, int worldY, int localZ) const;
 
         // Statistics
         size_t GetBlockCount() const;
@@ -52,9 +53,14 @@ namespace Game {
         static constexpr int SECTION_HEIGHT = Math::SECTION_HEIGHT; // 16
         static constexpr int SECTION_COUNT = Math::SECTIONS_PER_CHUNK; // 24
 
+        // World Y coordinate constants (no more local Y!)
+        static constexpr int MIN_WORLD_Y = Config::MinY;         // -64
+        static constexpr int MAX_WORLD_Y = Config::MaxY;         // 319
+        static constexpr int TOTAL_HEIGHT = MAX_WORLD_Y - MIN_WORLD_Y + 1; // 384 blocks tall
+
     private:
-        // Helper to convert section-local Y to section coordinates
-        void LocalYToSectionCoords(int sectionLocalY, int& sectionIndex, int& sectionY) const;
+        // Helper to convert world Y to section coordinates
+        void WorldYToSectionCoords(int worldY, int& sectionIndex, int& sectionY) const;
     };
 
 } // namespace Game
