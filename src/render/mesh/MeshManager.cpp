@@ -78,8 +78,6 @@ namespace Render {
             std::lock_guard<std::mutex> lock(m_dirtyMutex);
             m_dirtySections.insert(key);
         }
-
-        Log::Debug("Marked section (%d, %d, %d) dirty", chunkPos.x, sectionY, chunkPos.z);
     }
 
     void MeshManager::MarkChunkDirty(Game::Math::ChunkPos chunkPos) {
@@ -262,9 +260,7 @@ namespace Render {
     void MeshManager::UploadMeshResult(const MeshResult& result) {
         bool success = m_gpuDataManager.UpdateSection(result.chunkPos, result.sectionY, result.mesh);
 
-        if (success) {
-
-        } else {
+        if (!success) {
             Log::Warning("Failed to upload mesh for section (%d, %d, %d)",
                         result.chunkPos.x, result.sectionY, result.chunkPos.z);
         }

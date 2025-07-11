@@ -81,10 +81,29 @@ namespace Game {
         RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");
         RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");
         RegisterModelBlock(BlockID::Deepslate, "Deepslate", true, "deepslate");
+        RegisterModelBlock(BlockID::Diorite,                       "Diorite",                        true,  "diorite");
+        RegisterModelBlock(BlockID::Andesite,                      "Andesite",                       true,  "andesite");
+        RegisterModelBlock(BlockID::Granite,                       "Granite",                        true,  "granite");
+        RegisterModelBlock(BlockID::CopperOre,                     "Copper Ore",                     true,  "copper_ore");
+        RegisterModelBlock(BlockID::DeepslateLapisOre,             "Deepslate Lapis Ore",            true,  "deepslate_lapis_ore");
+        RegisterModelBlock(BlockID::DeepslateIronOre,              "Deepslate Iron Ore",             true,  "deepslate_iron_ore");
+        RegisterModelBlock(BlockID::DeepslateGoldOre,              "Deepslate Gold Ore",             true,  "deepslate_gold_ore");
+        RegisterModelBlock(BlockID::DeepslateDiamondOre,           "Deepslate Diamond Ore",          true,  "deepslate_diamond_ore");
+        RegisterModelBlock(BlockID::DeepslateCopperOre,            "Deepslate Copper Ore",           true,  "deepslate_copper_ore");
+        RegisterModelBlock(BlockID::Tuff,                          "Tuff",                           true,  "tuff");
+        RegisterModelBlock(BlockID::ChiseledTuffBricks,            "Chiseled Tuff Bricks",           true,  "chiseled_tuff_bricks");
+        RegisterModelBlock(BlockID::TuffBricks,                    "Tuff Bricks",                    true,  "tuff_bricks");
+        RegisterModelBlock(BlockID::WaxedCutCopper,                "Waxed Cut Copper",               true,  "waxed_cut_copper");
+        RegisterModelBlock(BlockID::waxed_chiseled_copper,         "Waxed Chiseled Copper",          true,  "waxed_chiseled_copper");
+        RegisterModelBlock(BlockID::Cobblestone,                   "Cobblestone",                    true,  "cobblestone");
+        RegisterModelBlock(BlockID::MossyCobblestone,              "Mossy Cobblestone",              true,  "mossy_cobblestone");
+        RegisterModelBlock(BlockID::polished_tuff,                 "Polished Tuff",                  true,  "polished_tuff");
+        RegisterModelBlock(BlockID::waxed_oxidized_chiseled_copper,"Waxed Oxidized Chiseled Copper", true,  "waxed_oxidized_chiseled_copper");
 
         // CUTOUT BLOCKS (Alpha-test layer)
         RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves");
         RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves");
+        RegisterModelBlock(BlockID::Spawner,                       "Spawner",                        false,  "spawner");
 
         // TRANSLUCENT BLOCKS (Blended layer)
         RegisterModelBlock(BlockID::Ice, "Ice", false, "ice");

@@ -241,18 +241,18 @@ namespace PlatformMain {
             "../world",                 // Parent directory
             "saves/New World",          // Typical save name
             "saves/World",              // Another common name
-            std::string(getenv("HOME") ? getenv("HOME") : "") + "/.minecraft/saves/New World",  // Default Minecraft location
+            std::string(getenv("HOME") ? getenv("HOME") : "") + "/library/Application Support/minecraft/saves/test1",  // Default Minecraft location
         };
 
         bool foundWorld = false;
         for (const auto& path : commonPaths) {
             if (path.empty()) continue;
 
-            /*if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
+            if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
                 Log::Info("✓ Automatically loaded Minecraft world: %s", path.c_str());
                 foundWorld = true;
                 break;
-            }*/
+            }
         }
 
         if (!foundWorld) {

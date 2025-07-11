@@ -44,6 +44,11 @@ namespace Game {
         ChunkProvider();
         ~ChunkProvider();
 
+        // **NEW**: Static methods for global Minecraft world management
+        static bool LoadMinecraftWorld(const std::string& savePath);
+        static void ClearAllChunks();
+        static void SetGlobalMinecraftWorldPath(const std::string& worldPath);
+
         // Lifecycle
         void Initialize();
         void Update(float deltaTime);
@@ -73,9 +78,10 @@ namespace Game {
         size_t GetDirtyChunkCount() const;
         void GetLoadedChunkBounds(int& minX, int& maxX, int& minZ, int& maxZ) const;
 
-        // Minecraft world support
+        // Minecraft world support (instance methods)
         void SetMinecraftWorldPath(const std::string& worldPath);
         const std::string& GetMinecraftWorldPath() const;
+        bool IsMinecraftChunkAvailable(Math::ChunkPos pos) const;
 
         // Configuration
         void SetMaxLoadedChunks(size_t maxChunks) { m_maxLoadedChunks = maxChunks; }

@@ -48,12 +48,8 @@ namespace Render {
             }
         }
 
-        if (success) {
-            Log::Debug("Created GPU buffers for section (%d, %d, %d): opaque=%u, cutout=%u, translucent=%u indices",
-                      mesh.chunkPos.x, mesh.sectionY, mesh.chunkPos.z,
-                      gpuData.opaqueIndexCount, gpuData.cutoutIndexCount, gpuData.translucentIndexCount);
-        } else {
-            // Clean up on failure
+        if (!success) {
+             // Clean up on failure
             DeleteBuffers(gpuData);
         }
 

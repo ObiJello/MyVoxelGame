@@ -75,10 +75,6 @@ namespace Render {
         // Calculate build time
         auto endTime = std::chrono::high_resolution_clock::now();
         m_lastStats.buildTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-        Log::Debug("Built section mesh (%d, %d, %d): %zu total vertices, %.2f ms",
-                  chunk.pos.x, sectionY, chunk.pos.z,
-                  outMesh.GetTotalVertexCount(), m_lastStats.buildTimeMs);
     }
 
     void Mesher::BuildChunkMesh(const Game::Chunk& chunk, ChunkMesh& outMesh) {
@@ -179,18 +175,12 @@ namespace Render {
             if (faceDef.tintIndex == 0) {
                 // Tint index 0 - usually foliage color (leaves, vines)
                 tintColor = CalculateFoliageTint(blockId, worldX, worldY, worldZ);
-                Log::Debug("Applied foliage tint (index 0) to %s: (%.2f, %.2f, %.2f)",
-                          texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
             } else if (faceDef.tintIndex == 1) {
                 // Tint index 1 - usually grass color (grass blocks)
                 tintColor = CalculateGrassTint(blockId, worldX, worldY, worldZ);
-                Log::Debug("Applied grass tint (index 1) to %s: (%.2f, %.2f, %.2f)",
-                          texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
             } else {
                 // Other tint indices - you can add more specific tinting here
                 tintColor = CalculateBiomeTint(blockId, worldX, worldY, worldZ);
-                Log::Debug("Applied biome tint (index %d) to %s: (%.2f, %.2f, %.2f)",
-                          faceDef.tintIndex, texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
             }
         }
 
@@ -317,15 +307,6 @@ namespace Render {
             // Get block from world (this handles cross-chunk access)
             Game::BlockID neighborBlock = m_world->GetBlock(worldX, worldY, worldZ);
 
-            // **DEBUG**: Log cross-chunk lookups occasionally
-            static int crossChunkLookupCount = 0;
-            if (++crossChunkLookupCount % 1000 == 0) {
-                Log::Debug("Cross-chunk lookup #%d: chunk (%d,%d) local (%d,%d,%d) -> world (%d,%d,%d) = %d",
-                          crossChunkLookupCount, chunk.pos.x, chunk.pos.z,
-                          neighborPos.x, neighborPos.y, neighborPos.z,
-                          worldX, worldY, worldZ, static_cast<int>(neighborBlock));
-            }
-
             return neighborBlock;
         }
 
@@ -446,6 +427,7 @@ namespace Render {
             switch (blockId) {
                 case Game::BlockID::Leaves:
                 case Game::BlockID::CherryLeaves:
+                case Game::BlockID::Spawner:
                     return RenderLayer::Cutout;
 
                 case Game::BlockID::Glass:

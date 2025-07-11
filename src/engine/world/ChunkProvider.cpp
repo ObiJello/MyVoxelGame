@@ -6,11 +6,15 @@
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <filesystem>
 
 // Include FastNoise for terrain generation
 #include "../../../ext/FastNoiseLite.h"
 
 namespace Game {
+
+    // **NEW**: Static world path for global access
+    static std::string s_globalMinecraftWorldPath;
 
     ChunkProvider::ChunkProvider() {
         Log::Info("ChunkProvider created");
@@ -95,6 +99,78 @@ namespace Game {
         Log::Info("ChunkProvider shutdown complete");
     }
 
+    // **NEW**: Static method to load Minecraft world
+    bool ChunkProvider::LoadMinecraftWorld(const std::string& savePath) {
+        Log::Info("Loading Minecraft world from: %s", savePath.c_str());
+
+        // Check if the path exists and has the expected structure
+        if (!std::filesystem::exists(savePath)) {
+            Log::Error("Minecraft world path does not exist: %s", savePath.c_str());
+            return false;
+        }
+
+        std::string regionPath = savePath + "/region";
+        if (!std::filesystem::exists(regionPath)) {
+            Log::Error("No region directory found in world: %s", savePath.c_str());
+            return false;
+        }
+
+        // Count region files
+        int regionFileCount = 0;
+        try {
+            for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
+                if (entry.path().extension() == ".mca") {
+                    regionFileCount++;
+                }
+            }
+        } catch (const std::exception& e) {
+            Log::Error("Error scanning region directory: %s", e.what());
+            return false;
+        }
+
+        if (regionFileCount == 0) {
+            Log::Warning("No .mca files found in region directory: %s", regionPath.c_str());
+            return false;
+        }
+
+        // Clear existing chunks and set new world path
+        ClearAllChunks();
+        SetGlobalMinecraftWorldPath(savePath);
+
+        Log::Info("Successfully loaded Minecraft world: %s (%d region files)",
+                 savePath.c_str(), regionFileCount);
+        return true;
+    }
+
+    // **NEW**: Static method to clear all chunks globally
+    void ChunkProvider::ClearAllChunks() {
+        // This would clear all chunk provider instances
+        // For now, just log - in a full implementation this would iterate over all providers
+        Log::Info("Clearing all chunks globally");
+        s_globalMinecraftWorldPath.clear();
+    }
+
+    // **NEW**: Static method to set global world path
+    void ChunkProvider::SetGlobalMinecraftWorldPath(const std::string& worldPath) {
+        s_globalMinecraftWorldPath = worldPath;
+
+        // Also set it on the MinecraftChunkLoader
+        try {
+            MinecraftChunkLoader::SetWorldPath(worldPath);
+            Log::Info("Set global Minecraft world path: %s", worldPath.c_str());
+        } catch (const std::exception& e) {
+            Log::Error("Failed to set world path on MinecraftChunkLoader: %s", e.what());
+        }
+
+        // Check if the world path exists and has region files
+        std::string regionPath = worldPath + "/region";
+        if (std::filesystem::exists(regionPath)) {
+            Log::Info("Found region directory: %s", regionPath.c_str());
+        } else {
+            Log::Warning("No region directory found at: %s (will use procedural generation)", regionPath.c_str());
+        }
+    }
+
     // Core chunk operations
     std::shared_ptr<Chunk> ChunkProvider::LoadChunk(int chunkX, int chunkZ) {
         Math::ChunkPos pos{chunkX, chunkZ};
@@ -111,9 +187,9 @@ namespace Game {
         // Try to load from Minecraft world first
         std::shared_ptr<Chunk> chunk = nullptr;
 
-        if (!m_minecraftWorldPath.empty()) {
+        if (!s_globalMinecraftWorldPath.empty()) {
             try {
-                chunk = MinecraftChunkLoader::LoadMinecraftChunk(pos, m_minecraftWorldPath);
+                chunk = MinecraftChunkLoader::LoadMinecraftChunk(pos, s_globalMinecraftWorldPath);
                 if (chunk) {
                     Log::Debug("Loaded chunk (%d, %d) from Minecraft world", chunkX, chunkZ);
                 }
@@ -321,18 +397,48 @@ namespace Game {
         }
     }
 
-    // Minecraft world support
+    // **NEW**: Instance methods for Minecraft world support
     void ChunkProvider::SetMinecraftWorldPath(const std::string& worldPath) {
         m_minecraftWorldPath = worldPath;
-        if (!worldPath.empty()) {
+
+        try {
+            MinecraftChunkLoader::SetWorldPath(worldPath);
             Log::Info("ChunkProvider: Set Minecraft world path: %s", worldPath.c_str());
+        } catch (const std::exception& e) {
+            Log::Error("Failed to set world path on MinecraftChunkLoader: %s", e.what());
+        }
+
+        // Check if the world path exists and has region files
+        std::string regionPath = worldPath + "/region";
+        if (std::filesystem::exists(regionPath)) {
+            Log::Info("Found region directory: %s", regionPath.c_str());
         } else {
-            Log::Info("ChunkProvider: Cleared Minecraft world path");
+            Log::Warning("No region directory found at: %s (will use procedural generation)", regionPath.c_str());
         }
     }
 
     const std::string& ChunkProvider::GetMinecraftWorldPath() const {
         return m_minecraftWorldPath;
+    }
+
+    // **NEW**: Check if a Minecraft chunk is available
+    bool ChunkProvider::IsMinecraftChunkAvailable(Math::ChunkPos pos) const {
+        std::string worldPath = m_minecraftWorldPath;
+        if (worldPath.empty()) {
+            worldPath = s_globalMinecraftWorldPath;
+        }
+
+        if (worldPath.empty()) {
+            return false;
+        }
+
+        try {
+            return MinecraftChunkLoader::ChunkExistsInRegion(pos, worldPath);
+        } catch (const std::exception& e) {
+            Log::Warning("Error checking Minecraft chunk availability for (%d, %d): %s",
+                        pos.x, pos.z, e.what());
+            return false;
+        }
     }
 
     // Debug/testing
@@ -580,7 +686,6 @@ namespace Game {
         // **UPDATED**: Use Chebyshev distance (square pattern) instead of circular
         return std::max(std::abs(x1 - x2), std::abs(z1 - z2));
     }
-
 
     bool ChunkProvider::IsValidPosition(int worldX, int worldY, int worldZ) const {
         return worldY >= Config::MinY && worldY <= Config::MaxY;

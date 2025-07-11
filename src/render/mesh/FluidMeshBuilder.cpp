@@ -24,16 +24,15 @@ namespace Render {
 
         // Get fluid type
         Game::BlockID fluidType = chunk.GetBlock(localX, localY + 64, localZ);
-        Log::Error("Thinks water is at (x,y,z): (%d, %d, %d)", localX, localY, localZ);
 
 
         if (!IsFluid(fluidType)) {
             return;
         }
 
-        Log::Debug("Building fluid block %s at (%d, %d, %d)",
+        /*Log::Debug("Building fluid block %s at (%d, %d, %d)",
                   fluidType == Game::BlockID::Water ? "water" : "lava",
-                  (int)worldPos.x, (int)worldPos.y, (int)worldPos.z);
+                  (int)worldPos.x, (int)worldPos.y, (int)worldPos.z);*/
 
         // Calculate fluid height and flow
         float fluidHeight = CalculateFluidHeight(chunk, localX, localY, localZ, fluidType);
@@ -99,7 +98,7 @@ namespace Render {
             return;
         }
 
-        Log::Debug("Creating fluid top surface with texture: %s", texturePath.c_str());
+        //Log::Debug("Creating fluid top surface with texture: %s", texturePath.c_str());
 
         // Create sloped or flat surface based on configuration and flow
         std::vector<Vertex> surfaceVerts;
@@ -120,8 +119,7 @@ namespace Render {
                 baseIndex + 0, baseIndex + 2, baseIndex + 3
             });
 
-            Log::Debug("Added fluid top surface: %zu vertices, %zu indices",
-                      surfaceVerts.size(), 6);
+            //Log::Debug("Added fluid top surface: %zu vertices, %zu indices", surfaceVerts.size(), 6);
         }
     }
 
@@ -141,7 +139,7 @@ namespace Render {
             return;
         }
 
-        Log::Debug("Adding fluid face %d with texture: %s", (int)face, texturePath.c_str());
+        //Log::Debug("Adding fluid face %d with texture: %s", (int)face, texturePath.c_str());
 
         // Create face quad
         std::vector<Vertex> faceVerts = CreateFluidQuad(blockPos, face, height, uvRect, tint);
@@ -155,7 +153,7 @@ namespace Render {
                 baseIndex + 0, baseIndex + 2, baseIndex + 3
             });
 
-            Log::Debug("Added fluid face: %zu vertices, %zu indices", faceVerts.size(), 6);
+            //Log::Debug("Added fluid face: %zu vertices, %zu indices", faceVerts.size(), 6);
         }
     }
 

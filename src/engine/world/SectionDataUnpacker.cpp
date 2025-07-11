@@ -49,6 +49,25 @@ namespace Game {
         s_nameToBlockId["minecraft:mycelium"] = BlockID::Mycelium;
         s_nameToBlockId["minecraft:deepslate"] = BlockID::Deepslate;
         s_nameToBlockId["minecraft:lava"] = BlockID::Lava;
+        s_nameToBlockId["minecraft:diorite"] = BlockID::Diorite;
+        s_nameToBlockId["minecraft:andesite"] = BlockID::Andesite;
+        s_nameToBlockId["minecraft:granite"] = BlockID::Granite;
+        s_nameToBlockId["minecraft:copper_ore"] = BlockID::CopperOre;
+        s_nameToBlockId["minecraft:deepslate_lapis_ore"] = BlockID::DeepslateLapisOre;
+        s_nameToBlockId["minecraft:deepslate_iron_ore"] = BlockID::DeepslateIronOre;
+        s_nameToBlockId["minecraft:deepslate_gold_ore"] = BlockID::DeepslateGoldOre;
+        s_nameToBlockId["minecraft:deepslate_diamond_ore"] = BlockID::DeepslateDiamondOre;
+        s_nameToBlockId["minecraft:deepslate_copper_ore"] = BlockID::DeepslateCopperOre;
+        s_nameToBlockId["minecraft:tuff"] = BlockID::Tuff;
+        s_nameToBlockId["minecraft:chiseled_tuff_bricks"] = BlockID::ChiseledTuffBricks;
+        s_nameToBlockId["minecraft:tuff_bricks"] = BlockID::TuffBricks;
+        s_nameToBlockId["minecraft:waxed_cut_copper"] = BlockID::WaxedCutCopper;
+        s_nameToBlockId["minecraft:waxed_chiseled_copper"] = BlockID::waxed_chiseled_copper;
+        s_nameToBlockId["minecraft:spawner"] = BlockID::Spawner;
+        s_nameToBlockId["minecraft:cobblestone"] = BlockID::Cobblestone;
+        s_nameToBlockId["minecraft:mossy_cobblestone"] = BlockID::MossyCobblestone;
+        s_nameToBlockId["minecraft:polished_tuff"] = BlockID::polished_tuff;
+        s_nameToBlockId["minecraft:waxed_oxidized_chiseled_copper"] = BlockID::waxed_oxidized_chiseled_copper;
 
         // Add common block variants
         s_nameToBlockId["minecraft:grass"] = BlockID::Grass; // Legacy name

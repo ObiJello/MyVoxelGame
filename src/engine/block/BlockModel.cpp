@@ -65,7 +65,7 @@ namespace Game {
                     s_rawJsons[filename] = j;                           // "grass_block"
 
                     loadedJsonCount++;
-                    Log::Debug("Loaded raw JSON: %s", filename.c_str());
+                    //Log::Debug("Loaded raw JSON: %s", filename.c_str());
 
                 } catch (const std::exception& e) {
                     Log::Error("Failed to load JSON '%s': %s", filename.c_str(), e.what());
@@ -90,7 +90,7 @@ namespace Game {
                     ResolveModel(modelName); // Model is cached inside ResolveModelRecursive
                     resolvedModelCount++;
 
-                    Log::Debug("Successfully resolved model '%s'", modelName.c_str());
+                    //Log::Debug("Successfully resolved model '%s'", modelName.c_str());
                 } catch (const std::exception& e) {
                     Log::Error("Failed to resolve model '%s': %s", modelName.c_str(), e.what());
                     failedCount++;
@@ -110,9 +110,9 @@ namespace Game {
             bool usesTinting = model.UsesBiomeTinting();
             auto textures = model.GetAllTexturePaths();
 
-            Log::Debug("Model '%s': %zu elements, %zu unique textures, biome tinting: %s",
+            /*Log::Debug("Model '%s': %zu elements, %zu unique textures, biome tinting: %s",
                       name.c_str(), model.elements.size(), textures.size(),
-                      usesTinting ? "yes" : "no");
+                      usesTinting ? "yes" : "no");*/
         }
 
         return resolvedModelCount > 0;
@@ -143,7 +143,7 @@ namespace Game {
         }
 
         const json& j = itRaw->second;
-        Log::Debug("Resolving model: %s (depth: %d)", name.c_str(), depth);
+        //Log::Debug("Resolving model: %s (depth: %d)", name.c_str(), depth);
 
         // Start with parent if any
         BlockModel result;
@@ -153,7 +153,7 @@ namespace Game {
             // Canonicalize parent reference - strip to just the model name
             std::string parentName = CanonicalizeModelName(parentRef);
 
-            Log::Debug("  Parent: %s -> %s", parentRef.c_str(), parentName.c_str());
+            //Log::Debug("  Parent: %s -> %s", parentRef.c_str(), parentName.c_str());
             result = ResolveModelRecursive(parentName, depth + 1);
 
             // **OPTIMIZATION**: Early-out for no-op children that only redirect to parent
@@ -179,14 +179,14 @@ namespace Game {
                 }
 
                 result.textures[key] = texPath;
-                Log::Debug("  Texture: %s -> %s", key.c_str(), texPath.c_str());
+                //Log::Debug("  Texture: %s -> %s", key.c_str(), texPath.c_str());
             }
         }
 
         // Override elements if this JSON has any (completely replace parent elements)
         if (j.contains("elements")) {
             result.elements.clear();
-            Log::Debug("  Parsing %zu elements", j["elements"].size());
+            //Log::Debug("  Parsing %zu elements", j["elements"].size());
 
             for (const auto& elemJson : j["elements"]) {
                 Element element = ParseElement(elemJson);
@@ -197,8 +197,7 @@ namespace Game {
         // Clear parent reference to avoid confusion
         result.parent = "";
 
-        Log::Debug("Resolved model '%s': %zu elements, %zu textures",
-                  name.c_str(), result.elements.size(), result.textures.size());
+        //Log::Debug("Resolved model '%s': %zu elements, %zu textures", name.c_str(), result.elements.size(), result.textures.size());
 
         // **OPTIMIZATION**: Cache the resolved model immediately to avoid redundant work
         // This matches Minecraft's exact behavior where each model is resolved only once
@@ -284,17 +283,17 @@ namespace Game {
 
                 element.faces[dir] = faceDef;
 
-                Log::Debug("    Face %s: uv(%.1f,%.1f,%.1f,%.1f) texture=%s tint=%d cull=%s",
+                /*Log::Debug("    Face %s: uv(%.1f,%.1f,%.1f,%.1f) texture=%s tint=%d cull=%s",
                           FaceDirToString(dir).c_str(),
                           faceDef.uv.x, faceDef.uv.y, faceDef.uv.z, faceDef.uv.w,
-                          faceDef.textureRef.c_str(), faceDef.tintIndex, faceDef.cullface.c_str());
+                          faceDef.textureRef.c_str(), faceDef.tintIndex, faceDef.cullface.c_str());*/
             }
         }
 
-        Log::Debug("  Element: from(%.1f,%.1f,%.1f) to(%.1f,%.1f,%.1f) faces=%zu",
+        /*Log::Debug("  Element: from(%.1f,%.1f,%.1f) to(%.1f,%.1f,%.1f) faces=%zu",
                   element.from.x, element.from.y, element.from.z,
                   element.to.x, element.to.y, element.to.z,
-                  element.faces.size());
+                  element.faces.size());*/
 
         return element;
     }

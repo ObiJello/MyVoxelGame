@@ -191,7 +191,6 @@ namespace Game {
                     auto chunk = m_chunkProvider->LoadChunk(chunkX, chunkZ);
                     if (chunk) {
                         newlyLoadedChunks.push_back({chunkX, chunkZ});
-                        Log::Debug("Loaded new chunk (%d, %d) for meshing", chunkX, chunkZ);
                     }
                 } else {
                     // Ensure the chunk is loaded (this is fast if already loaded)

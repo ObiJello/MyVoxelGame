@@ -96,7 +96,6 @@ namespace Render {
         }
 
         if (opaqueSections.empty()) {
-            Log::Debug("RenderOpaque: No opaque sections to render");
             return;
         }
 
