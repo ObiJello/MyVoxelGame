@@ -404,7 +404,6 @@ namespace PlatformMain {
         Render::MeshManagerConfig meshConfig;
         meshConfig.maxMeshesPerFrame = 3;        // Limit uploads per frame
         meshConfig.maxBuildTimeMs = 8.0f;        // Max time per frame for processing
-        meshConfig.meshRadius = 12;              // Mesh distance around player
         meshConfig.enableAsyncBuilding = true;   // Use background threads
         meshConfig.highPriorityRadius = 64.0f;   // High priority radius
 
