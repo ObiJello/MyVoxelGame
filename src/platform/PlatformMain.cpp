@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <memory>
 
+#include "GameDirectory.hpp"
 #include "JobSystem.hpp"
 #include "engine/world/RegionFileCache.hpp"
 #include "engine/world/SectionDataUnpacker.hpp"
@@ -287,6 +288,12 @@ namespace PlatformMain {
         // Initialize systems
         Log::Init();
         Log::Info("Starting MyVoxelGame v0.1 with Enhanced Mesher System");
+
+        // Initialize game directory system (creates obeycraft folder and loads options.txt)
+        if (!Platform::InitializeGameDirectorySystem()) {
+            Log::Error("Failed to initialize game directory system");
+            return -1;
+        }
 
         // Process world arguments and initialize Minecraft support FIRST
         ProcessWorldArguments(argc, argv);

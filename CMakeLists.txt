@@ -137,6 +137,7 @@ if(APPLE)
             src/render/mesh/Mesher.cpp
             src/render/mesh/FluidMeshBuilder.cpp
             src/render/mesh/ChunkMeshData.cpp
+            src/platform/GameDirectory.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -195,6 +196,8 @@ else()
             src/engine/world/Chunk.cpp
             src/engine/world/Chunk.hpp
             src/engine/world/WorldGlobals.hpp
+            src/platform/GameDirectory.cpp
+            src/platform/GameDirectory.hpp
     )
 endif()
 
