@@ -2,6 +2,7 @@
 #include "Mesher.hpp"
 #include "FluidMeshBuilder.hpp"
 #include "../../engine/block/BlockRegistry.hpp"
+#include "../../engine/world/World.hpp"  // **NEW**: Include for cross-chunk access
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
 #include <chrono>
@@ -29,8 +30,12 @@ namespace Render {
         {-1,  0,  0}  // NegativeX
     };
 
-    Mesher::Mesher(const MeshConfig& config) : m_config(config) {
+    Mesher::Mesher(const MeshConfig& config) : m_config(config), m_world(nullptr) {
         m_lastStats = {};
+    }
+
+    void Mesher::SetWorld(Game::World* world) {
+        m_world = world;
     }
 
     void Mesher::BuildSectionMesh(const Game::Chunk& chunk, int sectionY, SectionMesh& outMesh) {
@@ -282,20 +287,55 @@ namespace Render {
         return IsBlockOpaque(neighborBlock);
     }
 
+    // **UPDATED**: Now supports cross-chunk neighbor lookup
     Game::BlockID Mesher::GetNeighborBlock(const Game::Chunk& chunk, int x, int y, int z,
                                           BlockFace face) {
         glm::ivec3 offset = FACE_OFFSETS[static_cast<int>(face)];
         glm::ivec3 neighborPos = glm::ivec3(x, y, z) + offset;
 
-        // Check if neighbor is within chunk bounds
+        // Check if neighbor is within current chunk bounds
         if (neighborPos.x >= 0 && neighborPos.x < 16 &&
             neighborPos.y >= 0 && neighborPos.y < Game::Math::CHUNK_TOTAL_HEIGHT &&
             neighborPos.z >= 0 && neighborPos.z < 16) {
 
+            // Neighbor is within same chunk
             return chunk.GetBlock(neighborPos.x, neighborPos.y, neighborPos.z);
         }
 
-        // Neighbor is outside chunk - would need cross-chunk access in full implementation
+        // **NEW**: Cross-chunk neighbor lookup
+        if (m_world) {
+            // Convert to world coordinates
+            int worldX = chunk.pos.x * Game::Math::CHUNK_SIZE_X + neighborPos.x;
+            int worldY = neighborPos.y + Config::MinY;
+            int worldZ = chunk.pos.z * Game::Math::CHUNK_SIZE_Z + neighborPos.z;
+
+            // Check world bounds
+            if (worldY < Config::MinY || worldY > Config::MaxY) {
+                return Game::BlockID::Air;
+            }
+
+            // Get block from world (this handles cross-chunk access)
+            Game::BlockID neighborBlock = m_world->GetBlock(worldX, worldY, worldZ);
+
+            // **DEBUG**: Log cross-chunk lookups occasionally
+            static int crossChunkLookupCount = 0;
+            if (++crossChunkLookupCount % 1000 == 0) {
+                Log::Debug("Cross-chunk lookup #%d: chunk (%d,%d) local (%d,%d,%d) -> world (%d,%d,%d) = %d",
+                          crossChunkLookupCount, chunk.pos.x, chunk.pos.z,
+                          neighborPos.x, neighborPos.y, neighborPos.z,
+                          worldX, worldY, worldZ, static_cast<int>(neighborBlock));
+            }
+
+            return neighborBlock;
+        }
+
+        // **FALLBACK**: No world access available - assume air
+        // This will disable cross-chunk culling but prevent crashes
+        static bool warned = false;
+        if (!warned) {
+            Log::Warning("Mesher has no world reference - cross-chunk face culling disabled");
+            warned = true;
+        }
         return Game::BlockID::Air;
     }
 

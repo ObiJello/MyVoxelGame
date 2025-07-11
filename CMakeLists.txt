@@ -198,6 +198,7 @@ else()
             src/engine/world/WorldGlobals.hpp
             src/platform/GameDirectory.cpp
             src/platform/GameDirectory.hpp
+            src/render/mesh/WorldChunkAccess.cpp
     )
 endif()
 

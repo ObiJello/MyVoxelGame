@@ -24,6 +24,9 @@ namespace Render {
         m_world = world;
         m_stats = {};
 
+        // **NEW**: Set world reference on mesher for cross-chunk culling
+        m_mesher.SetWorld(world);
+
         // Clear any existing data
         {
             std::lock_guard<std::mutex> lock1(m_jobQueueMutex);
@@ -38,7 +41,7 @@ namespace Render {
 
         m_gpuDataManager.Clear();
 
-        Log::Info("MeshManager initialized with world reference");
+        Log::Info("MeshManager initialized with world reference and cross-chunk culling enabled");
     }
 
     void MeshManager::Shutdown() {

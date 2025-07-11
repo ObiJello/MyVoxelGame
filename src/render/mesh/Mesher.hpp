@@ -8,6 +8,11 @@
 #include "../atlas/AtlasBuilder.hpp"
 #include <glm/glm.hpp>
 
+// **NEW**: Forward declaration to avoid circular dependency
+namespace Game {
+    class World;
+}
+
 namespace Render {
 
     // Face directions for block meshing
@@ -49,6 +54,9 @@ namespace Render {
     public:
         explicit Mesher(const MeshConfig& config = MeshConfig{});
 
+        // **NEW**: Set world reference for cross-chunk neighbor access
+        void SetWorld(Game::World* world);
+
         // Rebuild mesh for one 16x16x16 section
         void BuildSectionMesh(const Game::Chunk& chunk, int sectionY, SectionMesh& outMesh);
 
@@ -71,6 +79,7 @@ namespace Render {
     private:
         MeshConfig m_config;
         mutable MeshStats m_lastStats;
+        Game::World* m_world;  // **NEW**: World reference for cross-chunk access
 
         // Core meshing functions
         void ProcessBlock(const Game::Chunk& chunk, int localX, int localY, int localZ,
@@ -89,6 +98,7 @@ namespace Render {
         bool ShouldCullFace(const Game::Chunk& chunk, int x, int y, int z,
                            BlockFace face, Game::BlockID currentBlock);
 
+        // **UPDATED**: Now supports cross-chunk neighbor lookup via world reference
         Game::BlockID GetNeighborBlock(const Game::Chunk& chunk, int x, int y, int z,
                                       BlockFace face);
 
