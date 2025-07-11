@@ -76,9 +76,11 @@ namespace Render {
         void ProcessBlock(const Game::Chunk& chunk, int localX, int localY, int localZ,
                          int sectionY, SectionMesh& mesh);
 
+        // **UPDATED**: Now includes world coordinates for biome tinting
         void AddBlockFace(const Game::BlockModel& model, const Game::Element& element,
                          Game::FaceDir faceDir, const Game::FaceDef& faceDef,
-                         glm::vec3 blockPos, glm::vec3 faceNormal, SectionMesh& mesh);
+                         glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
+                         int worldX, int worldY, int worldZ, SectionMesh& mesh);
 
         void GenerateQuad(const std::vector<Vertex>& quadVerts,
                          std::vector<Vertex>& outVerts, std::vector<uint32_t>& outIndices);
@@ -92,7 +94,12 @@ namespace Render {
 
         // Texture and material helpers
         bool GetTextureUV(const std::string& texturePath, glm::vec4& uvRect);
+
+        // **NEW**: Biome tinting methods for different tint indices
+        glm::vec4 CalculateGrassTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
+        glm::vec4 CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateBiomeTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
+
         RenderLayer GetRenderLayer(Game::BlockID blockId);
 
         // Geometry helpers

@@ -121,6 +121,10 @@ namespace Render {
         // Calculate world position for this block
         glm::vec3 worldPos = LocalToWorldPos(chunk.pos, localX, worldY, localZ);
 
+        // **NEW**: Calculate world coordinates for biome tinting
+        int worldX = chunk.pos.x * Game::Math::CHUNK_SIZE_X + localX;
+        int worldZ = chunk.pos.z * Game::Math::CHUNK_SIZE_Z + localZ;
+
         // Process each element in the block model
         for (const auto& element : model.elements) {
             // Process each face of the element
@@ -141,7 +145,7 @@ namespace Render {
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
 
                 // Add this face to the mesh
-                AddBlockFace(model, element, faceDir, faceDef, worldPos, faceNormal, mesh);
+                AddBlockFace(model, element, faceDir, faceDef, worldPos, faceNormal, blockId, worldX, worldY, worldZ, mesh);
                 m_lastStats.facesGenerated++;
             }
         }
@@ -149,11 +153,11 @@ namespace Render {
 
     void Mesher::AddBlockFace(const Game::BlockModel& model, const Game::Element& element,
                              Game::FaceDir faceDir, const Game::FaceDef& faceDef,
-                             glm::vec3 blockPos, glm::vec3 faceNormal, SectionMesh& mesh) {
+                             glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
+                             int worldX, int worldY, int worldZ, SectionMesh& mesh) {
 
         // Resolve texture path
         std::string texturePath = model.ResolveTexture(faceDef.textureRef);
-
 
         // Get UV coordinates from atlas
         glm::vec4 uvRect;
@@ -163,11 +167,26 @@ namespace Render {
             GetTextureUV(texturePath, uvRect);
         }
 
-        // Calculate biome tint if needed
-        glm::vec4 tintColor(1.0f);
+        // **FIXED**: Calculate biome tint based on tintIndex
+        glm::vec4 tintColor(1.0f, 1.0f, 1.0f, 1.0f); // Default white (no tint)
+
         if (m_config.enableBiomeTinting && faceDef.tintIndex >= 0) {
-            // For now, use white tint - in full implementation would sample colormap
-            tintColor = glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            if (faceDef.tintIndex == 0) {
+                // Tint index 0 - usually foliage color (leaves, vines)
+                tintColor = CalculateFoliageTint(blockId, worldX, worldY, worldZ);
+                Log::Debug("Applied foliage tint (index 0) to %s: (%.2f, %.2f, %.2f)",
+                          texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
+            } else if (faceDef.tintIndex == 1) {
+                // Tint index 1 - usually grass color (grass blocks)
+                tintColor = CalculateGrassTint(blockId, worldX, worldY, worldZ);
+                Log::Debug("Applied grass tint (index 1) to %s: (%.2f, %.2f, %.2f)",
+                          texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
+            } else {
+                // Other tint indices - you can add more specific tinting here
+                tintColor = CalculateBiomeTint(blockId, worldX, worldY, worldZ);
+                Log::Debug("Applied biome tint (index %d) to %s: (%.2f, %.2f, %.2f)",
+                          faceDef.tintIndex, texturePath.c_str(), tintColor.r, tintColor.g, tintColor.b);
+            }
         }
 
         // Convert face direction to our BlockFace enum
@@ -177,7 +196,6 @@ namespace Render {
         std::vector<Vertex> faceVerts = CreateFaceVertices(blockPos, blockFace, uvRect, tintColor);
 
         // Determine which render layer this goes into
-        Game::BlockID blockId = Game::BlockID::Stone; // Would get from context in real implementation
         RenderLayer layer = ClassifyBlock(blockId);
 
         // Add to appropriate mesh layer
@@ -194,6 +212,40 @@ namespace Render {
         }
 
         m_lastStats.quadsGenerated++;
+    }
+
+    // **NEW**: Grass-specific tinting (tint index 1)
+    glm::vec4 Mesher::CalculateGrassTint(Game::BlockID blockId, int worldX, int worldY, int worldZ) {
+        // For now, return a simple green tint for grass
+        // In a full implementation, this would sample from a colormap based on biome/temperature/humidity
+
+        // Different blocks might have different base grass colors
+        switch (blockId) {
+            case Game::BlockID::Grass:
+                return glm::vec4(0.5f, 0.7f, 0.3f, 1.0f); // Bright grass green
+            default:
+                return glm::vec4(0.5f, 0.7f, 0.3f, 1.0f); // Default grass green
+        }
+    }
+
+    // **NEW**: Foliage-specific tinting (tint index 0)
+    glm::vec4 Mesher::CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ) {
+        // For now, return a simple green tint for foliage
+        switch (blockId) {
+            case Game::BlockID::Leaves:
+                return glm::vec4(0.4f, 0.7f, 0.2f, 1.0f); // Oak leaves green
+            case Game::BlockID::CherryLeaves:
+                return glm::vec4(0.6f, 0.9f, 0.5f, 1.0f); // Brighter cherry green
+            default:
+                return glm::vec4(0.4f, 0.6f, 0.2f, 1.0f); // Default foliage green
+        }
+    }
+
+    // **UPDATED**: General biome tinting
+    glm::vec4 Mesher::CalculateBiomeTint(Game::BlockID blockId, int worldX, int worldY, int worldZ) {
+        // This is where you'd implement full biome-based tinting
+        // For now, return a neutral tint
+        return glm::vec4(1.0f, 1.0f, 1.0f, 1.0f);
     }
 
     void Mesher::GenerateQuad(const std::vector<Vertex>& quadVerts,
