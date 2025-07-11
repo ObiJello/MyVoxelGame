@@ -69,11 +69,11 @@ namespace Render {
             return;
         }
 
-        uint64_t packed = PackSectionCoords(chunkPos, sectionY);
+        DirtySectionKey key{chunkPos, sectionY};
 
         {
             std::lock_guard<std::mutex> lock(m_dirtyMutex);
-            m_dirtySections.insert(packed);
+            m_dirtySections.insert(key);
         }
 
         Log::Debug("Marked section (%d, %d, %d) dirty", chunkPos.x, sectionY, chunkPos.z);
@@ -92,24 +92,22 @@ namespace Render {
         m_frameStartTime = std::chrono::steady_clock::now();
 
         // Process dirty sections first
-        std::vector<uint64_t> sectionsToProcess;
+        std::vector<DirtySectionKey> sectionsToProcess;
         {
             std::lock_guard<std::mutex> lock(m_dirtyMutex);
             sectionsToProcess.reserve(m_dirtySections.size());
-            for (uint64_t packed : m_dirtySections) {
-                sectionsToProcess.push_back(packed);
+            for (const auto& key : m_dirtySections) {
+                sectionsToProcess.push_back(key);
             }
             m_dirtySections.clear();
         }
 
-        // Submit jobs for dirty sections
-        for (uint64_t packed : sectionsToProcess) {
-            Game::Math::ChunkPos chunkPos;
-            int sectionY;
-            UnpackSectionCoords(packed, chunkPos, sectionY);
+        Log::Debug("ProcessPendingRemeshes: Processing %zu dirty sections", sectionsToProcess.size());
 
-            bool highPriority = IsHighPriority(chunkPos, sectionY);
-            SubmitMeshJob(chunkPos, sectionY, highPriority);
+        // Submit jobs for dirty sections
+        for (const auto& key : sectionsToProcess) {
+            bool highPriority = IsHighPriority(key.chunkPos, key.sectionY);
+            SubmitMeshJob(key.chunkPos, key.sectionY, highPriority);
             m_stats.jobsSubmittedThisFrame++;
         }
 
@@ -285,6 +283,10 @@ namespace Render {
         // Create result
         MeshResult result(job.chunkPos, job.sectionY);
 
+        // **DEBUG**: Log when we start building a mesh
+        Log::Debug("Starting mesh build for section (%d, %d, %d)",
+                  job.chunkPos.x, job.sectionY, job.chunkPos.z);
+
         try {
             // Check if chunk is loaded
             if (!m_world->IsChunkLoaded(job.chunkPos.x, job.chunkPos.z)) {
@@ -303,6 +305,32 @@ namespace Render {
                 return;
             }
 
+            // **DEBUG**: Check if section has any blocks
+            const Game::ChunkSection* section = chunk->GetSection(job.sectionY);
+            if (!section) {
+                Log::Debug("Section %d in chunk (%d, %d) is null, creating empty mesh",
+                          job.sectionY, job.chunkPos.x, job.chunkPos.z);
+                result.success = true; // Empty mesh is still a success
+                result.mesh = SectionMesh(job.chunkPos, job.sectionY);
+                EnqueueResult(std::move(result));
+                return;
+            }
+
+            // **DEBUG**: Count non-air blocks in section
+            int nonAirBlocks = 0;
+            for (int x = 0; x < 16; ++x) {
+                for (int y = 0; y < 16; ++y) {
+                    for (int z = 0; z < 16; ++z) {
+                        if (section->GetBlockID(x, y, z) != Game::BlockID::Air) {
+                            nonAirBlocks++;
+                        }
+                    }
+                }
+            }
+
+            Log::Debug("Section (%d, %d, %d) has %d non-air blocks",
+                      job.chunkPos.x, job.sectionY, job.chunkPos.z, nonAirBlocks);
+
             // Initialize result mesh
             result.mesh = SectionMesh(job.chunkPos, job.sectionY);
 
@@ -310,11 +338,19 @@ namespace Render {
             m_mesher.BuildSectionMesh(*chunk, job.sectionY, result.mesh);
             result.success = true;
 
-            // Log mesh stats for debugging
+            // **DEBUG**: Log mesh stats for debugging
             size_t totalVerts = result.mesh.GetTotalVertexCount();
+            size_t totalIndices = result.mesh.GetTotalIndexCount();
+
             if (totalVerts > 0) {
-                Log::Debug("Built mesh for section (%d, %d, %d): %zu vertices",
-                          job.chunkPos.x, job.sectionY, job.chunkPos.z, totalVerts);
+                Log::Info("Built mesh for section (%d, %d, %d): %zu vertices, %zu indices (%d blocks)",
+                         job.chunkPos.x, job.sectionY, job.chunkPos.z, totalVerts, totalIndices, nonAirBlocks);
+            } else if (nonAirBlocks > 0) {
+                Log::Warning("Section (%d, %d, %d) has %d blocks but produced 0 vertices!",
+                            job.chunkPos.x, job.sectionY, job.chunkPos.z, nonAirBlocks);
+            } else {
+                Log::Debug("Section (%d, %d, %d) is empty, no mesh generated",
+                          job.chunkPos.x, job.sectionY, job.chunkPos.z);
             }
 
         } catch (const std::exception& e) {
@@ -332,6 +368,9 @@ namespace Render {
         // Update stats (thread-safe)
         m_stats.buildTimeMs += buildTimeMs;
         m_stats.meshesBuiltThisFrame++;
+
+        Log::Debug("Completed mesh build for section (%d, %d, %d) in %.2f ms",
+                  job.chunkPos.x, job.sectionY, job.chunkPos.z, buildTimeMs);
     }
 
     bool MeshManager::IsHighPriority(Game::Math::ChunkPos chunkPos, int sectionY) const {
@@ -350,21 +389,6 @@ namespace Render {
         return std::sqrt((sectionCenterX - m_playerPosition.x) * (sectionCenterX - m_playerPosition.x) +
                         (sectionCenterY - m_playerPosition.y) * (sectionCenterY - m_playerPosition.y) +
                         (sectionCenterZ - m_playerPosition.z) * (sectionCenterZ - m_playerPosition.z));
-    }
-
-    uint64_t MeshManager::PackSectionCoords(Game::Math::ChunkPos chunkPos, int sectionY) const {
-        // Pack chunk coordinates and section Y into a single 64-bit value
-        uint64_t packed = 0;
-        packed |= (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.x)) << 32);
-        packed |= (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.z)) << 16);
-        packed |= static_cast<uint64_t>(sectionY & 0xFF);
-        return packed;
-    }
-
-    void MeshManager::UnpackSectionCoords(uint64_t packed, Game::Math::ChunkPos& chunkPos, int& sectionY) const {
-        chunkPos.x = static_cast<int32_t>(packed >> 32);
-        chunkPos.z = static_cast<int32_t>((packed >> 16) & 0xFFFF);
-        sectionY = static_cast<int>(packed & 0xFF);
     }
 
     void MeshManager::EnqueueJob(const MeshJob& job) {

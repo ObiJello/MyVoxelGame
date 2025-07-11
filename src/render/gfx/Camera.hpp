@@ -123,7 +123,7 @@ namespace Render {
         }
 
         // Calculate movement input vector for physics system
-        // FIXED: Now returns full 3D movement for noclip mode
+        // Returns full 3D movement for noclip mode
         glm::vec3 CalculateMovementInput() const {
             if (!physicsControlled) {
                 return glm::vec3(0.0f); // Not using physics
@@ -148,7 +148,7 @@ namespace Render {
                 movement += horizontalRight;
             }
 
-            // FIXED: Add vertical movement for noclip mode
+            // Vertical movement for noclip mode
             if (Input::IsKeyDown(Input::Key::Space)) {
                 movement.y += 1.0f;  // Move up
             }

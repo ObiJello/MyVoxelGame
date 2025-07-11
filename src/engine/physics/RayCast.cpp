@@ -1,16 +1,16 @@
-// File: src/engine/physics/RayCast.cpp (FIXED)
+// File: src/engine/physics/RayCast.cpp
 #include "RayCast.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
-#include "Physics.hpp"  
+#include "Physics.hpp"
 #include <cmath>
 #include <algorithm>
 #include "world/IBlockAccess.hpp"
 
 namespace Game {
 
-    // **FIXED**: Global block access pointer for raycast system
+    // Global block access pointer for raycast system
     static const IBlockAccess* g_raycastBlockAccess = nullptr;
 
     // **NEW**: Set the global block access for raycast system
@@ -169,7 +169,6 @@ namespace Game {
     }
 
     BlockID Raycast::GetBlockAtWorldPos(const glm::vec3& pos) {
-        // **FIXED**: Use the global block access instead of undefined function
         return GetBlock(
             static_cast<int>(std::floor(pos.x)),
             static_cast<int>(std::floor(pos.y)),

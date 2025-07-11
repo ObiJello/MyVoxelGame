@@ -64,7 +64,7 @@ namespace Game {
     class SectionDataUnpacker {
     public:
         // Main entry point: unpack all sections from a chunk's NBT data
-        // FIXED: Use ::World::NBTTagPtr to refer to the global World namespace
+        // Use ::World::NBTTagPtr to refer to the global World namespace
         static bool UnpackChunkSections(const ::World::NBTTagPtr& chunkNBT, Chunk& chunk);
 
         // Unpack a single section from NBT

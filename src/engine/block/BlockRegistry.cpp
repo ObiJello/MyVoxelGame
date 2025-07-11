@@ -22,7 +22,7 @@ namespace Game {
             .modelName = modelName,
             .legacyTexIdx = {0, 0, 0, 0, 0, 0},
             .useLegacyTextures = false,
-            .isTransparent = !opaque  // FIXED: Set transparency correctly
+            .isTransparent = !opaque
         };
 
         Log::Info("Registered model-based block ID %u as \"%s\" (model=%s, opaque=%s)",
@@ -45,7 +45,7 @@ namespace Game {
             .legacyTexIdx = texIndices,
             .useLegacyTextures = true,
             .enableBiomeTinting = false,
-            .isTransparent = !opaque  // FIXED: Set transparency correctly
+            .isTransparent = !opaque
         };
 
         Log::Info("Registered legacy block ID %u as \"%s\" (legacy_textures=%s)",

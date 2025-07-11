@@ -6,12 +6,13 @@
 #include "Mesher.hpp"
 #include "../../core/JobSystem.hpp"
 #include "../../game/WorldMath.hpp"
-#include "engine/world/World.hpp"
 #include <unordered_set>
 #include <queue>
 #include <mutex>
 #include <future>
 #include <chrono>
+
+#include "world/World.hpp"
 
 namespace Render {
 
@@ -144,9 +145,28 @@ namespace Render {
         glm::vec3 m_playerPosition{0.0f};
         mutable std::mutex m_playerMutex;
 
-        // Dirty tracking
+        // Dirty tracking - use struct instead of bit packing to avoid coordinate corruption
+        struct DirtySectionKey {
+            Game::Math::ChunkPos chunkPos;
+            int sectionY;
+
+            bool operator==(const DirtySectionKey& other) const {
+                return chunkPos.x == other.chunkPos.x &&
+                       chunkPos.z == other.chunkPos.z &&
+                       sectionY == other.sectionY;
+            }
+        };
+
+        struct DirtySectionKeyHash {
+            std::size_t operator()(const DirtySectionKey& key) const {
+                return std::hash<int32_t>{}(key.chunkPos.x) ^
+                       (std::hash<int32_t>{}(key.chunkPos.z) << 1) ^
+                       (std::hash<int>{}(key.sectionY) << 2);
+            }
+        };
+
         mutable std::mutex m_dirtyMutex;
-        std::unordered_set<uint64_t> m_dirtySections;  // Packed chunk+section coordinates
+        std::unordered_set<DirtySectionKey, DirtySectionKeyHash> m_dirtySections;
 
         // Frame timing
         std::chrono::steady_clock::time_point m_frameStartTime;
@@ -162,10 +182,6 @@ namespace Render {
         // Priority and distance calculations
         bool IsHighPriority(Game::Math::ChunkPos chunkPos, int sectionY) const;
         float CalculateDistance(Game::Math::ChunkPos chunkPos, int sectionY) const;
-
-        // Dirty section management
-        uint64_t PackSectionCoords(Game::Math::ChunkPos chunkPos, int sectionY) const;
-        void UnpackSectionCoords(uint64_t packed, Game::Math::ChunkPos& chunkPos, int& sectionY) const;
 
         // Queue management
         void EnqueueJob(const MeshJob& job);

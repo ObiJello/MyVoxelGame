@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp (UPDATED - Integrated New Mesher System)
+// File: src/platform/PlatformMain.cpp
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -16,7 +16,7 @@
 // Include rendering headers
 #include "../render/gfx/Camera.hpp"
 #include "../render/gfx/Frustum.hpp"
-#include "../render/gfx/Shader.hpp"  // **FIX**: Make sure Shader is included
+#include "../render/gfx/Shader.hpp"
 #include "../render/mesh/BlockHighlight.hpp"
 #include "../render/debug/Crosshair.hpp"
 #include "../render/atlas/AtlasBuilder.hpp"
@@ -36,6 +36,7 @@
 #include "engine/world/SectionDataUnpacker.hpp"
 #include "mesh/ChunkRenderer.hpp"
 #include "mesh/MeshManager.hpp"
+#include "engine/world/WorldGlobals.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -380,7 +381,7 @@ namespace PlatformMain {
 
         // Initialize game systems
         Render::Camera camera;
-        camera.position = glm::vec3(0.0f, 80.0f, 0.0f);
+        camera.position = glm::vec3(0.0f, 97.0f, 0.0f);
         camera.physicsControlled = true;
 
         // Create PlayerController
@@ -446,11 +447,14 @@ namespace PlatformMain {
             playerController.Update(dt, camera);
             world.Update(dt);  // Make sure world is updated
 
-            // **NEW**: Update mesh system
+            //Set player position for mesh system prioritization
+            glm::vec3 playerPos = playerController.GetPhysics().position;
+            Render::SetMeshSystemPlayerPosition(playerPos);
+
+            // Update mesh system
             Render::UpdateMeshSystem(dt);
 
             // Get player chunk position for chunk loading
-            glm::vec3 playerPos = playerController.GetPhysics().position;
             int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
             int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
@@ -473,6 +477,22 @@ namespace PlatformMain {
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
+
+            // **CRITICAL FIX 4**: Check if we have meshes to render
+            if (Render::g_meshManager) {
+                size_t activeSections = Render::g_meshManager->GetGPUDataManager().GetSectionCount();
+                size_t pendingJobs = Render::g_meshManager->GetPendingJobCount();
+                size_t completedResults = Render::g_meshManager->GetCompletedResultCount();
+
+                // Log mesh stats occasionally
+                static float meshLogTimer = 0.0f;
+                meshLogTimer += dt;
+                if (meshLogTimer >= 2.0f) { // Every 2 seconds
+                    Log::Info("Mesh Status: %zu active sections, %zu pending jobs, %zu completed results",
+                             activeSections, pendingJobs, completedResults);
+                    meshLogTimer = 0.0f;
+                }
+            }
 
             // Render chunks using the new system
             Render::RenderChunksAll(camera, frustum);

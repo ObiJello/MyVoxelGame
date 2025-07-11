@@ -486,7 +486,7 @@ namespace Render {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasWidth, atlasHeight, 0,
                     GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
 
-        // **UPDATED**: Use the new parameter system instead of hardcoded values
+        // Use the new parameter system instead of hardcoded values
         UpdateTextureParameters();
 
         glBindTexture(GL_TEXTURE_2D, 0);

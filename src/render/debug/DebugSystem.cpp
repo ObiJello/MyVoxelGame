@@ -1,20 +1,16 @@
-// File: src/render/debug/DebugSystem.cpp (FIXED - Removed undefined references)
+// File: src/render/debug/DebugSystem.cpp (FINAL FIX - Removed incorrect includes)
 #include "DebugSystem.hpp"
-#include "platform/PlatformMain.cpp"
 #include "../../core/Log.hpp"
 #include "../../engine/block/BlockRegistry.hpp"
 #include "../debug/Crosshair.hpp"
 #include "../atlas/AtlasBuilder.hpp"
 #include "../../core/Config.hpp"
 #include "../../game/WorldMath.hpp"
+#include "engine/world/World.hpp"
+#include "../../engine/world/WorldGlobals.hpp"
 #include <unordered_set>
 #include <cmath>
 #include <filesystem>
-
-// Forward declare global world instance (you'll need to provide this)
-namespace Game {
-    extern class World* g_world;
-}
 
 namespace Debug {
 
@@ -103,7 +99,7 @@ namespace Debug {
         ImGui::Text("Render Time: %.2f ms", metrics.renderTime);
         ImGui::Spacing();
 
-        // **NEW**: Enhanced mesh system metrics
+        // Enhanced mesh system metrics
         ImGui::Text("Enhanced Mesh System");
         ImGui::Separator();
         ImGui::Text("Meshes Built This Frame: %d", metrics.meshesUploadedThisFrame);
@@ -134,14 +130,13 @@ namespace Debug {
         }
         ImGui::Spacing();
 
-        // **NEW**: Mipmap controls
+        // Mipmap controls
         static bool mipmapEnabled = false;
         bool mipmapChanged = ImGui::Checkbox("Enable Mipmaps", &mipmapEnabled);
 
         if (mipmapChanged) {
             // Apply mipmap setting to AtlasBuilder
             if (Render::g_atlasBuilder && Render::g_atlasBuilder->GetAtlasTextureID() != 0) {
-                // Note: SetMipmapEnabled may not exist - this is a placeholder
                 Log::Info("Mipmap setting changed to %s", mipmapEnabled ? "enabled" : "disabled");
             }
         }
@@ -509,7 +504,7 @@ namespace Debug {
         ImGui::EndChild();
     }
 
-    // Simplified world debug - removed Minecraft-specific features for now
+    // Simplified world debug
     void DebugSystem::DrawWorldDebug() {
         if (!ImGui::Begin("World Debug")) {
             ImGui::End();

@@ -289,7 +289,7 @@ namespace World {
 
         chunkData.compressedData.resize(dataLength);
 
-        // **FIXED**: Check stream state before reading
+        // Check stream state before reading
         if (!localFileStream.good()) {
             Log::Error("File stream is in bad state before reading chunk data for (%d, %d)", localX, localZ);
             return chunkData;

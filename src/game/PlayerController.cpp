@@ -1,4 +1,4 @@
-// File: src/game/PlayerController.cpp (FIXED)
+// File: src/game/PlayerController.cpp
 #include "PlayerController.hpp"
 #include "../engine/block/BlockRegistry.hpp"
 #include "../engine/world/World.hpp"
@@ -23,7 +23,7 @@ namespace Game {
         inventory.InitializeDefaults();
 
         // Initialize physics at a safe spawn position
-        physics.position = glm::vec3(0.0f, 80.0f, 0.0f);
+        physics.position = glm::vec3(0.0f, 97.0f, 0.0f);
         physics.velocity = glm::vec3(0.0f);
         physics.isOnGround = false;
         physics.isSneaking = false;
@@ -82,7 +82,7 @@ namespace Game {
     }
 
     void PlayerController::UpdatePhysics(float deltaTime) {
-        // **FIXED**: Create physics context with world block access
+        // Create physics context with world block access
         PhysicsContext context;
         context.blockAccess = world; // World implements IBlockAccess
 

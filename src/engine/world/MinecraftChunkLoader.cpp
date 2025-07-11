@@ -1,5 +1,3 @@
-
-
 // File: src/engine/world/MinecraftChunkLoader.cpp
 #include "MinecraftChunkLoader.hpp"
 #include "ChunkProvider.hpp"

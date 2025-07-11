@@ -141,6 +141,45 @@ namespace Game {
 
     void World::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {
         m_chunkLoadRequests++;
+
+        // Track newly loaded chunks to trigger mesh updates
+        std::vector<Game::Math::ChunkPos> newlyLoadedChunks;
+
+        // Load chunks in view distance
+        for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
+            for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+                int chunkX = playerChunkX + dx;
+                int chunkZ = playerChunkZ + dz;
+
+                // Check if chunk is already loaded
+                bool wasLoaded = m_chunkProvider->IsChunkLoaded(chunkX, chunkZ);
+
+                if (!wasLoaded) {
+                    // Load the chunk
+                    auto chunk = m_chunkProvider->LoadChunk(chunkX, chunkZ);
+                    if (chunk) {
+                        newlyLoadedChunks.push_back({chunkX, chunkZ});
+                        Log::Debug("Loaded new chunk (%d, %d) for meshing", chunkX, chunkZ);
+                    }
+                } else {
+                    // Ensure the chunk is loaded (this is fast if already loaded)
+                    m_chunkProvider->EnsureChunkLoaded(chunkX, chunkZ);
+                }
+            }
+        }
+
+        // **CRITICAL FIX**: Mark newly loaded chunks for mesh generation
+        if (!newlyLoadedChunks.empty() && Render::g_meshManager) {
+            for (const auto& chunkPos : newlyLoadedChunks) {
+                // Mark all sections in newly loaded chunks as dirty for meshing
+                for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                    Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
+                }
+            }
+            Log::Info("Marked %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
+        }
+
+        // Call the original chunk provider update
         m_chunkProvider->UpdateLoadedChunks(playerChunkX, playerChunkZ, viewDistance);
     }
 

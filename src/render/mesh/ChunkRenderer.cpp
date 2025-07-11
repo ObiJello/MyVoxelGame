@@ -51,6 +51,8 @@ namespace Render {
 
     void ChunkRenderer::RenderOpaque(const Camera& camera, const Frustum& frustum) {
         if (!m_shadersLoaded || !g_meshManager || (m_debugLayer >= 0 && m_debugLayer != 0)) {
+            Log::Debug("RenderOpaque early exit: shaders=%d, meshManager=%p, debugLayer=%d",
+                      m_shadersLoaded, (void*)g_meshManager.get(), m_debugLayer);
             return;
         }
 
@@ -58,6 +60,8 @@ namespace Render {
 
         // Prepare visible sections
         PrepareVisibleSections(camera, frustum);
+
+        Log::Debug("RenderOpaque: Found %zu total visible sections", m_visibleSections.size());
 
         // Filter for sections with opaque geometry
         std::vector<SectionRenderData> opaqueSections;
@@ -67,11 +71,25 @@ namespace Render {
             }
         }
 
+        Log::Debug("RenderOpaque: %zu sections have opaque geometry", opaqueSections.size());
+
+        if (opaqueSections.empty()) {
+            Log::Debug("RenderOpaque: No opaque sections to render");
+            return;
+        }
+
         // Sort front to back for depth buffer optimization
         SortSections(camera, opaqueSections, true);
 
         // Setup render state for opaque pass
         SetupRenderPass(m_opaqueConfig);
+
+        // **DEBUG**: Log render state
+        GLboolean depthTest, depthMask, blendEnabled;
+        glGetBooleanv(GL_DEPTH_TEST, &depthTest);
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+        blendEnabled = glIsEnabled(GL_BLEND);
+        Log::Debug("Render state: depth_test=%d, depth_mask=%d, blend=%d", depthTest, depthMask, blendEnabled);
 
         // Render the layer
         RenderLayerPass(RenderLayer::Opaque, camera, opaqueSections);
@@ -120,7 +138,7 @@ namespace Render {
         float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         m_stats.renderTimeMs += renderTime;
 
-        Log::Debug("Rendered %zu cutout sections in %.2f ms", cutoutSections.size(), renderTime);
+        //Log::Debug("Rendered %zu cutout sections in %.2f ms", cutoutSections.size(), renderTime);
     }
 
     void ChunkRenderer::RenderTranslucent(const Camera& camera, const Frustum& frustum) {
@@ -158,7 +176,7 @@ namespace Render {
         float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         m_stats.renderTimeMs += renderTime;
 
-        Log::Debug("Rendered %zu translucent sections in %.2f ms", translucentSections.size(), renderTime);
+        //Log::Debug("Rendered %zu translucent sections in %.2f ms", translucentSections.size(), renderTime);
     }
 
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum) {
@@ -189,13 +207,13 @@ namespace Render {
         }
     }
 
-    // Private methods
     void ChunkRenderer::PrepareVisibleSections(const Camera& camera, const Frustum& frustum) {
         auto startTime = std::chrono::high_resolution_clock::now();
 
         m_visibleSections.clear();
 
         if (!g_meshManager) {
+            Log::Debug("PrepareVisibleSections: No mesh manager available");
             return;
         }
 
@@ -206,43 +224,80 @@ namespace Render {
         int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
         int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
-        int chunkRadius = static_cast<int>(std::ceil(m_renderDistance / Game::Math::CHUNK_SIZE_X));
+        // **DEBUG**: Log camera position and calculated chunk
+        Log::Debug("PrepareVisibleSections: Camera at (%.1f,%.1f,%.1f), chunk (%d,%d)",
+                  playerPos.x, playerPos.y, playerPos.z, playerChunkX, playerChunkZ);
+
+        // **FIX**: Use a reasonable render distance instead of the huge 128.0
+        float effectiveRenderDistance = std::min(m_renderDistance, 128.0f); // Cap at 8 chunks
+        int chunkRadius = static_cast<int>(std::ceil(effectiveRenderDistance / Game::Math::CHUNK_SIZE_X));
+        chunkRadius = std::max(chunkRadius, 8); // At least 8 chunks radius
+
+        Log::Debug("PrepareVisibleSections: Using chunk radius %d (render distance %.1f -> %.1f)",
+                  chunkRadius, m_renderDistance, effectiveRenderDistance);
+
+        int sectionsFound = 0;
+        int sectionsWithGeometry = 0;
+        int sectionsInRange = 0;
+        int chunksChecked = 0;
 
         // Collect all sections within render distance
         for (int dz = -chunkRadius; dz <= chunkRadius; ++dz) {
             for (int dx = -chunkRadius; dx <= chunkRadius; ++dx) {
                 Game::Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
+                chunksChecked++;
 
-                // Check if chunk is within circular render distance
-                float chunkDistance = CalculateSectionDistance(camera, chunkPos, 0);
-                if (chunkDistance > m_renderDistance) {
+                // **FIX**: Use chunk-based distance instead of section distance for initial filtering
+                float chunkCenterX = chunkPos.x * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
+                float chunkCenterZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
+                float chunkDistance = std::sqrt((chunkCenterX - playerPos.x) * (chunkCenterX - playerPos.x) +
+                                               (chunkCenterZ - playerPos.z) * (chunkCenterZ - playerPos.z));
+
+                if (chunkDistance > effectiveRenderDistance) {
                     continue;
                 }
+                sectionsInRange++;
 
                 // Check all sections in this chunk
                 for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                     const GPUSectionData* gpuData = gpuManager.GetSectionData(chunkPos, sectionY);
 
-                    if (gpuData && gpuData->HasGeometry()) {
-                        float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
+                    if (gpuData) {
+                        sectionsFound++;
+                        if (gpuData->HasGeometry()) {
+                            sectionsWithGeometry++;
+                            float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
 
-                        SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
-                        m_visibleSections.push_back(renderData);
+                            SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
+
+                            // **DEBUG**: Log first few sections with geometry
+                            if (sectionsWithGeometry <= 10) {
+                                Log::Debug("Found section (%d,%d,%d) with geometry: opaque=%u, cutout=%u, translucent=%u, dist=%.1f",
+                                          chunkPos.x, sectionY, chunkPos.z,
+                                          gpuData->opaqueIndexCount, gpuData->cutoutIndexCount, gpuData->translucentIndexCount,
+                                          sectionDistance);
+                            }
+
+                            m_visibleSections.push_back(renderData);
+                        }
                     }
                 }
             }
         }
 
-        // Perform frustum culling if enabled
-        if (m_enableFrustumCulling) {
+        Log::Debug("PrepareVisibleSections: %d chunks checked, %d chunks in range, %d sections found, %d with geometry",
+                  chunksChecked, sectionsInRange, sectionsFound, sectionsWithGeometry);
+
+        // **ALWAYS DISABLE FRUSTUM CULLING FOR NOW** to debug the rendering issue
+        if (false && m_enableFrustumCulling) {
             PerformFrustumCulling(frustum, m_visibleSections);
         }
-
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
-        Log::Debug("Prepared %zu visible sections in %.2f ms", m_visibleSections.size(), m_stats.frustumCullTimeMs);
+
+        Log::Debug("PrepareVisibleSections: %zu final visible sections (%.2f ms)",
+                  m_visibleSections.size(), m_stats.frustumCullTimeMs);
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
@@ -319,7 +374,7 @@ namespace Render {
         );
 
         m_stats.sectionsSkipped = culled;
-        Log::Debug("Frustum culling: %d sections culled, %zu remaining", culled, sections.size());
+        //Log::Debug("Frustum culling: %d sections culled, %zu remaining", culled, sections.size());
     }
 
     void ChunkRenderer::SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack) {
@@ -436,6 +491,23 @@ namespace Render {
         if (g_atlasBuilder && g_atlasBuilder->GetAtlasTextureID() != 0) {
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, g_atlasBuilder->GetAtlasTextureID());
+
+            // **DEBUG**: Verify texture binding
+            GLint boundTexture;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
+            static int bindLogCount = 0;
+            if (bindLogCount < 3) {
+                bindLogCount++;
+                Log::Debug("BindTextureAtlas %d: Atlas ID=%u, bound texture=%d",
+                          bindLogCount, g_atlasBuilder->GetAtlasTextureID(), boundTexture);
+            }
+        } else {
+            static int noTextureLogCount = 0;
+            if (noTextureLogCount < 3) {
+                noTextureLogCount++;
+                Log::Error("BindTextureAtlas %d: No atlas available! AtlasBuilder=%p",
+                          noTextureLogCount, g_atlasBuilder.get());
+            }
         }
     }
 

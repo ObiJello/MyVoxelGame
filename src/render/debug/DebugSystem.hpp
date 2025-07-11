@@ -1,4 +1,4 @@
-// File: src/render/debug/DebugSystem.hpp (FIXED - Updated function declarations)
+// File: src/render/debug/DebugSystem.hpp
 #pragma once
 
 #include "../gfx/Camera.hpp"

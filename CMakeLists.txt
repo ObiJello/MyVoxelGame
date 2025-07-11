@@ -49,7 +49,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 # ────────────────────────────────────────────────────────────────────────────
 
-# 4) ImGui (no demo window) - FIXED: Added GLM include directory
+# 4) ImGui
 add_library(imgui
         ext/imgui/imgui.cpp
         ext/imgui/imgui_draw.cpp
@@ -96,7 +96,7 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
-# ── FIXED: Define world parsing sources for region file dumper AND main executable ──────────────
+# ── Define world parsing sources for region file dumper AND main executable ──────────────
 set(WORLD_SOURCES
         src/engine/world/RegionFile.cpp
         src/engine/world/RegionFileCache.cpp
@@ -194,6 +194,7 @@ else()
             src/engine/world/ChunkProvider.hpp
             src/engine/world/Chunk.cpp
             src/engine/world/Chunk.hpp
+            src/engine/world/WorldGlobals.hpp
     )
 endif()
 

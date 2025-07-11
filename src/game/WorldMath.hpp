@@ -9,7 +9,7 @@ namespace Game::Math {
     constexpr int CHUNK_SIZE_X         = 16;               // X width
     constexpr int CHUNK_SIZE_Z         = 16;               // Z depth
     constexpr int SECTION_HEIGHT       = 16;               // Y height of a sub-chunk
-    constexpr int SECTIONS_PER_CHUNK   = 24;               // 384 / 16 = 24 (FIXED: was 16, now 24)
+    constexpr int SECTIONS_PER_CHUNK   = 24;               // 384 / 16 = 24
     constexpr int CHUNK_TOTAL_HEIGHT   = SECTION_HEIGHT * SECTIONS_PER_CHUNK; // 384
 
     // 2D chunk grid position (which chunk in world)
