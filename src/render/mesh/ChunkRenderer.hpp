@@ -90,8 +90,8 @@ namespace Render {
         // Convenience method to render all layers
         void RenderAll(const Camera& camera, const Frustum& frustum);
 
-        // Configuration
-        void SetRenderDistance(float distance) { m_renderDistance = distance; }
+        // Configuration - **UPDATED**: Now reads from game settings
+        void RefreshSettings(); // Call when settings change
         float GetRenderDistance() const { return m_renderDistance; }
 
         void SetEnableFrustumCulling(bool enable) { m_enableFrustumCulling = enable; }
@@ -111,8 +111,8 @@ namespace Render {
         std::unique_ptr<Shader> m_blockShader;
         bool m_shadersLoaded = false;
 
-        // Render configuration
-        float m_renderDistance = 128.0f;
+        // Render configuration - **UPDATED**: Now loaded from settings
+        float m_renderDistance = 128.0f;  // Will be updated from settings
         bool m_enableFrustumCulling = true;
         bool m_wireframeMode = false;
         bool m_showSectionBounds = false;
@@ -159,6 +159,9 @@ namespace Render {
 
         // Initialize render pass configurations
         void SetupRenderConfigs();
+
+        // **NEW**: Load settings from game settings
+        void LoadRenderSettings();
     };
 
     // Global chunk renderer instance

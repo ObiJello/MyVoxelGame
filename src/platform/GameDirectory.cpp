@@ -115,34 +115,179 @@ namespace Platform {
     }
 
     void GameSettings::CreateDefaults() {
-        Log::Info("Creating default game settings...");
+        Log::Info("Creating default game settings (Minecraft-style)...");
 
-        // Graphics settings
-        SetInt("renderDistance", 8);
+        // Version
+        SetInt("version", 4438);
+
+        // Graphics/Video Settings
+        SetBool("ao", true);
+        SetInt("biomeBlendRadius", 2);
+        SetBool("enableVsync", true);
+        SetFloat("entityDistanceScaling", 1.0f);
+        SetBool("entityShadows", false);
+        SetBool("forceUnicodeFont", false);
+        SetBool("japaneseGlyphVariants", false);
         SetFloat("fov", 70.0f);
-        SetBool("vsync", true);
+        SetFloat("fovEffectScale", 1.0f);
+        SetFloat("darknessEffectScale", 1.0f);
+        SetFloat("glintSpeed", 0.5f);
+        SetFloat("glintStrength", 0.75f);
+        SetInt("prioritizeChunkUpdates", 0);
         SetBool("fullscreen", false);
-        SetInt("resWidth", 1280);
-        SetInt("resHeight", 720);
-        SetString("graphics", "fancy");
+        SetFloat("gamma", 1.0f);
+        SetInt("graphicsMode", 1);
+        SetInt("guiScale", 3);
+        SetInt("maxFps", 120);
+        SetString("inactivityFpsLimit", "afk");
+        SetInt("mipmapLevels", 4);
+        SetInt("narrator", 0);
+        SetInt("particles", 1);
+        SetBool("reducedDebugInfo", false);
+        SetString("renderClouds", "true");
+        SetInt("cloudRange", 128);
+        SetInt("renderDistance", 12);
+        SetInt("simulationDistance", 12);
+        SetFloat("screenEffectScale", 1.0f);
 
-        // Input settings
-        SetFloat("mouseSensitivity", 0.1f);
+        // Audio Settings
+        SetString("soundDevice", "");
+        SetFloat("soundCategory_master", 0.20778146f);
+        SetFloat("soundCategory_music", 0.0f);
+        SetFloat("soundCategory_record", 1.0f);
+        SetFloat("soundCategory_weather", 1.0f);
+        SetFloat("soundCategory_block", 1.0f);
+        SetFloat("soundCategory_hostile", 1.0f);
+        SetFloat("soundCategory_neutral", 1.0f);
+        SetFloat("soundCategory_player", 1.0f);
+        SetFloat("soundCategory_ambient", 1.0f);
+        SetFloat("soundCategory_voice", 1.0f);
+        SetFloat("soundCategory_ui", 1.0f);
 
-        // Debug settings
-        SetBool("showDebugInfo", false);
-        SetBool("wireframeMode", false);
+        // Controls and Input
+        SetBool("autoJump", false);
+        SetBool("rotateWithMinecart", false);
+        SetBool("operatorItemsTab", false);
+        SetBool("autoSuggestions", true);
+        SetBool("chatColors", true);
+        SetBool("chatLinks", true);
+        SetBool("chatLinksPrompt", true);
+        SetBool("discrete_mouse_scroll", false);
+        SetBool("invertYMouse", false);
+        SetBool("realmsNotifications", true);
+        SetBool("showSubtitles", false);
+        SetBool("directionalAudio", false);
+        SetBool("touchscreen", false);
+        SetBool("bobView", false);
+        SetBool("toggleCrouch", false);
+        SetBool("toggleSprint", false);
+        SetBool("darkMojangStudiosBackground", false);
+        SetBool("hideLightningFlashes", false);
+        SetBool("hideSplashTexts", false);
+        SetFloat("mouseSensitivity", 0.5f);
+        SetFloat("damageTiltStrength", 1.0f);
 
-        // Performance settings
-        SetInt("maxFPS", 60);
-        SetBool("limitFramerate", true);
+        // Accessibility
+        SetBool("highContrast", false);
+        SetBool("highContrastBlockOutline", false);
+        SetBool("narratorHotkey", true);
 
-        // Audio settings (for future use)
-        SetFloat("masterVolume", 1.0f);
-        SetFloat("musicVolume", 0.5f);
-        SetFloat("soundVolume", 1.0f);
+        // Resource Packs (empty arrays)
+        SetString("resourcePacks", "[]");
+        SetString("incompatibleResourcePacks", "[]");
 
-        Log::Info("Created %zu default settings", m_settings.size());
+        // Multiplayer Settings
+        SetString("lastServer", "192.168.1.158");
+        SetString("lang", "en_us");
+        SetInt("chatVisibility", 0);
+        SetFloat("chatOpacity", 1.0f);
+        SetFloat("chatLineSpacing", 0.0f);
+        SetFloat("textBackgroundOpacity", 0.5f);
+        SetBool("backgroundForChatOnly", true);
+        SetBool("hideServerAddress", false);
+        SetBool("advancedItemTooltips", true);
+        SetBool("pauseOnLostFocus", true);
+
+        // Screen Settings
+        SetInt("overrideWidth", 0);
+        SetInt("overrideHeight", 0);
+        SetFloat("chatHeightFocused", 1.0f);
+        SetFloat("chatDelay", 0.0f);
+        SetFloat("chatHeightUnfocused", 0.4375f);
+        SetFloat("chatScale", 1.0f);
+        SetFloat("chatWidth", 1.0f);
+        SetFloat("notificationDisplayTime", 1.0f);
+
+        // Advanced Settings
+        SetBool("useNativeTransport", true);
+        SetString("mainHand", "right");
+        SetInt("attackIndicator", 1);
+        SetString("tutorialStep", "none");
+        SetFloat("mouseWheelSensitivity", 1.0f);
+        SetBool("rawMouseInput", true);
+        SetInt("glDebugVerbosity", 1);
+        SetBool("skipMultiplayerWarning", true);
+        SetBool("hideMatchedNames", true);
+        SetBool("joinedFirstServer", false);
+        SetBool("syncChunkWrites", false);
+        SetBool("showAutosaveIndicator", true);
+        SetBool("allowServerListing", true);
+        SetBool("onlyShowSecureChat", false);
+        SetFloat("panoramaScrollSpeed", 1.0f);
+        SetBool("telemetryOptInExtra", false);
+        SetBool("onboardAccessibility", false);
+        SetInt("menuBackgroundBlurriness", 5);
+        SetBool("startedCleanly", true);
+        SetBool("showNowPlayingToast", false);
+        SetString("musicFrequency", "DEFAULT");
+
+        // Key Bindings (Minecraft default keys)
+        SetString("key_key.attack", "key.mouse.left");
+        SetString("key_key.use", "key.mouse.right");
+        SetString("key_key.forward", "key.keyboard.w");
+        SetString("key_key.left", "key.keyboard.a");
+        SetString("key_key.back", "key.keyboard.s");
+        SetString("key_key.right", "key.keyboard.d");
+        SetString("key_key.jump", "key.keyboard.space");
+        SetString("key_key.sneak", "key.keyboard.left.shift");
+        SetString("key_key.sprint", "key.keyboard.left.control");
+        SetString("key_key.drop", "key.keyboard.q");
+        SetString("key_key.inventory", "key.keyboard.e");
+        SetString("key_key.chat", "key.keyboard.t");
+        SetString("key_key.playerlist", "key.keyboard.tab");
+        SetString("key_key.pickItem", "key.mouse.middle");
+        SetString("key_key.command", "key.keyboard.slash");
+        SetString("key_key.socialInteractions", "key.keyboard.p");
+        SetString("key_key.screenshot", "key.keyboard.f2");
+        SetString("key_key.togglePerspective", "key.keyboard.f5");
+        SetString("key_key.smoothCamera", "key.keyboard.unknown");
+        SetString("key_key.fullscreen", "key.keyboard.f11");
+        SetString("key_key.spectatorOutlines", "key.keyboard.unknown");
+        SetString("key_key.swapOffhand", "key.keyboard.f");
+        SetString("key_key.saveToolbarActivator", "key.keyboard.c");
+        SetString("key_key.loadToolbarActivator", "key.keyboard.x");
+        SetString("key_key.advancements", "key.keyboard.l");
+        SetString("key_key.quickActions", "key.keyboard.g");
+        SetString("key_key.hotbar.1", "key.keyboard.1");
+        SetString("key_key.hotbar.2", "key.keyboard.2");
+        SetString("key_key.hotbar.3", "key.keyboard.3");
+        SetString("key_key.hotbar.4", "key.keyboard.4");
+        SetString("key_key.hotbar.5", "key.keyboard.5");
+        SetString("key_key.hotbar.6", "key.keyboard.6");
+        SetString("key_key.hotbar.7", "key.keyboard.7");
+        SetString("key_key.hotbar.8", "key.keyboard.8");
+        SetString("key_key.hotbar.9", "key.keyboard.9");
+
+        // Model Parts (player appearance)
+        SetBool("modelPart_cape", true);
+        SetBool("modelPart_jacket", true);
+        SetBool("modelPart_left_sleeve", true);
+        SetBool("modelPart_right_sleeve", true);
+        SetBool("modelPart_left_pants_leg", true);
+        SetBool("modelPart_right_pants_leg", true);
+        SetBool("modelPart_hat", true);
+
+        Log::Info("Created %zu default Minecraft-style settings", m_settings.size());
     }
 
     bool GameSettings::ParseLine(const std::string& line) {

@@ -1,9 +1,10 @@
-// File: src/render/mesh/MeshManager.cpp
+// File: src/render/mesh/MeshManager.cpp (FIXED)
 #include "MeshManager.hpp"
 #include "../../engine/world/World.hpp"
 #include "../../core/Log.hpp"
 #include <algorithm>
 #include <cmath>
+#include <atomic>
 
 namespace Render {
 
@@ -22,7 +23,9 @@ namespace Render {
 
     void MeshManager::Initialize(Game::World* world) {
         m_world = world;
-        m_stats = {};
+
+        // **FIX**: Use atomic initialization for stats
+        m_stats.store({});
 
         // Clear any existing data
         {
@@ -91,10 +94,14 @@ namespace Render {
 
         m_frameStartTime = std::chrono::steady_clock::now();
 
-        // Process dirty sections first
+        // **FIX**: Better dirty section processing
         std::vector<DirtySectionKey> sectionsToProcess;
         {
             std::lock_guard<std::mutex> lock(m_dirtyMutex);
+            if (m_dirtySections.empty()) {
+                return; // Early exit if no work
+            }
+
             sectionsToProcess.reserve(m_dirtySections.size());
             for (const auto& key : m_dirtySections) {
                 sectionsToProcess.push_back(key);
@@ -104,11 +111,33 @@ namespace Render {
 
         Log::Debug("ProcessPendingRemeshes: Processing %zu dirty sections", sectionsToProcess.size());
 
-        // Submit jobs for dirty sections
+        // **FIX**: Filter sections to only include loaded chunks
+        std::vector<DirtySectionKey> validSections;
+        validSections.reserve(sectionsToProcess.size());
+
         for (const auto& key : sectionsToProcess) {
+            if (m_world->IsChunkLoaded(key.chunkPos.x, key.chunkPos.z)) {
+                validSections.push_back(key);
+            } else {
+                // **FIX**: Re-queue sections for chunks that aren't loaded yet
+                Log::Debug("Chunk (%d, %d) not loaded yet, re-queuing section %d",
+                          key.chunkPos.x, key.chunkPos.z, key.sectionY);
+
+                // Re-add to dirty queue to try again later
+                {
+                    std::lock_guard<std::mutex> lock(m_dirtyMutex);
+                    m_dirtySections.insert(key);
+                }
+            }
+        }
+
+        // Submit jobs for valid sections only
+        for (const auto& key : validSections) {
             bool highPriority = IsHighPriority(key.chunkPos, key.sectionY);
             SubmitMeshJob(key.chunkPos, key.sectionY, highPriority);
-            m_stats.jobsSubmittedThisFrame++;
+
+            // **FIX**: Thread-safe stats update
+            m_stats.fetch_add_jobsSubmittedThisFrame(1);
         }
 
         // Process completed mesh results
@@ -116,11 +145,11 @@ namespace Render {
     }
 
     void MeshManager::Update(float deltaTime) {
-        // Update statistics
-        m_stats.pendingJobs = GetPendingJobCount();
-        m_stats.completedResults = GetCompletedResultCount();
-        m_stats.activeSections = m_gpuDataManager.GetSectionCount();
-        m_stats.totalGPUMemory = m_gpuDataManager.GetTotalMemoryUsage();
+        // **FIX**: Thread-safe stats access using setter methods
+        m_stats.setPendingJobs(GetPendingJobCount());
+        m_stats.setCompletedResults(GetCompletedResultCount());
+        m_stats.setActiveSections(m_gpuDataManager.GetSectionCount());
+        m_stats.setTotalGPUMemory(m_gpuDataManager.GetTotalMemoryUsage());
 
         // Cleanup old results periodically
         static float cleanupTimer = 0.0f;
@@ -241,7 +270,9 @@ namespace Render {
             // Process the result outside the lock
             if (result && result->success) {
                 UploadMeshResult(*result);
-                m_stats.meshesUploadedThisFrame++;
+
+                // **FIX**: Thread-safe stats update
+                m_stats.fetch_add_meshesUploadedThisFrame(1);
             }
 
             processed++;
@@ -256,7 +287,8 @@ namespace Render {
 
         if (processed > 0) {
             auto endTime = std::chrono::steady_clock::now();
-            m_stats.uploadTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+            float uploadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+            m_stats.fetch_set_uploadTimeMs(uploadTime);
         }
     }
 
@@ -288,18 +320,34 @@ namespace Render {
                   job.chunkPos.x, job.sectionY, job.chunkPos.z);
 
         try {
-            // Check if chunk is loaded
+            // **FIX**: Better chunk loading check with retry logic
             if (!m_world->IsChunkLoaded(job.chunkPos.x, job.chunkPos.z)) {
-                Log::Debug("Skipping mesh for unloaded chunk (%d, %d)", job.chunkPos.x, job.chunkPos.z);
+                Log::Debug("Chunk (%d, %d) not loaded, job will be retried later",
+                          job.chunkPos.x, job.chunkPos.z);
+
+                // **FIX**: Don't mark as failed - re-queue the section as dirty
+                {
+                    std::lock_guard<std::mutex> lock(m_dirtyMutex);
+                    m_dirtySections.insert({job.chunkPos, job.sectionY});
+                }
+
                 result.success = false;
                 EnqueueResult(std::move(result));
                 return;
             }
 
-            // **FIXED**: Get chunk data through proper interface
+            // **FIXED**: Get chunk data through proper interface with additional safety
             const Game::Chunk* chunk = m_world->GetChunkForMeshing(job.chunkPos.x, job.chunkPos.z);
             if (!chunk) {
-                Log::Debug("Could not get chunk data for meshing (%d, %d)", job.chunkPos.x, job.chunkPos.z);
+                Log::Debug("Could not get chunk data for meshing (%d, %d), will retry",
+                          job.chunkPos.x, job.chunkPos.z);
+
+                // **FIX**: Re-queue instead of failing
+                {
+                    std::lock_guard<std::mutex> lock(m_dirtyMutex);
+                    m_dirtySections.insert({job.chunkPos, job.sectionY});
+                }
+
                 result.success = false;
                 EnqueueResult(std::move(result));
                 return;
@@ -365,9 +413,9 @@ namespace Render {
         // Enqueue result
         EnqueueResult(std::move(result));
 
-        // Update stats (thread-safe)
-        m_stats.buildTimeMs += buildTimeMs;
-        m_stats.meshesBuiltThisFrame++;
+        // **FIX**: Thread-safe stats update
+        m_stats.fetch_add_buildTimeMs(buildTimeMs);
+        m_stats.fetch_add_meshesBuiltThisFrame(1);
 
         Log::Debug("Completed mesh build for section (%d, %d, %d) in %.2f ms",
                   job.chunkPos.x, job.sectionY, job.chunkPos.z, buildTimeMs);
@@ -379,16 +427,21 @@ namespace Render {
     }
 
     float MeshManager::CalculateDistance(Game::Math::ChunkPos chunkPos, int sectionY) const {
-        std::lock_guard<std::mutex> lock(m_playerMutex);
+        // **FIX**: Better thread safety for player position
+        glm::vec3 playerPos;
+        {
+            std::lock_guard<std::mutex> lock(m_playerMutex);
+            playerPos = m_playerPosition;
+        }
 
         // Calculate distance from player to section center
         float sectionCenterX = chunkPos.x * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
         float sectionCenterY = sectionY * Game::Math::SECTION_HEIGHT + Game::Math::SECTION_HEIGHT * 0.5f;
         float sectionCenterZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
 
-        return std::sqrt((sectionCenterX - m_playerPosition.x) * (sectionCenterX - m_playerPosition.x) +
-                        (sectionCenterY - m_playerPosition.y) * (sectionCenterY - m_playerPosition.y) +
-                        (sectionCenterZ - m_playerPosition.z) * (sectionCenterZ - m_playerPosition.z));
+        return std::sqrt((sectionCenterX - playerPos.x) * (sectionCenterX - playerPos.x) +
+                        (sectionCenterY - playerPos.y) * (sectionCenterY - playerPos.y) +
+                        (sectionCenterZ - playerPos.z) * (sectionCenterZ - playerPos.z));
     }
 
     void MeshManager::EnqueueJob(const MeshJob& job) {
@@ -441,12 +494,16 @@ namespace Render {
     void MeshManager::EnforceJobLimits() {
         std::lock_guard<std::mutex> lock(m_jobQueueMutex);
 
-        // Limit total pending jobs
-        while (m_pendingJobs.size() + m_highPriorityJobs.size() > m_config.maxPendingJobs) {
+        // **FIX**: More robust limit enforcement
+        size_t totalJobs = m_pendingJobs.size() + m_highPriorityJobs.size();
+
+        while (totalJobs > m_config.maxPendingJobs) {
             if (!m_pendingJobs.empty()) {
                 m_pendingJobs.pop();
+                totalJobs--;
             } else if (!m_highPriorityJobs.empty()) {
                 m_highPriorityJobs.pop();
+                totalJobs--;
             } else {
                 break;
             }

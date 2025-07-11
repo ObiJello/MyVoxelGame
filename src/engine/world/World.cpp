@@ -4,6 +4,7 @@
 #include "../../core/Config.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../physics/Physics.hpp"
+#include "../../platform/GameDirectory.hpp"  // **NEW**: Include for settings access
 #include <algorithm>
 #include <cmath>
 
@@ -14,7 +15,8 @@ namespace Game {
 
     World::World() {
         m_chunkProvider = std::make_unique<ChunkProvider>();
-        Log::Info("World created");
+        LoadWorldSettings();  // **NEW**: Load settings on construction
+        Log::Info("World created (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
     }
 
     World::~World() {
@@ -25,13 +27,16 @@ namespace Game {
     void World::Initialize() {
         Log::Info("Initializing World...");
 
+        // Load world settings from game settings
+        LoadWorldSettings();
+
         // Initialize chunk provider
         m_chunkProvider->Initialize();
 
         // Set the global block access for physics system
         SetGlobalBlockAccess(this);
 
-        Log::Info("✓ World initialized successfully");
+        Log::Info("✓ World initialized successfully (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
     }
 
     void World::Update(float deltaTime) {
@@ -60,6 +65,25 @@ namespace Game {
         SetGlobalBlockAccess(nullptr);
 
         Log::Info("World shutdown complete");
+    }
+
+    void World::RefreshSettings() {
+        LoadWorldSettings();
+        Log::Info("World settings refreshed (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
+    }
+
+    void World::LoadWorldSettings() {
+        // **NEW**: Load render distance from game settings and use it for chunk loading
+        int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
+
+        // Use render distance for chunk loading, but add a buffer for smooth loading
+        m_chunkLoadingDistance = renderDistanceChunks + 2; // Load 2 extra chunks beyond render distance
+
+        // Clamp to reasonable values
+        m_chunkLoadingDistance = std::clamp(m_chunkLoadingDistance, 4, 64);
+
+        Log::Debug("Loaded world settings: render distance=%d chunks, chunk loading distance=%d chunks",
+                  renderDistanceChunks, m_chunkLoadingDistance);
     }
 
     // IBlockAccess implementation
@@ -142,6 +166,11 @@ namespace Game {
     void World::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {
         m_chunkLoadRequests++;
 
+        // **UPDATED**: Use setting-based view distance if not provided
+        if (viewDistance <= 0) {
+            viewDistance = m_chunkLoadingDistance;
+        }
+
         // Track newly loaded chunks to trigger mesh updates
         std::vector<Game::Math::ChunkPos> newlyLoadedChunks;
 
@@ -179,8 +208,19 @@ namespace Game {
             Log::Info("Marked %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
         }
 
-        // Call the original chunk provider update
+        // Call the original chunk provider update with the view distance
         m_chunkProvider->UpdateLoadedChunks(playerChunkX, playerChunkZ, viewDistance);
+
+        // Log chunk loading stats periodically
+        static float chunkLogTimer = 0.0f;
+        static float deltaAccumulator = 0.0f;
+        deltaAccumulator += 1.0f; // Assuming this is called once per frame
+        chunkLogTimer += 1.0f;
+        if (chunkLogTimer >= 300.0f) { // Every 5 seconds at 60fps
+            Log::Debug("Chunk loading stats: view distance=%d chunks, loaded chunks=%zu, newly loaded this update=%zu",
+                      viewDistance, GetLoadedChunkCount(), newlyLoadedChunks.size());
+            chunkLogTimer = 0.0f;
+        }
     }
 
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {

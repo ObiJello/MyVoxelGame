@@ -3,6 +3,7 @@
 #include "../atlas/AtlasBuilder.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
+#include "../../platform/GameDirectory.hpp"  // **NEW**: Include for settings access
 #include <algorithm>
 #include <chrono>
 #include <glm/gtc/matrix_transform.hpp>
@@ -14,7 +15,8 @@ namespace Render {
 
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
-        m_visibleSections.reserve(1000); // Reserve space for performance
+        LoadRenderSettings();  // **NEW**: Load settings on construction
+        m_visibleSections.reserve(768); // Reserve space for performance
     }
 
     ChunkRenderer::~ChunkRenderer() {
@@ -23,6 +25,9 @@ namespace Render {
 
     bool ChunkRenderer::Initialize() {
         Log::Info("Initializing ChunkRenderer...");
+
+        // Load render settings from game settings
+        LoadRenderSettings();
 
         // Load shaders
         try {
@@ -37,7 +42,7 @@ namespace Render {
         // Reset statistics
         m_stats.Reset();
 
-        Log::Info("✓ ChunkRenderer initialized successfully");
+        Log::Info("✓ ChunkRenderer initialized successfully (render distance: %.1f blocks)", m_renderDistance);
         return true;
     }
 
@@ -47,6 +52,26 @@ namespace Render {
             m_shadersLoaded = false;
         }
         Log::Info("ChunkRenderer shutdown complete");
+    }
+
+    void ChunkRenderer::RefreshSettings() {
+        LoadRenderSettings();
+        Log::Info("ChunkRenderer settings refreshed (render distance: %.1f blocks)", m_renderDistance);
+    }
+
+    void ChunkRenderer::LoadRenderSettings() {
+        // **NEW**: Load render distance from game settings
+        m_renderDistance = static_cast<float>(Platform::g_gameSettings.GetRenderDistance());
+
+        // Convert from chunks to blocks for internal use
+        // Minecraft's render distance is in chunks (16 blocks each)
+        m_renderDistance = m_renderDistance * 16.0f;
+
+        // Clamp to reasonable values
+        m_renderDistance = std::clamp(m_renderDistance, 32.0f, 1024.0f);
+
+        Log::Debug("Loaded render distance from settings: %.1f blocks (%.1f chunks)",
+                  m_renderDistance, m_renderDistance / 16.0f);
     }
 
     void ChunkRenderer::RenderOpaque(const Camera& camera, const Frustum& frustum) {
@@ -61,7 +86,6 @@ namespace Render {
         // Prepare visible sections
         PrepareVisibleSections(camera, frustum);
 
-        Log::Debug("RenderOpaque: Found %zu total visible sections", m_visibleSections.size());
 
         // Filter for sections with opaque geometry
         std::vector<SectionRenderData> opaqueSections;
@@ -70,8 +94,6 @@ namespace Render {
                 opaqueSections.push_back(section);
             }
         }
-
-        Log::Debug("RenderOpaque: %zu sections have opaque geometry", opaqueSections.size());
 
         if (opaqueSections.empty()) {
             Log::Debug("RenderOpaque: No opaque sections to render");
@@ -89,7 +111,7 @@ namespace Render {
         glGetBooleanv(GL_DEPTH_TEST, &depthTest);
         glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
         blendEnabled = glIsEnabled(GL_BLEND);
-        Log::Debug("Render state: depth_test=%d, depth_mask=%d, blend=%d", depthTest, depthMask, blendEnabled);
+        //Log::Debug("Render state: depth_test=%d, depth_mask=%d, blend=%d", depthTest, depthMask, blendEnabled);
 
         // Render the layer
         RenderLayerPass(RenderLayer::Opaque, camera, opaqueSections);
@@ -99,8 +121,6 @@ namespace Render {
         auto endTime = std::chrono::high_resolution_clock::now();
         float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         m_stats.renderTimeMs += renderTime;
-
-        Log::Debug("Rendered %zu opaque sections in %.2f ms", opaqueSections.size(), renderTime);
     }
 
     void ChunkRenderer::RenderCutout(const Camera& camera, const Frustum& frustum) {
@@ -224,17 +244,14 @@ namespace Render {
         int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
         int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
-        // **DEBUG**: Log camera position and calculated chunk
-        Log::Debug("PrepareVisibleSections: Camera at (%.1f,%.1f,%.1f), chunk (%d,%d)",
-                  playerPos.x, playerPos.y, playerPos.z, playerChunkX, playerChunkZ);
 
-        // **FIX**: Use a reasonable render distance instead of the huge 128.0
-        float effectiveRenderDistance = std::min(m_renderDistance, 128.0f); // Cap at 8 chunks
+        // **UPDATED**: Use render distance from settings
+        float effectiveRenderDistance = m_renderDistance;
         int chunkRadius = static_cast<int>(std::ceil(effectiveRenderDistance / Game::Math::CHUNK_SIZE_X));
-        chunkRadius = std::max(chunkRadius, 8); // At least 8 chunks radius
+        chunkRadius = std::max(chunkRadius, 2); // At least 2 chunks radius
 
-        Log::Debug("PrepareVisibleSections: Using chunk radius %d (render distance %.1f -> %.1f)",
-                  chunkRadius, m_renderDistance, effectiveRenderDistance);
+        /*Log::Debug("PrepareVisibleSections: Using chunk radius %d (render distance %.1f blocks)",
+                  chunkRadius, effectiveRenderDistance);*/
 
         int sectionsFound = 0;
         int sectionsWithGeometry = 0;
@@ -247,7 +264,7 @@ namespace Render {
                 Game::Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
                 chunksChecked++;
 
-                // **FIX**: Use chunk-based distance instead of section distance for initial filtering
+                // **UPDATED**: Use render distance from settings for distance check
                 float chunkCenterX = chunkPos.x * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
                 float chunkCenterZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
                 float chunkDistance = std::sqrt((chunkCenterX - playerPos.x) * (chunkCenterX - playerPos.x) +
@@ -270,14 +287,6 @@ namespace Render {
 
                             SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
 
-                            // **DEBUG**: Log first few sections with geometry
-                            if (sectionsWithGeometry <= 10) {
-                                Log::Debug("Found section (%d,%d,%d) with geometry: opaque=%u, cutout=%u, translucent=%u, dist=%.1f",
-                                          chunkPos.x, sectionY, chunkPos.z,
-                                          gpuData->opaqueIndexCount, gpuData->cutoutIndexCount, gpuData->translucentIndexCount,
-                                          sectionDistance);
-                            }
-
                             m_visibleSections.push_back(renderData);
                         }
                     }
@@ -285,19 +294,16 @@ namespace Render {
             }
         }
 
-        Log::Debug("PrepareVisibleSections: %d chunks checked, %d chunks in range, %d sections found, %d with geometry",
-                  chunksChecked, sectionsInRange, sectionsFound, sectionsWithGeometry);
-
         // **ALWAYS DISABLE FRUSTUM CULLING FOR NOW** to debug the rendering issue
-        if (false && m_enableFrustumCulling) {
+        if (m_enableFrustumCulling) {
             PerformFrustumCulling(frustum, m_visibleSections);
         }
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
 
-        Log::Debug("PrepareVisibleSections: %zu final visible sections (%.2f ms)",
-                  m_visibleSections.size(), m_stats.frustumCullTimeMs);
+        /*Log::Debug("PrepareVisibleSections: %zu final visible sections (%.2f ms, render distance: %.1f)",
+                  m_visibleSections.size(), m_stats.frustumCullTimeMs, effectiveRenderDistance);*/
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
