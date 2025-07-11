@@ -174,9 +174,12 @@ namespace Game {
         // Track newly loaded chunks to trigger mesh updates
         std::vector<Game::Math::ChunkPos> newlyLoadedChunks;
 
-        // Load chunks in view distance
-        for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
-            for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+        // **UPDATED**: Load chunks in a square pattern instead of radius
+        // Create a square of size (viewDistance * 2 + 1) x (viewDistance * 2 + 1)
+        int halfSize = viewDistance;
+
+        for (int dz = -halfSize; dz <= halfSize; ++dz) {
+            for (int dx = -halfSize; dx <= halfSize; ++dx) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
 
@@ -208,8 +211,8 @@ namespace Game {
             Log::Info("Marked %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
         }
 
-        // Call the original chunk provider update with the view distance
-        m_chunkProvider->UpdateLoadedChunks(playerChunkX, playerChunkZ, viewDistance);
+        // **UPDATED**: Unload distant chunks (use square distance instead of radius)
+        UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
 
         // Log chunk loading stats periodically
         static float chunkLogTimer = 0.0f;
@@ -349,6 +352,42 @@ namespace Game {
     const Chunk* World::GetChunkForMeshing(int chunkX, int chunkZ) const {
         auto chunk = GetChunk(chunkX, chunkZ);
         return chunk.get();
+    }
+
+    // **NEW**: Helper method to unload distant chunks using square distance
+    void World::UnloadDistantChunks(int centerX, int centerZ, int keepDistance) {
+        std::vector<Math::ChunkPos> chunksToUnload;
+
+        // Find chunks to unload using square distance instead of radius
+        {
+            int minX, maxX, minZ, maxZ;
+            m_chunkProvider->GetLoadedChunkBounds(minX, maxX, minZ, maxZ);
+
+            for (int chunkX = minX; chunkX <= maxX; ++chunkX) {
+                for (int chunkZ = minZ; chunkZ <= maxZ; ++chunkZ) {
+                    if (m_chunkProvider->IsChunkLoaded(chunkX, chunkZ)) {
+                        // Calculate square distance (Chebyshev distance)
+                        int distanceX = std::abs(chunkX - centerX);
+                        int distanceZ = std::abs(chunkZ - centerZ);
+                        int squareDistance = std::max(distanceX, distanceZ);
+
+                        if (squareDistance > keepDistance) {
+                            chunksToUnload.push_back({chunkX, chunkZ});
+                        }
+                    }
+                }
+            }
+        }
+
+        // Unload chunks outside the lock to avoid deadlock
+        for (const Math::ChunkPos& pos : chunksToUnload) {
+            m_chunkProvider->UnloadChunk(pos.x, pos.z);
+        }
+
+        if (!chunksToUnload.empty()) {
+            Log::Debug("Unloaded %zu distant chunks (keep distance: %d)",
+                      chunksToUnload.size(), keepDistance);
+        }
     }
 
 } // namespace Game

@@ -110,14 +110,6 @@ namespace Render {
         if (!sectionsToProcess.empty()) {
             Log::Debug("ProcessPendingRemeshes: Processing %zu dirty sections", sectionsToProcess.size());
 
-            // Check if we're hitting job limits
-            size_t currentPending = GetPendingJobCount();
-            if (currentPending >= m_config.maxPendingJobs) {
-                Log::Warning("Job queue at limit (%zu/%d), skipping new jobs",
-                            currentPending, m_config.maxPendingJobs);
-                return;
-            }
-
             // Submit jobs for dirty sections
             for (const auto& key : sectionsToProcess) {
                 bool highPriority = IsHighPriority(key.chunkPos, key.sectionY);
@@ -261,22 +253,14 @@ namespace Render {
         if (processed > 0) {
             auto endTime = std::chrono::steady_clock::now();
             m_stats.uploadTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-            Log::Debug("Processed %d mesh results in %.2f ms", processed, m_stats.uploadTimeMs);
         }
     }
 
     void MeshManager::UploadMeshResult(const MeshResult& result) {
-        auto startTime = std::chrono::steady_clock::now();
-
         bool success = m_gpuDataManager.UpdateSection(result.chunkPos, result.sectionY, result.mesh);
 
-        auto endTime = std::chrono::steady_clock::now();
-        float uploadTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
         if (success) {
-            Log::Debug("Uploaded mesh for section (%d, %d, %d) in %.2f ms",
-                      result.chunkPos.x, result.sectionY, result.chunkPos.z, uploadTimeMs);
+
         } else {
             Log::Warning("Failed to upload mesh for section (%d, %d, %d)",
                         result.chunkPos.x, result.sectionY, result.chunkPos.z);

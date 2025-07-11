@@ -239,41 +239,29 @@ namespace Render {
 
         const auto& gpuManager = g_meshManager->GetGPUDataManager();
 
-        // Calculate player chunk position for range limiting
+        // Calculate player chunk position for square rendering
         glm::vec3 playerPos = camera.position;
         int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
         int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
+        // **UPDATED**: Calculate square size based on render distance
+        // Convert render distance from blocks to chunks and use it as the square half-size
+        int renderDistanceChunks = static_cast<int>(std::ceil(m_renderDistance / Game::Math::CHUNK_SIZE_X));
 
-        // **UPDATED**: Use render distance from settings
-        float effectiveRenderDistance = m_renderDistance;
-        int chunkRadius = static_cast<int>(std::ceil(effectiveRenderDistance / Game::Math::CHUNK_SIZE_X));
-        chunkRadius = std::max(chunkRadius, 2); // At least 2 chunks radius
-
-        /*Log::Debug("PrepareVisibleSections: Using chunk radius %d (render distance %.1f blocks)",
-                  chunkRadius, effectiveRenderDistance);*/
+        // Create a square of size (renderDistanceChunks * 2 + 1) x (renderDistanceChunks * 2 + 1)
+        int halfSize = renderDistanceChunks;  // This creates the desired square size
 
         int sectionsFound = 0;
         int sectionsWithGeometry = 0;
         int sectionsInRange = 0;
         int chunksChecked = 0;
 
-        // Collect all sections within render distance
-        for (int dz = -chunkRadius; dz <= chunkRadius; ++dz) {
-            for (int dx = -chunkRadius; dx <= chunkRadius; ++dx) {
+        // **UPDATED**: Iterate in a square pattern instead of radius check
+        for (int dz = -halfSize; dz <= halfSize; ++dz) {
+            for (int dx = -halfSize; dx <= halfSize; ++dx) {
                 Game::Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
                 chunksChecked++;
-
-                // **UPDATED**: Use render distance from settings for distance check
-                float chunkCenterX = chunkPos.x * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
-                float chunkCenterZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
-                float chunkDistance = std::sqrt((chunkCenterX - playerPos.x) * (chunkCenterX - playerPos.x) +
-                                               (chunkCenterZ - playerPos.z) * (chunkCenterZ - playerPos.z));
-
-                if (chunkDistance > effectiveRenderDistance) {
-                    continue;
-                }
-                sectionsInRange++;
+                sectionsInRange++;  // All chunks in the square are "in range"
 
                 // Check all sections in this chunk
                 for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
@@ -298,12 +286,10 @@ namespace Render {
         if (m_enableFrustumCulling) {
             PerformFrustumCulling(frustum, m_visibleSections);
         }
+
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
-
-        /*Log::Debug("PrepareVisibleSections: %zu final visible sections (%.2f ms, render distance: %.1f)",
-                  m_visibleSections.size(), m_stats.frustumCullTimeMs, effectiveRenderDistance);*/
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {

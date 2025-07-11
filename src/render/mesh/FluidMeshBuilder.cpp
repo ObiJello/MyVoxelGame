@@ -5,6 +5,8 @@
 #include "../../core/Log.hpp"
 #include <algorithm>
 
+#include "block/BlockRegistry.hpp"
+
 namespace Render {
 
     FluidMeshBuilder::FluidMeshBuilder(const FluidMeshConfig& config) : m_config(config) {
@@ -21,22 +23,27 @@ namespace Render {
         );
 
         // Get fluid type
-        int chunkLocalY = sectionY * 16 + localY;
-        Game::BlockID fluidType = chunk.GetBlock(localX, chunkLocalY, localZ);
+        Game::BlockID fluidType = chunk.GetBlock(localX, localY + 64, localZ);
+        Log::Error("Thinks water is at (x,y,z): (%d, %d, %d)", localX, localY, localZ);
+
 
         if (!IsFluid(fluidType)) {
             return;
         }
 
+        Log::Debug("Building fluid block %s at (%d, %d, %d)",
+                  fluidType == Game::BlockID::Water ? "water" : "lava",
+                  (int)worldPos.x, (int)worldPos.y, (int)worldPos.z);
+
         // Calculate fluid height and flow
-        float fluidHeight = CalculateFluidHeight(chunk, localX, chunkLocalY, localZ, fluidType);
-        FlowDirection flowDir = DetectFlowDirection(chunk, localX, chunkLocalY, localZ);
+        float fluidHeight = CalculateFluidHeight(chunk, localX, localY, localZ, fluidType);
+        FlowDirection flowDir = DetectFlowDirection(chunk, localX, localY, localZ);
 
         // Get fluid tint
         glm::vec4 tint = GetFluidTint(fluidType);
 
         // Create top surface if exposed to air or different fluid
-        Game::BlockID blockAbove = chunk.GetBlock(localX, chunkLocalY + 1, localZ);
+        Game::BlockID blockAbove = chunk.GetBlock(localX, localY + 1, localZ);
         if (blockAbove == Game::BlockID::Air || !IsSameFluid(blockAbove, fluidType)) {
             CreateFluidTopSurface(fluidType, worldPos, fluidHeight, flowDir, tint, outMesh);
         }
@@ -48,13 +55,13 @@ namespace Render {
         };
 
         for (BlockFace face : sideFaces) {
-            if (IsFluidFaceExposed(chunk, localX, chunkLocalY, localZ, face)) {
+            if (IsFluidFaceExposed(chunk, localX, localY, localZ, face)) {
                 CreateFluidSideFace(fluidType, worldPos, face, fluidHeight, tint, outMesh);
             }
         }
 
         // Create bottom face if exposed (rare, but possible)
-        if (IsFluidFaceExposed(chunk, localX, chunkLocalY, localZ, BlockFace::NegativeY)) {
+        if (IsFluidFaceExposed(chunk, localX, localY, localZ, BlockFace::NegativeY)) {
             AddFluidFace(fluidType, worldPos, BlockFace::NegativeY, 0.0f, tint, outMesh);
         }
     }
@@ -83,13 +90,16 @@ namespace Render {
                                                 float height, FlowDirection flow,
                                                 const glm::vec4& tint, SectionMesh& mesh) {
 
-        // Get texture UV coordinates
-        std::string texturePath = GetFluidTexture(fluidType, flow != FlowDirection::None);
+        // **FIXED**: Always use "still" texture for top surface as you requested
+        std::string texturePath = GetFluidTextureForFace(fluidType, BlockFace::PositiveY);
+
         glm::vec4 uvRect;
         if (!GetFluidTextureUV(texturePath, uvRect)) {
             Log::Warning("Failed to get fluid texture UV for: %s", texturePath.c_str());
             return;
         }
+
+        Log::Debug("Creating fluid top surface with texture: %s", texturePath.c_str());
 
         // Create sloped or flat surface based on configuration and flow
         std::vector<Vertex> surfaceVerts;
@@ -109,6 +119,9 @@ namespace Render {
                 baseIndex + 0, baseIndex + 1, baseIndex + 2,
                 baseIndex + 0, baseIndex + 2, baseIndex + 3
             });
+
+            Log::Debug("Added fluid top surface: %zu vertices, %zu indices",
+                      surfaceVerts.size(), 6);
         }
     }
 
@@ -120,12 +133,15 @@ namespace Render {
     void FluidMeshBuilder::AddFluidFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
                                        float height, const glm::vec4& tint, SectionMesh& mesh) {
 
-        // Get texture
-        std::string texturePath = GetFluidTexture(fluidType);
+        // **FIXED**: Use the face-specific texture method
+        std::string texturePath = GetFluidTextureForFace(fluidType, face);
         glm::vec4 uvRect;
         if (!GetFluidTextureUV(texturePath, uvRect)) {
+            Log::Warning("Failed to get fluid texture UV for face %d: %s", (int)face, texturePath.c_str());
             return;
         }
+
+        Log::Debug("Adding fluid face %d with texture: %s", (int)face, texturePath.c_str());
 
         // Create face quad
         std::vector<Vertex> faceVerts = CreateFluidQuad(blockPos, face, height, uvRect, tint);
@@ -138,6 +154,37 @@ namespace Render {
                 baseIndex + 0, baseIndex + 1, baseIndex + 2,
                 baseIndex + 0, baseIndex + 2, baseIndex + 3
             });
+
+            Log::Debug("Added fluid face: %zu vertices, %zu indices", faceVerts.size(), 6);
+        }
+    }
+
+    // **NEW**: Face-specific texture selection as you requested
+    std::string FluidMeshBuilder::GetFluidTextureForFace(Game::BlockID fluidType, BlockFace face) const {
+        switch (fluidType) {
+            case Game::BlockID::Water:
+                if (face == BlockFace::PositiveY || face == BlockFace::NegativeY) {
+                    // Top and bottom faces use "still" texture
+
+                    return "block/water_still";
+                } else {
+                    // Side faces use "flow" texture
+                    return "block/water_flow";
+                }
+                break;
+
+            case Game::BlockID::Lava:
+                if (face == BlockFace::PositiveY || face == BlockFace::NegativeY) {
+                    // Top and bottom faces use "still" texture
+                    return "block/lava_still";
+                } else {
+                    // Side faces use "flow" texture
+                    return "block/lava_flow";
+                }
+                break;
+
+            default:
+                return "missingno";
         }
     }
 
@@ -228,12 +275,13 @@ namespace Render {
         return IsFluid(a) && a == b;
     }
 
+    // **DEPRECATED**: Keep old method for compatibility but use new face-specific method
     std::string FluidMeshBuilder::GetFluidTexture(Game::BlockID fluidType, bool isFlowing) const {
         switch (fluidType) {
             case Game::BlockID::Water:
-                return isFlowing ? "block/water_flow" : "block/water_still";
+                return isFlowing ? "water_flow" : "water_still";
             case Game::BlockID::Lava:
-                return isFlowing ? "block/lava_flow" : "block/lava_still";
+                return isFlowing ? "lava_flow" : "lava_still";
             default:
                 return "missingno";
         }
@@ -361,7 +409,11 @@ namespace Render {
                 uvRect = glm::vec4(atlasUV.uvMin.x, atlasUV.uvMin.y,
                                   atlasUV.uvMax.x, atlasUV.uvMax.y);
                 return true;
+            } else {
+                Log::Warning("Failed to find texture '%s' in atlas", texturePath.c_str());
             }
+        } else {
+            Log::Warning("No atlas builder available for texture lookup");
         }
 
         // Fallback

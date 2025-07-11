@@ -243,9 +243,12 @@ namespace Game {
 
     // Chunk management around player
     void ChunkProvider::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {
-        // Load chunks in a square around the player
-        for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
-            for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+        // **UPDATED**: Load chunks in a square pattern instead of radius
+        // Create a square of size (viewDistance * 2 + 1) x (viewDistance * 2 + 1)
+        int halfSize = viewDistance;
+
+        for (int dz = -halfSize; dz <= halfSize; ++dz) {
+            for (int dx = -halfSize; dx <= halfSize; ++dx) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
 
@@ -255,7 +258,7 @@ namespace Game {
             }
         }
 
-        // Unload distant chunks
+        // Unload distant chunks using square distance
         UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
     }
 
@@ -537,6 +540,7 @@ namespace Game {
     }
 
     bool ChunkProvider::ShouldUnloadChunk(Math::ChunkPos chunkPos, int centerX, int centerZ, int keepRadius) const {
+        // **UPDATED**: Use square distance instead of radius
         int distance = ChunkDistance(chunkPos.x, chunkPos.z, centerX, centerZ);
         return distance > keepRadius;
     }
@@ -573,9 +577,10 @@ namespace Game {
     }
 
     int ChunkProvider::ChunkDistance(int x1, int z1, int x2, int z2) const {
-        // Use Chebyshev distance (max of dx, dz) for square loading pattern
+        // **UPDATED**: Use Chebyshev distance (square pattern) instead of circular
         return std::max(std::abs(x1 - x2), std::abs(z1 - z2));
     }
+
 
     bool ChunkProvider::IsValidPosition(int worldX, int worldY, int worldZ) const {
         return worldY >= Config::MinY && worldY <= Config::MaxY;

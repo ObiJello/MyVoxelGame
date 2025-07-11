@@ -35,7 +35,7 @@ namespace Game {
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
 
         // Chunk management (delegates to ChunkProvider)
-        // **UPDATED**: Now uses settings-based view distance by default
+        // **UPDATED**: Now uses square-based loading pattern instead of radius
         void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance = 0);
 
         // Mesh system integration
@@ -76,6 +76,9 @@ namespace Game {
         void OnBlockChanged(int worldX, int worldY, int worldZ);
         Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
         void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
+
+        // **NEW**: Square-based chunk unloading helper
+        void UnloadDistantChunks(int centerX, int centerZ, int keepDistance);
 
         // **NEW**: Load settings from game settings
         void LoadWorldSettings();

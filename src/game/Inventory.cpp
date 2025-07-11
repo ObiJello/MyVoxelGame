@@ -16,18 +16,18 @@ namespace Game {
         // Clear all slots first
         Clear();
 
-        /* Add some default blocks for testing
+        //Add some default blocks for testing
         slots[0] = { BlockID::Stone, 64 };
         slots[1] = { BlockID::Dirt, 64 };
         slots[2] = { BlockID::Grass, 64 };
-        slots[3] = { BlockID::OakLog, 32 };
+        slots[3] = { BlockID::Lava, 32 };
         slots[4] = { BlockID::Glass, 32 };
         slots[5] = { BlockID::Sand, 64 };
         slots[6] = { BlockID::Leaves, 32 };
         slots[7] = { BlockID::Water, 16 };
-        slots[8] = { BlockID::Bedrock, 8 };*/
+        slots[8] = { BlockID::Bedrock, 8 };
 
-        slots[0] = { BlockID::Water, 64 };
+        /*slots[0] = { BlockID::Water, 64 };
         slots[1] = { BlockID::Lava, 64 };
         slots[2] = { BlockID::GoldOre, 64 };
         slots[3] = { BlockID::EmeraldOre, 64 };
@@ -35,7 +35,7 @@ namespace Game {
         slots[5] = { BlockID::Gravel, 64 };
         slots[6] = { BlockID::Mycelium, 64 };
         slots[7] = { BlockID::CoalOre, 64 };
-        slots[8] = { BlockID::RedstoneOre,64 };
+        slots[8] = { BlockID::RedstoneOre,64 };*/
 
         Log::Info("Inventory initialized with default blocks");
     }

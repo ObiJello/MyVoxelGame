@@ -154,6 +154,7 @@ namespace Render {
         // Resolve texture path
         std::string texturePath = model.ResolveTexture(faceDef.textureRef);
 
+
         // Get UV coordinates from atlas
         glm::vec4 uvRect;
         if (!GetTextureUV(texturePath, uvRect)) {
