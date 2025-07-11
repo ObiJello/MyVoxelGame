@@ -6,13 +6,12 @@
 #include "Mesher.hpp"
 #include "../../core/JobSystem.hpp"
 #include "../../game/WorldMath.hpp"
+#include "engine/world/World.hpp"
 #include <unordered_set>
 #include <queue>
 #include <mutex>
 #include <future>
 #include <chrono>
-
-#include "world/World.hpp"
 
 namespace Render {
 

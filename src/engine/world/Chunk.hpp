@@ -7,6 +7,7 @@
 #include "../../core/Config.hpp"
 #include <array>
 #include <memory>
+#include <functional>
 
 namespace Game {
 
@@ -17,6 +18,9 @@ namespace Game {
 
         // Array of chunk sections (24 sections of 16x16x16 each)
         std::array<std::unique_ptr<ChunkSection>, Math::SECTIONS_PER_CHUNK> sections;
+
+        // **NEW**: Callback for notifying when a section becomes dirty
+        std::function<void(int sectionIndex)> onSectionDirty;
 
         Chunk();
         ~Chunk() = default;

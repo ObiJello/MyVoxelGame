@@ -42,9 +42,13 @@
 #include <unistd.h>
 #endif
 
+namespace Game {
+    // Global world reference for debug system
+    World* g_world = nullptr;
+}
+
 namespace PlatformMain {
 
-    // [Keep all existing platform-specific functions unchanged]
     std::string GetAssetPath(const std::string& relativePath) {
 #ifdef __APPLE__
         // On macOS, check if we're running from a bundle
@@ -96,7 +100,6 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    // [Keep all existing initialization functions unchanged]
     void InitializeGameSystems() {
         Log::Info("Initializing game systems...");
 
@@ -383,9 +386,11 @@ namespace PlatformMain {
         // Create PlayerController
         Game::PlayerController playerController;
 
-        // **NEW**: Initialize the mesh system
+        // Initialize the mesh system
         Game::World world;
         world.Initialize();
+
+        Game::g_world = &world;
 
         // Initialize mesh system with the world
         Render::MeshManagerConfig meshConfig;
@@ -508,6 +513,8 @@ namespace PlatformMain {
 
         // Shutdown world
         world.Shutdown();
+
+        Game::g_world = nullptr;
 
         // Clear region file cache
         World::RegionFileCache::Instance().Clear();

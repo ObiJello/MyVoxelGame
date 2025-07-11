@@ -1,10 +1,10 @@
-// File: src/render/debug/DebugSystem.hpp (ENHANCED - Added Mesh System Debug)
+// File: src/render/debug/DebugSystem.hpp (FIXED - Updated function declarations)
 #pragma once
 
 #include "../gfx/Camera.hpp"
 #include "../gfx/Frustum.hpp"
-#include "../game/PlayerController.hpp"
-#include "../Vertex.hpp" // **NEW**: Include for vertex size calculations
+#include "../../game/PlayerController.hpp"
+#include "../Vertex.hpp"
 
 #ifndef NDEBUG
 #include "imgui.h"
@@ -85,7 +85,7 @@ namespace Debug {
         static void DrawChunkVisualization(const Render::Camera& camera, const Frustum& frustum);
         static void DrawTextureAtlasDebug();
         static void DrawAtlasBuilderDebug();
-        static void DrawMinecraftWorldDebug();
+        static void DrawWorldDebug();
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };
