@@ -23,7 +23,7 @@ namespace Game {
         slots[3] = { BlockID::Lava, 32 };
         slots[4] = { BlockID::Glass, 32 };
         slots[5] = { BlockID::Sand, 64 };
-        slots[6] = { BlockID::Leaves, 32 };
+        slots[6] = { BlockID::OakLeaves, 32 };
         slots[7] = { BlockID::Water, 16 };
         slots[8] = { BlockID::Bedrock, 8 };
 

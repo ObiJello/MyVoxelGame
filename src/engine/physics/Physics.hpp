@@ -57,7 +57,7 @@ namespace Game {
         static constexpr float MAX_SPEED_MULTIPLIER = 2.0f; // Max speed multiplier
 
         // Current player state
-        glm::vec3 position{0.0f, 80.0f, 0.0f};
+        glm::vec3 position{0.0f, 97.0f, 0.0f};
         glm::vec3 velocity{0.0f};
         bool isOnGround = false;
         bool isSneaking = false;

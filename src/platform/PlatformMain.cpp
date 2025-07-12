@@ -241,7 +241,7 @@ namespace PlatformMain {
             "../world",                 // Parent directory
             "saves/New World",          // Typical save name
             "saves/World",              // Another common name
-            std::string(getenv("HOME") ? getenv("HOME") : "") + "/library/Application Support/minecraft/saves/test1",  // Default Minecraft location
+            std::string(getenv("HOME") ? getenv("HOME") : "") + "/library/Application Support/minecraft/saves/new",  // Default Minecraft location
         };
 
         bool foundWorld = false;

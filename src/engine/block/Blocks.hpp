@@ -21,7 +21,7 @@ namespace Game {
         Glass        = 10,
         Bedrock      = 11,
         Water        = 12,
-        Leaves       = 13,
+        OakLeaves    = 13,
         CherryLog    = 14,
         BirchLog     = 15,
         AcaciaLog    = 16,
@@ -57,6 +57,8 @@ namespace Game {
         polished_tuff = 46,
         waxed_oxidized_chiseled_copper = 47,
         deepslate_coal_ore = 48,
+        BirchLeaves    = 49,
+
 
         Count // Always keep this as the last entry.
     };

@@ -33,7 +33,8 @@ namespace Game {
         s_nameToBlockId["minecraft:glass"] = BlockID::Glass;
         s_nameToBlockId["minecraft:bedrock"] = BlockID::Bedrock;
         s_nameToBlockId["minecraft:water"] = BlockID::Water;
-        s_nameToBlockId["minecraft:oak_leaves"] = BlockID::Leaves;
+        s_nameToBlockId["minecraft:oak_leaves"] = BlockID::OakLeaves;
+        s_nameToBlockId["minecraft:birch_leaves"] = BlockID::BirchLeaves;
         s_nameToBlockId["minecraft:cherry_log"] = BlockID::CherryLog;
         s_nameToBlockId["minecraft:birch_log"] = BlockID::BirchLog;
         s_nameToBlockId["minecraft:acacia_log"] = BlockID::AcaciaLog;

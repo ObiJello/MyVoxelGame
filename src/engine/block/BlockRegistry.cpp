@@ -101,7 +101,8 @@ namespace Game {
         RegisterModelBlock(BlockID::waxed_oxidized_chiseled_copper,"Waxed Oxidized Chiseled Copper", true,  "waxed_oxidized_chiseled_copper");
 
         // CUTOUT BLOCKS (Alpha-test layer)
-        RegisterModelBlock(BlockID::Leaves, "Leaves", false, "oak_leaves");
+        RegisterModelBlock(BlockID::OakLeaves, "Oak Leaves", false, "oak_leaves");
+        RegisterModelBlock(BlockID::BirchLeaves, "Birch Leaves", false, "birch_leaves");
         RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves");
         RegisterModelBlock(BlockID::Spawner,                       "Spawner",                        false,  "spawner");
 

@@ -223,9 +223,9 @@ namespace Render {
     glm::vec4 Mesher::CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ) {
         // For now, return a simple green tint for foliage
         switch (blockId) {
-            case Game::BlockID::Leaves:
+            case Game::BlockID::OakLeaves:
                 return glm::vec4(0.4f, 0.7f, 0.2f, 1.0f); // Oak leaves green
-            case Game::BlockID::CherryLeaves:
+            case Game::BlockID::BirchLeaves:
                 return glm::vec4(0.6f, 0.9f, 0.5f, 1.0f); // Brighter cherry green
             default:
                 return glm::vec4(0.4f, 0.6f, 0.2f, 1.0f); // Default foliage green
@@ -417,7 +417,8 @@ namespace Render {
         if (block.isTransparent) {
             // Distinguish between cutout and translucent
             switch (blockId) {
-                case Game::BlockID::Leaves:
+                case Game::BlockID::OakLeaves:
+                case Game::BlockID::BirchLeaves:
                 case Game::BlockID::CherryLeaves:
                 case Game::BlockID::Spawner:
                     return RenderLayer::Cutout;
