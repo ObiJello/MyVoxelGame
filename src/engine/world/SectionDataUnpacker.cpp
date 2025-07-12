@@ -217,7 +217,7 @@ namespace Game {
             return false;
         }
 
-        // Get block_states compound
+        // **CRITICAL FIX**: Get block_states compound first, then get palette from within it
         auto blockStatesTag = sectionCompound->GetTag("block_states");
         if (!blockStatesTag) {
             Log::Debug("Section Y=%d has no block_states, filling with air", sectionY);
@@ -230,10 +230,10 @@ namespace Game {
             return false;
         }
 
-        // Parse palette
+        // **FIXED**: Parse palette from INSIDE block_states, not from section root
         auto paletteTag = blockStatesCompound->GetTag("palette");
         if (!paletteTag) {
-            Log::Error("No palette found in section Y=%d", sectionY);
+            Log::Error("No palette found in block_states for section Y=%d", sectionY);
             return false;
         }
 
@@ -243,7 +243,7 @@ namespace Game {
             return false;
         }
 
-        Log::Debug("Section Y=%d has palette with %zu entries", sectionY, palette.size());
+        Log::Debug("Section Y=%d has BLOCK palette with %zu entries", sectionY, palette.size());
 
         // If palette has only one entry, fill entire section with that block
         if (palette.size() == 1) {
@@ -262,9 +262,9 @@ namespace Game {
             }
 
             // Fill entire section with the single block type
-            for (int x = 0; x < ChunkSection::SIZE; ++x) {
-                for (int y = 0; y < ChunkSection::SIZE; ++y) {
-                    for (int z = 0; z < ChunkSection::SIZE; ++z) {
+            for (int y = 0; y < ChunkSection::SIZE; ++y) {
+                for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                    for (int x = 0; x < ChunkSection::SIZE; ++x) {
                         chunk.sections[sectionIndex]->Set(x, y, z, singleBlock);
                     }
                 }
@@ -274,16 +274,16 @@ namespace Game {
             return true;
         }
 
-        // Get packed data for multi-block sections
+        // **FIXED**: Get packed data from INSIDE block_states, not from section root
         auto dataTag = blockStatesCompound->GetTag("data");
         if (!dataTag) {
-            Log::Error("No data array found in section Y=%d", sectionY);
+            Log::Error("No data array found in block_states for section Y=%d", sectionY);
             return false;
         }
 
         auto dataArray = std::dynamic_pointer_cast<World::NBTTagLongArray>(dataTag);
         if (!dataArray) {
-            Log::Error("Data is not a long array in section Y=%d", sectionY);
+            Log::Error("Data is not a long array in block_states for section Y=%d", sectionY);
             return false;
         }
 
@@ -294,7 +294,7 @@ namespace Game {
             packedData.push_back(static_cast<uint64_t>(val));
         }
 
-        Log::Debug("Section Y=%d has %zu longs of packed data", sectionY, packedData.size());
+        Log::Debug("Section Y=%d has %zu longs of packed BLOCK data", sectionY, packedData.size());
 
         // Unpack the block data
         return UnpackBlockData(packedData, palette, chunk, sectionY);
