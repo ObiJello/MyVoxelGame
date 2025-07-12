@@ -60,7 +60,7 @@ namespace Game {
         bool IsChunkLoaded(int chunkX, int chunkZ) const;
         bool EnsureChunkLoaded(int chunkX, int chunkZ);
 
-        // Block access with world coordinate conversion
+        // **UPDATED**: Block access with world Y coordinates (no conversion needed)
         BlockID GetBlockAt(int worldX, int worldY, int worldZ) const;
         bool SetBlockAt(int worldX, int worldY, int worldZ, BlockID blockId);
 
@@ -90,13 +90,13 @@ namespace Game {
         // Debug/testing
         void GenerateTestChunks(int centerX, int centerZ, int radius);
 
-        // World coordinate conversion utilities
+        // **UPDATED**: World coordinate conversion utilities - simplified for world Y
         static Math::ChunkPos WorldToChunkPos(int worldX, int worldZ);
         static void WorldToLocal(int worldX, int worldY, int worldZ,
                                 int& chunkX, int& chunkZ,
-                                int& localX, int& localY, int& localZ);
+                                int& localX, int& localZ);
         static int WorldYToSectionIndex(int worldY);
-        static int WorldYToChunkLocalY(int worldY);
+        // **REMOVED**: WorldYToChunkLocalY - no longer needed since we use world Y directly
 
         // **NEW**: Get already loaded chunk (don't trigger loading)
         std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
@@ -134,7 +134,7 @@ namespace Game {
         std::shared_ptr<Chunk> GenerateChunk(Math::ChunkPos chunkPos);
         void SetupChunkCallbacks(std::shared_ptr<Chunk> chunk);
 
-        // Chunk generation
+        // **UPDATED**: Chunk generation now uses world Y coordinates
         void GenerateTerrainChunk(Chunk& chunk, Math::ChunkPos pos);
         void PlaceStructures(Chunk& chunk, Math::ChunkPos pos);
 

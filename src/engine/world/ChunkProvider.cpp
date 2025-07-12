@@ -265,30 +265,32 @@ namespace Game {
         return chunk != nullptr;
     }
 
-    // Block access with world coordinate conversion
+    // **UPDATED**: Block access now uses world Y coordinates consistently
     BlockID ChunkProvider::GetBlockAt(int worldX, int worldY, int worldZ) const {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             return BlockID::Air;
         }
 
-        int chunkX, chunkZ, localX, localY, localZ;
-        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localY, localZ);
+        int chunkX, chunkZ, localX, localZ;
+        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localZ);
 
         auto chunk = GetChunk(chunkX, chunkZ);
         if (!chunk) {
             return BlockID::Air;
         }
 
-        return chunk->GetBlock(localX, localY, localZ);
+        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
+        return chunk->GetBlock(localX, worldY, localZ);
     }
 
+    // **UPDATED**: Block setting now uses world Y coordinates consistently
     bool ChunkProvider::SetBlockAt(int worldX, int worldY, int worldZ, BlockID blockId) {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             return false;
         }
 
-        int chunkX, chunkZ, localX, localY, localZ;
-        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localY, localZ);
+        int chunkX, chunkZ, localX, localZ;
+        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localZ);
 
         auto chunk = GetChunk(chunkX, chunkZ);
         if (!chunk) {
@@ -299,13 +301,14 @@ namespace Game {
             }
         }
 
-        // Get old block to check for actual change
-        BlockID oldBlock = chunk->GetBlock(localX, localY, localZ);
+        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
+        BlockID oldBlock = chunk->GetBlock(localX, worldY, localZ);
         if (oldBlock == blockId) {
             return true; // No change needed
         }
 
-        chunk->SetBlock(localX, localY, localZ, blockId);
+        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
+        chunk->SetBlock(localX, worldY, localZ, blockId);
 
         // Mark chunk as dirty for saving
         Math::ChunkPos pos{chunkX, chunkZ};
@@ -456,7 +459,7 @@ namespace Game {
         Log::Info("Generated %d test chunks", (radius * 2 + 1) * (radius * 2 + 1));
     }
 
-    // World coordinate conversion utilities (static)
+    // **UPDATED**: World coordinate conversion utilities - no more local Y conversion
     Math::ChunkPos ChunkProvider::WorldToChunkPos(int worldX, int worldZ) {
         return Math::ChunkPos{
             static_cast<int32_t>(std::floor(static_cast<float>(worldX) / Math::CHUNK_SIZE_X)),
@@ -464,9 +467,10 @@ namespace Game {
         };
     }
 
+    // **UPDATED**: Simplified coordinate conversion - no more localY parameter
     void ChunkProvider::WorldToLocal(int worldX, int worldY, int worldZ,
                                     int& chunkX, int& chunkZ,
-                                    int& localX, int& localY, int& localZ) {
+                                    int& localX, int& localZ) {
         // Calculate chunk coordinates
         chunkX = static_cast<int>(std::floor(static_cast<float>(worldX) / Math::CHUNK_SIZE_X));
         chunkZ = static_cast<int>(std::floor(static_cast<float>(worldZ) / Math::CHUNK_SIZE_Z));
@@ -474,7 +478,7 @@ namespace Game {
         // Calculate local coordinates within chunk
         localX = worldX - (chunkX * Math::CHUNK_SIZE_X);
         localZ = worldZ - (chunkZ * Math::CHUNK_SIZE_Z);
-        localY = worldY - Config::MinY; // Convert to chunk-local Y (0-383)
+        // **REMOVED**: localY calculation - worldY is used directly
 
         // Ensure local coordinates are in valid range
         if (localX < 0) localX += Math::CHUNK_SIZE_X;
@@ -485,9 +489,7 @@ namespace Game {
         return (worldY - Config::MinY) / Math::SECTION_HEIGHT;
     }
 
-    int ChunkProvider::WorldYToChunkLocalY(int worldY) {
-        return worldY - Config::MinY;
-    }
+    // **REMOVED**: WorldYToChunkLocalY method since we don't need local Y anymore
 
     // Private helper functions
     std::shared_ptr<Chunk> ChunkProvider::GetChunk(int chunkX, int chunkZ) const {
@@ -519,6 +521,7 @@ namespace Game {
         };
     }
 
+    // **UPDATED**: Terrain generation now uses world Y coordinates
     void ChunkProvider::GenerateTerrainChunk(Chunk& chunk, Math::ChunkPos pos) {
         static FastNoiseLite noise;
         static bool initialized = false;
@@ -544,48 +547,48 @@ namespace Game {
                 int surfaceHeight = static_cast<int>(normalizedNoise * 64.0f + 64.0f); // Height 64-128
                 surfaceHeight = std::clamp(surfaceHeight, Config::MinY + 5, Config::MaxY - 10);
 
-                // Convert world Y to chunk-local Y
-                int bedrockStart = Config::MinY - Config::MinY; // 0 in chunk-local
-                int bedrockEnd = (Config::MinY + 5) - Config::MinY; // 5 in chunk-local
-                int surfaceLocalY = surfaceHeight - Config::MinY;
+                // **UPDATED**: Use world Y coordinates directly
+                int bedrockStart = Config::MinY;
+                int bedrockEnd = Config::MinY + 5;
 
                 // Generate bedrock layer
-                for (int localY = bedrockStart; localY < bedrockEnd; ++localY) {
-                    chunk.SetBlock(localX, localY, localZ, BlockID::Bedrock);
+                for (int worldY = bedrockStart; worldY < bedrockEnd; ++worldY) {
+                    chunk.SetBlock(localX, worldY, localZ, BlockID::Bedrock);
                 }
 
                 // Generate stone and surface
-                for (int localY = bedrockEnd; localY <= surfaceLocalY; ++localY) {
+                for (int worldY = bedrockEnd; worldY <= surfaceHeight; ++worldY) {
                     BlockID blockType;
-                    if (localY == surfaceLocalY) {
+                    if (worldY == surfaceHeight) {
                         blockType = BlockID::Grass; // Surface
-                    } else if (localY >= surfaceLocalY - 3) {
+                    } else if (worldY >= surfaceHeight - 3) {
                         blockType = BlockID::Dirt; // Top soil
                     } else {
                         blockType = BlockID::Stone; // Deep stone
                     }
 
-                    chunk.SetBlock(localX, localY, localZ, blockType);
+                    chunk.SetBlock(localX, worldY, localZ, blockType);
                 }
             }
         }
     }
 
+    // **UPDATED**: Structure placement now uses world Y coordinates
     void ChunkProvider::PlaceStructures(Chunk& chunk, Math::ChunkPos pos) {
         // Simple ore generation
         std::mt19937 rng(pos.x * 31 + pos.z * 17 + 12345);
         std::uniform_int_distribution<int> coordDist(1, 14); // Avoid chunk edges
-        std::uniform_int_distribution<int> heightDist(5, 50); // Chunk-local Y coordinates
+        std::uniform_int_distribution<int> heightDist(Config::MinY + 5, Config::MinY + 50); // World Y coordinates
         std::uniform_real_distribution<float> chanceDist(0.0f, 1.0f);
 
         // Place some coal ore
         if (chanceDist(rng) < 0.3f) { // 30% chance
             int x = coordDist(rng);
             int z = coordDist(rng);
-            int y = heightDist(rng);
+            int worldY = heightDist(rng); // **UPDATED**: Use world Y directly
 
-            if (chunk.GetBlock(x, y, z) == BlockID::Stone) {
-                chunk.SetBlock(x, y, z, BlockID::CoalOre);
+            if (chunk.GetBlock(x, worldY, z) == BlockID::Stone) {
+                chunk.SetBlock(x, worldY, z, BlockID::CoalOre);
             }
         }
 
@@ -593,10 +596,10 @@ namespace Game {
         if (chanceDist(rng) < 0.2f) { // 20% chance
             int x = coordDist(rng);
             int z = coordDist(rng);
-            int y = heightDist(rng);
+            int worldY = heightDist(rng); // **UPDATED**: Use world Y directly
 
-            if (chunk.GetBlock(x, y, z) == BlockID::Stone) {
-                chunk.SetBlock(x, y, z, BlockID::IronOre);
+            if (chunk.GetBlock(x, worldY, z) == BlockID::Stone) {
+                chunk.SetBlock(x, worldY, z, BlockID::IronOre);
             }
         }
     }

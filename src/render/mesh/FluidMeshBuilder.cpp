@@ -23,15 +23,11 @@ namespace Render {
         );
 
         // Get fluid type
-        Game::BlockID fluidType = chunk.GetBlock(localX, localY + 64, localZ);
+        Game::BlockID fluidType = chunk.GetBlock(localX, localY, localZ);
 
         if (!IsFluid(fluidType)) {
             return;
         }
-
-        /*Log::Debug("Building fluid block %s at (%d, %d, %d)",
-                  fluidType == Game::BlockID::Water ? "water" : "lava",
-                  (int)worldPos.x, (int)worldPos.y, (int)worldPos.z);*/
 
         // Calculate fluid height and flow
         float fluidHeight = CalculateFluidHeight(chunk, localX, localY, localZ, fluidType);
@@ -325,7 +321,7 @@ namespace Render {
 
         // Base height for all corners
         float baseHeight = height;
-        float lowHeight = height * 0.7f; // Slightly lower on flow side
+        float lowHeight = height; //* 0.7f; // Slightly lower on flow side
 
         // Adjust corner heights based on flow direction
         float h0 = baseHeight, h1 = baseHeight, h2 = baseHeight, h3 = baseHeight;

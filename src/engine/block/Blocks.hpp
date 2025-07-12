@@ -56,6 +56,8 @@ namespace Game {
         MossyCobblestone = 45,
         polished_tuff = 46,
         waxed_oxidized_chiseled_copper = 47,
+        deepslate_coal_ore = 48,
+
         Count // Always keep this as the last entry.
     };
 
