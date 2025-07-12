@@ -78,10 +78,16 @@ namespace Game {
                                    const std::vector<BlockState>& palette,
                                    Chunk& chunk, int sectionY);
 
+        // **NEW**: Unpack block data for Minecraft 1.16+ format (no cross-boundary indices)
+        static bool UnpackBlockDataPost116(const std::vector<uint64_t>& packedData,
+                                          const std::vector<BlockState>& palette,
+                                          ChunkSection& section,
+                                          int bitsPerBlock, int sectionY);
+
         // Calculate bits per block for a palette
         static int CalculateBitsPerBlock(size_t paletteSize);
 
-        // Extract a value from packed long array
+        // Extract a value from packed long array (legacy method for pre-1.16)
         static uint64_t ExtractPackedValue(const std::vector<uint64_t>& data,
                                          int bitIndex, int bitsPerBlock);
 

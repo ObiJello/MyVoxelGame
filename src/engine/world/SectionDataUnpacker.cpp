@@ -372,8 +372,25 @@ namespace Game {
         Log::Debug("Section Y=%d using %d bits per block for palette size %zu",
                   sectionY, bitsPerBlock, palette.size());
 
-        // Validate data size
-        int expectedLongs = (4096 * bitsPerBlock + 63) / 64; // Ceiling division
+        // **CRITICAL FIX**: Use new 1.16+ unpacking that respects long boundaries
+        return UnpackBlockDataPost116(packedData, palette, *chunk.sections[sectionIndex],
+                                     bitsPerBlock, sectionY);
+    }
+
+    // **NEW METHOD**: Unpacking for Minecraft 1.16+ format (no crossing long boundaries)
+    bool SectionDataUnpacker::UnpackBlockDataPost116(const std::vector<uint64_t>& packedData,
+                                                     const std::vector<BlockState>& palette,
+                                                     ChunkSection& section,
+                                                     int bitsPerBlock, int sectionY) {
+        // Calculate how many indices fit in one 64-bit long
+        int indicesPerLong = 64 / bitsPerBlock;
+
+        // Calculate expected number of longs needed
+        int expectedLongs = (4096 + indicesPerLong - 1) / indicesPerLong; // Ceiling division
+
+        Log::Debug("Section Y=%d: bitsPerBlock=%d, indicesPerLong=%d, expectedLongs=%d, actualLongs=%zu",
+                  sectionY, bitsPerBlock, indicesPerLong, expectedLongs, packedData.size());
+
         if (static_cast<int>(packedData.size()) < expectedLongs) {
             Log::Error("Not enough packed data: have %zu longs, need %d for section Y=%d",
                       packedData.size(), expectedLongs, sectionY);
@@ -384,34 +401,40 @@ namespace Game {
         int blocksProcessed = 0;
         std::unordered_map<BlockID, int> blockCounts; // For statistics
 
-        // Loop over all 4096 blocks in the section
-        for (int blockIndex = 0; blockIndex < 4096; ++blockIndex) {
-            // Extract palette index from packed data
-            uint64_t paletteIndex = ExtractPackedValue(packedData, blockIndex * bitsPerBlock, bitsPerBlock);
+        // Process each long
+        for (int longIndex = 0; longIndex < expectedLongs && longIndex < static_cast<int>(packedData.size()); ++longIndex) {
+            uint64_t currentLong = packedData[longIndex];
 
-            // Validate palette index
-            if (paletteIndex >= palette.size()) {
-                Log::Error("Invalid palette index %llu (max %zu) at block %d in section Y=%d",
-                          paletteIndex, palette.size() - 1, blockIndex, sectionY);
-                continue;
+            // Extract indices from this long (no cross-boundary spanning)
+            for (int indexInLong = 0; indexInLong < indicesPerLong && blocksProcessed < 4096; ++indexInLong) {
+                // Extract the palette index from the current position
+                int bitPosition = indexInLong * bitsPerBlock;
+                uint64_t paletteIndex = (currentLong >> bitPosition) & mask;
+
+                // Validate palette index
+                if (paletteIndex >= palette.size()) {
+                    Log::Error("Invalid palette index %llu (max %zu) at block %d in section Y=%d",
+                              paletteIndex, palette.size() - 1, blocksProcessed, sectionY);
+                    continue;
+                }
+
+                // Get block ID from palette
+                BlockID blockId = palette[paletteIndex].resolvedId;
+
+                // Convert block index to local coordinates
+                int x, y, z;
+                IndexToCoords(blocksProcessed, x, y, z);
+
+                // Set block in section
+                section.Set(x, y, z, blockId);
+
+                // Update statistics
+                blockCounts[blockId]++;
+                blocksProcessed++;
             }
-
-            // Get block ID from palette
-            BlockID blockId = palette[paletteIndex].resolvedId;
-
-            // Convert block index to local coordinates
-            int x, y, z;
-            IndexToCoords(blockIndex, x, y, z);
-
-            // Set block in section
-            chunk.sections[sectionIndex]->Set(x, y, z, blockId);
-
-            // Update statistics
-            blockCounts[blockId]++;
-            blocksProcessed++;
         }
 
-        PrintSectionStats(palette, sectionY, blocksProcessed);
+        Log::Debug("Section Y=%d unpacked %d blocks successfully", sectionY, blocksProcessed);
 
         // Log block distribution for debugging
         if (blockCounts.size() <= 10) { // Only log if not too many different blocks
@@ -422,12 +445,17 @@ namespace Game {
             }
         }
 
-        return true;
+        return blocksProcessed > 0;
     }
 
     int SectionDataUnpacker::CalculateBitsPerBlock(size_t paletteSize) {
         if (paletteSize <= 1) return 0; // Single block
-        return std::max(4, static_cast<int>(std::ceil(std::log2(paletteSize))));
+
+        // Calculate the minimum bits needed to represent all palette indices
+        int bitsNeeded = static_cast<int>(std::ceil(std::log2(paletteSize)));
+
+        // Minecraft uses a minimum of 4 bits per block
+        return std::max(4, bitsNeeded);
     }
 
     uint64_t SectionDataUnpacker::ExtractPackedValue(const std::vector<uint64_t>& data,
