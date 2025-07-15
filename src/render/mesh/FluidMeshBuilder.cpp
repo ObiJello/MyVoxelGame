@@ -290,18 +290,6 @@ namespace Render {
         return IsFluid(a) && a == b;
     }
 
-    // **DEPRECATED**: Keep old method for compatibility but use new face-specific method
-    std::string FluidMeshBuilder::GetFluidTexture(Game::BlockID fluidType, bool isFlowing) const {
-        switch (fluidType) {
-            case Game::BlockID::Water:
-                return isFlowing ? "water_flow" : "water_still";
-            case Game::BlockID::Lava:
-                return isFlowing ? "lava_flow" : "lava_still";
-            default:
-                return "missingno";
-        }
-    }
-
     glm::vec4 FluidMeshBuilder::GetFluidTint(Game::BlockID fluidType) const {
         switch (fluidType) {
             case Game::BlockID::Water:

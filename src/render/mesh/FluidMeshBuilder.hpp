@@ -75,8 +75,6 @@ namespace Render {
         // **NEW**: Face-specific texture selection
         std::string GetFluidTextureForFace(Game::BlockID fluidType, BlockFace face) const;
 
-        // **DEPRECATED**: Old texture method (kept for compatibility)
-        std::string GetFluidTexture(Game::BlockID fluidType, bool isFlowing = false) const;
 
         glm::vec4 GetFluidTint(Game::BlockID fluidType) const;
 
