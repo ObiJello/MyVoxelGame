@@ -1,10 +1,11 @@
-// File: src/render/mesh/Mesher.hpp
+// File: src/render/mesh/Mesher.hpp (UPDATED - Uses WorldCoordinates)
 #pragma once
 
 #include "SectionMesh.hpp"
 #include "../../engine/world/Chunk.hpp"
 #include "../../engine/block/Blocks.hpp"
 #include "../../engine/block/BlockModel.hpp"
+#include "../../game/WorldCoordinates.hpp"  // **NEW**: Use centralized coordinates
 #include "../atlas/AtlasBuilder.hpp"
 #include <glm/glm.hpp>
 
@@ -119,9 +120,14 @@ namespace Render {
         uint8_t CalculateAmbientOcclusion(const Game::Chunk& chunk, int x, int y, int z,
                                          BlockFace face, int vertexIndex);
 
-        // Coordinate conversions
-        int WorldYToChunkY(int worldY) const;
-        glm::vec3 LocalToWorldPos(const Game::Math::ChunkPos& chunkPos, int localX, int localY, int localZ) const;
+        // **REMOVED**: WorldYToChunkY() - use Game::Math::WorldCoordinates instead
+
+        // **UPDATED**: Use WorldCoordinates for coordinate conversion
+        glm::vec3 LocalToWorldPos(const Game::Math::ChunkPos& chunkPos, int localX, int localY, int localZ) const {
+            int worldX, worldY, worldZ;
+            Game::Math::WorldCoordinates::LocalToWorld(chunkPos, localX, localY, localZ, worldX, worldY, worldZ);
+            return glm::vec3(static_cast<float>(worldX), static_cast<float>(worldY), static_cast<float>(worldZ));
+        }
     };
 
 } // namespace Render

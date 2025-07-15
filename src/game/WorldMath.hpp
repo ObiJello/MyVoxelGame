@@ -1,4 +1,4 @@
-// File: src/game/WorldMath.hpp
+// File: src/game/WorldMath.hpp (UPDATED - Enhanced with Forward Declarations)
 #pragma once
 
 #include <cstdint>
@@ -35,3 +35,14 @@ namespace Game::Math {
     }
 
 } // namespace Game::Math
+
+// **NEW**: Forward declarations for render system (to avoid circular dependencies)
+namespace Render {
+    enum class BlockFace : int;
+}
+
+// **NEW**: Convenience aliases for common coordinate operations
+namespace Game {
+    // Alias for shorter access to coordinate utilities
+    namespace WC = Game::Math;
+}

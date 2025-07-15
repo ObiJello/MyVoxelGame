@@ -59,6 +59,12 @@ add_library(imgui
         ext/imgui/backends/imgui_impl_opengl3.cpp
         src/render/debug/DebugSystem.cpp
         src/render/debug/DebugSystem.hpp
+        src/engine/world/interfaces/IChunkLoader.hpp
+        src/engine/world/interfaces/IChunkSaver.hpp
+        src/engine/world/interfaces/IChunkGenerator.hpp
+        src/engine/world/interfaces/INeighborProvider.hpp
+        src/engine/world/interfaces/ChunkCache.cpp
+        src/engine/world/interfaces/ChunkCache.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui

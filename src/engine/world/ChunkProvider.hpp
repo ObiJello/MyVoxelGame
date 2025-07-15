@@ -3,6 +3,7 @@
 
 #include "Chunk.hpp"
 #include "../../game/WorldMath.hpp"
+#include "../../game/WorldCoordinates.hpp"  // **NEW**: Use centralized coordinates
 #include "../block/Blocks.hpp"
 #include "../../core/Config.hpp"
 #include <unordered_map>
@@ -90,20 +91,34 @@ namespace Game {
         // Debug/testing
         void GenerateTestChunks(int centerX, int centerZ, int radius);
 
-        // **UPDATED**: World coordinate conversion utilities - simplified for world Y
-        static Math::ChunkPos WorldToChunkPos(int worldX, int worldZ);
+        // **UPDATED**: World coordinate conversion utilities - use WorldCoordinates
+        static Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) {
+            return Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        }
+
         static void WorldToLocal(int worldX, int worldY, int worldZ,
                                 int& chunkX, int& chunkZ,
-                                int& localX, int& localZ);
-        static int WorldYToSectionIndex(int worldY);
-        // **REMOVED**: WorldYToChunkLocalY - no longer needed since we use world Y directly
+                                int& localX, int& localZ) {
+            Math::ChunkPos chunkPos;
+            int localY; // Not used but required by WorldCoordinates
+            Math::WorldCoordinates::WorldToLocal(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
+            chunkX = chunkPos.x;
+            chunkZ = chunkPos.z;
+        }
 
-        // **NEW**: Get already loaded chunk (don't trigger loading)
+        // **UPDATED**: Use WorldCoordinates for section index calculation
+        static int WorldYToSectionIndex(int worldY) {
+            return Math::WorldCoordinates::WorldYToSectionIndex(worldY);
+        }
+
+        // Get already loaded chunk (don't trigger loading)
         std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
 
     private:
-        // internal helper to guard world‐Y bounds
-        bool IsValidPosition(int worldX, int worldY, int worldZ) const;
+        // **UPDATED**: Use WorldCoordinates for validation
+        bool IsValidPosition(int worldX, int worldY, int worldZ) const {
+            return Math::WorldCoordinates::IsValidWorldY(worldY);
+        }
 
         // Chunk storage
         mutable std::mutex m_chunksMutex;
@@ -134,7 +149,7 @@ namespace Game {
         std::shared_ptr<Chunk> GenerateChunk(Math::ChunkPos chunkPos);
         void SetupChunkCallbacks(std::shared_ptr<Chunk> chunk);
 
-        // **UPDATED**: Chunk generation now uses world Y coordinates
+        // **UPDATED**: Chunk generation now uses WorldCoordinates
         void GenerateTerrainChunk(Chunk& chunk, Math::ChunkPos pos);
         void PlaceStructures(Chunk& chunk, Math::ChunkPos pos);
 

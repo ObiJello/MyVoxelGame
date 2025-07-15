@@ -1,6 +1,7 @@
-// File: src/engine/world/Chunk.cpp
+// File: src/engine/world/Chunk.cpp (UPDATED - Uses WorldCoordinates)
 #include "Chunk.hpp"
 #include "../../core/Log.hpp"
+#include "../../game/WorldCoordinates.hpp"  // **NEW**: Use centralized coordinates
 #include <algorithm>
 
 namespace Game {
@@ -14,13 +15,17 @@ namespace Game {
 
     // Block access (local X/Z coordinates, world Y coordinate)
     BlockID Chunk::GetBlock(int localX, int worldY, int localZ) const {
-        if (!IsWithinChunkBounds(localX, worldY, localZ)) {
+        if (!ValidateCoordinates(localX, worldY, localZ, "GetBlock")) {
             return BlockID::Air;
         }
 
-        // Convert world Y to section coordinates
-        int sectionIndex = (worldY - Config::MinY) / SECTION_HEIGHT;
-        int sectionY = (worldY - Config::MinY) % SECTION_HEIGHT;
+        // **UPDATED**: Use WorldCoordinates for conversion
+        int sectionIndex, sectionY;
+        Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
+
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
+            return BlockID::Air;
+        }
 
         const ChunkSection* section = GetSection(sectionIndex);
         if (!section) {
@@ -31,15 +36,21 @@ namespace Game {
     }
 
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId) {
-        if (!IsWithinChunkBounds(localX, worldY, localZ)) {
+        if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
                         localX, worldY, localZ, pos.x, pos.z);
             return;
         }
 
-        // Convert world Y to section coordinates
-        int sectionIndex = (worldY - Config::MinY) / SECTION_HEIGHT;
-        int sectionY = (worldY - Config::MinY) % SECTION_HEIGHT;
+        // **UPDATED**: Use WorldCoordinates for conversion
+        int sectionIndex, sectionY;
+        Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
+
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
+            Log::Warning("Invalid section index %d for world Y %d in chunk (%d, %d)",
+                        sectionIndex, worldY, pos.x, pos.z);
+            return;
+        }
 
         // Get the old block to check if we're actually changing anything
         BlockID oldBlockId = GetBlock(localX, worldY, localZ);
@@ -61,7 +72,7 @@ namespace Game {
         if (section) {
             section->Set(localX, sectionY, localZ, blockId);
 
-            // **CRITICAL FIX**: Mark section as dirty for mesh rebuilding
+            // Mark section as dirty for mesh rebuilding
             if (onSectionDirty) {
                 onSectionDirty(sectionIndex);
             }
@@ -99,23 +110,6 @@ namespace Game {
             return false;
         }
         return sections[sectionIndex] != nullptr;
-    }
-
-    // **FIXED**: Use world Y coordinates consistently
-    bool Chunk::IsWithinChunkBounds(int localX, int worldY, int localZ) const {
-        return localX >= 0 && localX < SIZE_X &&
-               worldY >= MIN_WORLD_Y && worldY <= MAX_WORLD_Y &&
-               localZ >= 0 && localZ < SIZE_Z;
-    }
-
-    // **NEW**: Validation method for external use
-    bool Chunk::IsValidLocalPosition(int localX, int worldY, int localZ) const {
-        return IsWithinChunkBounds(localX, worldY, localZ);
-    }
-
-    // **NEW**: Convert world Y to section index
-    int Chunk::WorldYToSectionIndex(int worldY) const {
-        return (worldY - Config::MinY) / SECTION_HEIGHT;
     }
 
     // Statistics
@@ -157,16 +151,27 @@ namespace Game {
         return true;
     }
 
-    // Private helper functions
-    void Chunk::WorldYToSectionCoords(int worldY, int& sectionIndex, int& sectionY) const {
-        // Input is world Y (-64 to 319), output section index and section-local Y
-        int chunkLocalY = worldY - Config::MinY;
-        sectionIndex = chunkLocalY / SECTION_HEIGHT;
-        sectionY = chunkLocalY % SECTION_HEIGHT;
+    // **NEW**: Helper method for coordinate validation with detailed logging
+    bool Chunk::ValidateCoordinates(int localX, int worldY, int localZ, const char* operation) const {
+        if (localX < 0 || localX >= SIZE_X) {
+            Log::Warning("%s: Invalid localX %d (must be 0-%d) in chunk (%d, %d)",
+                        operation, localX, SIZE_X - 1, pos.x, pos.z);
+            return false;
+        }
 
-        // Clamp to valid ranges
-        sectionIndex = std::clamp(sectionIndex, 0, SECTION_COUNT - 1);
-        sectionY = std::clamp(sectionY, 0, SECTION_HEIGHT - 1);
+        if (localZ < 0 || localZ >= SIZE_Z) {
+            Log::Warning("%s: Invalid localZ %d (must be 0-%d) in chunk (%d, %d)",
+                        operation, localZ, SIZE_Z - 1, pos.x, pos.z);
+            return false;
+        }
+
+        if (!Math::WorldCoordinates::IsValidWorldY(worldY)) {
+            Log::Warning("%s: Invalid worldY %d (must be %d-%d) in chunk (%d, %d)",
+                        operation, worldY, MIN_WORLD_Y, MAX_WORLD_Y, pos.x, pos.z);
+            return false;
+        }
+
+        return true;
     }
 
 } // namespace Game
