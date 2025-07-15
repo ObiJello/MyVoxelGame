@@ -63,8 +63,12 @@ add_library(imgui
         src/engine/world/interfaces/IChunkSaver.hpp
         src/engine/world/interfaces/IChunkGenerator.hpp
         src/engine/world/interfaces/INeighborProvider.hpp
-        src/engine/world/interfaces/ChunkCache.cpp
-        src/engine/world/interfaces/ChunkCache.hpp
+        src/engine/world/cache/ChunkCache.cpp
+        src/engine/world/cache/ChunkCache.hpp
+        src/engine/world/generation/ProceduralChunkGenerator.cpp
+        src/engine/world/generation/ProceduralChunkGenerator.hpp
+        src/engine/world/saving/AsyncChunkSaver.cpp
+        src/engine/world/saving/AsyncChunkSaver.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
