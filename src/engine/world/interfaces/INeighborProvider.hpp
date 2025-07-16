@@ -6,6 +6,8 @@
 #include "../../block/Blocks.hpp"
 #include <vector>
 
+#include "glm/vec3.hpp"
+
 namespace Game {
 
     // Information about a block for neighbor queries

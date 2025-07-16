@@ -41,9 +41,9 @@ namespace Game {
     };
 
     // Abstract interface for chunk saving strategies
-    class IIChunkSaver {
+    class IChunkSaver {
     public:
-        virtual ~IIChunkSaver() = default;
+        virtual ~IChunkSaver() = default;
 
         // === CORE SAVING INTERFACE ===
 
@@ -208,6 +208,6 @@ namespace Game {
     };
 
     // Factory function type for creating chunk savers
-    using ChunkSaverFactory = std::function<std::unique_ptr<IIChunkSaver>()>;
+    using ChunkSaverFactory = std::function<std::unique_ptr<IChunkSaver>()>;
 
 } // namespace Game

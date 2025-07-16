@@ -3,167 +3,365 @@
 
 #include "Chunk.hpp"
 #include "../../game/WorldMath.hpp"
-#include "../../game/WorldCoordinates.hpp"  // **NEW**: Use centralized coordinates
+#include "../../game/WorldCoordinates.hpp"
 #include "../block/Blocks.hpp"
 #include "../../core/Config.hpp"
-#include <unordered_map>
-#include <unordered_set>
+
+// New composition dependencies
+#include "cache/ChunkCache.hpp"
+#include "loading/MinecraftChunkLoaderImpl.hpp"
+#include "generation/ProceduralChunkGenerator.hpp"
+#include "saving/AsyncChunkSaver.hpp"
+#include "tracking/DirtyTracker.hpp"
+#include "interfaces/INeighborProvider.hpp"
+
 #include <memory>
-#include <mutex>
 #include <string>
+#include <vector>
+#include <future>
 #include <queue>
+#include <unordered_set>
+#include <mutex>
+#include <shared_mutex>
 
 namespace Game {
 
-    // Hash function for ChunkPos to use in unordered_map
-    struct ChunkPosHash {
-        std::size_t operator()(const Math::ChunkPos& pos) const {
-            return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
+    // Configuration for ChunkProvider composition
+    struct ChunkProviderConfig {
+        // Cache settings
+        size_t maxLoadedChunks = 1024;
+        bool enableLRUEviction = true;
+        
+        // Loading settings
+        std::string minecraftWorldPath;
+        bool enableFallbackGeneration = true;
+        
+        // Saving settings
+        bool enableAsyncSaving = true;
+        bool enableAutoSave = true;
+        float autoSaveIntervalSeconds = 30.0f;
+        
+        // Generation settings
+        GenerationConfig generationConfig;
+        
+        // Dirty tracking settings
+        DirtyTrackerConfig dirtyConfig;
+        
+        // Performance settings
+        int maxChunksPerFrame = 4;
+        float maxLoadTimePerFrame = 10.0f; // milliseconds
+        
+        bool IsValid() const {
+            return maxLoadedChunks > 0 && 
+                   maxChunksPerFrame > 0 && 
+                   maxLoadTimePerFrame > 0.0f &&
+                   generationConfig.IsValid();
         }
     };
 
-    // Dirty section tracking
-    struct DirtySection {
-        Math::ChunkPos chunkPos;
-        int sectionIndex;
+    // Legacy DirtySection struct for backward compatibility
+    using DirtySection = Game::DirtySection;
 
-        bool operator==(const DirtySection& other) const {
-            return chunkPos.x == other.chunkPos.x &&
-                   chunkPos.z == other.chunkPos.z &&
-                   sectionIndex == other.sectionIndex;
+    // Statistics for the composed chunk provider
+    struct ChunkProviderStats {
+        size_t chunksLoaded = 0;
+        size_t chunksGenerated = 0;
+        size_t chunksSaved = 0;
+        size_t chunksEvicted = 0;
+        size_t dirtySections = 0;
+        
+        float averageLoadTime = 0.0f;
+        float averageGenerationTime = 0.0f;
+        float averageSaveTime = 0.0f;
+        
+        size_t cacheHitRate = 0;
+        size_t memoryUsage = 0;
+        
+        void Reset() {
+            chunksLoaded = chunksGenerated = chunksSaved = chunksEvicted = 0;
+            dirtySections = 0;
+            averageLoadTime = averageGenerationTime = averageSaveTime = 0.0f;
+            cacheHitRate = memoryUsage = 0;
         }
     };
 
-    struct DirtySectionHash {
-        std::size_t operator()(const DirtySection& ds) const {
-            return ChunkPosHash{}(ds.chunkPos) ^ (std::hash<int>{}(ds.sectionIndex) << 2);
-        }
+    // Load request for async chunk loading
+    struct ChunkLoadRequest {
+        Math::ChunkPos position;
+        bool highPriority;
+        std::shared_ptr<std::promise<std::shared_ptr<Chunk>>> promise;
+        
+        ChunkLoadRequest(Math::ChunkPos pos, bool priority = false)
+            : position(pos), highPriority(priority)
+            , promise(std::make_shared<std::promise<std::shared_ptr<Chunk>>>()) {}
     };
 
-    class ChunkProvider {
+    /**
+     * Refactored ChunkProvider using composition pattern
+     * 
+     * This class coordinates between:
+     * - ChunkCache: In-memory chunk storage with LRU eviction
+     * - MinecraftChunkLoaderImpl: Loading chunks from Minecraft region files
+     * - ProceduralChunkGenerator: Generating new chunks when not found
+     * - AsyncChunkSaver: Saving dirty chunks to disk
+     * - DirtyTracker: Tracking sections that need mesh updates
+     * 
+     * Responsibilities:
+     * - Coordinate loading, generation, and saving workflows
+     * - Manage chunk lifecycle and dependencies
+     * - Provide INeighborProvider interface for meshing
+     * - Handle dirty tracking for mesh invalidation
+     * - Maintain performance targets and statistics
+     */
+    class ChunkProvider : public INeighborProvider {
     public:
-        ChunkProvider();
+        explicit ChunkProvider(const ChunkProviderConfig& config = ChunkProviderConfig{});
         ~ChunkProvider();
 
-        // **NEW**: Static methods for global Minecraft world management
-        static bool LoadMinecraftWorld(const std::string& savePath);
-        static void ClearAllChunks();
-        static void SetGlobalMinecraftWorldPath(const std::string& worldPath);
+        // Non-copyable, movable
+        ChunkProvider(const ChunkProvider&) = delete;
+        ChunkProvider& operator=(const ChunkProvider&) = delete;
+        ChunkProvider(ChunkProvider&& other) noexcept;
+        ChunkProvider& operator=(ChunkProvider&& other) noexcept;
 
-        // Lifecycle
-        void Initialize();
-        void Update(float deltaTime);
+        // === LIFECYCLE ===
+        
+        bool Initialize();
         void Shutdown();
+        bool IsInitialized() const { return m_initialized; }
+        
+        // Regular update for maintenance tasks
+        void Update(float deltaTime);
 
-        // Core chunk operations
-        std::shared_ptr<Chunk> LoadChunk(int chunkX, int chunkZ);
-        void UnloadChunk(int chunkX, int chunkZ);
-        bool IsChunkLoaded(int chunkX, int chunkZ) const;
-        bool EnsureChunkLoaded(int chunkX, int chunkZ);
+        // === CORE CHUNK OPERATIONS ===
 
-        // **UPDATED**: Block access with world Y coordinates (no conversion needed)
-        BlockID GetBlockAt(int worldX, int worldY, int worldZ) const;
-        bool SetBlockAt(int worldX, int worldY, int worldZ, BlockID blockId);
+        // Get chunk (loads if necessary, returns null if not available)
+        std::shared_ptr<Chunk> GetChunk(Math::ChunkPos position);
+        
+        // Get chunk with specific priority
+        std::shared_ptr<Chunk> GetChunkWithPriority(Math::ChunkPos position, bool highPriority = false);
 
-        // Chunk management around player
-        void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance);
+        // Load chunk asynchronously
+        std::future<std::shared_ptr<Chunk>> LoadChunkAsync(Math::ChunkPos position);
 
-        // Dirty tracking for mesh system
+        // Check if chunk is loaded
+        bool IsChunkLoaded(Math::ChunkPos position) const;
+
+        // Preload chunks for better performance
+        void PreloadChunk(Math::ChunkPos position);
+        void PreloadArea(Math::ChunkPos center, int radius);
+
+        // Unload chunk and save if dirty
+        bool UnloadChunk(Math::ChunkPos position);
+        void UnloadArea(Math::ChunkPos center, int radius);
+
+        // === BLOCK ACCESS ===
+
+        // Get/set blocks using world coordinates
+        BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
+        void SetBlock(int worldX, int worldY, int worldZ, BlockID block);
+
+        // Batch block operations
+        void SetBlocks(const std::vector<std::tuple<int, int, int, BlockID>>& blocks);
+        std::vector<BlockID> GetBlocks(const std::vector<std::tuple<int, int, int>>& positions) const;
+
+        // === INEIGHBORPROVIDER IMPLEMENTATION ===
+
+        bool IsChunkLoaded(int chunkX, int chunkZ) const override;
+        bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
+        bool IsBlockSolid(int worldX, int worldY, int worldZ) const override;
+        bool IsBlockFluid(int worldX, int worldY, int worldZ) const override;
+        bool IsBlockTransparent(int worldX, int worldY, int worldZ) const override;
+
+        NeighborStats GetStats() const override;
+        void ResetStats() override;
+
+        // === DIRTY TRACKING ===
+
+        // Mark sections dirty for mesh updates
         void MarkSectionDirty(Math::ChunkPos chunkPos, int sectionIndex);
         void MarkChunkDirty(Math::ChunkPos chunkPos);
-        bool HasDirtySections() const;
+        void MarkBlockDirty(int worldX, int worldY, int worldZ);
+        void MarkRegionDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ);
+
+        // Get dirty sections for mesh rebuilding
+        std::vector<DirtySection> GetDirtySections(size_t maxCount = SIZE_MAX);
         std::vector<DirtySection> GetAndClearDirtySections();
+        void ClearDirtySections(const std::vector<DirtySection>& sections);
 
-        // Statistics
+        // Check dirty state
+        bool IsChunkDirty(Math::ChunkPos chunkPos) const;
+        bool IsSectionDirty(Math::ChunkPos chunkPos, int sectionIndex) const;
+        size_t GetDirtyCount() const;
+
+        // === SAVING ===
+
+        // Save operations
+        void SaveChunk(Math::ChunkPos position);
+        void SaveAllDirtyChunks();
+        void SaveArea(Math::ChunkPos center, int radius);
+
+        // Auto-save configuration
+        void SetAutoSaveEnabled(bool enabled);
+        void SetAutoSaveInterval(float seconds);
+        bool IsAutoSaveEnabled() const;
+
+        // === CONFIGURATION ===
+
+        void SetConfig(const ChunkProviderConfig& config);
+        ChunkProviderConfig GetConfig() const;
+
+        // Component configuration
+        void SetWorldPath(const std::string& path);
+        std::string GetWorldPath() const;
+
+        void SetMaxLoadedChunks(size_t maxChunks);
+        size_t GetMaxLoadedChunks() const;
+
+        void SetGenerationSeed(int32_t seed);
+        int32_t GetGenerationSeed() const;
+
+        // === STATISTICS ===
+
+        ChunkProviderStats GetProviderStats() const;
+        void ResetProviderStats();
+
+        // Component statistics
+        ChunkCache::CacheStats GetCacheStats() const;
+        MinecraftChunkLoaderImpl::LoaderStats GetLoaderStats() const;
+        ProceduralChunkGenerator::GeneratorStats GetGeneratorStats() const;
+        AsyncChunkSaver::SaverStats getSaverStats() const;
+        DirtyTrackerStats GetDirtyTrackerStats() const;
+
+        // === DIAGNOSTICS ===
+
+        // Memory usage
+        size_t GetMemoryUsage() const;
         size_t GetLoadedChunkCount() const;
-        size_t GetDirtyChunkCount() const;
-        void GetLoadedChunkBounds(int& minX, int& maxX, int& minZ, int& maxZ) const;
 
-        // Minecraft world support (instance methods)
-        void SetMinecraftWorldPath(const std::string& worldPath);
-        const std::string& GetMinecraftWorldPath() const;
-        bool IsMinecraftChunkAvailable(Math::ChunkPos pos) const;
+        // Performance monitoring
+        void LogPerformanceStats() const;
+        void LogComponentStats() const;
 
-        // Configuration
-        void SetMaxLoadedChunks(size_t maxChunks) { m_maxLoadedChunks = maxChunks; }
-        void SetAsyncSaveEnabled(bool enabled) { m_asyncSaveEnabled = enabled; }
+        // Debug validation
+        bool ValidateState() const;
+        void DumpLoadedChunks() const;
 
-        // Debug/testing
-        void GenerateTestChunks(int centerX, int centerZ, int radius);
+        // === LEGACY COMPATIBILITY ===
 
-        // **UPDATED**: World coordinate conversion utilities - use WorldCoordinates
-        static Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) {
-            return Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        }
+        // For compatibility with existing code that expects these methods
+        std::shared_ptr<Chunk> LoadChunkFromDisk(Math::ChunkPos position);
+        std::shared_ptr<Chunk> GenerateChunk(Math::ChunkPos position);
+        void QueueChunkForSaving(std::shared_ptr<const Chunk> chunk);
 
-        static void WorldToLocal(int worldX, int worldY, int worldZ,
-                                int& chunkX, int& chunkZ,
-                                int& localX, int& localZ) {
-            Math::ChunkPos chunkPos;
-            int localY; // Not used but required by WorldCoordinates
-            Math::WorldCoordinates::WorldToLocal(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
-            chunkX = chunkPos.x;
-            chunkZ = chunkPos.z;
-        }
-
-        // **UPDATED**: Use WorldCoordinates for section index calculation
-        static int WorldYToSectionIndex(int worldY) {
-            return Math::WorldCoordinates::WorldYToSectionIndex(worldY);
-        }
-
-        // Get already loaded chunk (don't trigger loading)
-        std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
+        // Legacy dirty tracking
+        void AddDirtySection(const DirtySection& section);
+        std::vector<DirtySection> RemoveDirtySections();
 
     private:
-        // **UPDATED**: Use WorldCoordinates for validation
-        bool IsValidPosition(int worldX, int worldY, int worldZ) const {
-            return Math::WorldCoordinates::IsValidWorldY(worldY);
-        }
-
-        // Chunk storage
-        mutable std::mutex m_chunksMutex;
-        std::unordered_map<Math::ChunkPos, std::shared_ptr<Chunk>, ChunkPosHash> m_loadedChunks;
-
-        // Dirty tracking
-        mutable std::mutex m_dirtyMutex;
-        std::unordered_set<DirtySection, DirtySectionHash> m_dirtySections;
-        std::unordered_set<Math::ChunkPos, ChunkPosHash> m_dirtyChunks; // For saving
-
-        // Async saving queue
-        mutable std::mutex m_saveMutex;
-        std::queue<std::shared_ptr<Chunk>> m_chunksToSave;
-
         // Configuration
-        std::string m_minecraftWorldPath;
-        size_t m_maxLoadedChunks = 1024; // LRU eviction threshold
-        bool m_asyncSaveEnabled = true;
+        ChunkProviderConfig m_config;
+        mutable std::shared_mutex m_configMutex;
 
-        // Statistics
-        size_t m_chunksGenerated = 0;
-        size_t m_chunksLoaded = 0;
-        size_t m_chunksUnloaded = 0;
-        size_t m_chunksSaved = 0;
+        // Core components (composition instead of inheritance)
+        std::unique_ptr<ChunkCache> m_chunkCache;
+        std::unique_ptr<MinecraftChunkLoaderImpl> m_chunkLoader;
+        std::unique_ptr<ProceduralChunkGenerator> m_chunkGenerator;
+        std::unique_ptr<AsyncChunkSaver> m_chunkSaver;
+        std::unique_ptr<DirtyTracker> m_dirtyTracker;
 
-        // Helper functions
-        std::shared_ptr<Chunk> GetChunk(int chunkX, int chunkZ) const;
-        std::shared_ptr<Chunk> GenerateChunk(Math::ChunkPos chunkPos);
-        void SetupChunkCallbacks(std::shared_ptr<Chunk> chunk);
+        // State
+        std::atomic<bool> m_initialized{false};
+        std::atomic<bool> m_shutdownRequested{false};
 
-        // **UPDATED**: Chunk generation now uses WorldCoordinates
-        void GenerateTerrainChunk(Chunk& chunk, Math::ChunkPos pos);
-        void PlaceStructures(Chunk& chunk, Math::ChunkPos pos);
+        // Performance tracking
+        mutable std::mutex m_statsMutex;
+        ChunkProviderStats m_stats;
+        std::chrono::steady_clock::time_point m_lastAutoSave;
 
-        // Unloading and LRU logic
-        void UnloadDistantChunks(int centerX, int centerZ, int keepRadius);
-        void EnforceLRULimit();
-        bool ShouldUnloadChunk(Math::ChunkPos chunkPos, int centerX, int centerZ, int keepRadius) const;
+        // Async loading support
+        mutable std::mutex m_loadRequestMutex;
+        std::queue<ChunkLoadRequest> m_loadRequests;
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_pendingLoads;
 
-        // Async saving
-        void QueueChunkForSave(std::shared_ptr<Chunk> chunk);
-        void ProcessSaveQueue();
+        // === INTERNAL WORKFLOWS ===
 
-        // Distance calculation
-        int ChunkDistance(int x1, int z1, int x2, int z2) const;
+        // Core loading workflow
+        std::shared_ptr<Chunk> LoadChunkInternal(Math::ChunkPos position, bool allowGeneration = true);
+
+        // Try loading from cache first
+        std::shared_ptr<Chunk> TryLoadFromCache(Math::ChunkPos position);
+
+        // Try loading from disk
+        std::shared_ptr<Chunk> TryLoadFromDisk(Math::ChunkPos position);
+
+        // Generate new chunk
+        std::shared_ptr<Chunk> TryGenerateChunk(Math::ChunkPos position);
+
+        // Complete chunk loading (add to cache, etc.)
+        std::shared_ptr<Chunk> CompleteChunkLoad(std::shared_ptr<Chunk> chunk);
+
+        // === COORDINATION ===
+
+        // Coordinate between components
+        void SetupComponentDependencies();
+        void ConfigureComponents();
+        void SynchronizeComponents();
+
+        // Event handlers for component interactions
+        void OnChunkEvicted(Math::ChunkPos position, std::shared_ptr<Chunk> chunk, bool wasDirty);
+        void OnChunkSaved(const ChunkSaveResult& result);
+        void OnSectionDirty(const DirtySection& section);
+
+        // === MAINTENANCE ===
+
+        // Regular maintenance tasks
+        void PerformMaintenance(float deltaTime);
+        void UpdateAutoSave(float deltaTime);
+        void ProcessLoadRequests();
+        void UpdateComponentStats();
+
+        // Performance enforcement
+        void EnforcePerformanceLimits();
+        bool ShouldThrottleLoading() const;
+
+        // === VALIDATION ===
+
+        bool ValidateChunk(const std::shared_ptr<Chunk>& chunk) const;
+        bool ValidateChunkPosition(Math::ChunkPos position) const;
+        bool ValidateWorldPosition(int worldX, int worldY, int worldZ) const;
+
+        // === HELPERS ===
+
+        // Coordinate conversion helpers
+        void WorldToLocalCoords(int worldX, int worldY, int worldZ, Math::ChunkPos& chunkPos,
+                               int& localX, int& localY, int& localZ) const;
+
+        // Block property helpers
+        bool IsValidBlockID(BlockID block) const;
+        bool GetBlockProperties(BlockID block, bool& isSolid, bool& isFluid, bool& isTransparent) const;
+
+        // Statistics helpers
+        void UpdateLoadStats(float loadTime, bool fromCache, bool fromDisk, bool generated);
+        void UpdateSaveStats(float saveTime, bool success);
+
+        // Error handling
+        void LogError(const std::string& operation, const std::string& error) const;
+        void LogWarning(const std::string& operation, const std::string& warning) const;
+
+        // === MOVE SEMANTICS ===
+
+        void MoveFrom(ChunkProvider&& other) noexcept;
     };
+
+    // === UTILITY FUNCTIONS ===
+
+    // Factory function for creating configured chunk providers
+    std::unique_ptr<ChunkProvider> CreateChunkProvider(const ChunkProviderConfig& config = ChunkProviderConfig{});
+
+    // Configuration helpers
+    ChunkProviderConfig CreateDefaultConfig();
+    ChunkProviderConfig CreatePerformanceConfig();  // Optimized for performance
+    ChunkProviderConfig CreateMemoryConfig();       // Optimized for low memory usage
 
 } // namespace Game

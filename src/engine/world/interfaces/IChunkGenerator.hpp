@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <future>
+#include <map>
 #include <random>
 
 namespace Game {

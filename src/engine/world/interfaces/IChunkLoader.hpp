@@ -39,9 +39,9 @@ namespace Game {
     };
 
     // Abstract interface for chunk loading strategies
-    class IIChunkLoader {
+    class IChunkLoader {
     public:
-        virtual ~IIChunkLoader() = default;
+        virtual ~IChunkLoader() = default;
 
         // === CORE LOADING INTERFACE ===
 
@@ -169,6 +169,6 @@ namespace Game {
     };
 
     // Factory function type for creating chunk loaders
-    using ChunkLoaderFactory = std::function<std::unique_ptr<IIChunkLoader>()>;
+    using ChunkLoaderFactory = std::function<std::unique_ptr<IChunkLoader>()>;
 
 } // namespace Game

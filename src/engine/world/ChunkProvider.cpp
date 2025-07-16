@@ -1,705 +1,1308 @@
 // File: src/engine/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
-#include "MinecraftChunkLoader.hpp"
 #include "../../core/Log.hpp"
-#include "../../core/Config.hpp"
+#include "../../core/JobSystem.hpp"
+#include "../block/BlockRegistry.hpp"
 #include <algorithm>
-#include <cmath>
-#include <random>
-#include <filesystem>
-
-// Include FastNoise for terrain generation
-#include "../../../ext/FastNoiseLite.h"
+#include <chrono>
 
 namespace Game {
 
-    // **NEW**: Static world path for global access
-    static std::string s_globalMinecraftWorldPath;
+    // === CONSTRUCTION ===
 
-    ChunkProvider::ChunkProvider() {
-        Log::Info("ChunkProvider created");
+    ChunkProvider::ChunkProvider(const ChunkProviderConfig& config)
+        : m_config(config)
+        , m_lastAutoSave(std::chrono::steady_clock::now()) {
+
+        if (!m_config.IsValid()) {
+            Log::Warning("Invalid ChunkProvider configuration, using defaults");
+            m_config = ChunkProviderConfig{};
+        }
+
+        Log::Debug("ChunkProvider created with max chunks: %zu", m_config.maxLoadedChunks);
     }
 
     ChunkProvider::~ChunkProvider() {
         Shutdown();
-        Log::Info("ChunkProvider destroyed");
     }
 
-    void ChunkProvider::Initialize() {
-        Log::Info("Initializing ChunkProvider...");
-
-        // Clear any existing chunks
-        {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            m_loadedChunks.clear();
-        }
-
-        // Clear dirty tracking
-        {
-            std::lock_guard<std::mutex> lock(m_dirtyMutex);
-            m_dirtySections.clear();
-            m_dirtyChunks.clear();
-        }
-
-        // Reset statistics
-        m_chunksGenerated = 0;
-        m_chunksLoaded = 0;
-        m_chunksUnloaded = 0;
-        m_chunksSaved = 0;
-
-        Log::Info("✓ ChunkProvider initialized");
+    ChunkProvider::ChunkProvider(ChunkProvider&& other) noexcept {
+        MoveFrom(std::move(other));
     }
 
-    void ChunkProvider::Update(float deltaTime) {
-        // Process async save queue
-        if (m_asyncSaveEnabled) {
-            ProcessSaveQueue();
+    ChunkProvider& ChunkProvider::operator=(ChunkProvider&& other) noexcept {
+        if (this != &other) {
+            Shutdown();
+            MoveFrom(std::move(other));
+        }
+        return *this;
+    }
+
+    // === LIFECYCLE ===
+
+    bool ChunkProvider::Initialize() {
+        if (m_initialized) {
+            return true;
         }
 
-        // Periodically log statistics
-        static float logTimer = 0.0f;
-        logTimer += deltaTime;
-        if (logTimer >= 10.0f) { // Every 10 seconds
-            size_t loadedCount = GetLoadedChunkCount();
-            size_t dirtyCount = GetDirtyChunkCount();
-            if (loadedCount > 0) {
-                Log::Debug("ChunkProvider: %zu loaded, %zu dirty, %zu generated, %zu saved",
-                          loadedCount, dirtyCount, m_chunksGenerated, m_chunksSaved);
+        Log::Info("Initializing ChunkProvider with composition architecture...");
+
+        try {
+            // Create core components
+            ChunkCacheConfig cacheConfig;
+            cacheConfig.maxSize = m_config.maxLoadedChunks;
+            cacheConfig.enableLRUEviction = m_config.enableLRUEviction;
+            m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
+
+            MinecraftLoaderConfig loaderConfig;
+            loaderConfig.worldPath = m_config.minecraftWorldPath;
+            loaderConfig.enableFallbackGeneration = m_config.enableFallbackGeneration;
+            m_chunkLoader = std::make_unique<MinecraftChunkLoaderImpl>(loaderConfig);
+
+            m_chunkGenerator = std::make_unique<ProceduralChunkGenerator>(m_config.generationConfig);
+
+            SaveWorkerConfig saverConfig;
+            saverConfig.workerThreads = m_config.enableAsyncSaving ? 2 : 1;
+            m_chunkSaver = std::make_unique<AsyncChunkSaver>(saverConfig);
+
+            m_dirtyTracker = std::make_unique<DirtyTracker>(m_config.dirtyConfig);
+
+            // Initialize components
+            if (!m_chunkLoader->Initialize()) {
+                Log::Error("Failed to initialize chunk loader");
+                return false;
             }
-            logTimer = 0.0f;
+
+            if (!m_chunkGenerator->Initialize()) {
+                Log::Error("Failed to initialize chunk generator");
+                return false;
+            }
+
+            if (!m_chunkSaver->Initialize()) {
+                Log::Error("Failed to initialize chunk saver");
+                return false;
+            }
+
+            if (!m_dirtyTracker->Initialize()) {
+                Log::Error("Failed to initialize dirty tracker");
+                return false;
+            }
+
+            // Set up component dependencies
+            SetupComponentDependencies();
+            ConfigureComponents();
+
+            // Reset statistics
+            ResetProviderStats();
+
+            m_initialized = true;
+            Log::Info("ChunkProvider initialized successfully");
+            return true;
+
+        } catch (const std::exception& e) {
+            Log::Error("ChunkProvider initialization failed: %s", e.what());
+            Shutdown();
+            return false;
         }
     }
 
     void ChunkProvider::Shutdown() {
+        if (!m_initialized) {
+            return;
+        }
+
         Log::Info("Shutting down ChunkProvider...");
 
+        m_shutdownRequested = true;
+
         // Save all dirty chunks before shutdown
-        ProcessSaveQueue();
+        if (m_chunkSaver && m_chunkCache) {
+            Log::Info("Saving all dirty chunks before shutdown...");
+            m_chunkCache->SaveAllDirty();
+        }
 
-        size_t chunkCount = 0;
+        // Shutdown components in reverse order
+        if (m_dirtyTracker) {
+            m_dirtyTracker->Shutdown();
+            m_dirtyTracker.reset();
+        }
+
+        if (m_chunkSaver) {
+            m_chunkSaver->Shutdown();
+            m_chunkSaver.reset();
+        }
+
+        if (m_chunkGenerator) {
+            m_chunkGenerator->Shutdown();
+            m_chunkGenerator.reset();
+        }
+
+        if (m_chunkLoader) {
+            m_chunkLoader->Shutdown();
+            m_chunkLoader.reset();
+        }
+
+        if (m_chunkCache) {
+            m_chunkCache.reset();
+        }
+
+        // Clear pending requests
         {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            chunkCount = m_loadedChunks.size();
-
-            // Save all loaded chunks that are dirty
-            for (const auto& [pos, chunk] : m_loadedChunks) {
-                if (m_dirtyChunks.find(pos) != m_dirtyChunks.end()) {
-                    // TODO: Save chunk to disk
-                    m_chunksSaved++;
-                }
+            std::lock_guard<std::mutex> lock(m_loadRequestMutex);
+            while (!m_loadRequests.empty()) {
+                m_loadRequests.pop();
             }
-
-            m_loadedChunks.clear();
+            m_pendingLoads.clear();
         }
 
-        if (chunkCount > 0) {
-            Log::Info("Unloaded %zu chunks during shutdown (%zu saved)", chunkCount, m_chunksSaved);
-        }
+        LogComponentStats();
 
+        m_initialized = false;
         Log::Info("ChunkProvider shutdown complete");
     }
 
-    // **NEW**: Static method to load Minecraft world
-    bool ChunkProvider::LoadMinecraftWorld(const std::string& savePath) {
-        Log::Info("Loading Minecraft world from: %s", savePath.c_str());
-
-        // Check if the path exists and has the expected structure
-        if (!std::filesystem::exists(savePath)) {
-            Log::Error("Minecraft world path does not exist: %s", savePath.c_str());
-            return false;
+    void ChunkProvider::Update(float deltaTime) {
+        if (!m_initialized || m_shutdownRequested) {
+            return;
         }
 
-        std::string regionPath = savePath + "/region";
-        if (!std::filesystem::exists(regionPath)) {
-            Log::Error("No region directory found in world: %s", savePath.c_str());
-            return false;
-        }
-
-        // Count region files
-        int regionFileCount = 0;
-        try {
-            for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
-                if (entry.path().extension() == ".mca") {
-                    regionFileCount++;
-                }
-            }
-        } catch (const std::exception& e) {
-            Log::Error("Error scanning region directory: %s", e.what());
-            return false;
-        }
-
-        if (regionFileCount == 0) {
-            Log::Warning("No .mca files found in region directory: %s", regionPath.c_str());
-            return false;
-        }
-
-        // Clear existing chunks and set new world path
-        ClearAllChunks();
-        SetGlobalMinecraftWorldPath(savePath);
-
-        Log::Info("Successfully loaded Minecraft world: %s (%d region files)",
-                 savePath.c_str(), regionFileCount);
-        return true;
+        PerformMaintenance(deltaTime);
     }
 
-    // **NEW**: Static method to clear all chunks globally
-    void ChunkProvider::ClearAllChunks() {
-        // This would clear all chunk provider instances
-        // For now, just log - in a full implementation this would iterate over all providers
-        Log::Info("Clearing all chunks globally");
-        s_globalMinecraftWorldPath.clear();
+    // === CORE CHUNK OPERATIONS ===
+
+    std::shared_ptr<Chunk> ChunkProvider::GetChunk(Math::ChunkPos position) {
+        return GetChunkWithPriority(position, false);
     }
 
-    // **NEW**: Static method to set global world path
-    void ChunkProvider::SetGlobalMinecraftWorldPath(const std::string& worldPath) {
-        s_globalMinecraftWorldPath = worldPath;
-
-        // Also set it on the MinecraftChunkLoader
-        try {
-            MinecraftChunkLoader::SetWorldPath(worldPath);
-            Log::Info("Set global Minecraft world path: %s", worldPath.c_str());
-        } catch (const std::exception& e) {
-            Log::Error("Failed to set world path on MinecraftChunkLoader: %s", e.what());
+    std::shared_ptr<Chunk> ChunkProvider::GetChunkWithPriority(Math::ChunkPos position, bool highPriority) {
+        if (!m_initialized || !ValidateChunkPosition(position)) {
+            return nullptr;
         }
 
-        // Check if the world path exists and has region files
-        std::string regionPath = worldPath + "/region";
-        if (std::filesystem::exists(regionPath)) {
-            Log::Info("Found region directory: %s", regionPath.c_str());
-        } else {
-            Log::Warning("No region directory found at: %s (will use procedural generation)", regionPath.c_str());
-        }
-    }
+        auto startTime = std::chrono::high_resolution_clock::now();
 
-    // Core chunk operations
-    std::shared_ptr<Chunk> ChunkProvider::LoadChunk(int chunkX, int chunkZ) {
-        Math::ChunkPos pos{chunkX, chunkZ};
-
-        // Check if already loaded
-        {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            auto it = m_loadedChunks.find(pos);
-            if (it != m_loadedChunks.end()) {
-                return it->second;
-            }
+        // Try to get from cache first
+        std::shared_ptr<Chunk> chunk = TryLoadFromCache(position);
+        if (chunk) {
+            auto endTime = std::chrono::high_resolution_clock::now();
+            float loadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+            UpdateLoadStats(loadTime, true, false, false);
+            return chunk;
         }
 
-        // Try to load from Minecraft world first
-        std::shared_ptr<Chunk> chunk = nullptr;
-
-        if (!s_globalMinecraftWorldPath.empty()) {
-            try {
-                chunk = MinecraftChunkLoader::LoadMinecraftChunk(pos, s_globalMinecraftWorldPath);
-                if (chunk) {
-                    Log::Debug("Loaded chunk (%d, %d) from Minecraft world", chunkX, chunkZ);
-                }
-            } catch (const std::exception& e) {
-                Log::Warning("Failed to load Minecraft chunk (%d, %d): %s", chunkX, chunkZ, e.what());
-            }
+        // Performance throttling
+        if (!highPriority && ShouldThrottleLoading()) {
+            return nullptr;
         }
 
-        // Fall back to procedural generation
+        // Load from disk or generate
+        chunk = LoadChunkInternal(position);
+
+        auto endTime = std::chrono::high_resolution_clock::now();
+        float loadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+
+        bool fromCache = false;
+        bool fromDisk = chunk != nullptr;
+        bool generated = false;
+
         if (!chunk) {
-            chunk = GenerateChunk(pos);
-            m_chunksGenerated++;
-        }
-
-        // Setup callbacks for dirty tracking
-        SetupChunkCallbacks(chunk);
-
-        // Store in loaded chunks
-        {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            m_loadedChunks[pos] = chunk;
-        }
-
-        m_chunksLoaded++;
-
-        // Enforce LRU limit
-        EnforceLRULimit();
-
-        return chunk;
-    }
-
-    void ChunkProvider::UnloadChunk(int chunkX, int chunkZ) {
-        Math::ChunkPos pos{chunkX, chunkZ};
-
-        std::shared_ptr<Chunk> chunk;
-        {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            auto it = m_loadedChunks.find(pos);
-            if (it != m_loadedChunks.end()) {
-                chunk = it->second;
-                m_loadedChunks.erase(it);
-            }
+            // Try generation as fallback
+            chunk = TryGenerateChunk(position);
+            fromDisk = false;
+            generated = chunk != nullptr;
         }
 
         if (chunk) {
-            // Check if chunk is dirty and queue for saving
-            {
-                std::lock_guard<std::mutex> lock(m_dirtyMutex);
-                if (m_dirtyChunks.find(pos) != m_dirtyChunks.end()) {
-                    QueueChunkForSave(chunk);
-                    m_dirtyChunks.erase(pos);
-                }
+            chunk = CompleteChunkLoad(chunk);
+        }
+
+        UpdateLoadStats(loadTime, fromCache, fromDisk, generated);
+        return chunk;
+    }
+
+    std::future<std::shared_ptr<Chunk>> ChunkProvider::LoadChunkAsync(Math::ChunkPos position) {
+        auto promise = std::make_shared<std::promise<std::shared_ptr<Chunk>>>();
+        auto future = promise->get_future();
+
+        if (!m_initialized) {
+            promise->set_value(nullptr);
+            return future;
+        }
+
+        // Check cache first
+        auto chunk = TryLoadFromCache(position);
+        if (chunk) {
+            promise->set_value(chunk);
+            return future;
+        }
+
+        // Queue for async loading
+        {
+            std::lock_guard<std::mutex> lock(m_loadRequestMutex);
+
+            // Check if already pending
+            if (m_pendingLoads.find(position) != m_pendingLoads.end()) {
+                promise->set_value(nullptr); // Already pending
+                return future;
             }
 
-            m_chunksUnloaded++;
-            Log::Debug("Unloaded chunk (%d, %d)", chunkX, chunkZ);
-        }
-    }
-
-    bool ChunkProvider::IsChunkLoaded(int chunkX, int chunkZ) const {
-        Math::ChunkPos pos{chunkX, chunkZ};
-
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
-        return m_loadedChunks.find(pos) != m_loadedChunks.end();
-    }
-
-    bool ChunkProvider::EnsureChunkLoaded(int chunkX, int chunkZ) {
-        if (IsChunkLoaded(chunkX, chunkZ)) {
-            return true;
+            ChunkLoadRequest request(position);
+            request.promise = promise;
+            m_loadRequests.push(std::move(request));
+            m_pendingLoads.insert(position);
         }
 
-        auto chunk = LoadChunk(chunkX, chunkZ);
-        return chunk != nullptr;
+        return future;
     }
 
-    // **UPDATED**: Block access now uses world Y coordinates consistently
-    BlockID ChunkProvider::GetBlockAt(int worldX, int worldY, int worldZ) const {
-        if (!IsValidPosition(worldX, worldY, worldZ)) {
-            return BlockID::Air;
-        }
-
-        int chunkX, chunkZ, localX, localZ;
-        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localZ);
-
-        auto chunk = GetChunk(chunkX, chunkZ);
-        if (!chunk) {
-            return BlockID::Air;
-        }
-
-        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
-        return chunk->GetBlock(localX, worldY, localZ);
-    }
-
-    // **UPDATED**: Block setting now uses world Y coordinates consistently
-    bool ChunkProvider::SetBlockAt(int worldX, int worldY, int worldZ, BlockID blockId) {
-        if (!IsValidPosition(worldX, worldY, worldZ)) {
+    bool ChunkProvider::IsChunkLoaded(Math::ChunkPos position) const {
+        if (!m_initialized || !m_chunkCache) {
             return false;
         }
 
-        int chunkX, chunkZ, localX, localZ;
-        WorldToLocal(worldX, worldY, worldZ, chunkX, chunkZ, localX, localZ);
+        return m_chunkCache->Contains(position);
+    }
 
-        auto chunk = GetChunk(chunkX, chunkZ);
-        if (!chunk) {
-            // Try to load the chunk
-            chunk = LoadChunk(chunkX, chunkZ);
-            if (!chunk) {
-                return false;
+    void ChunkProvider::PreloadChunk(Math::ChunkPos position) {
+        if (!IsChunkLoaded(position)) {
+            LoadChunkAsync(position);
+        }
+    }
+
+    void ChunkProvider::PreloadArea(Math::ChunkPos center, int radius) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                Math::ChunkPos pos{center.x + dx, center.z + dz};
+                PreloadChunk(pos);
             }
         }
+    }
 
-        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
-        BlockID oldBlock = chunk->GetBlock(localX, worldY, localZ);
-        if (oldBlock == blockId) {
-            return true; // No change needed
+    bool ChunkProvider::UnloadChunk(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache) {
+            return false;
         }
 
-        // **UPDATED**: Pass worldY directly to chunk (no conversion needed)
-        chunk->SetBlock(localX, worldY, localZ, blockId);
-
-        // Mark chunk as dirty for saving
-        Math::ChunkPos pos{chunkX, chunkZ};
-        {
-            std::lock_guard<std::mutex> lock(m_dirtyMutex);
-            m_dirtyChunks.insert(pos);
-        }
-
-        return true;
+        return m_chunkCache->Remove(position);
     }
 
-    // Chunk management around player
-    void ChunkProvider::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {
-        // **UPDATED**: Load chunks in a square pattern instead of radius
-        // Create a square of size (viewDistance * 2 + 1) x (viewDistance * 2 + 1)
-        int halfSize = viewDistance;
-
-        for (int dz = -halfSize; dz <= halfSize; ++dz) {
-            for (int dx = -halfSize; dx <= halfSize; ++dx) {
-                int chunkX = playerChunkX + dx;
-                int chunkZ = playerChunkZ + dz;
-
-                if (!IsChunkLoaded(chunkX, chunkZ)) {
-                    LoadChunk(chunkX, chunkZ);
-                }
-            }
-        }
-
-        // Unload distant chunks using square distance
-        UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
-    }
-
-    // Dirty tracking for mesh system
-    void ChunkProvider::MarkSectionDirty(Math::ChunkPos chunkPos, int sectionIndex) {
-        std::lock_guard<std::mutex> lock(m_dirtyMutex);
-        m_dirtySections.insert({chunkPos, sectionIndex});
-    }
-
-    void ChunkProvider::MarkChunkDirty(Math::ChunkPos chunkPos) {
-        std::lock_guard<std::mutex> lock(m_dirtyMutex);
-        m_dirtyChunks.insert(chunkPos);
-    }
-
-    bool ChunkProvider::HasDirtySections() const {
-        std::lock_guard<std::mutex> lock(m_dirtyMutex);
-        return !m_dirtySections.empty();
-    }
-
-    std::vector<DirtySection> ChunkProvider::GetAndClearDirtySections() {
-        std::lock_guard<std::mutex> lock(m_dirtyMutex);
-
-        std::vector<DirtySection> result(m_dirtySections.begin(), m_dirtySections.end());
-        m_dirtySections.clear();
-
-        return result;
-    }
-
-    // Statistics
-    size_t ChunkProvider::GetLoadedChunkCount() const {
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
-        return m_loadedChunks.size();
-    }
-
-    size_t ChunkProvider::GetDirtyChunkCount() const {
-        std::lock_guard<std::mutex> lock(m_dirtyMutex);
-        return m_dirtyChunks.size();
-    }
-
-    void ChunkProvider::GetLoadedChunkBounds(int& minX, int& maxX, int& minZ, int& maxZ) const {
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
-
-        if (m_loadedChunks.empty()) {
-            minX = maxX = minZ = maxZ = 0;
+    void ChunkProvider::UnloadArea(Math::ChunkPos center, int radius) {
+        if (!m_initialized) {
             return;
         }
 
-        bool first = true;
-        for (const auto& [pos, chunk] : m_loadedChunks) {
-            if (first) {
-                minX = maxX = pos.x;
-                minZ = maxZ = pos.z;
-                first = false;
-            } else {
-                minX = std::min(minX, pos.x);
-                maxX = std::max(maxX, pos.x);
-                minZ = std::min(minZ, pos.z);
-                maxZ = std::max(maxZ, pos.z);
+        // Unload chunks outside the radius
+        auto loadedChunks = m_chunkCache->GetDebugState().allChunks;
+
+        for (const auto& pos : loadedChunks) {
+            int dx = pos.x - center.x;
+            int dz = pos.z - center.z;
+            int distanceSquared = dx * dx + dz * dz;
+
+            if (distanceSquared > radius * radius) {
+                UnloadChunk(pos);
             }
         }
     }
 
-    // **NEW**: Instance methods for Minecraft world support
-    void ChunkProvider::SetMinecraftWorldPath(const std::string& worldPath) {
-        m_minecraftWorldPath = worldPath;
+    // === BLOCK ACCESS ===
 
-        try {
-            MinecraftChunkLoader::SetWorldPath(worldPath);
-            Log::Info("ChunkProvider: Set Minecraft world path: %s", worldPath.c_str());
-        } catch (const std::exception& e) {
-            Log::Error("Failed to set world path on MinecraftChunkLoader: %s", e.what());
+    BlockID ChunkProvider::GetBlock(int worldX, int worldY, int worldZ) const {
+        if (!ValidateWorldPosition(worldX, worldY, worldZ)) {
+            return BlockID::Air;
         }
 
-        // Check if the world path exists and has region files
-        std::string regionPath = worldPath + "/region";
-        if (std::filesystem::exists(regionPath)) {
-            Log::Info("Found region directory: %s", regionPath.c_str());
-        } else {
-            Log::Warning("No region directory found at: %s (will use procedural generation)", regionPath.c_str());
+        Math::ChunkPos chunkPos;
+        int localX, localY, localZ;
+        WorldToLocalCoords(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
+
+        auto chunk = m_chunkCache ? m_chunkCache->Peek(chunkPos) : nullptr;
+        if (!chunk) {
+            return BlockID::Air; // Chunk not loaded
         }
+
+        return chunk->GetBlock(localX, localY, localZ);
     }
 
-    const std::string& ChunkProvider::GetMinecraftWorldPath() const {
-        return m_minecraftWorldPath;
+    void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block) {
+        if (!ValidateWorldPosition(worldX, worldY, worldZ) || !IsValidBlockID(block)) {
+            return;
+        }
+
+        Math::ChunkPos chunkPos;
+        int localX, localY, localZ;
+        WorldToLocalCoords(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
+
+        auto chunk = GetChunk(chunkPos); // Load if necessary
+        if (!chunk) {
+            Log::Warning("Cannot set block at (%d, %d, %d) - chunk not available", worldX, worldY, worldZ);
+            return;
+        }
+
+        // Set the block
+        chunk->SetBlock(localX, localY, localZ, block);
+
+        // Mark chunk as dirty for saving
+        if (m_chunkCache) {
+            m_chunkCache->MarkDirty(chunkPos);
+        }
+
+        // Mark affected sections dirty for mesh rebuilding
+        MarkBlockDirty(worldX, worldY, worldZ);
     }
 
-    // **NEW**: Check if a Minecraft chunk is available
-    bool ChunkProvider::IsMinecraftChunkAvailable(Math::ChunkPos pos) const {
-        std::string worldPath = m_minecraftWorldPath;
-        if (worldPath.empty()) {
-            worldPath = s_globalMinecraftWorldPath;
+    void ChunkProvider::SetBlocks(const std::vector<std::tuple<int, int, int, BlockID>>& blocks) {
+        if (blocks.empty()) {
+            return;
         }
 
-        if (worldPath.empty()) {
-            return false;
-        }
+        // Group blocks by chunk for efficient processing
+        std::unordered_map<Math::ChunkPos, std::vector<std::tuple<int, int, int, BlockID>>, Math::ChunkPosHash> chunkBlocks;
 
-        try {
-            return MinecraftChunkLoader::ChunkExistsInRegion(pos, worldPath);
-        } catch (const std::exception& e) {
-            Log::Warning("Error checking Minecraft chunk availability for (%d, %d): %s",
-                        pos.x, pos.z, e.what());
-            return false;
-        }
-    }
-
-    // Debug/testing
-    void ChunkProvider::GenerateTestChunks(int centerX, int centerZ, int radius) {
-        Log::Info("Generating test chunks around (%d, %d) with radius %d", centerX, centerZ, radius);
-
-        for (int dz = -radius; dz <= radius; ++dz) {
-            for (int dx = -radius; dx <= radius; ++dx) {
-                int chunkX = centerX + dx;
-                int chunkZ = centerZ + dz;
-                LoadChunk(chunkX, chunkZ);
+        for (const auto& [worldX, worldY, worldZ, block] : blocks) {
+            if (ValidateWorldPosition(worldX, worldY, worldZ) && IsValidBlockID(block)) {
+                Math::ChunkPos chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+                chunkBlocks[chunkPos].emplace_back(worldX, worldY, worldZ, block);
             }
         }
 
-        Log::Info("Generated %d test chunks", (radius * 2 + 1) * (radius * 2 + 1));
+        // Process each chunk
+        for (const auto& [chunkPos, chunkBlockList] : chunkBlocks) {
+            auto chunk = GetChunk(chunkPos);
+            if (!chunk) {
+                continue;
+            }
+
+            // Set all blocks in this chunk
+            for (const auto& [worldX, worldY, worldZ, block] : chunkBlockList) {
+                int localX, localY, localZ;
+                Math::ChunkPos tempPos;
+                WorldToLocalCoords(worldX, worldY, worldZ, tempPos, localX, localY, localZ);
+
+                chunk->SetBlock(localX, localY, localZ, block);
+                MarkBlockDirty(worldX, worldY, worldZ);
+            }
+
+            // Mark chunk dirty for saving
+            if (m_chunkCache) {
+                m_chunkCache->MarkDirty(chunkPos);
+            }
+        }
     }
 
-    // **UPDATED**: World coordinate conversion utilities - no more local Y conversion
-    Math::ChunkPos ChunkProvider::WorldToChunkPos(int worldX, int worldZ) {
-        return Math::ChunkPos{
-            static_cast<int32_t>(std::floor(static_cast<float>(worldX) / Math::CHUNK_SIZE_X)),
-            static_cast<int32_t>(std::floor(static_cast<float>(worldZ) / Math::CHUNK_SIZE_Z))
-        };
+    std::vector<BlockID> ChunkProvider::GetBlocks(const std::vector<std::tuple<int, int, int>>& positions) const {
+        std::vector<BlockID> results;
+        results.reserve(positions.size());
+
+        for (const auto& [worldX, worldY, worldZ] : positions) {
+            results.push_back(GetBlock(worldX, worldY, worldZ));
+        }
+
+        return results;
     }
 
-    // **UPDATED**: Simplified coordinate conversion - no more localY parameter
-    void ChunkProvider::WorldToLocal(int worldX, int worldY, int worldZ,
-                                    int& chunkX, int& chunkZ,
-                                    int& localX, int& localZ) {
-        // Calculate chunk coordinates
-        chunkX = static_cast<int>(std::floor(static_cast<float>(worldX) / Math::CHUNK_SIZE_X));
-        chunkZ = static_cast<int>(std::floor(static_cast<float>(worldZ) / Math::CHUNK_SIZE_Z));
+    // === INEIGHBORPROVIDER IMPLEMENTATION ===
 
-        // Calculate local coordinates within chunk
-        localX = worldX - (chunkX * Math::CHUNK_SIZE_X);
-        localZ = worldZ - (chunkZ * Math::CHUNK_SIZE_Z);
-        // **REMOVED**: localY calculation - worldY is used directly
-
-        // Ensure local coordinates are in valid range
-        if (localX < 0) localX += Math::CHUNK_SIZE_X;
-        if (localZ < 0) localZ += Math::CHUNK_SIZE_Z;
+    bool ChunkProvider::IsChunkLoaded(int chunkX, int chunkZ) const {
+        return IsChunkLoaded(Math::ChunkPos{chunkX, chunkZ});
     }
 
-    int ChunkProvider::WorldYToSectionIndex(int worldY) {
-        return (worldY - Config::MinY) / Math::SECTION_HEIGHT;
+    bool ChunkProvider::IsPositionLoaded(int worldX, int worldY, int worldZ) const {
+        Math::ChunkPos chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        return IsChunkLoaded(chunkPos);
     }
 
-    // **REMOVED**: WorldYToChunkLocalY method since we don't need local Y anymore
-
-    // Private helper functions
-    std::shared_ptr<Chunk> ChunkProvider::GetChunk(int chunkX, int chunkZ) const {
-        Math::ChunkPos pos{chunkX, chunkZ};
-
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
-        auto it = m_loadedChunks.find(pos);
-        return (it != m_loadedChunks.end()) ? it->second : nullptr;
+    bool ChunkProvider::IsBlockSolid(int worldX, int worldY, int worldZ) const {
+        BlockID block = GetBlock(worldX, worldY, worldZ);
+        bool isSolid, isFluid, isTransparent;
+        GetBlockProperties(block, isSolid, isFluid, isTransparent);
+        return isSolid;
     }
 
-    std::shared_ptr<Chunk> ChunkProvider::GenerateChunk(Math::ChunkPos chunkPos) {
-        auto chunk = std::make_shared<Chunk>();
-        chunk->pos = chunkPos;
+    bool ChunkProvider::IsBlockFluid(int worldX, int worldY, int worldZ) const {
+        BlockID block = GetBlock(worldX, worldY, worldZ);
+        bool isSolid, isFluid, isTransparent;
+        GetBlockProperties(block, isSolid, isFluid, isTransparent);
+        return isFluid;
+    }
 
-        // Generate terrain
-        GenerateTerrainChunk(*chunk, chunkPos);
+    bool ChunkProvider::IsBlockTransparent(int worldX, int worldY, int worldZ) const {
+        BlockID block = GetBlock(worldX, worldY, worldZ);
+        bool isSolid, isFluid, isTransparent;
+        GetBlockProperties(block, isSolid, isFluid, isTransparent);
+        return isTransparent;
+    }
 
-        // Add structures (trees, ores, etc.)
-        PlaceStructures(*chunk, chunkPos);
+    INeighborProvider::NeighborStats ChunkProvider::GetStats() const {
+        // Return basic stats for neighbor provider interface
+        NeighborStats stats;
+        auto providerStats = GetProviderStats();
+        stats.totalQueries = providerStats.chunksLoaded * 100; // Rough estimate
+        stats.cacheHits = static_cast<size_t>(providerStats.cacheHitRate);
+        return stats;
+    }
+
+    void ChunkProvider::ResetStats() {
+        ResetProviderStats();
+    }
+
+    // === DIRTY TRACKING ===
+
+    void ChunkProvider::MarkSectionDirty(Math::ChunkPos chunkPos, int sectionIndex) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return;
+        }
+
+        m_dirtyTracker->MarkSectionDirty(chunkPos, sectionIndex);
+    }
+
+    void ChunkProvider::MarkChunkDirty(Math::ChunkPos chunkPos) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return;
+        }
+
+        m_dirtyTracker->MarkChunkDirty(chunkPos);
+    }
+
+    void ChunkProvider::MarkBlockDirty(int worldX, int worldY, int worldZ) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return;
+        }
+
+        // Get affected sections (including neighbors if on boundaries)
+        auto affectedSections = GetAffectedSections(worldX, worldY, worldZ, true);
+
+        for (const auto& section : affectedSections) {
+            m_dirtyTracker->MarkSectionDirty(section.chunkPos, section.sectionIndex);
+        }
+    }
+
+    void ChunkProvider::MarkRegionDirty(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return;
+        }
+
+        m_dirtyTracker->MarkRegionDirty(minX, minY, minZ, maxX, maxY, maxZ);
+    }
+
+    std::vector<DirtySection> ChunkProvider::GetDirtySections(size_t maxCount) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return {};
+        }
+
+        return m_dirtyTracker->GetDirtySections(maxCount);
+    }
+
+    std::vector<DirtySection> ChunkProvider::GetAndClearDirtySections() {
+        if (!m_initialized || !m_dirtyTracker) {
+            return {};
+        }
+
+        return m_dirtyTracker->GetAndClearAllDirtySections();
+    }
+
+    void ChunkProvider::ClearDirtySections(const std::vector<DirtySection>& sections) {
+        if (!m_initialized || !m_dirtyTracker) {
+            return;
+        }
+
+        m_dirtyTracker->ClearDirtySections(sections);
+    }
+
+    bool ChunkProvider::IsChunkDirty(Math::ChunkPos chunkPos) const {
+        if (!m_initialized || !m_dirtyTracker) {
+            return false;
+        }
+
+        return m_dirtyTracker->IsChunkDirty(chunkPos);
+    }
+
+    bool ChunkProvider::IsSectionDirty(Math::ChunkPos chunkPos, int sectionIndex) const {
+        if (!m_initialized || !m_dirtyTracker) {
+            return false;
+        }
+
+        return m_dirtyTracker->IsSectionDirty(chunkPos, sectionIndex);
+    }
+
+    size_t ChunkProvider::GetDirtyCount() const {
+        if (!m_initialized || !m_dirtyTracker) {
+            return 0;
+        }
+
+        return m_dirtyTracker->GetDirtyCount();
+    }
+
+    // === SAVING ===
+
+    void ChunkProvider::SaveChunk(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache || !m_chunkSaver) {
+            return;
+        }
+
+        auto chunk = m_chunkCache->Peek(position);
+        if (chunk && m_chunkCache->IsDirty(position)) {
+            m_chunkSaver->SaveChunkAsync(*chunk);
+            m_chunkCache->ClearDirtyFlag(position);
+        }
+    }
+
+    void ChunkProvider::SaveAllDirtyChunks() {
+        if (!m_initialized || !m_chunkCache) {
+            return;
+        }
+
+        m_chunkCache->SaveAllDirty();
+    }
+
+    void ChunkProvider::SaveArea(Math::ChunkPos center, int radius) {
+        if (!m_initialized || !m_chunkCache) {
+            return;
+        }
+
+        auto dirtyChunks = m_chunkCache->GetDirtyChunks();
+
+        for (const auto& pos : dirtyChunks) {
+            int dx = pos.x - center.x;
+            int dz = pos.z - center.z;
+
+            if (dx * dx + dz * dz <= radius * radius) {
+                SaveChunk(pos);
+            }
+        }
+    }
+
+    void ChunkProvider::SetAutoSaveEnabled(bool enabled) {
+        std::lock_guard<std::shared_mutex> lock(m_configMutex);
+        m_config.enableAutoSave = enabled;
+    }
+
+    void ChunkProvider::SetAutoSaveInterval(float seconds) {
+        std::lock_guard<std::shared_mutex> lock(m_configMutex);
+        m_config.autoSaveIntervalSeconds = std::max(1.0f, seconds);
+    }
+
+    bool ChunkProvider::IsAutoSaveEnabled() const {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        return m_config.enableAutoSave;
+    }
+
+    // === CONFIGURATION ===
+
+    void ChunkProvider::SetConfig(const ChunkProviderConfig& config) {
+        if (!config.IsValid()) {
+            Log::Warning("Invalid ChunkProvider configuration, ignoring");
+            return;
+        }
+
+        std::lock_guard<std::shared_mutex> lock(m_configMutex);
+        m_config = config;
+
+        if (m_initialized) {
+            ConfigureComponents();
+        }
+    }
+
+    ChunkProviderConfig ChunkProvider::GetConfig() const {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        return m_config;
+    }
+
+    void ChunkProvider::SetWorldPath(const std::string& path) {
+        {
+            std::lock_guard<std::shared_mutex> lock(m_configMutex);
+            m_config.minecraftWorldPath = path;
+        }
+
+        if (m_initialized && m_chunkLoader) {
+            m_chunkLoader->SetSource(path);
+        }
+    }
+
+    std::string ChunkProvider::GetWorldPath() const {
+        if (m_chunkLoader) {
+            return m_chunkLoader->GetSource();
+        }
+
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        return m_config.minecraftWorldPath;
+    }
+
+    void ChunkProvider::SetMaxLoadedChunks(size_t maxChunks) {
+        {
+            std::lock_guard<std::shared_mutex> lock(m_configMutex);
+            m_config.maxLoadedChunks = std::max(size_t(16), maxChunks);
+        }
+
+        if (m_initialized && m_chunkCache) {
+            ChunkCacheConfig cacheConfig = m_chunkCache->GetConfig();
+            cacheConfig.maxSize = maxChunks;
+            m_chunkCache->SetConfig(cacheConfig);
+        }
+    }
+
+    size_t ChunkProvider::GetMaxLoadedChunks() const {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        return m_config.maxLoadedChunks;
+    }
+
+    void ChunkProvider::SetGenerationSeed(int32_t seed) {
+        {
+            std::lock_guard<std::shared_mutex> lock(m_configMutex);
+            m_config.generationConfig.seed = seed;
+        }
+
+        if (m_initialized && m_chunkGenerator) {
+            m_chunkGenerator->SetSeed(seed);
+        }
+    }
+
+    int32_t ChunkProvider::GetGenerationSeed() const {
+        if (m_chunkGenerator) {
+            return m_chunkGenerator->GetSeed();
+        }
+
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        return m_config.generationConfig.seed;
+    }
+
+    // === STATISTICS ===
+
+    ChunkProviderStats ChunkProvider::GetProviderStats() const {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        ChunkProviderStats stats = m_stats;
+
+        // Update real-time values
+        if (m_chunkCache) {
+            auto cacheStats = m_chunkCache->GetStats();
+            stats.cacheHitRate = static_cast<size_t>(cacheStats.GetHitRate() * 100);
+            stats.memoryUsage = m_chunkCache->GetMemoryUsageBytes();
+        }
+
+        if (m_dirtyTracker) {
+            stats.dirtySections = m_dirtyTracker->GetDirtyCount();
+        }
+
+        return stats;
+    }
+
+    void ChunkProvider::ResetProviderStats() {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+        m_stats.Reset();
+
+        // Reset component stats
+        if (m_chunkCache) m_chunkCache->ResetStats();
+        if (m_chunkLoader) m_chunkLoader->ResetStats();
+        if (m_chunkGenerator) m_chunkGenerator->ResetStats();
+        if (m_chunkSaver) m_chunkSaver->ResetStats();
+        if (m_dirtyTracker) m_dirtyTracker->ResetStats();
+    }
+
+    ChunkCache::CacheStats ChunkProvider::GetCacheStats() const {
+        return m_chunkCache ? m_chunkCache->GetStats() : ChunkCache::CacheStats{};
+    }
+
+    MinecraftChunkLoaderImpl::LoaderStats ChunkProvider::GetLoaderStats() const {
+        return m_chunkLoader ? m_chunkLoader->GetStats() : MinecraftChunkLoaderImpl::LoaderStats{};
+    }
+
+    ProceduralChunkGenerator::GeneratorStats ChunkProvider::GetGeneratorStats() const {
+        return m_chunkGenerator ? m_chunkGenerator->GetStats() : ProceduralChunkGenerator::GeneratorStats{};
+    }
+
+    AsyncChunkSaver::SaverStats ChunkProvider::getSaverStats() const {
+        return m_chunkSaver ? m_chunkSaver->GetStats() : AsyncChunkSaver::SaverStats{};
+    }
+
+    DirtyTrackerStats ChunkProvider::GetDirtyTrackerStats() const {
+        return m_dirtyTracker ? m_dirtyTracker->GetStats() : DirtyTrackerStats{};
+    }
+
+    // === DIAGNOSTICS ===
+
+    size_t ChunkProvider::GetMemoryUsage() const {
+        size_t total = sizeof(ChunkProvider);
+
+        if (m_chunkCache) total += m_chunkCache->GetMemoryUsageBytes();
+        if (m_dirtyTracker) total += m_dirtyTracker->GetMemoryUsage();
+
+        return total;
+    }
+
+    size_t ChunkProvider::GetLoadedChunkCount() const {
+        return m_chunkCache ? m_chunkCache->GetStats().currentSize : 0;
+    }
+
+    void ChunkProvider::LogPerformanceStats() const {
+        auto stats = GetProviderStats();
+
+        Log::Info("ChunkProvider Performance:");
+        Log::Info("  Loaded: %zu, Generated: %zu, Saved: %zu, Evicted: %zu",
+                 stats.chunksLoaded, stats.chunksGenerated, stats.chunksSaved, stats.chunksEvicted);
+        Log::Info("  Avg Times - Load: %.2fms, Gen: %.2fms, Save: %.2fms",
+                 stats.averageLoadTime, stats.averageGenerationTime, stats.averageSaveTime);
+        Log::Info("  Cache Hit Rate: %zu%%, Memory: %zu KB",
+                 stats.cacheHitRate, stats.memoryUsage / 1024);
+        Log::Info("  Dirty Sections: %zu", stats.dirtySections);
+    }
+
+    void ChunkProvider::LogComponentStats() const {
+        Log::Info("=== ChunkProvider Component Statistics ===");
+
+        if (m_chunkCache) {
+            m_chunkCache->LogStats("ChunkCache");
+        }
+
+        if (m_chunkLoader) {
+            m_chunkLoader->LogDiagnostics("ChunkLoader");
+        }
+
+        if (m_chunkGenerator) {
+            auto genStats = m_chunkGenerator->GetStats();
+            Log::Info("ChunkGenerator: Generated=%zu, AvgTime=%.2fms, Blocks=%zu",
+                     genStats.chunksGenerated, genStats.averageGenerationTimeMs, genStats.totalBlocksGenerated);
+        }
+
+        if (m_chunkSaver) {
+            auto saveStats = m_chunkSaver->GetStats();
+            Log::Info("ChunkSaver: Saved=%zu, Failed=%zu, AvgTime=%.2fms, Bytes=%zu",
+                     saveStats.chunksSaved, saveStats.saveFailures, saveStats.averageSaveTimeMs, saveStats.totalBytesWritten);
+        }
+
+        if (m_dirtyTracker) {
+            m_dirtyTracker->LogDirtySections("DirtyTracker");
+        }
+    }
+
+    bool ChunkProvider::ValidateState() const {
+        if (!m_initialized) {
+            return false;
+        }
+
+        bool valid = true;
+
+        if (m_chunkCache && !m_chunkCache->ValidateIntegrity()) {
+            Log::Error("ChunkCache validation failed");
+            valid = false;
+        }
+
+        if (m_dirtyTracker && !m_dirtyTracker->ValidateState()) {
+            Log::Error("DirtyTracker validation failed");
+            valid = false;
+        }
+
+        return valid;
+    }
+
+    void ChunkProvider::DumpLoadedChunks() const {
+        if (!m_chunkCache) {
+            Log::Info("No chunk cache available");
+            return;
+        }
+
+        auto debugState = m_chunkCache->GetDebugState();
+        Log::Info("=== Loaded Chunks (%zu total) ===", debugState.allChunks.size());
+
+        for (const auto& pos : debugState.allChunks) {
+            bool dirty = std::find(debugState.dirtyChunks.begin(), debugState.dirtyChunks.end(), pos)
+                        != debugState.dirtyChunks.end();
+            Log::Info("  Chunk (%d, %d)%s", pos.x, pos.z, dirty ? " [DIRTY]" : "");
+        }
+    }
+
+    // === LEGACY COMPATIBILITY ===
+
+    std::shared_ptr<Chunk> ChunkProvider::LoadChunkFromDisk(Math::ChunkPos position) {
+        return TryLoadFromDisk(position);
+    }
+
+    std::shared_ptr<Chunk> ChunkProvider::GenerateChunk(Math::ChunkPos position) {
+        return TryGenerateChunk(position);
+    }
+
+    void ChunkProvider::QueueChunkForSaving(std::shared_ptr<const Chunk> chunk) {
+        if (chunk && m_chunkSaver) {
+            m_chunkSaver->QueueChunkForSave(chunk);
+        }
+    }
+
+    void ChunkProvider::AddDirtySection(const DirtySection& section) {
+        MarkSectionDirty(section.chunkPos, section.sectionIndex);
+    }
+
+    std::vector<DirtySection> ChunkProvider::RemoveDirtySections() {
+        return GetAndClearDirtySections();
+    }
+
+    // === INTERNAL WORKFLOWS ===
+
+    std::shared_ptr<Chunk> ChunkProvider::LoadChunkInternal(Math::ChunkPos position, bool allowGeneration) {
+        if (!ValidateChunkPosition(position)) {
+            return nullptr;
+        }
+
+        // Try loading from disk first
+        std::shared_ptr<Chunk> chunk = TryLoadFromDisk(position);
+
+        if (!chunk && allowGeneration) {
+            // Generate new chunk
+            chunk = TryGenerateChunk(position);
+        }
 
         return chunk;
     }
 
-    void ChunkProvider::SetupChunkCallbacks(std::shared_ptr<Chunk> chunk) {
-        // Set up the dirty callback for the chunk
-        Math::ChunkPos pos = chunk->pos;
-        chunk->onSectionDirty = [this, pos](int sectionIndex) {
-            this->MarkSectionDirty(pos, sectionIndex);
-        };
+    std::shared_ptr<Chunk> ChunkProvider::TryLoadFromCache(Math::ChunkPos position) {
+        if (!m_chunkCache) {
+            return nullptr;
+        }
+
+        return m_chunkCache->Get(position);
     }
 
-    // **UPDATED**: Terrain generation now uses world Y coordinates
-    void ChunkProvider::GenerateTerrainChunk(Chunk& chunk, Math::ChunkPos pos) {
-        static FastNoiseLite noise;
-        static bool initialized = false;
-        if (!initialized) {
-            noise.SetNoiseType(FastNoiseLite::NoiseType_Perlin);
-            noise.SetSeed(12345);
-            noise.SetFrequency(0.01f);
-            initialized = true;
+    std::shared_ptr<Chunk> ChunkProvider::TryLoadFromDisk(Math::ChunkPos position) {
+        if (!m_chunkLoader) {
+            return nullptr;
         }
 
-        int baseWorldX = pos.x * Math::CHUNK_SIZE_X;
-        int baseWorldZ = pos.z * Math::CHUNK_SIZE_Z;
-
-        for (int localX = 0; localX < Math::CHUNK_SIZE_X; ++localX) {
-            for (int localZ = 0; localZ < Math::CHUNK_SIZE_Z; ++localZ) {
-                int worldX = baseWorldX + localX;
-                int worldZ = baseWorldZ + localZ;
-
-                // Generate height using noise
-                float noiseValue = noise.GetNoise(static_cast<float>(worldX), static_cast<float>(worldZ));
-                float normalizedNoise = (noiseValue + 1.0f) * 0.5f; // Convert from [-1,1] to [0,1]
-
-                int surfaceHeight = static_cast<int>(normalizedNoise * 64.0f + 64.0f); // Height 64-128
-                surfaceHeight = std::clamp(surfaceHeight, Config::MinY + 5, Config::MaxY - 10);
-
-                // **UPDATED**: Use world Y coordinates directly
-                int bedrockStart = Config::MinY;
-                int bedrockEnd = Config::MinY + 5;
-
-                // Generate bedrock layer
-                for (int worldY = bedrockStart; worldY < bedrockEnd; ++worldY) {
-                    chunk.SetBlock(localX, worldY, localZ, BlockID::Bedrock);
-                }
-
-                // Generate stone and surface
-                for (int worldY = bedrockEnd; worldY <= surfaceHeight; ++worldY) {
-                    BlockID blockType;
-                    if (worldY == surfaceHeight) {
-                        blockType = BlockID::Grass; // Surface
-                    } else if (worldY >= surfaceHeight - 3) {
-                        blockType = BlockID::Dirt; // Top soil
-                    } else {
-                        blockType = BlockID::Stone; // Deep stone
-                    }
-
-                    chunk.SetBlock(localX, worldY, localZ, blockType);
-                }
-            }
-        }
+        auto result = m_chunkLoader->LoadChunk(position);
+        return result.success ? result.chunk : nullptr;
     }
 
-    // **UPDATED**: Structure placement now uses world Y coordinates
-    void ChunkProvider::PlaceStructures(Chunk& chunk, Math::ChunkPos pos) {
-        // Simple ore generation
-        std::mt19937 rng(pos.x * 31 + pos.z * 17 + 12345);
-        std::uniform_int_distribution<int> coordDist(1, 14); // Avoid chunk edges
-        std::uniform_int_distribution<int> heightDist(Config::MinY + 5, Config::MinY + 50); // World Y coordinates
-        std::uniform_real_distribution<float> chanceDist(0.0f, 1.0f);
-
-        // Place some coal ore
-        if (chanceDist(rng) < 0.3f) { // 30% chance
-            int x = coordDist(rng);
-            int z = coordDist(rng);
-            int worldY = heightDist(rng); // **UPDATED**: Use world Y directly
-
-            if (chunk.GetBlock(x, worldY, z) == BlockID::Stone) {
-                chunk.SetBlock(x, worldY, z, BlockID::CoalOre);
-            }
+    std::shared_ptr<Chunk> ChunkProvider::TryGenerateChunk(Math::ChunkPos position) {
+        if (!m_chunkGenerator) {
+            return nullptr;
         }
 
-        // Place some iron ore
-        if (chanceDist(rng) < 0.2f) { // 20% chance
-            int x = coordDist(rng);
-            int z = coordDist(rng);
-            int worldY = heightDist(rng); // **UPDATED**: Use world Y directly
-
-            if (chunk.GetBlock(x, worldY, z) == BlockID::Stone) {
-                chunk.SetBlock(x, worldY, z, BlockID::IronOre);
-            }
-        }
+        auto result = m_chunkGenerator->GenerateChunk(position);
+        return result.success ? result.chunk : nullptr;
     }
 
-    void ChunkProvider::UnloadDistantChunks(int centerX, int centerZ, int keepRadius) {
-        std::vector<Math::ChunkPos> chunksToUnload;
-
-        // Find chunks to unload
-        {
-            std::lock_guard<std::mutex> lock(m_chunksMutex);
-            for (const auto& [pos, chunk] : m_loadedChunks) {
-                if (ShouldUnloadChunk(pos, centerX, centerZ, keepRadius)) {
-                    chunksToUnload.push_back(pos);
-                }
-            }
+    std::shared_ptr<Chunk> ChunkProvider::CompleteChunkLoad(std::shared_ptr<Chunk> chunk) {
+        if (!chunk || !m_chunkCache) {
+            return chunk;
         }
 
-        // Unload chunks outside the lock to avoid deadlock
-        for (const Math::ChunkPos& pos : chunksToUnload) {
-            UnloadChunk(pos.x, pos.z);
+        // Validate chunk
+        if (!ValidateChunk(chunk)) {
+            Log::Warning("Loaded chunk failed validation: (%d, %d)", chunk->pos.x, chunk->pos.z);
+            return nullptr;
         }
 
-        if (!chunksToUnload.empty()) {
-            Log::Debug("Unloaded %zu distant chunks (keep radius: %d)",
-                      chunksToUnload.size(), keepRadius);
-        }
+        // Add to cache
+        m_chunkCache->Put(chunk->pos, chunk);
+
+        return chunk;
     }
 
-    void ChunkProvider::EnforceLRULimit() {
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
+    // === COORDINATION ===
 
-        if (m_loadedChunks.size() <= m_maxLoadedChunks) {
-            return; // Under limit
-        }
-
-        // Simple eviction: unload the first chunk we find
-        // TODO: Implement proper LRU tracking
-        auto it = m_loadedChunks.begin();
-        if (it != m_loadedChunks.end()) {
-            Math::ChunkPos pos = it->first;
-            Log::Debug("LRU eviction: unloading chunk (%d, %d)", pos.x, pos.z);
-
-            // Note: We need to release the lock before calling UnloadChunk
-            // to avoid deadlock, but this is a simplified implementation
-            m_loadedChunks.erase(it);
-        }
-    }
-
-    bool ChunkProvider::ShouldUnloadChunk(Math::ChunkPos chunkPos, int centerX, int centerZ, int keepRadius) const {
-        // **UPDATED**: Use square distance instead of radius
-        int distance = ChunkDistance(chunkPos.x, chunkPos.z, centerX, centerZ);
-        return distance > keepRadius;
-    }
-
-    void ChunkProvider::QueueChunkForSave(std::shared_ptr<Chunk> chunk) {
-        if (!m_asyncSaveEnabled) {
+    void ChunkProvider::SetupComponentDependencies() {
+        if (!m_initialized) {
             return;
         }
 
-        std::lock_guard<std::mutex> lock(m_saveMutex);
-        m_chunksToSave.push(chunk);
+        // Set up chunk cache dependencies
+        if (m_chunkCache && m_chunkSaver) {
+            m_chunkCache->SetChunkSaver(m_chunkSaver);
+        }
+
+        // Set up loader fallback generation
+        if (m_chunkLoader && m_chunkGenerator) {
+            m_chunkLoader->SetFallbackGenerator(m_chunkGenerator);
+        }
+
+        // Set up callbacks
+        if (m_chunkCache) {
+            m_chunkCache->SetEvictionCallback(
+                [this](Math::ChunkPos pos, std::shared_ptr<Chunk> chunk, bool wasDirty) {
+                    OnChunkEvicted(pos, chunk, wasDirty);
+                });
+        }
+
+        if (m_dirtyTracker) {
+            m_dirtyTracker->SetDirtyCallback(
+                [this](const DirtySection& section) {
+                    OnSectionDirty(section);
+                });
+        }
     }
 
-    void ChunkProvider::ProcessSaveQueue() {
-        std::queue<std::shared_ptr<Chunk>> chunksToSave;
+    void ChunkProvider::ConfigureComponents() {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
 
-        // Move chunks from save queue
+        // Configure cache
+        if (m_chunkCache) {
+            ChunkCacheConfig cacheConfig = m_chunkCache->GetConfig();
+            cacheConfig.maxSize = m_config.maxLoadedChunks;
+            cacheConfig.enableLRUEviction = m_config.enableLRUEviction;
+            m_chunkCache->SetConfig(cacheConfig);
+        }
+
+        // Configure loader
+        if (m_chunkLoader) {
+            m_chunkLoader->SetSource(m_config.minecraftWorldPath);
+        }
+
+        // Configure generator
+        if (m_chunkGenerator) {
+            m_chunkGenerator->SetConfig(m_config.generationConfig);
+        }
+
+        // Configure saver
+        if (m_chunkSaver) {
+            m_chunkSaver->SetAutoSaveEnabled(m_config.enableAutoSave);
+            m_chunkSaver->SetAutoSaveInterval(m_config.autoSaveIntervalSeconds);
+        }
+
+        // Configure dirty tracker
+        if (m_dirtyTracker) {
+            m_dirtyTracker->SetConfig(m_config.dirtyConfig);
+        }
+    }
+
+    void ChunkProvider::SynchronizeComponents() {
+        // Synchronize state between components if needed
+        // Currently not much synchronization needed due to good separation of concerns
+    }
+
+    void ChunkProvider::OnChunkEvicted(Math::ChunkPos position, std::shared_ptr<Chunk> chunk, bool wasDirty) {
+        // Update statistics
         {
-            std::lock_guard<std::mutex> lock(m_saveMutex);
-            chunksToSave.swap(m_chunksToSave);
+            std::lock_guard<std::mutex> lock(m_statsMutex);
+            m_stats.chunksEvicted++;
         }
 
-        // Process saves (this would write to disk in a real implementation)
-        while (!chunksToSave.empty()) {
-            auto chunk = chunksToSave.front();
-            chunksToSave.pop();
+        Log::Debug("Chunk (%d, %d) evicted from cache%s", position.x, position.z, wasDirty ? " (was dirty)" : "");
+    }
 
-            // TODO: Actually save chunk to disk
-            // For now, just count it
-            m_chunksSaved++;
-
-            Log::Debug("Saved chunk (%d, %d) to disk", chunk->pos.x, chunk->pos.z);
+    void ChunkProvider::OnChunkSaved(const ChunkSaveResult& result) {
+        // Update statistics
+        {
+            std::lock_guard<std::mutex> lock(m_statsMutex);
+            if (result.success) {
+                m_stats.chunksSaved++;
+                m_stats.averageSaveTime = (m_stats.averageSaveTime * (m_stats.chunksSaved - 1) + result.saveTimeMs) / m_stats.chunksSaved;
+            }
         }
     }
 
-    int ChunkProvider::ChunkDistance(int x1, int z1, int x2, int z2) const {
-        // **UPDATED**: Use Chebyshev distance (square pattern) instead of circular
-        return std::max(std::abs(x1 - x2), std::abs(z1 - z2));
+    void ChunkProvider::OnSectionDirty(const DirtySection& section) {
+        // Optional: Log or perform additional processing when sections become dirty
+        // Currently just forwarded to interested systems
     }
 
-    bool ChunkProvider::IsValidPosition(int worldX, int worldY, int worldZ) const {
-        return worldY >= Config::MinY && worldY <= Config::MaxY;
+    // === MAINTENANCE ===
+
+    void ChunkProvider::PerformMaintenance(float deltaTime) {
+        UpdateAutoSave(deltaTime);
+        ProcessLoadRequests();
+        UpdateComponentStats();
+        EnforcePerformanceLimits();
+
+        // Update components
+        if (m_chunkCache) {
+            m_chunkCache->PerformMaintenance();
+        }
+
+        if (m_dirtyTracker) {
+            m_dirtyTracker->Update(deltaTime);
+        }
     }
 
-    std::shared_ptr<Chunk> ChunkProvider::GetLoadedChunk(int chunkX, int chunkZ) const {
-        Math::ChunkPos pos{chunkX, chunkZ};
+    void ChunkProvider::UpdateAutoSave(float deltaTime) {
+        if (!IsAutoSaveEnabled()) {
+            return;
+        }
 
-        std::lock_guard<std::mutex> lock(m_chunksMutex);
-        auto it = m_loadedChunks.find(pos);
-        return (it != m_loadedChunks.end()) ? it->second : nullptr;
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastAutoSave);
+
+        if (elapsed.count() >= m_config.autoSaveIntervalSeconds) {
+            SaveAllDirtyChunks();
+            m_lastAutoSave = now;
+        }
+    }
+
+    void ChunkProvider::ProcessLoadRequests() {
+        std::lock_guard<std::mutex> lock(m_loadRequestMutex);
+
+        // Process up to maxChunksPerFrame requests
+        int processed = 0;
+        while (!m_loadRequests.empty() && processed < m_config.maxChunksPerFrame) {
+            ChunkLoadRequest request = std::move(m_loadRequests.front());
+            m_loadRequests.pop();
+            m_pendingLoads.erase(request.position);
+
+            // Load chunk
+            auto chunk = LoadChunkInternal(request.position);
+            if (chunk) {
+                chunk = CompleteChunkLoad(chunk);
+            }
+
+            // Set promise result
+            if (request.promise) {
+                request.promise->set_value(chunk);
+            }
+
+            processed++;
+        }
+    }
+
+    void ChunkProvider::UpdateComponentStats() {
+        // Aggregate stats from components
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+
+        if (m_chunkLoader) {
+            auto loaderStats = m_chunkLoader->GetStats();
+            m_stats.chunksLoaded = loaderStats.chunksLoaded;
+            m_stats.averageLoadTime = loaderStats.averageLoadTimeMs;
+        }
+
+        if (m_chunkGenerator) {
+            auto genStats = m_chunkGenerator->GetStats();
+            m_stats.chunksGenerated = genStats.chunksGenerated;
+            m_stats.averageGenerationTime = genStats.averageGenerationTimeMs;
+        }
+
+        if (m_chunkSaver) {
+            auto saveStats = m_chunkSaver->GetStats();
+            m_stats.chunksSaved = saveStats.chunksSaved;
+            m_stats.averageSaveTime = saveStats.averageSaveTimeMs;
+        }
+    }
+
+    void ChunkProvider::EnforcePerformanceLimits() {
+        // Currently basic enforcement - could be enhanced
+        if (m_chunkCache) {
+            auto stats = m_chunkCache->GetStats();
+            if (stats.GetUtilization() > 0.95f) {
+                // Cache is very full, trigger eviction
+                m_chunkCache->EvictLRU(m_config.maxLoadedChunks / 10);
+            }
+        }
+    }
+
+    bool ChunkProvider::ShouldThrottleLoading() const {
+        // Simple throttling based on cache usage
+        if (!m_chunkCache) {
+            return false;
+        }
+
+        auto stats = m_chunkCache->GetStats();
+        return stats.GetUtilization() > 0.9f; // Throttle when cache is 90% full
+    }
+
+    // === VALIDATION ===
+
+    bool ChunkProvider::ValidateChunk(const std::shared_ptr<Chunk>& chunk) const {
+        if (!chunk) {
+            return false;
+        }
+
+        // Basic validation
+        if (chunk->IsEmpty()) {
+            return false;
+        }
+
+        // Validate position is reasonable
+        return ValidateChunkPosition(chunk->pos);
+    }
+
+    bool ChunkProvider::ValidateChunkPosition(Math::ChunkPos position) const {
+        // Prevent extreme coordinates that might cause issues
+        const int MAX_CHUNK_COORD = 1000000;
+        return std::abs(position.x) < MAX_CHUNK_COORD && std::abs(position.z) < MAX_CHUNK_COORD;
+    }
+
+    bool ChunkProvider::ValidateWorldPosition(int worldX, int worldY, int worldZ) const {
+        return Math::WorldCoordinates::IsValidWorldY(worldY) &&
+               std::abs(worldX) < 30000000 && std::abs(worldZ) < 30000000; // Minecraft world limits
+    }
+
+    // === HELPERS ===
+
+    void ChunkProvider::WorldToLocalCoords(int worldX, int worldY, int worldZ, Math::ChunkPos& chunkPos,
+                                          int& localX, int& localY, int& localZ) const {
+        chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        localX = Math::WorldCoordinates::WorldXToChunkX(worldX);
+        localY = worldY; // World Y is used directly
+        localZ = Math::WorldCoordinates::WorldZToChunkZ(worldZ);
+    }
+
+    bool ChunkProvider::IsValidBlockID(BlockID block) const {
+        // Basic validation - could use BlockRegistry for more sophisticated checking
+        return static_cast<int>(block) >= 0 && static_cast<int>(block) < 1000;
+    }
+
+    bool ChunkProvider::GetBlockProperties(BlockID block, bool& isSolid, bool& isFluid, bool& isTransparent) const {
+        // Default properties - could integrate with BlockRegistry for more accurate data
+        switch (block) {
+            case BlockID::Air:
+                isSolid = false;
+                isFluid = false;
+                isTransparent = true;
+                break;
+            case BlockID::Water:
+                isSolid = false;
+                isFluid = true;
+                isTransparent = true;
+                break;
+            case BlockID::Glass:
+                isSolid = true;
+                isFluid = false;
+                isTransparent = true;
+                break;
+            case BlockID::OakLeaves:
+            case BlockID::BirchLeaves:
+                isSolid = true;
+                isFluid = false;
+                isTransparent = true;
+                break;
+            default:
+                isSolid = true;
+                isFluid = false;
+                isTransparent = false;
+                break;
+        }
+        return true;
+    }
+
+    void ChunkProvider::UpdateLoadStats(float loadTime, bool fromCache, bool fromDisk, bool generated) {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+
+        if (fromCache) {
+            // Cache hit - very fast
+            m_stats.cacheHitRate = std::min(size_t(100), m_stats.cacheHitRate + 1);
+        } else {
+            m_stats.cacheHitRate = std::max(size_t(0), m_stats.cacheHitRate - 1);
+        }
+
+        if (fromDisk) {
+            m_stats.chunksLoaded++;
+            m_stats.averageLoadTime = (m_stats.averageLoadTime * (m_stats.chunksLoaded - 1) + loadTime) / m_stats.chunksLoaded;
+        }
+
+        if (generated) {
+            m_stats.chunksGenerated++;
+            m_stats.averageGenerationTime = (m_stats.averageGenerationTime * (m_stats.chunksGenerated - 1) + loadTime) / m_stats.chunksGenerated;
+        }
+    }
+
+    void ChunkProvider::UpdateSaveStats(float saveTime, bool success) {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+
+        if (success) {
+            m_stats.chunksSaved++;
+            m_stats.averageSaveTime = (m_stats.averageSaveTime * (m_stats.chunksSaved - 1) + saveTime) / m_stats.chunksSaved;
+        }
+    }
+
+    void ChunkProvider::LogError(const std::string& operation, const std::string& error) const {
+        Log::Error("ChunkProvider %s: %s", operation.c_str(), error.c_str());
+    }
+
+    void ChunkProvider::LogWarning(const std::string& operation, const std::string& warning) const {
+        Log::Warning("ChunkProvider %s: %s", operation.c_str(), warning.c_str());
+    }
+
+    // === MOVE SEMANTICS ===
+
+    void ChunkProvider::MoveFrom(ChunkProvider&& other) noexcept {
+        m_config = std::move(other.m_config);
+        m_chunkCache = std::move(other.m_chunkCache);
+        m_chunkLoader = std::move(other.m_chunkLoader);
+        m_chunkGenerator = std::move(other.m_chunkGenerator);
+        m_chunkSaver = std::move(other.m_chunkSaver);
+        m_dirtyTracker = std::move(other.m_dirtyTracker);
+        m_stats = other.m_stats;
+        m_lastAutoSave = other.m_lastAutoSave;
+        m_initialized = other.m_initialized.load();
+        m_shutdownRequested = other.m_shutdownRequested.load();
+
+        // Clear other's state
+        other.m_chunkCache.reset();
+        other.m_chunkLoader.reset();
+        other.m_chunkGenerator.reset();
+        other.m_chunkSaver.reset();
+        other.m_dirtyTracker.reset();
+        other.m_stats.Reset();
+        other.m_initialized = false;
+        other.m_shutdownRequested = true;
+    }
+
+    // === UTILITY FUNCTIONS ===
+
+    std::unique_ptr<ChunkProvider> CreateChunkProvider(const ChunkProviderConfig& config) {
+        return std::make_unique<ChunkProvider>(config);
+    }
+
+    ChunkProviderConfig CreateDefaultConfig() {
+        ChunkProviderConfig config;
+        config.maxLoadedChunks = 1024;
+        config.enableLRUEviction = true;
+        config.enableFallbackGeneration = true;
+        config.enableAsyncSaving = true;
+        config.enableAutoSave = true;
+        config.autoSaveIntervalSeconds = 30.0f;
+        config.maxChunksPerFrame = 4;
+        config.maxLoadTimePerFrame = 10.0f;
+
+        // Set up generation config
+        config.generationConfig.seed = 12345;
+        config.generationConfig.worldType = "default";
+        config.generationConfig.generateOres = true;
+        config.generationConfig.generateCaves = true;
+        config.generationConfig.generateStructures = true;
+        config.generationConfig.generateVegetation = true;
+
+        // Set up dirty tracking config
+        config.dirtyConfig.enableBatching = true;
+        config.dirtyConfig.maxBatchSize = 50;
+        config.dirtyConfig.batchTimeoutMs = 10.0f;
+        config.dirtyConfig.enableNeighborInvalidation = true;
+
+        return config;
+    }
+
+    ChunkProviderConfig CreatePerformanceConfig() {
+        ChunkProviderConfig config = CreateDefaultConfig();
+
+        // Optimize for performance
+        config.maxLoadedChunks = 2048;           // More chunks in memory
+        config.maxChunksPerFrame = 8;            // Load more chunks per frame
+        config.maxLoadTimePerFrame = 20.0f;      // Allow more time for loading
+        config.autoSaveIntervalSeconds = 60.0f;  // Save less frequently
+
+        // Aggressive caching
+        ChunkCacheConfig& cacheConfig = config.dirtyConfig; // Reuse struct pattern
+
+        // Faster dirty tracking
+        config.dirtyConfig.enableBatching = true;
+        config.dirtyConfig.maxBatchSize = 100;
+        config.dirtyConfig.batchTimeoutMs = 5.0f;
+
+        return config;
+    }
+
+    ChunkProviderConfig CreateMemoryConfig() {
+        ChunkProviderConfig config = CreateDefaultConfig();
+
+        // Optimize for low memory usage
+        config.maxLoadedChunks = 256;            // Fewer chunks in memory
+        config.maxChunksPerFrame = 2;            // Load fewer chunks per frame
+        config.maxLoadTimePerFrame = 5.0f;       // Shorter loading time
+        config.autoSaveIntervalSeconds = 15.0f;  // Save more frequently
+
+        // Aggressive eviction
+        config.enableLRUEviction = true;
+
+        // Smaller dirty tracking batches
+        config.dirtyConfig.maxBatchSize = 20;
+        config.dirtyConfig.batchTimeoutMs = 20.0f;
+
+        return config;
     }
 
 } // namespace Game

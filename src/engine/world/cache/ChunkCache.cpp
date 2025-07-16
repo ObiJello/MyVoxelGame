@@ -2,6 +2,7 @@
 #include "ChunkCache.hpp"
 #include "../interfaces/IChunkSaver.hpp"
 #include <algorithm>
+#include <cfloat>
 
 namespace Game {
 
