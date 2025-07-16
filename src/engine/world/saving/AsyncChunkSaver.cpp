@@ -834,4 +834,317 @@ namespace Game {
 
         // Check if already pending
         if (m_pendingPositions.find(pos) != m_pendingPositions.end()) {
-            return; // Already queue
+            return; // Already queued
+        }
+
+        // Add to appropriate queue
+        if (entry.highPriority) {
+            m_highPriorityQueue.push(std::move(entry));
+        } else {
+            m_normalPriorityQueue.push(std::move(entry));
+        }
+
+        m_pendingPositions.insert(pos);
+        m_queueCondition.notify_one();
+    }
+
+    void AsyncChunkSaver::RemoveFromPending(Math::ChunkPos position) {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_pendingPositions.erase(position);
+    }
+
+    bool AsyncChunkSaver::HasQueueSpace() const {
+        return GetTotalQueueSize() < m_config.maxQueueSize;
+    }
+
+    size_t AsyncChunkSaver::GetTotalQueueSize() const {
+        return m_normalPriorityQueue.size() + m_highPriorityQueue.size();
+    }
+
+    // === AUTO-SAVE SYSTEM ===
+
+    bool AsyncChunkSaver::ShouldAutoSave() const {
+        if (!m_autoSaveEnabled) {
+            return false;
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - m_lastAutoSave);
+        return elapsed.count() >= m_autoSaveInterval;
+    }
+
+    void AsyncChunkSaver::TriggerAutoSave() {
+        // Auto-save implementation would need integration with the world system
+        // to get all dirty chunks. For now, this is a placeholder.
+        Log::Info("Auto-save triggered");
+        m_lastAutoSave = std::chrono::steady_clock::now();
+    }
+
+    // === BACKUP SYSTEM ===
+
+    bool AsyncChunkSaver::CreateBackup(Math::ChunkPos position) {
+        if (!m_backupEnabled) {
+            return true;
+        }
+
+        std::string originalPath = GetChunkSavePath(position);
+        if (!FileExists(originalPath)) {
+            return true; // No file to backup
+        }
+
+        // Find next backup index
+        int backupIndex = 0;
+        std::string backupPath;
+        do {
+            backupPath = GetBackupPath(position, backupIndex);
+            backupIndex++;
+        } while (FileExists(backupPath) && backupIndex < m_maxBackups);
+
+        if (backupIndex >= m_maxBackups) {
+            // Remove oldest backup
+            std::string oldestBackup = GetBackupPath(position, 0);
+            std::filesystem::remove(oldestBackup);
+
+            // Shift all backups down
+            for (int i = 1; i < m_maxBackups; ++i) {
+                std::string from = GetBackupPath(position, i);
+                std::string to = GetBackupPath(position, i - 1);
+                if (FileExists(from)) {
+                    std::filesystem::rename(from, to);
+                }
+            }
+            backupPath = GetBackupPath(position, m_maxBackups - 1);
+        }
+
+        // Copy original to backup
+        try {
+            std::filesystem::copy_file(originalPath, backupPath);
+            return true;
+        } catch (const std::exception& e) {
+            Log::Warning("Failed to create backup for chunk (%d, %d): %s",
+                        position.x, position.z, e.what());
+            return false;
+        }
+    }
+
+    void AsyncChunkSaver::CleanOldBackups(Math::ChunkPos position) {
+        if (!m_backupEnabled) {
+            return;
+        }
+
+        // Remove excess backups
+        for (int i = m_maxBackups; i < m_maxBackups + 10; ++i) {
+            std::string backupPath = GetBackupPath(position, i);
+            if (FileExists(backupPath)) {
+                std::filesystem::remove(backupPath);
+            }
+        }
+    }
+
+    std::string AsyncChunkSaver::GetBackupPath(Math::ChunkPos position, int backupIndex) const {
+        std::ostringstream oss;
+        oss << m_destinationPath << "/backups/chunk_" << position.x << "_" << position.z
+            << ".backup." << backupIndex << ".dat";
+        return oss.str();
+    }
+
+    // === VALIDATION ===
+
+    bool AsyncChunkSaver::ValidateChunkData(const Chunk& chunk) const {
+        // Additional validation beyond CanSaveChunk
+        if (chunk.pos.x == 0 && chunk.pos.z == 0) {
+            return false; // Invalid default position
+        }
+
+        // Check for reasonable non-air block count
+        size_t nonAirBlocks = chunk.GetNonAirBlockCount();
+        size_t totalBlocks = chunk.GetBlockCount();
+
+        if (nonAirBlocks == 0) {
+            return false; // Completely empty chunk
+        }
+
+        if (nonAirBlocks == totalBlocks) {
+            Log::Warning("Chunk (%d, %d) is completely solid, this might be incorrect",
+                        chunk.pos.x, chunk.pos.z);
+        }
+
+        return true;
+    }
+
+    bool AsyncChunkSaver::VerifyFileIntegrity(const std::string& filePath) const {
+        std::ifstream file(filePath, std::ios::binary);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        // Read magic number
+        uint32_t magic;
+        file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+
+        if (!file.good() || magic != 0x434B4E4B) {
+            return false;
+        }
+
+        // Basic file size check
+        file.seekg(0, std::ios::end);
+        size_t fileSize = file.tellg();
+
+        // Minimum size check (header + at least some data)
+        return fileSize >= 16;
+    }
+
+    // === ERROR HANDLING ===
+
+    void AsyncChunkSaver::SetLastError(const std::string& error) const {
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastError = error;
+    }
+
+    void AsyncChunkSaver::LogError(const std::string& operation, const std::string& error) const {
+        Log::Error("AsyncChunkSaver %s: %s", operation.c_str(), error.c_str());
+        SetLastError(operation + ": " + error);
+    }
+
+    bool AsyncChunkSaver::ShouldRetryOnError(const std::string& error) const {
+        // Determine if an error is retryable
+        return error.find("disk full") == std::string::npos &&
+               error.find("permission denied") == std::string::npos &&
+               error.find("file not found") == std::string::npos;
+    }
+
+    // === STATISTICS ===
+
+    void AsyncChunkSaver::UpdateSaveStats(const ChunkSaveResult& result, size_t originalSize, size_t compressedSize) {
+        std::lock_guard<std::mutex> lock(m_statsMutex);
+
+        if (result.success) {
+            m_stats.chunksSaved++;
+            m_stats.totalSaveTimeMs += result.saveTimeMs;
+            m_stats.totalBytesWritten += result.bytesWritten;
+
+            if (m_stats.chunksSaved > 0) {
+                m_stats.averageSaveTimeMs = m_stats.totalSaveTimeMs / m_stats.chunksSaved;
+            }
+
+            UpdateCompressionStats(originalSize, compressedSize);
+        } else {
+            m_stats.saveFailures++;
+        }
+    }
+
+    void AsyncChunkSaver::UpdateCompressionStats(size_t originalSize, size_t compressedSize) {
+        if (originalSize > 0 && compressedSize > 0) {
+            size_t ratio = (compressedSize * 100) / originalSize;
+
+            // Update running average of compression ratio
+            if (m_stats.chunksSaved > 1) {
+                m_stats.compressionRatio = (m_stats.compressionRatio + ratio) / 2;
+            } else {
+                m_stats.compressionRatio = ratio;
+            }
+        }
+    }
+
+    // === UTILITY METHODS ===
+
+    size_t AsyncChunkSaver::CalculateQueueMemoryUsage() const {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+
+        size_t usage = 0;
+
+        // Estimate memory usage of queued chunks
+        size_t totalQueuedChunks = m_normalPriorityQueue.size() + m_highPriorityQueue.size();
+        usage += totalQueuedChunks * sizeof(Chunk); // Rough estimate
+
+        // Add queue overhead
+        usage += sizeof(SaveQueueEntry) * totalQueuedChunks;
+
+        return usage;
+    }
+
+    std::string AsyncChunkSaver::GetTimestamp() const {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+
+        std::ostringstream oss;
+        oss << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S");
+        return oss.str();
+    }
+
+    bool AsyncChunkSaver::FileExists(const std::string& path) const {
+        return std::filesystem::exists(path);
+    }
+
+    bool AsyncChunkSaver::CreateDirectoryRecursive(const std::string& path) const {
+        try {
+            return std::filesystem::create_directories(path);
+        } catch (const std::exception& e) {
+            Log::Error("Failed to create directory %s: %s", path.c_str(), e.what());
+            return false;
+        }
+    }
+
+    size_t AsyncChunkSaver::GetFileSize(const std::string& path) const {
+        try {
+            return std::filesystem::file_size(path);
+        } catch (const std::exception&) {
+            return 0;
+        }
+    }
+
+    // === RAII SAVE OPERATION ===
+
+    SaveOperation::SaveOperation(AsyncChunkSaver* saver, std::shared_ptr<const Chunk> chunk, bool highPriority)
+        : m_saver(saver), m_chunk(chunk) {
+
+        if (m_saver && m_chunk) {
+            if (highPriority) {
+                m_saver->SaveChunkHighPriority(m_chunk);
+            } else {
+                m_future = m_saver->SaveChunkAsync(*m_chunk);
+            }
+        }
+    }
+
+    SaveOperation::~SaveOperation() {
+        if (!m_cancelled && m_future.valid()) {
+            // Wait for completion if not cancelled
+            try {
+                m_future.get();
+            } catch (const std::exception& e) {
+                Log::Warning("SaveOperation destructor caught exception: %s", e.what());
+            }
+        }
+    }
+
+    std::future<ChunkSaveResult> SaveOperation::GetFuture() {
+        return std::move(m_future);
+    }
+
+    bool SaveOperation::IsComplete() const {
+        return m_future.valid() &&
+               m_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    }
+
+    bool SaveOperation::WaitForCompletion(float timeoutSeconds) {
+        if (!m_future.valid()) {
+            return false;
+        }
+
+        auto timeout = std::chrono::milliseconds(static_cast<int>(timeoutSeconds * 1000));
+        return m_future.wait_for(timeout) == std::future_status::ready;
+    }
+
+    void SaveOperation::Cancel() {
+        m_cancelled = true;
+        // Note: We can't actually cancel an in-progress save, but we can mark it as cancelled
+    }
+
+    // === UTILITY FUNCTIONS ===
+
+    std::unique_ptr<IChunkSaver> CreateAsyncChunkSaver(const SaveWorkerConfig& config) {
+        return std::make_unique<AsyncChunkSaver>(config);
+    }
+
+} // namespace Game
