@@ -18,6 +18,7 @@ namespace Game {
 
     // Forward declarations
     class Chunk;
+    class AnvilChunkSaver;
 
     // Compression utilities for chunk saving
     class ChunkCompressor {
@@ -61,6 +62,12 @@ namespace Game {
         bool enableBatching = true;          // Batch multiple saves together
         int batchSize = 10;                  // Number of chunks per batch
         float batchTimeoutMs = 50.0f;        // Max wait time for batch completion
+        
+        // NEW: Anvil format support
+        bool enableAnvilFormat = false;          // Use Anvil .mca format instead of custom format
+        std::string minecraftWorldPath;          // Path for Minecraft-compatible world
+        bool createMinecraftStructure = true;    // Auto-create level.dat and directories
+        size_t maxRegionCacheSize = 16;         // Maximum cached region files
     };
 
     // Async chunk saver with background worker threads and compression
@@ -153,6 +160,20 @@ namespace Game {
         void FlushAllQueues();
         bool WaitForQueueEmpty(float timeoutSeconds = 10.0f);
 
+        // === ANVIL FORMAT CONTROL ===
+
+        // Enable Anvil .mca format for Minecraft compatibility
+        void EnableAnvilFormat(const std::string& minecraftWorldPath);
+        
+        // Disable Anvil format (use custom format instead)
+        void DisableAnvilFormat();
+        
+        // Check if Anvil format is currently enabled and active
+        bool IsAnvilFormatEnabled() const;
+        
+        // Get the Minecraft world path for Anvil format
+        std::string GetMinecraftWorldPath() const;
+
     protected:
         void UpdateStats(const ChunkSaveResult& result) override;
 
@@ -195,6 +216,10 @@ namespace Game {
         mutable std::mutex m_errorMutex;
         std::string m_lastError;
 
+        // NEW: Anvil format support
+        std::unique_ptr<AnvilChunkSaver> m_anvilSaver;
+        bool m_useAnvilFormat = false;
+
         // === WORKER THREAD IMPLEMENTATION ===
 
         // Main worker thread loop
@@ -213,6 +238,12 @@ namespace Game {
 
         // Synchronous save implementation
         ChunkSaveResult SaveChunkInternal(const Chunk& chunk, bool compress = true);
+
+        // NEW: Anvil format integration methods
+        bool InitializeAnvilSaver();
+        void ShutdownAnvilSaver();
+        ChunkSaveResult SaveChunkAnvil(const Chunk& chunk);
+        bool ShouldUseAnvilFormat() const { return m_useAnvilFormat && m_anvilSaver != nullptr; }
 
         // Write chunk data to file
         bool WriteChunkToFile(const Chunk& chunk, const std::vector<uint8_t>& data);

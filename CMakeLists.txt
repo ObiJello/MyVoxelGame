@@ -69,6 +69,10 @@ add_library(imgui
         src/engine/world/generation/ProceduralChunkGenerator.hpp
         src/engine/world/saving/AsyncChunkSaver.cpp
         src/engine/world/saving/AsyncChunkSaver.hpp
+        src/engine/world/saving/AnvilRegionWriter.cpp
+        src/engine/world/saving/AnvilRegionWriter.hpp
+        src/engine/world/saving/AnvilChunkSaver.cpp
+        src/engine/world/saving/AnvilChunkSaver.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui

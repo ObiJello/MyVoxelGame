@@ -1,5 +1,6 @@
 // File: src/engine/world/saving/AsyncChunkSaver.cpp
 #include "AsyncChunkSaver.hpp"
+#include "AnvilChunkSaver.hpp"
 #include "../Chunk.hpp"
 #include <filesystem>
 #include <fstream>
@@ -384,15 +385,38 @@ namespace Game {
 
         Log::Info("Initializing AsyncChunkSaver...");
 
-        if (m_destinationPath.empty()) {
+        // Validate destination path for custom format
+        if (!m_config.enableAnvilFormat && m_destinationPath.empty()) {
             SetLastError("No destination path set");
             return false;
         }
 
-        // Create destination directory
-        if (!CreateDirectoryRecursive(m_destinationPath)) {
+        // Create destination directory for custom format
+        if (!m_config.enableAnvilFormat && !CreateDirectoryRecursive(m_destinationPath)) {
             SetLastError("Failed to create destination directory: " + m_destinationPath);
             return false;
+        }
+
+        // NEW: Initialize Anvil saver if requested
+        if (m_config.enableAnvilFormat) {
+            if (!InitializeAnvilSaver()) {
+                Log::Warning("Failed to initialize Anvil saver, falling back to custom format");
+                m_useAnvilFormat = false;
+                
+                // Fall back to custom format
+                if (m_destinationPath.empty()) {
+                    SetLastError("No destination path set for fallback custom format");
+                    return false;
+                }
+                if (!CreateDirectoryRecursive(m_destinationPath)) {
+                    SetLastError("Failed to create destination directory: " + m_destinationPath);
+                    return false;
+                }
+            } else {
+                m_useAnvilFormat = true;
+                Log::Info("AsyncChunkSaver: Using Anvil .mca format for world: %s", 
+                         m_config.minecraftWorldPath.c_str());
+            }
         }
 
         // Start worker threads
@@ -439,6 +463,9 @@ namespace Game {
 
         m_workerThreads.clear();
         m_workersRunning = false;
+
+        // NEW: Shutdown Anvil saver
+        ShutdownAnvilSaver();
 
         // Clear queues
         {
@@ -742,6 +769,11 @@ namespace Game {
     // === CORE SAVE IMPLEMENTATION ===
 
     ChunkSaveResult AsyncChunkSaver::SaveChunkInternal(const Chunk& chunk, bool compress) {
+        // NEW: Route to Anvil saver if enabled
+        if (ShouldUseAnvilFormat()) {
+            return SaveChunkAnvil(chunk);
+        }
+
         if (!CanSaveChunk(chunk)) {
             return ChunkSaveResult::Failure(chunk.pos, "Chunk validation failed");
         }
@@ -1139,6 +1171,91 @@ namespace Game {
     void SaveOperation::Cancel() {
         m_cancelled = true;
         // Note: We can't actually cancel an in-progress save, but we can mark it as cancelled
+    }
+
+    // === ANVIL FORMAT INTEGRATION ===
+
+    bool AsyncChunkSaver::InitializeAnvilSaver() {
+        if (m_config.minecraftWorldPath.empty()) {
+            Log::Error("Anvil format requested but no Minecraft world path specified");
+            return false;
+        }
+
+        // Configure Anvil saver
+        AnvilSaverConfig anvilConfig;
+        anvilConfig.worldPath = m_config.minecraftWorldPath;
+        anvilConfig.createWorldStructure = m_config.createMinecraftStructure;
+        anvilConfig.maxCachedRegions = m_config.maxRegionCacheSize;
+        anvilConfig.enableAsyncSaving = true;
+        anvilConfig.strictAnvilCompliance = true;
+
+        // Create Anvil saver
+        m_anvilSaver = std::make_unique<AnvilChunkSaver>(anvilConfig);
+        
+        if (!m_anvilSaver->Initialize()) {
+            Log::Error("Failed to initialize AnvilChunkSaver");
+            m_anvilSaver.reset();
+            return false;
+        }
+
+        Log::Info("AnvilChunkSaver initialized for world: %s", anvilConfig.worldPath.c_str());
+        return true;
+    }
+
+    void AsyncChunkSaver::ShutdownAnvilSaver() {
+        if (m_anvilSaver) {
+            m_anvilSaver->Shutdown();
+            m_anvilSaver.reset();
+        }
+    }
+
+    ChunkSaveResult AsyncChunkSaver::SaveChunkAnvil(const Chunk& chunk) {
+        if (!m_anvilSaver) {
+            return ChunkSaveResult::Failure(chunk.pos, "Anvil saver not initialized");
+        }
+
+        // Use the Anvil saver for actual saving
+        ChunkSaveResult result = m_anvilSaver->SaveChunk(chunk);
+        
+        // Update our statistics with the result
+        UpdateSaveStats(result, 0, 0); // Size info not available from Anvil saver
+        
+        return result;
+    }
+
+    // === ANVIL FORMAT UTILITY METHODS ===
+
+    void AsyncChunkSaver::EnableAnvilFormat(const std::string& minecraftWorldPath) {
+        if (m_initialized) {
+            Log::Warning("Cannot change save format while saver is running");
+            return;
+        }
+
+        m_config.enableAnvilFormat = true;
+        m_config.minecraftWorldPath = minecraftWorldPath;
+        m_config.createMinecraftStructure = true;
+        
+        Log::Info("AsyncChunkSaver configured for Anvil format: %s", minecraftWorldPath.c_str());
+    }
+
+    void AsyncChunkSaver::DisableAnvilFormat() {
+        if (m_initialized) {
+            Log::Warning("Cannot change save format while saver is running");
+            return;
+        }
+
+        m_config.enableAnvilFormat = false;
+        m_config.minecraftWorldPath.clear();
+        
+        Log::Info("AsyncChunkSaver configured for custom format");
+    }
+
+    bool AsyncChunkSaver::IsAnvilFormatEnabled() const {
+        return m_config.enableAnvilFormat && m_useAnvilFormat;
+    }
+
+    std::string AsyncChunkSaver::GetMinecraftWorldPath() const {
+        return m_config.minecraftWorldPath;
     }
 
     // === UTILITY FUNCTIONS ===
