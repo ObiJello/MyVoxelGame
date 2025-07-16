@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.cpp
+// File: src/engine/world/ChunkProvider.cpp - Updated with new system integration
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/JobSystem.hpp"
@@ -63,6 +63,8 @@ namespace Game {
 
             SaveWorkerConfig saverConfig;
             saverConfig.workerThreads = m_config.enableAsyncSaving ? 2 : 1;
+            saverConfig.enableAnvilFormat = !m_config.minecraftWorldPath.empty();
+            saverConfig.minecraftWorldPath = m_config.minecraftWorldPath;
             m_chunkSaver = std::make_unique<AsyncChunkSaver>(saverConfig);
 
             m_dirtyTracker = std::make_unique<DirtyTracker>(m_config.dirtyConfig);
@@ -1274,9 +1276,6 @@ namespace Game {
         config.maxChunksPerFrame = 8;            // Load more chunks per frame
         config.maxLoadTimePerFrame = 20.0f;      // Allow more time for loading
         config.autoSaveIntervalSeconds = 60.0f;  // Save less frequently
-
-        // Aggressive caching
-        ChunkCacheConfig& cacheConfig = config.dirtyConfig; // Reuse struct pattern
 
         // Faster dirty tracking
         config.dirtyConfig.enableBatching = true;

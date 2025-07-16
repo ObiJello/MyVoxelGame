@@ -1,10 +1,11 @@
-// File: src/engine/world/World.hpp
+// File: src/engine/world/World.hpp - Updated for new ChunkProvider integration
 #pragma once
 
 #include "IBlockAccess.hpp"
 #include "ChunkProvider.hpp"
 #include "../block/Blocks.hpp"
 #include "../../game/WorldMath.hpp"
+#include "tracking/DirtyTracker.hpp"
 #include <memory>
 #include <glm/glm.hpp>
 
@@ -20,7 +21,7 @@ namespace Game {
         void Update(float deltaTime);
         void Shutdown();
 
-        // **NEW**: Refresh settings from game settings
+        // Refresh settings from game settings
         void RefreshSettings();
 
         // IBlockAccess implementation
@@ -35,18 +36,21 @@ namespace Game {
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
 
         // Chunk management (delegates to ChunkProvider)
-        // **UPDATED**: Now uses square-based loading pattern instead of radius
+        // Updated: Now uses square-based loading pattern instead of radius
         void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance = 0);
 
         // Mesh system integration
         void MarkSectionDirty(int worldX, int worldY, int worldZ);
         bool HasDirtySections() const;
-        // TODO: Add GetDirtySections() when MeshManager exists
+
+        // Get dirty sections for mesh rebuilding
+        std::vector<DirtySection> GetDirtySections(size_t maxCount = SIZE_MAX);
+        void ClearDirtySections(const std::vector<DirtySection>& sections);
 
         // Get loaded chunk count for debugging
         size_t GetLoadedChunkCount() const;
 
-        // **NEW**: Get current chunk loading distance from settings
+        // Get current chunk loading distance from settings
         int GetChunkLoadingDistance() const { return m_chunkLoadingDistance; }
 
         // World bounds (from Config)
@@ -54,22 +58,38 @@ namespace Game {
         static constexpr int MAX_Y = 319;
         static constexpr int WORLD_HEIGHT = MAX_Y - MIN_Y + 1;
 
-        // Set Minecraft world path for chunk loading
+        // Minecraft world support
         void SetMinecraftWorldPath(const std::string& worldPath);
         const std::string& GetMinecraftWorldPath() const;
         bool HasMinecraftWorld() const;
 
-        // **NEW**: Provide chunk access for mesh system
+        // Provide chunk access for mesh system
         std::shared_ptr<Chunk> GetChunk(int chunkX, int chunkZ) const;
 
-        // **NEW**: Convenience method for mesh manager
+        // Convenience method for mesh manager
         const Chunk* GetChunkForMeshing(int chunkX, int chunkZ) const;
+
+        // Performance and debugging
+        void LogPerformanceStats();
+        void SaveAllChunks();
+        size_t GetMemoryUsage() const;
+        ChunkProviderStats GetChunkProviderStats() const;
+
+        // World generation control
+        void SetGenerationSeed(int32_t seed);
+        int32_t GetGenerationSeed() const;
+
+        // Chunk preloading
+        void PreloadArea(int centerChunkX, int centerChunkZ, int radius);
+
+        // Direct access to chunk provider for advanced use cases
+        ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }
 
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;
 
-        // **NEW**: Settings-based configuration
+        // Settings-based configuration
         int m_chunkLoadingDistance = 10; // Will be loaded from settings
 
         // Helper functions
@@ -77,10 +97,10 @@ namespace Game {
         Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
         void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
 
-        // **NEW**: Square-based chunk unloading helper
+        // Square-based chunk unloading helper
         void UnloadDistantChunks(int centerX, int centerZ, int keepDistance);
 
-        // **NEW**: Load settings from game settings
+        // Load settings from game settings
         void LoadWorldSettings();
 
         // Statistics

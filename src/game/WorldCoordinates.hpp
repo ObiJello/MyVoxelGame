@@ -106,7 +106,7 @@ namespace Game::Math {
 
         // Calculate world coordinates of neighboring block
         static void GetNeighborWorldCoords(int worldX, int worldY, int worldZ,
-                                         BlockFace face, int& neighborX, int& neighborY, int& neighborZ) {
+                                           Render::BlockFace face, int& neighborX, int& neighborY, int& neighborZ) {
             neighborX = worldX;
             neighborY = worldY;
             neighborZ = worldZ;

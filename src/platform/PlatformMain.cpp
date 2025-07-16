@@ -1,4 +1,4 @@
-// File: src/platform/PlatformMain.cpp
+// File: src/platform/PlatformMain.cpp - Updated for new chunk system integration
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "Input.hpp"
@@ -21,6 +21,15 @@
 #include "../render/debug/Crosshair.hpp"
 #include "../render/atlas/AtlasBuilder.hpp"
 
+// Include world system headers
+#include "../engine/world/World.hpp"
+#include "../engine/world/WorldGlobals.hpp"
+#include "../engine/world/ChunkProvider.hpp"
+
+// Include mesh system headers
+#include "../render/mesh/ChunkRenderer.hpp"
+#include "../render/mesh/MeshManager.hpp"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
@@ -33,11 +42,6 @@
 
 #include "GameDirectory.hpp"
 #include "JobSystem.hpp"
-#include "engine/world/RegionFileCache.hpp"
-#include "engine/world/SectionDataUnpacker.hpp"
-#include "mesh/ChunkRenderer.hpp"
-#include "mesh/MeshManager.hpp"
-#include "engine/world/WorldGlobals.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -130,7 +134,7 @@ namespace PlatformMain {
             return Shader(vertPath, fragPath);
         }
 
-        // **FIX**: Return a valid shader even if files don't exist
+        // Return a valid shader even if files don't exist
         Log::Warning("Shader files not found, creating basic fallback shader");
         return Shader(vertPath, fragPath); // This will create a basic shader even if files don't exist
     }
@@ -154,7 +158,6 @@ namespace PlatformMain {
         return true;
     }
 
-    // [Keep all existing input and utility functions unchanged]
     void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
         // Movement input
         glm::vec3 movementInput = camera.CalculateMovementInput();
@@ -231,27 +234,31 @@ namespace PlatformMain {
     bool InitializeMinecraftSupport() {
         Log::Info("=== MINECRAFT WORLD SUPPORT INITIALIZATION ===");
 
-        // Initialize the block state registry for converting Minecraft blocks
-        Game::BlockStateRegistry::Initialize();
-        Log::Info("✓ Block state registry initialized");
-
         // Check for common Minecraft world locations
         std::vector<std::string> commonPaths = {
             "world",                    // Current directory
             "../world",                 // Parent directory
             "saves/New World",          // Typical save name
             "saves/World",              // Another common name
-            std::string(getenv("HOME") ? getenv("HOME") : "") + "/library/Application Support/minecraft/saves/new",  // Default Minecraft location
+            std::string(getenv("HOME") ? getenv("HOME") : "") + "/Library/Application Support/minecraft/saves/New World",  // macOS Minecraft location
+            std::string(getenv("APPDATA") ? getenv("APPDATA") : "") + "/.minecraft/saves/New World",  // Windows Minecraft location
         };
 
         bool foundWorld = false;
+        std::string detectedWorldPath;
+
         for (const auto& path : commonPaths) {
             if (path.empty()) continue;
 
-            if (Game::ChunkProvider::LoadMinecraftWorld(path)) {
-                Log::Info("✓ Automatically loaded Minecraft world: %s", path.c_str());
-                foundWorld = true;
-                break;
+            if (std::filesystem::exists(path) && std::filesystem::is_directory(path)) {
+                // Check if it looks like a Minecraft world (has level.dat)
+                std::string levelDatPath = path + "/level.dat";
+                if (std::filesystem::exists(levelDatPath)) {
+                    Log::Info("✓ Found Minecraft world: %s", path.c_str());
+                    detectedWorldPath = path;
+                    foundWorld = true;
+                    break;
+                }
             }
         }
 
@@ -259,35 +266,49 @@ namespace PlatformMain {
             Log::Info("No Minecraft world auto-detected, will use procedural generation");
         }
 
+        // Store the detected world path globally for use during world initialization
+        if (foundWorld) {
+            // We'll pass this to the world during initialization
+            Log::Info("Will use Minecraft world: %s", detectedWorldPath.c_str());
+        }
+
         Log::Info("=== MINECRAFT WORLD SUPPORT READY ===");
         return true;
     }
 
-    bool ProcessWorldArguments(int argc, char* argv[]) {
+    std::string ProcessWorldArguments(int argc, char* argv[]) {
         for (int i = 1; i < argc - 1; ++i) {
             std::string arg = argv[i];
 
             if (arg == "--world" || arg == "-w") {
                 std::string worldPath = argv[i + 1];
-                Log::Info("Loading Minecraft world from command line: %s", worldPath.c_str());
-
-                /*if (Game::ChunkProvider::LoadMinecraftWorld(worldPath)) {
-                    Log::Info("✓ Successfully loaded world: %s", worldPath.c_str());
-                    return true;
-                } else {
-                    Log::Error("✗ Failed to load world: %s", worldPath.c_str());
-                    return false;
-                }*/
+                Log::Info("Using Minecraft world from command line: %s", worldPath.c_str());
+                return worldPath;
             }
         }
 
-        return false; // No world argument found
+        return ""; // No world argument found
+    }
+
+    void UpdateMeshSystemIntegration(Game::World& world) {
+        // Get dirty sections from the world's chunk provider
+        auto dirtySections = world.GetDirtySections(50); // Process up to 50 sections per frame
+
+        // Mark them dirty in the mesh system
+        if (Render::g_meshManager) {
+            for (const auto& section : dirtySections) {
+                Render::g_meshManager->MarkSectionDirty(section.chunkPos, section.sectionIndex);
+            }
+        }
+
+        // Clear the processed sections
+        world.ClearDirtySections(dirtySections);
     }
 
     int Run(int argc, char** argv) {
         // Initialize systems
         Log::Init();
-        Log::Info("Starting MyVoxelGame v0.1 with Enhanced Mesher System");
+        Log::Info("Starting Enhanced Voxel Engine v0.2 with New Chunk System");
 
         // Initialize game directory system (creates obeycraft folder and loads options.txt)
         if (!Platform::InitializeGameDirectorySystem()) {
@@ -295,8 +316,8 @@ namespace PlatformMain {
             return -1;
         }
 
-        // Process world arguments and initialize Minecraft support FIRST
-        ProcessWorldArguments(argc, argv);
+        // Process world arguments and initialize Minecraft support
+        std::string worldPath = ProcessWorldArguments(argc, argv);
         InitializeMinecraftSupport();
 
         // Initialize game systems BEFORE any chunk loading
@@ -394,10 +415,17 @@ namespace PlatformMain {
         // Create PlayerController
         Game::PlayerController playerController;
 
-        // Initialize the mesh system
+        // Initialize the world with the new chunk system
         Game::World world;
+
+        // Set Minecraft world path if specified
+        if (!worldPath.empty()) {
+            world.SetMinecraftWorldPath(worldPath);
+        }
+
         world.Initialize();
 
+        // Set global world reference
         Game::g_world = &world;
 
         // Initialize mesh system with the world
@@ -407,12 +435,15 @@ namespace PlatformMain {
         meshConfig.enableAsyncBuilding = true;   // Use background threads
         meshConfig.highPriorityRadius = 64.0f;   // High priority radius
 
-        Render::InitializeMeshSystem(&world, meshConfig);
+        if (!Render::InitializeMeshSystem(&world, meshConfig)) {
+            Log::Error("Failed to initialize mesh system");
+            return -6;
+        }
 
         // Initialize chunk renderer
         if (!Render::InitializeChunkRenderer()) {
             Log::Error("Failed to initialize chunk renderer");
-            return -6;
+            return -7;
         }
 
         // Set world reference for player controller
@@ -425,7 +456,7 @@ namespace PlatformMain {
         Debug::PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        Log::Info("Entering main render loop with Enhanced Mesher System");
+        Log::Info("Entering main render loop with Enhanced Chunk System");
 
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {
@@ -451,21 +482,24 @@ namespace PlatformMain {
             // Update game systems
             camera.Update(dt);
             playerController.Update(dt, camera);
-            world.Update(dt);  // Make sure world is updated
+            world.Update(dt);  // Update world with new chunk system
 
-            //Set player position for mesh system prioritization
+            // Set player position for mesh system prioritization
             glm::vec3 playerPos = playerController.GetPhysics().position;
             Render::SetMeshSystemPlayerPosition(playerPos);
 
             // Update mesh system
             Render::UpdateMeshSystem(dt);
 
+            // Integrate mesh system with chunk provider's dirty tracking
+            UpdateMeshSystemIntegration(world);
+
             // Get player chunk position for chunk loading
             int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
             int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
 
             // Update chunk loading around player
-            world.UpdateLoadedChunks(playerChunkX, playerChunkZ, 8);
+            world.UpdateLoadedChunks(playerChunkX, playerChunkZ);
 
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
@@ -484,23 +518,24 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // **CRITICAL FIX 4**: Check if we have meshes to render
+            // Check mesh system status
             if (Render::g_meshManager) {
                 size_t activeSections = Render::g_meshManager->GetGPUDataManager().GetSectionCount();
                 size_t pendingJobs = Render::g_meshManager->GetPendingJobCount();
                 size_t completedResults = Render::g_meshManager->GetCompletedResultCount();
 
-                // Log mesh stats occasionally
+                // Log mesh and chunk stats occasionally
                 static float meshLogTimer = 0.0f;
                 meshLogTimer += dt;
-                if (meshLogTimer >= 2.0f) { // Every 2 seconds
-                    Log::Info("Mesh Status: %zu active sections, %zu pending jobs, %zu completed results",
-                             activeSections, pendingJobs, completedResults);
+                if (meshLogTimer >= 3.0f) { // Every 3 seconds
+                    auto chunkStats = world.GetChunkProviderStats();
+                    Log::Info("System Status: %zu loaded chunks, %zu active sections, %zu pending jobs, %zu dirty sections",
+                             chunkStats.chunksLoaded, activeSections, pendingJobs, chunkStats.dirtySections);
                     meshLogTimer = 0.0f;
                 }
             }
 
-            // Render chunks using the new system
+            // Render chunks using the enhanced system
             Render::RenderChunksAll(camera, frustum);
 
             // Render UI elements
@@ -509,7 +544,7 @@ namespace PlatformMain {
             // Render crosshair (must be last to appear on top)
             RenderCrosshair(window);
 
-            // **NEW**: Update debug UI with mesh statistics
+            // Update debug UI with enhanced statistics
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -529,7 +564,21 @@ namespace PlatformMain {
             // Calculate frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
+
+            // Performance monitoring for the new system
+            static float perfLogTimer = 0.0f;
+            perfLogTimer += dt;
+            if (perfLogTimer >= 10.0f) { // Every 10 seconds
+                world.LogPerformanceStats();
+                perfLogTimer = 0.0f;
+            }
         }
+
+        // Shutdown sequence
+        Log::Info("Shutting down Enhanced Voxel Engine...");
+
+        // Save all chunks before shutdown
+        world.SaveAllChunks();
 
         // Shutdown mesh system first (stops background threads)
         Render::ShutdownMeshSystem();
@@ -537,17 +586,16 @@ namespace PlatformMain {
         // Shutdown chunk renderer
         Render::ShutdownChunkRenderer();
 
-        // Shutdown world
+        // Shutdown world (this will shutdown the chunk provider)
         world.Shutdown();
 
+        // Clear global reference
         Game::g_world = nullptr;
 
-        // Clear region file cache
-        World::RegionFileCache::Instance().Clear();
-
-        // Cleanup
+        // Cleanup debug system
         Debug::DebugSystem::Shutdown();
 
+        // Stop background job system
         Log::Info("Stopping background job system...");
         try {
             JobSystem::g_ThreadPool.Stop();
@@ -558,12 +606,10 @@ namespace PlatformMain {
             Log::Error("Unknown exception stopping job system");
         }
 
-        // Clean up OpenGL resources with better error handling
+        // Clean up OpenGL resources
         Log::Info("Cleaning up OpenGL resources...");
         try {
-            // Make sure we have a valid OpenGL context
             if (glfwGetCurrentContext() == window) {
-
                 // Clean up global rendering resources
                 if (Render::g_atlasBuilder) {
                     Render::g_atlasBuilder.reset();
@@ -574,7 +620,7 @@ namespace PlatformMain {
                     // Clear error queue
                 }
             } else {
-                Log::Warning("No valid OpenGL context during cleanup - skipping OpenGL resource cleanup");
+                Log::Warning("No valid OpenGL context during cleanup");
             }
         } catch (const std::exception& e) {
             Log::Error("Exception during OpenGL cleanup: %s", e.what());
@@ -582,9 +628,9 @@ namespace PlatformMain {
             Log::Error("Unknown exception during OpenGL cleanup");
         }
 
-        Log::Info("Enhanced Voxel Engine shutting down");
+        Log::Info("Enhanced Voxel Engine with New Chunk System shutting down");
 
-        // Destroy window and terminate GLFW with error handling
+        // Destroy window and terminate GLFW
         try {
             glfwDestroyWindow(window);
             glfwTerminate();
