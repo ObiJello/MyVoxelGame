@@ -34,6 +34,13 @@ namespace Game::Math {
         return static_cast<uint32_t>(( (y * CHUNK_SIZE_X) + z ) * CHUNK_SIZE_Z + x);
     }
 
+    // Hash function for ChunkPos (for use with unordered containers)
+    struct ChunkPosHash {
+        std::size_t operator()(const ChunkPos& pos) const {
+            return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
+        }
+    };
+
 } // namespace Game::Math
 
 // **NEW**: Forward declarations for render system (to avoid circular dependencies)

@@ -29,16 +29,8 @@ namespace Game {
     // Forward declarations
     class IChunkSaver;
     class IChunkGenerator;
+    class AsyncChunkSaver;
     struct ChunkSaveResult;
-
-    // Hash function for Math::ChunkPos
-    namespace Math {
-        struct ChunkPosHash {
-            std::size_t operator()(const ChunkPos& pos) const {
-                return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
-            }
-        };
-    }
 
     // Configuration for ChunkProvider composition
     struct ChunkProviderConfig {
@@ -244,7 +236,7 @@ namespace Game {
         ChunkCache::CacheStats GetCacheStats() const;
         MinecraftChunkLoaderImpl::LoaderStats GetLoaderStats() const;
         ProceduralChunkGenerator::GeneratorStats GetGeneratorStats() const;
-        AsyncChunkSaver::SaverStats getSaverStats() const;
+        IChunkSaver::SaverStats getSaverStats() const;
         DirtyTrackerStats GetDirtyTrackerStats() const;
 
         // === DIAGNOSTICS ===
@@ -281,7 +273,7 @@ namespace Game {
         std::unique_ptr<ChunkCache> m_chunkCache;
         std::unique_ptr<MinecraftChunkLoaderImpl> m_chunkLoader;
         std::unique_ptr<ProceduralChunkGenerator> m_chunkGenerator;
-        std::unique_ptr<AsyncChunkSaver> m_chunkSaver;
+        std::unique_ptr<IChunkSaver> m_chunkSaver;
         std::unique_ptr<DirtyTracker> m_dirtyTracker;
 
         // State

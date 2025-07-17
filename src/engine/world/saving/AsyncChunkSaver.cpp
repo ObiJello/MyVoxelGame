@@ -226,9 +226,11 @@ namespace Game {
             case SaveMode::Immediate:
                 return SaveChunkInternal(chunk, m_compressionEnabled);
 
-            case SaveMode::Queued:
-                QueueChunkForSave(std::make_shared<Chunk>(chunk));
+            case SaveMode::Queued: {
+                auto clonedChunk = chunk.Clone();
+                QueueChunkForSave(clonedChunk);
                 return ChunkSaveResult::Success(chunk.pos);
+            }
 
             case SaveMode::Background: {
                 auto future = SaveChunkAsync(chunk);
@@ -236,9 +238,11 @@ namespace Game {
                 return future.get();
             }
 
-            case SaveMode::OnShutdown:
-                QueueChunkForSave(std::make_shared<Chunk>(chunk));
+            case SaveMode::OnShutdown: {
+                auto clonedChunk = chunk.Clone();
+                QueueChunkForSave(clonedChunk);
                 return ChunkSaveResult::Success(chunk.pos);
+            }
 
             default:
                 return ChunkSaveResult::Failure(chunk.pos, "Unknown save mode");
@@ -252,8 +256,8 @@ namespace Game {
             return promise.get_future();
         }
 
-        auto chunkPtr = std::make_shared<Chunk>(chunk);
-        SaveQueueEntry entry(chunkPtr, m_saveMode);
+        auto clonedChunk = chunk.Clone();
+        SaveQueueEntry entry(clonedChunk, m_saveMode);
         auto future = entry.promise->get_future();
 
         EnqueueSaveEntry(std::move(entry));

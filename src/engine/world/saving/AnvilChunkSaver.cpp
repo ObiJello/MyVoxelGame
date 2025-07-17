@@ -45,8 +45,9 @@ namespace Game {
         auto future = promise->get_future();
 
         // Submit to job system
-        JobSystem::g_ThreadPool.Enqueue([this, chunk, promise]() {
-            ChunkSaveResult result = SaveChunk(chunk);
+        auto chunkClone = chunk.Clone();
+        JobSystem::g_ThreadPool.Enqueue([this, chunkClone, promise]() {
+            ChunkSaveResult result = SaveChunk(*chunkClone);
             promise->set_value(std::move(result));
         });
 

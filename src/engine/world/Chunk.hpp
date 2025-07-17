@@ -73,6 +73,35 @@ namespace Game {
         // Check if chunk is completely empty (all air)
         bool IsEmpty() const;
 
+        // Delete copy constructor and assignment to prevent accidental copies
+        Chunk(const Chunk&) = delete;
+        Chunk& operator=(const Chunk&) = delete;
+
+        // Allow move construction and assignment
+        Chunk(Chunk&&) = default;
+        Chunk& operator=(Chunk&&) = default;
+
+        // Create a deep copy of this chunk
+        std::shared_ptr<Chunk> Clone() const {
+            auto cloned = std::make_shared<Chunk>();
+            cloned->pos = this->pos;
+
+            // Deep copy all sections
+            for (int i = 0; i < SECTION_COUNT; ++i) {
+                if (this->HasSection(i)) {
+                    cloned->EnsureSection(i);
+                    const ChunkSection* srcSection = this->GetSection(i);
+                    ChunkSection* dstSection = cloned->GetSection(i);
+
+                    // Copy the blocks array and palette
+                    dstSection->blocks = srcSection->blocks;
+                    dstSection->palette = srcSection->palette;
+                }
+            }
+
+            return cloned;
+        }
+
         // === CONSTANTS ===
 
         static constexpr int SIZE_X = Math::CHUNK_SIZE_X;      // 16

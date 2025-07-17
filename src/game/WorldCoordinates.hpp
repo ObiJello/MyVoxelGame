@@ -1,4 +1,4 @@
-// File: src/game/WorldCoordinates.hpp
+// File: src/game/WorldCoordinates.hpp - FIXED VERSION
 #pragma once
 
 #include "../core/Config.hpp"
@@ -119,20 +119,26 @@ namespace Game::Math {
 
         // === NEIGHBOR CALCULATION ===
 
+        // FIXED: Use Render::BlockFace instead of defining our own
         // Calculate world coordinates of neighboring block
+        template<typename BlockFaceType>
         static void GetNeighborWorldCoords(int worldX, int worldY, int worldZ,
-                                           Render::BlockFace face, int& neighborX, int& neighborY, int& neighborZ) {
+                                           BlockFaceType face, int& neighborX, int& neighborY, int& neighborZ) {
             neighborX = worldX;
             neighborY = worldY;
             neighborZ = worldZ;
 
-            switch (face) {
-                case BlockFace::PositiveX: neighborX++; break;
-                case BlockFace::NegativeX: neighborX--; break;
-                case BlockFace::PositiveY: neighborY++; break;
-                case BlockFace::NegativeY: neighborY--; break;
-                case BlockFace::PositiveZ: neighborZ++; break;
-                case BlockFace::NegativeZ: neighborZ--; break;
+            // Use integer values to avoid enum conflicts
+            int faceValue = static_cast<int>(face);
+
+            // Assuming standard face ordering: PositiveX=0, NegativeX=1, PositiveY=2, NegativeY=3, PositiveZ=4, NegativeZ=5
+            switch (faceValue) {
+                case 0: neighborX++; break; // PositiveX
+                case 1: neighborX--; break; // NegativeX
+                case 2: neighborY++; break; // PositiveY
+                case 3: neighborY--; break; // NegativeY
+                case 4: neighborZ++; break; // PositiveZ
+                case 5: neighborZ--; break; // NegativeZ
             }
         }
 
@@ -165,13 +171,6 @@ namespace Game::Math {
         static constexpr int WORLD_HEIGHT = MAX_WORLD_Y - MIN_WORLD_Y + 1; // 384
 
     private:
-        // Block face enum forward declaration (defined in render system)
-        enum class BlockFace {
-            PositiveX, NegativeX,
-            PositiveY, NegativeY,
-            PositiveZ, NegativeZ
-        };
-
         WorldCoordinates() = delete; // Static utility class
     };
 

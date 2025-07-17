@@ -1,4 +1,4 @@
-// File: src/engine/world/saving/AsyncChunkSaver.hpp
+// File: src/engine/world/saving/AsyncChunkSaver.hpp - FIXED VERSION
 #pragma once
 
 #include "../interfaces/IChunkSaver.hpp"
@@ -15,6 +15,9 @@
 #include <unordered_set>
 
 #include "engine/world/ChunkProvider.hpp"
+
+// REMOVE THIS LINE - it's causing circular dependency:
+// #include "engine/world/ChunkProvider.hpp"
 
 namespace Game {
 
@@ -45,12 +48,12 @@ namespace Game {
     // Save queue entry with priority
     struct SaveQueueEntry {
         std::shared_ptr<const Chunk> chunk;
-        SaveMode saveMode;
+        IChunkSaver::SaveMode saveMode;  // FIX: Use full qualified name
         bool highPriority;
         std::chrono::steady_clock::time_point queueTime;
         std::shared_ptr<std::promise<ChunkSaveResult>> promise;
 
-        SaveQueueEntry(std::shared_ptr<const Chunk> chunkPtr, SaveMode mode, bool priority = false)
+        SaveQueueEntry(std::shared_ptr<const Chunk> chunkPtr, IChunkSaver::SaveMode mode, bool priority = false)  // FIX: Use full qualified name
             : chunk(chunkPtr), saveMode(mode), highPriority(priority)
             , queueTime(std::chrono::steady_clock::now())
             , promise(std::make_shared<std::promise<ChunkSaveResult>>()) {}
@@ -64,7 +67,7 @@ namespace Game {
         bool enableBatching = true;          // Batch multiple saves together
         int batchSize = 10;                  // Number of chunks per batch
         float batchTimeoutMs = 50.0f;        // Max wait time for batch completion
-        
+
         // NEW: Anvil format support
         bool enableAnvilFormat = false;          // Use Anvil .mca format instead of custom format
         std::string minecraftWorldPath;          // Path for Minecraft-compatible world
@@ -166,13 +169,13 @@ namespace Game {
 
         // Enable Anvil .mca format for Minecraft compatibility
         void EnableAnvilFormat(const std::string& minecraftWorldPath);
-        
+
         // Disable Anvil format (use custom format instead)
         void DisableAnvilFormat();
-        
+
         // Check if Anvil format is currently enabled and active
         bool IsAnvilFormatEnabled() const;
-        
+
         // Get the Minecraft world path for Anvil format
         std::string GetMinecraftWorldPath() const;
 
@@ -208,7 +211,7 @@ namespace Game {
         std::condition_variable m_queueCondition;
         std::queue<SaveQueueEntry> m_normalPriorityQueue;
         std::queue<SaveQueueEntry> m_highPriorityQueue;
-        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_pendingPositions;
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_pendingPositions;  // FIX: Use the one from WorldMath.hpp
 
         // Statistics
         mutable std::mutex m_statsMutex;
@@ -216,7 +219,7 @@ namespace Game {
 
         // Error handling
         mutable std::mutex m_errorMutex;
-        std::string m_lastError;
+        mutable std::string m_lastError;  // FIXED: removed const
 
         // NEW: Anvil format support
         std::unique_ptr<AnvilChunkSaver> m_anvilSaver;
@@ -353,12 +356,5 @@ namespace Game {
 
     // Create an AsyncChunkSaver instance
     std::unique_ptr<IChunkSaver> CreateAsyncChunkSaver(const SaveWorkerConfig& config = SaveWorkerConfig{});
-
-    // Helper for chunk position hashing
-    struct ChunkPosHash {
-        std::size_t operator()(const Math::ChunkPos& pos) const {
-            return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
-        }
-    };
 
 } // namespace Game

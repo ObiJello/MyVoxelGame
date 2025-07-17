@@ -15,12 +15,17 @@
 #include <future>
 #include <atomic>
 #include "../ChunkProvider.hpp"
+#include <glm/glm.hpp>
+
 
 namespace Game {
 
     // Forward declarations
     class Chunk;
     class IChunkGenerator;
+    class RegionFileCache;
+    class NBTTag;
+    using NBTTagPtr = std::shared_ptr<NBTTag>;
 
     // Cache entry for loaded chunk data
     struct ChunkDataCacheEntry {
@@ -148,7 +153,7 @@ namespace Game {
         std::shared_ptr<IChunkGenerator> m_fallbackGenerator;
 
         // Region file management
-        std::unique_ptr<World::RegionFileCache> m_regionCache;
+        std::unique_ptr<RegionFileCache> m_regionCache;
 
         // Chunk data caching
         mutable std::shared_mutex m_cacheMutex;
@@ -193,7 +198,7 @@ namespace Game {
         // === NBT DATA PROCESSING ===
 
         // Load chunk NBT from region file
-        World::NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
+        NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
 
         // Convert NBT data to chunk
         std::shared_ptr<Chunk> NBTToChunk(const World::NBTTagPtr& nbtData, Math::ChunkPos position);
