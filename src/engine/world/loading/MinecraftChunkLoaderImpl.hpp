@@ -1,4 +1,4 @@
-// File: src/engine/world/loading/MinecraftChunkLoaderImpl.hpp
+// File: src/engine/world/loading/MinecraftChunkLoaderImpl.hpp - FIXED VERSION
 #pragma once
 
 #include "../interfaces/IChunkLoader.hpp"
@@ -15,18 +15,19 @@
 #include <atomic>
 #include <glm/glm.hpp>
 
-#include "world/RegionFile.hpp"
-#include "world/RegionFileCache.hpp"
-
+// FIX: Forward declarations to avoid circular dependencies
+namespace World {
+    class RegionFileCache;
+    class RegionFile;
+    class NBTTag;
+    using NBTTagPtr = std::shared_ptr<NBTTag>;
+}
 
 namespace Game {
 
     // Forward declarations
     class Chunk;
     class IChunkGenerator;
-    namespace World { class RegionFileCache; }
-    class NBTTag;
-    using NBTTagPtr = std::shared_ptr<NBTTag>;
 
     // Cache entry for loaded chunk data
     struct ChunkDataCacheEntry {
@@ -57,6 +58,30 @@ namespace Game {
         float loadTimeoutSeconds = 30.0f;        // Timeout for chunk loading
         bool enableCompression = true;           // Use compressed region data
         bool strictValidation = false;           // Strict chunk validation
+    };
+
+    // Forward declaration for RegionFileLock
+    class MinecraftChunkLoaderImpl;
+
+    // RAII wrapper for region file access
+    class RegionFileLock {
+    public:
+        RegionFileLock(MinecraftChunkLoaderImpl* loader, int regionX, int regionZ);
+        ~RegionFileLock();
+
+        bool IsValid() const { return m_valid; }
+        ::World::RegionFile* GetRegionFile() const { return m_regionFile; }
+
+        // Non-copyable, non-movable for safety
+        RegionFileLock(const RegionFileLock&) = delete;
+        RegionFileLock& operator=(const RegionFileLock&) = delete;
+        RegionFileLock(RegionFileLock&&) = delete;
+        RegionFileLock& operator=(RegionFileLock&&) = delete;
+
+    private:
+        MinecraftChunkLoaderImpl* m_loader;
+        ::World::RegionFile* m_regionFile;
+        bool m_valid = false;
     };
 
     // Minecraft region file chunk loader implementation
@@ -142,6 +167,9 @@ namespace Game {
         DiagnosticInfo GetDiagnosticInfo() const;
         void LogDiagnostics(const std::string& prefix = "MinecraftLoader") const;
 
+        // === FRIEND CLASSES ===
+        friend class RegionFileLock;
+
     protected:
         void UpdateStats(const ChunkLoadResult& result) override;
 
@@ -153,8 +181,8 @@ namespace Game {
         // Dependencies
         std::shared_ptr<IChunkGenerator> m_fallbackGenerator;
 
-        // Region file management
-        std::unique_ptr<::World::RegionFileCache> m_regionCache;
+        // Note: RegionFileCache is a singleton, accessed via RegionFileCache::Instance()
+        // No need to store it as a member variable
 
         // Chunk data caching
         mutable std::shared_mutex m_cacheMutex;
@@ -168,7 +196,7 @@ namespace Game {
 
         // Error handling
         mutable std::mutex m_errorMutex;
-        std::string m_lastError;
+        mutable std::string m_lastError; // FIX: Made mutable for const methods
 
         // Async loading support
         std::atomic<bool> m_shutdownRequested{false};
@@ -199,7 +227,7 @@ namespace Game {
         // === NBT DATA PROCESSING ===
 
         // Load chunk NBT from region file
-        NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
+        ::World::NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
 
         // Convert NBT data to chunk
         std::shared_ptr<Chunk> NBTToChunk(const ::World::NBTTagPtr& nbtData, Math::ChunkPos position);
@@ -209,8 +237,8 @@ namespace Game {
 
         // === CACHING IMPLEMENTATION ===
 
-        // Get cached chunk data
-        bool GetCachedChunkData(Math::ChunkPos position, std::vector<uint8_t>& data);
+        // FIX: Made const to match usage in const methods
+        bool GetCachedChunkData(Math::ChunkPos position, std::vector<uint8_t>& data) const;
 
         // Store chunk data in cache
         void CacheChunkData(Math::ChunkPos position, const std::vector<uint8_t>& data);
@@ -264,23 +292,6 @@ namespace Game {
         };
     };
 
-    // === RAII REGION FILE LOCK ===
-
-    // RAII wrapper for region file access
-    class RegionFileLock {
-    public:
-        RegionFileLock(MinecraftChunkLoaderImpl* loader, int regionX, int regionZ);
-        ~RegionFileLock();
-
-        bool IsValid() const { return m_valid; }
-        ::World::RegionFile* GetRegionFile() const { return m_regionFile; }
-
-    private:
-        MinecraftChunkLoaderImpl* m_loader;
-        ::World::RegionFile* m_regionFile;
-        bool m_valid = false;
-    };
-
     // === UTILITY FUNCTIONS ===
 
     // Factory function for creating Minecraft chunk loaders
@@ -293,6 +304,12 @@ namespace Game {
         static glm::ivec3 ChunkToWorldPos(Math::ChunkPos chunkPos, int localX, int localY, int localZ);
         static bool IsValidMinecraftY(int worldY);
         static int ClampMinecraftY(int worldY);
+
+        // Delete constructor to make this a pure static utility class
+        MinecraftCoordinateHelper() = delete;
+        ~MinecraftCoordinateHelper() = delete;
+        MinecraftCoordinateHelper(const MinecraftCoordinateHelper&) = delete;
+        MinecraftCoordinateHelper& operator=(const MinecraftCoordinateHelper&) = delete;
     };
 
 } // namespace Game

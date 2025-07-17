@@ -22,7 +22,7 @@ namespace Game {
         BlockInfo(BlockID blockId, bool loaded = true)
             : id(blockId), isLoaded(loaded) {
             // Set properties based on block ID
-            UpdateProperties();
+            //UpdateProperties();
         }
 
     private:

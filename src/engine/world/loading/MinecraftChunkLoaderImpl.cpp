@@ -1,4 +1,4 @@
-// File: src/engine/world/loading/MinecraftChunkLoaderImpl.cpp
+// File: src/engine/world/loading/MinecraftChunkLoaderImpl.cpp - FIXED VERSION
 #include "MinecraftChunkLoaderImpl.hpp"
 #include "../Chunk.hpp"
 #include "../interfaces/IChunkGenerator.hpp"
@@ -28,15 +28,17 @@ namespace Game {
 
     RegionFileLock::RegionFileLock(MinecraftChunkLoaderImpl* loader, int regionX, int regionZ)
         : m_loader(loader), m_regionFile(nullptr), m_valid(false) {
-        
-        if (!m_loader || !m_loader->m_regionCache) {
+
+        if (!m_loader) {
             return;
         }
 
         try {
             std::string regionPath = m_loader->GetRegionFilePath(regionX, regionZ);
             if (m_loader->RegionFileExists(regionX, regionZ)) {
-                m_regionFile = m_loader->m_regionCache->GetRegionFile(regionPath);
+                // FIX: Use singleton RegionFileCache
+                auto regionFilePtr = ::World::RegionFileCache::Instance().GetRegionFile(regionPath);
+                m_regionFile = regionFilePtr.get();
                 m_valid = (m_regionFile != nullptr);
             }
         } catch (const std::exception& e) {
@@ -53,10 +55,10 @@ namespace Game {
 
     MinecraftChunkLoaderImpl::MinecraftChunkLoaderImpl(const MinecraftLoaderConfig& config)
         : m_config(config) {
-        
-        // Initialize region file cache
-        m_regionCache = std::make_unique<::World::RegionFileCache>();
-        
+
+        // FIX: RegionFileCache is a singleton, use Instance() instead of make_unique
+        // m_regionCache will store a reference to the singleton
+
         Log::Debug("MinecraftChunkLoaderImpl created for world: %s", config.worldPath.c_str());
     }
 
@@ -107,7 +109,9 @@ namespace Game {
                 return false;
             }
 
-            return lock.GetRegionFile()->ChunkExists(localX, localZ);
+            // FIX: Use correct method name and check if region file has chunk data
+            auto location = lock.GetRegionFile()->GetLocation(localX, localZ);
+            return !location.isEmpty();
         } catch (const std::exception& e) {
             LogError("ChunkExists", e.what());
             return false;
@@ -142,9 +146,15 @@ namespace Game {
         std::vector<ChunkLoadResult> results;
         results.reserve(positions.size());
 
+        // FIX: Create custom hash function for std::pair<int, int>
+        struct PairHash {
+            std::size_t operator()(const std::pair<int, int>& p) const {
+                return std::hash<int>{}(p.first) ^ (std::hash<int>{}(p.second) << 1);
+            }
+        };
+
         // Group by region files for efficient batch loading
-        std::unordered_map<std::pair<int, int>, std::vector<Math::ChunkPos>, 
-                          std::hash<std::pair<int, int>>> regionGroups;
+        std::unordered_map<std::pair<int, int>, std::vector<Math::ChunkPos>, PairHash> regionGroups;
 
         for (const auto& pos : positions) {
             int regionX, regionZ, localX, localZ;
@@ -177,7 +187,7 @@ namespace Game {
 
     void MinecraftChunkLoaderImpl::SetSource(const std::string& sourcePath) {
         std::lock_guard<std::shared_mutex> lock(m_configMutex);
-        
+
         if (m_initialized) {
             Log::Warning("Cannot change source path while loader is initialized");
             return;
@@ -194,7 +204,7 @@ namespace Game {
     void MinecraftChunkLoaderImpl::SetCachingEnabled(bool enabled) {
         std::lock_guard<std::shared_mutex> lock(m_configMutex);
         m_config.enableCaching = enabled;
-        
+
         if (!enabled) {
             ClearCache();
         }
@@ -221,16 +231,21 @@ namespace Game {
             return false;
         }
 
-        // Initialize region file cache
-        if (!m_regionCache) {
-            m_regionCache = std::make_unique<::World::RegionFileCache>();
+        // FIX: RegionFileCache is a singleton, don't create new instance
+        // Just verify it's accessible
+        try {
+            auto& cache = ::World::RegionFileCache::Instance();
+            // Cache is now accessible
+        } catch (const std::exception& e) {
+            SetLastError("Failed to access RegionFileCache: " + std::string(e.what()));
+            return false;
         }
 
         try {
             // Set region cache base path
             std::filesystem::path worldPath(m_config.worldPath);
             std::filesystem::path regionPath = worldPath / "region";
-            
+
             if (!std::filesystem::exists(regionPath)) {
                 SetLastError("Region directory not found: " + regionPath.string());
                 return false;
@@ -266,10 +281,8 @@ namespace Game {
         // Clear caches
         ClearCache();
 
-        // Shutdown region file cache
-        if (m_regionCache) {
-            m_regionCache.reset();
-        }
+        // FIX: Don't shutdown singleton RegionFileCache, just clear it
+        ::World::RegionFileCache::Instance().Clear();
 
         // Log final statistics
         LogDiagnostics("Shutdown");
@@ -279,7 +292,7 @@ namespace Game {
     }
 
     bool MinecraftChunkLoaderImpl::IsReady() const {
-        return m_initialized && m_regionCache != nullptr;
+        return m_initialized;
     }
 
     // === STATISTICS ===
@@ -362,7 +375,7 @@ namespace Game {
 
     void MinecraftChunkLoaderImpl::SetConfig(const MinecraftLoaderConfig& config) {
         std::lock_guard<std::shared_mutex> lock(m_configMutex);
-        
+
         if (m_initialized && config.worldPath != m_config.worldPath) {
             Log::Warning("Cannot change world path while loader is initialized");
             return;
@@ -386,23 +399,26 @@ namespace Game {
     }
 
     bool MinecraftChunkLoaderImpl::IsRegionFileLoaded(int regionX, int regionZ) const {
-        if (!m_regionCache) {
+        try {
+            std::string regionPath = GetRegionFilePath(regionX, regionZ);
+            // FIX: Use singleton RegionFileCache
+            auto regionFile = ::World::RegionFileCache::Instance().GetRegionFile(regionPath);
+            return regionFile != nullptr;
+        } catch (const std::exception& e) {
             return false;
         }
-
-        std::string regionPath = GetRegionFilePath(regionX, regionZ);
-        return m_regionCache->IsRegionFileLoaded(regionPath);
     }
 
     void MinecraftChunkLoaderImpl::PreloadRegionFile(int regionX, int regionZ) {
-        if (!m_initialized || !m_regionCache) {
+        if (!m_initialized) {
             return;
         }
 
         try {
             std::string regionPath = GetRegionFilePath(regionX, regionZ);
             if (RegionFileExists(regionX, regionZ)) {
-                m_regionCache->GetRegionFile(regionPath);
+                // FIX: Use singleton RegionFileCache
+                ::World::RegionFileCache::Instance().GetRegionFile(regionPath);
                 Log::Debug("Preloaded region file (%d, %d)", regionX, regionZ);
             }
         } catch (const std::exception& e) {
@@ -411,17 +427,13 @@ namespace Game {
     }
 
     void MinecraftChunkLoaderImpl::UnloadRegionFile(int regionX, int regionZ) {
-        if (!m_regionCache) {
-            return;
-        }
-
-        std::string regionPath = GetRegionFilePath(regionX, regionZ);
-        m_regionCache->UnloadRegionFile(regionPath);
-        Log::Debug("Unloaded region file (%d, %d)", regionX, regionZ);
+        // FIX: Clear the entire singleton cache since we can't unload individual files
+        ::World::RegionFileCache::Instance().Clear();
+        Log::Debug("Cleared region file cache (includes region (%d, %d))", regionX, regionZ);
     }
 
     size_t MinecraftChunkLoaderImpl::GetLoadedRegionCount() const {
-        return m_regionCache ? m_regionCache->GetLoadedRegionCount() : 0;
+        return ::World::RegionFileCache::Instance().GetCacheSize();
     }
 
     size_t MinecraftChunkLoaderImpl::GetCacheSize() const {
@@ -454,24 +466,26 @@ namespace Game {
     }
 
     size_t MinecraftChunkLoaderImpl::GetRegionFileCacheHits() const {
-        return m_regionCache ? m_regionCache->GetCacheHits() : 0;
+        // FIX: RegionFileCache doesn't have GetCacheHits method, return 0 for now
+        return 0;
     }
 
     size_t MinecraftChunkLoaderImpl::GetRegionFileCacheMisses() const {
-        return m_regionCache ? m_regionCache->GetCacheMisses() : 0;
+        // FIX: RegionFileCache doesn't have GetCacheMisses method, return 0 for now
+        return 0;
     }
 
     float MinecraftChunkLoaderImpl::GetRegionFileCacheHitRate() const {
         size_t hits = GetRegionFileCacheHits();
         size_t misses = GetRegionFileCacheMisses();
         size_t total = hits + misses;
-        
+
         return total > 0 ? static_cast<float>(hits) / static_cast<float>(total) : 0.0f;
     }
 
     MinecraftChunkLoaderImpl::DiagnosticInfo MinecraftChunkLoaderImpl::GetDiagnosticInfo() const {
         DiagnosticInfo info;
-        
+
         info.regionFilesLoaded = GetLoadedRegionCount();
         info.chunksInCache = GetCacheSize();
         info.averageLoadTimeMs = GetAverageLoadTime();
@@ -488,7 +502,7 @@ namespace Game {
 
     void MinecraftChunkLoaderImpl::LogDiagnostics(const std::string& prefix) const {
         DiagnosticInfo info = GetDiagnosticInfo();
-        
+
         Log::Info("%s: Regions=%zu, Cache=%zu, Loaded=%zu, AvgTime=%.2fms, Memory=%zuKB",
                  prefix.c_str(),
                  info.regionFilesLoaded,
@@ -529,7 +543,7 @@ namespace Game {
         try {
             // Try loading from Minecraft region files first
             ChunkLoadResult result = LoadFromRegionFile(position);
-            
+
             if (result.success) {
                 result.wasFromDisk = true;
                 return result;
@@ -612,7 +626,7 @@ namespace Game {
 
         try {
             auto genResult = m_fallbackGenerator->GenerateChunk(position);
-            
+
             if (!genResult.success) {
                 return ChunkLoadResult::Failure("Generator failed: " + genResult.errorMessage);
             }
@@ -638,10 +652,10 @@ namespace Game {
 
     std::string MinecraftChunkLoaderImpl::GetRegionFilePath(int regionX, int regionZ) const {
         std::shared_lock<std::shared_mutex> lock(m_configMutex);
-        
+
         std::filesystem::path worldPath(m_config.worldPath);
         std::filesystem::path regionPath = worldPath / "region";
-        
+
         std::string fileName = "r." + std::to_string(regionX) + "." + std::to_string(regionZ) + ".mca";
         return (regionPath / fileName).string();
     }
@@ -663,20 +677,20 @@ namespace Game {
                 return nullptr;
             }
 
-            // Get chunk data from region file
-            std::vector<uint8_t> chunkData = lock.GetRegionFile()->GetChunkData(localX, localZ);
-            if (chunkData.empty()) {
+            // FIX: Use RegionDumper to read chunk data since RegionFile doesn't have GetChunkData
+            ::World::ChunkData chunkData = ::World::RegionDumper::ReadChunkData(*lock.GetRegionFile(), localX, localZ);
+            if (!chunkData.isValid || chunkData.uncompressedData.empty()) {
                 return nullptr;
             }
 
             // Cache the raw data if caching is enabled
             if (m_config.enableCaching) {
-                CacheChunkData(position, chunkData);
+                CacheChunkData(position, chunkData.compressedData);
             }
 
-            // Parse NBT data
-            World::NBTParser parser;
-            return parser.ParseNBT(chunkData);
+            // FIX: Parse the uncompressed NBT data
+            ::World::NBTParser parser;
+            return parser.Parse(chunkData.uncompressedData);
 
         } catch (const std::exception& e) {
             LogError("LoadChunkNBT", e.what());
@@ -714,10 +728,8 @@ namespace Game {
         }
 
         try {
-            // Basic NBT structure validation for Minecraft chunks
-            // Check for required tags like \"Level\", \"Sections\", etc.
-            // This is a simplified validation - real implementation would be more thorough
-            return true;
+            // FIX: Use RegionDumper validation method
+            return ::World::RegionDumper::ValidateChunkNBT(nbtData);
 
         } catch (const std::exception& e) {
             LogError("ValidateChunkNBT", e.what());
@@ -727,7 +739,7 @@ namespace Game {
 
     // === CACHING IMPLEMENTATION ===
 
-    bool MinecraftChunkLoaderImpl::GetCachedChunkData(Math::ChunkPos position, std::vector<uint8_t>& data) {
+    bool MinecraftChunkLoaderImpl::GetCachedChunkData(Math::ChunkPos position, std::vector<uint8_t>& data) const {
         if (!m_config.enableCaching) {
             return false;
         }
