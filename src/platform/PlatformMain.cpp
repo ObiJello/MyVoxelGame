@@ -435,10 +435,7 @@ namespace PlatformMain {
         meshConfig.enableAsyncBuilding = true;   // Use background threads
         meshConfig.highPriorityRadius = 64.0f;   // High priority radius
 
-        if (!Render::InitializeMeshSystem(&world, meshConfig)) {
-            Log::Error("Failed to initialize mesh system");
-            return -6;
-        }
+        Render::InitializeMeshSystem(&world, meshConfig);
 
         // Initialize chunk renderer
         if (!Render::InitializeChunkRenderer()) {

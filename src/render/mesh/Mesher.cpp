@@ -400,15 +400,6 @@ namespace Render {
         return 255;
     }
 
-    glm::vec3 Mesher::LocalToWorldPos(const Game::Math::ChunkPos& chunkPos,
-                                     int localX, int worldY, int localZ) const {
-        return glm::vec3(
-            chunkPos.x * Game::Math::CHUNK_SIZE_X + localX,
-            worldY,  // **UPDATED**: worldY is used directly now
-            chunkPos.z * Game::Math::CHUNK_SIZE_Z + localZ
-        );
-    }
-
     // Render layer classification functions
     RenderLayer ClassifyBlock(Game::BlockID blockId) {
         const Game::Block& block = Game::BlockRegistry::Get(blockId);

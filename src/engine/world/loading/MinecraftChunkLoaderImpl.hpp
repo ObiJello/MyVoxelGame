@@ -201,10 +201,10 @@ namespace Game {
         NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
 
         // Convert NBT data to chunk
-        std::shared_ptr<Chunk> NBTToChunk(const World::NBTTagPtr& nbtData, Math::ChunkPos position);
+        std::shared_ptr<Chunk> NBTToChunk(const ::World::NBTTagPtr& nbtData, Math::ChunkPos position);
 
         // Validate NBT chunk data
-        bool ValidateChunkNBT(const World::NBTTagPtr& nbtData) const;
+        bool ValidateChunkNBT(const ::World::NBTTagPtr& nbtData) const;
 
         // === CACHING IMPLEMENTATION ===
 
@@ -272,11 +272,11 @@ namespace Game {
         ~RegionFileLock();
 
         bool IsValid() const { return m_valid; }
-        World::RegionFile* GetRegionFile() const { return m_regionFile; }
+        ::World::RegionFile* GetRegionFile() const { return m_regionFile; }
 
     private:
         MinecraftChunkLoaderImpl* m_loader;
-        World::RegionFile* m_regionFile;
+        ::World::RegionFile* m_regionFile;
         bool m_valid = false;
     };
 

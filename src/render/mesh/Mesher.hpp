@@ -123,10 +123,12 @@ namespace Render {
         // **REMOVED**: WorldYToChunkY() - use Game::Math::WorldCoordinates instead
 
         // **UPDATED**: Use WorldCoordinates for coordinate conversion
-        glm::vec3 LocalToWorldPos(const Game::Math::ChunkPos& chunkPos, int localX, int localY, int localZ) const {
-            int worldX, worldY, worldZ;
-            Game::Math::WorldCoordinates::LocalToWorld(chunkPos, localX, localY, localZ, worldX, worldY, worldZ);
-            return glm::vec3(static_cast<float>(worldX), static_cast<float>(worldY), static_cast<float>(worldZ));
+        glm::vec3 LocalToWorldPos(const Game::Math::ChunkPos& chunkPos, int localX, int worldY, int localZ) const {
+            return glm::vec3(
+                chunkPos.x * Game::Math::CHUNK_SIZE_X + localX,
+                static_cast<float>(worldY),
+                chunkPos.z * Game::Math::CHUNK_SIZE_Z + localZ
+            );
         }
     };
 

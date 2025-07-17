@@ -54,7 +54,7 @@ namespace Game {
         : m_config(config) {
         
         // Initialize region file cache
-        m_regionCache = std::make_unique<World::RegionFileCache>();
+        m_regionCache = std::make_unique<::World::RegionFileCache>();
         
         Log::Debug("MinecraftChunkLoaderImpl created for world: %s", config.worldPath.c_str());
     }
@@ -222,7 +222,7 @@ namespace Game {
 
         // Initialize region file cache
         if (!m_regionCache) {
-            m_regionCache = std::make_unique<World::RegionFileCache>();
+            m_regionCache = std::make_unique<::World::RegionFileCache>();
         }
 
         try {
@@ -574,7 +574,7 @@ namespace Game {
             }
 
             // Load NBT data
-            World::NBTTagPtr nbtData = LoadChunkNBT(position);
+            ::World::NBTTagPtr nbtData = LoadChunkNBT(position);
             if (!nbtData) {
                 return ChunkLoadResult::Failure("Failed to load chunk NBT data");
             }
@@ -652,7 +652,7 @@ namespace Game {
 
     // === NBT DATA PROCESSING ===
 
-    World::NBTTagPtr MinecraftChunkLoaderImpl::LoadChunkNBT(Math::ChunkPos position) {
+    ::World::NBTTagPtr MinecraftChunkLoaderImpl::LoadChunkNBT(Math::ChunkPos position) {
         int regionX, regionZ, localX, localZ;
         ChunkToRegion(position, regionX, regionZ, localX, localZ);
 
@@ -683,7 +683,7 @@ namespace Game {
         }
     }
 
-    std::shared_ptr<Chunk> MinecraftChunkLoaderImpl::NBTToChunk(const World::NBTTagPtr& nbtData, Math::ChunkPos position) {
+    std::shared_ptr<Chunk> MinecraftChunkLoaderImpl::NBTToChunk(const ::World::NBTTagPtr& nbtData, Math::ChunkPos position) {
         if (!nbtData) {
             return nullptr;
         }
@@ -707,7 +707,7 @@ namespace Game {
         }
     }
 
-   bool MinecraftChunkLoaderImpl::ValidateChunkNBT(const World::NBTTagPtr& nbtData) const {
+   bool MinecraftChunkLoaderImpl::ValidateChunkNBT(const ::World::NBTTagPtr& nbtData) const {
         if (!nbtData) {
             return false;
         }

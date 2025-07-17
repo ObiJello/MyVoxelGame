@@ -129,21 +129,13 @@ if(APPLE)
             src/core/Log.cpp
             src/core/JobSystem.cpp
             src/render/gfx/Shader.cpp
-            src/render/mesh/BlockHighlight.cpp
-            src/render/debug/Crosshair.cpp
-            src/render/atlas/AtlasBuilder.cpp
             src/engine/block/BlockModel.cpp
-            src/engine/world/SectionDataUnpacker.cpp
-            src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/Physics/RayCast.cpp
-            src/engine/Physics/Physics.cpp
-            src/engine/block/BlockRegistry.cpp
             ${WORLD_SOURCES}
+            src/engine/physics/RayCast.cpp
+            src/engine/physics/Physics.cpp
             src/game/Inventory.cpp
             src/game/PlayerController.cpp
-            src/engine/world/World.cpp
-            src/engine/world/ChunkProvider.cpp
-            src/engine/world/Chunk.cpp
+            src/render/mesh/BlockHighlight.cpp
             src/render/mesh/ChunkRenderer.cpp
             src/render/mesh/MeshManager.cpp
             src/render/mesh/ChunkMeshData.cpp
@@ -151,7 +143,16 @@ if(APPLE)
             src/render/mesh/Mesher.cpp
             src/render/mesh/FluidMeshBuilder.cpp
             src/render/mesh/ChunkMeshData.cpp
+            src/render/debug/Crosshair.cpp
+            src/render/atlas/AtlasBuilder.cpp
+            src/engine/block/BlockRegistry.cpp
+            src/engine/world/SectionDataUnpacker.cpp
+            src/engine/world/MinecraftChunkLoader.cpp
+            src/engine/world/World.cpp
+            src/engine/world/ChunkProvider.cpp
+            src/engine/world/Chunk.cpp
             src/platform/GameDirectory.cpp
+            src/game/WorldCoordinates.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -167,10 +168,10 @@ else()
             src/render/gfx/Shader.cpp
             src/engine/block/BlockModel.cpp
             ${WORLD_SOURCES}
-            src/engine/Physics/RayCast.cpp
-            src/engine/Physics/RayCast.hpp
-            src/engine/Physics/Physics.cpp
-            src/engine/Physics/Physics.hpp
+            src/engine/physics/RayCast.cpp
+            src/engine/physics/RayCast.hpp
+            src/engine/physics/Physics.cpp
+            src/engine/physics/Physics.hpp
             src/game/Inventory.cpp
             src/game/Inventory.hpp
             src/game/PlayerController.cpp
