@@ -5,7 +5,6 @@
 #include "../../../game/WorldCoordinates.hpp"
 #include "../../../core/Log.hpp"
 #include "../../../core/JobSystem.hpp"
-#include "../RegionFileCache.hpp"
 #include "../SectionDataUnpacker.hpp"
 #include "../NBTParser.hpp"
 #include <memory>
@@ -14,8 +13,10 @@
 #include <shared_mutex>
 #include <future>
 #include <atomic>
-#include "../ChunkProvider.hpp"
 #include <glm/glm.hpp>
+
+#include "world/RegionFile.hpp"
+#include "world/RegionFileCache.hpp"
 
 
 namespace Game {
@@ -23,7 +24,7 @@ namespace Game {
     // Forward declarations
     class Chunk;
     class IChunkGenerator;
-    class RegionFileCache;
+    namespace World { class RegionFileCache; }
     class NBTTag;
     using NBTTagPtr = std::shared_ptr<NBTTag>;
 
@@ -153,7 +154,7 @@ namespace Game {
         std::shared_ptr<IChunkGenerator> m_fallbackGenerator;
 
         // Region file management
-        std::unique_ptr<RegionFileCache> m_regionCache;
+        std::unique_ptr<::World::RegionFileCache> m_regionCache;
 
         // Chunk data caching
         mutable std::shared_mutex m_cacheMutex;

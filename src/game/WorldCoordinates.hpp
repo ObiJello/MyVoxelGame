@@ -4,6 +4,8 @@
 #include "../core/Config.hpp"
 #include "WorldMath.hpp"
 #include <cassert>
+#include <algorithm>
+#include <cmath>
 
 namespace Game::Math {
 

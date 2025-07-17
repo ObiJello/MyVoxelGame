@@ -9,11 +9,11 @@
 
 // New composition dependencies
 #include "cache/ChunkCache.hpp"
-#include "loading/MinecraftChunkLoaderImpl.hpp"
 #include "generation/ProceduralChunkGenerator.hpp"
 #include "saving/AsyncChunkSaver.hpp"
 #include "tracking/DirtyTracker.hpp"
 #include "interfaces/INeighborProvider.hpp"
+#include "interfaces/IChunkLoader.hpp"
 
 #include <memory>
 #include <string>
@@ -30,6 +30,7 @@ namespace Game {
     class IChunkSaver;
     class IChunkGenerator;
     class AsyncChunkSaver;
+    class MinecraftChunkLoaderImpl;
     struct ChunkSaveResult;
 
     // Configuration for ChunkProvider composition
@@ -234,7 +235,7 @@ namespace Game {
 
         // Component statistics
         ChunkCache::CacheStats GetCacheStats() const;
-        MinecraftChunkLoaderImpl::LoaderStats GetLoaderStats() const;
+        IChunkLoader::LoaderStats GetLoaderStats() const;
         ProceduralChunkGenerator::GeneratorStats GetGeneratorStats() const;
         IChunkSaver::SaverStats getSaverStats() const;
         DirtyTrackerStats GetDirtyTrackerStats() const;

@@ -1,6 +1,7 @@
 // File: src/engine/world/ChunkProvider.cpp - FIXED VERSION
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
+#include "loading/MinecraftChunkLoaderImpl.hpp"
 #include "../../core/JobSystem.hpp"
 #include "../block/BlockRegistry.hpp"
 #include <algorithm>
@@ -705,8 +706,8 @@ namespace Game {
         return m_chunkCache ? m_chunkCache->GetStats() : ChunkCache::CacheStats{};
     }
 
-    MinecraftChunkLoaderImpl::LoaderStats ChunkProvider::GetLoaderStats() const {
-        return m_chunkLoader ? m_chunkLoader->GetStats() : MinecraftChunkLoaderImpl::LoaderStats{};
+    IChunkLoader::LoaderStats ChunkProvider::GetLoaderStats() const {
+        return m_chunkLoader ? m_chunkLoader->GetStats() : IChunkLoader::LoaderStats{};
     }
 
     ProceduralChunkGenerator::GeneratorStats ChunkProvider::GetGeneratorStats() const {

@@ -2,6 +2,7 @@
 #include "MinecraftChunkLoaderImpl.hpp"
 #include "../Chunk.hpp"
 #include "../interfaces/IChunkGenerator.hpp"
+#include "../RegionFileCache.hpp"
 #include "../RegionDumper.hpp"
 #include "../../../core/JobSystem.hpp"
 #include "../../../platform/GameDirectory.hpp"
