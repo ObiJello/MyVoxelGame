@@ -151,6 +151,13 @@ if(APPLE)
             src/engine/world/World.cpp
             src/engine/world/ChunkProvider.cpp
             src/engine/world/Chunk.cpp
+            src/engine/world/tracking/DirtyTracker.cpp
+            src/engine/world/saving/AsyncChunkSaver.cpp
+            src/engine/world/saving/AnvilRegionWriter.cpp
+            src/engine/world/saving/AnvilChunkSaver.cpp
+            src/engine/world/loading/MinecraftChunkLoaderImpl.cpp
+            src/engine/world/generation/ProceduralChunkGenerator.cpp
+            src/engine/world/cache/ChunkCache.cpp
             src/platform/GameDirectory.cpp
             src/game/WorldCoordinates.cpp
     )
@@ -210,6 +217,24 @@ else()
             src/engine/world/ChunkProvider.hpp
             src/engine/world/Chunk.cpp
             src/engine/world/Chunk.hpp
+            src/engine/world/tracking/DirtyTracker.cpp
+            src/engine/world/tracking/DirtyTracker.hpp
+            src/engine/world/saving/AsyncChunkSaver.cpp
+            src/engine/world/saving/AsyncChunkSaver.hpp
+            src/engine/world/saving/AnvilRegionWriter.cpp
+            src/engine/world/saving/AnvilRegionWriter.hpp
+            src/engine/world/saving/AnvilChunkSaver.cpp
+            src/engine/world/saving/AnvilChunkSaver.hpp
+            src/engine/world/loading/MinecraftChunkLoaderImpl.cpp
+            src/engine/world/loading/MinecraftChunkLoaderImpl.hpp
+            src/engine/world/generation/ProceduralChunkGenerator.cpp
+            src/engine/world/generation/ProceduralChunkGenerator.hpp
+            src/engine/world/cache/ChunkCache.cpp
+            src/engine/world/cache/ChunkCache.hpp
+            src/engine/world/interfaces/IChunkGenerator.hpp
+            src/engine/world/interfaces/IChunkLoader.hpp
+            src/engine/world/interfaces/IChunkSaver.hpp
+            src/engine/world/interfaces/INeighborProvider.hpp
             src/engine/world/WorldGlobals.hpp
             src/platform/GameDirectory.cpp
             src/platform/GameDirectory.hpp
