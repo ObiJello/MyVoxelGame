@@ -251,22 +251,11 @@ namespace Render {
         int neighborLocalZ = localZ + offset.z;
 
         // Check bounds using the chunk's validation method
-        if (!chunk.IsWithinChunkBounds(neighborLocalX, neighborWorldY, neighborLocalZ)) {
+        if (!chunk.IsValidLocalPosition(neighborLocalX, neighborWorldY, neighborLocalZ)) {
             return true; // Assume exposed at chunk boundaries
         }
 
         Game::BlockID neighbor = chunk.GetBlock(neighborLocalX, neighborWorldY, neighborLocalZ);
-
-        // **THIS IS THE FINAL CULLING DECISION POINT**
-        // Enable this debug logging temporarily to see what's happening:
-        /*static int debugCount = 0;
-        if (debugCount < 20 && IsFluid(currentFluid)) {
-            Log::Debug("FACE CULLING: pos=(%d,%d,%d) face=%d current=%d neighbor=%d sameFluid=%s -> expose=%s",
-                      localX, worldY, localZ, (int)face, (int)currentFluid, (int)neighbor,
-                      IsSameFluid(neighbor, currentFluid) ? "YES" : "NO",
-                      (neighbor == Game::BlockID::Air || !IsSameFluid(neighbor, currentFluid)) ? "YES" : "NO");
-            debugCount++;
-        }*/
 
         // Face is exposed if neighbor is AIR or NOT the same fluid type
         if (neighbor == Game::BlockID::Air) {

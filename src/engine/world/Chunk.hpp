@@ -1,4 +1,4 @@
-// File: src/engine/world/Chunk.hpp
+// File: src/engine/world/Chunk.hpp - FIXED VERSION
 #pragma once
 
 #include "ChunkSection.hpp"
@@ -50,11 +50,16 @@ namespace Game {
 
         // === COORDINATE UTILITIES ===
 
-        // Validate local coordinates (uses WorldCoordinates internally)
-        bool IsValidLocalPosition(int localX, int worldY, int localZ) const {
+        // **FIXED**: Added missing method that Mesher was trying to call
+        bool IsWithinChunkBounds(int localX, int worldY, int localZ) const {
             return localX >= 0 && localX < SIZE_X &&
                    Math::WorldCoordinates::IsValidWorldY(worldY) &&
                    localZ >= 0 && localZ < SIZE_Z;
+        }
+
+        // Validate local coordinates (uses WorldCoordinates internally)
+        bool IsValidLocalPosition(int localX, int worldY, int localZ) const {
+            return IsWithinChunkBounds(localX, worldY, localZ);
         }
 
         // Convert world Y to section index (delegates to WorldCoordinates)
@@ -72,6 +77,17 @@ namespace Game {
 
         // Check if chunk is completely empty (all air)
         bool IsEmpty() const;
+
+        // **NEW**: Get count of non-null sections
+        size_t GetSectionCount() const {
+            size_t count = 0;
+            for (const auto& section : sections) {
+                if (section != nullptr) {
+                    count++;
+                }
+            }
+            return count;
+        }
 
         // Delete copy constructor and assignment to prevent accidental copies
         Chunk(const Chunk&) = delete;
@@ -115,10 +131,6 @@ namespace Game {
         static constexpr int TOTAL_HEIGHT = Math::WorldCoordinates::WORLD_HEIGHT;       // 384
 
     private:
-        // **REMOVED**: Duplicate Y conversion methods - now use WorldCoordinates
-        // **REMOVED**: WorldYToSectionCoords() - use Math::WorldCoordinates::WorldYToSectionCoords()
-        // **REMOVED**: IsWithinChunkBounds() - use IsValidLocalPosition()
-
         // Helper to validate coordinates and log errors
         bool ValidateCoordinates(int localX, int worldY, int localZ, const char* operation) const;
     };
