@@ -1,8 +1,8 @@
 #pragma once
 
 #include "../Chunk.hpp"
-#include "../../game/WorldMath.hpp"
-#include "../../core/Log.hpp"
+#include "../../../game/WorldMath.hpp"
+#include "../../../core/Log.hpp"
 #include <string>
 #include <vector>
 #include <fstream>

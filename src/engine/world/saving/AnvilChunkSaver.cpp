@@ -143,12 +143,12 @@ namespace Game {
 
     // === SAVE POLICIES ===
 
-    void AnvilChunkSaver::SetSaveMode(SaveMode mode) {
+    void AnvilChunkSaver::SetSaveMode(IChunkSaver::SaveMode mode) {  // FIX: Use fully qualified name
         // Anvil saver uses immediate mode by default
     }
 
-    SaveMode AnvilChunkSaver::GetSaveMode() const {
-        return SaveMode::Immediate;
+    IChunkSaver::SaveMode AnvilChunkSaver::GetSaveMode() const {  // FIX: Use fully qualified name
+        return IChunkSaver::SaveMode::Immediate;
     }
 
     void AnvilChunkSaver::SetAutoSaveEnabled(bool enabled) {
@@ -284,7 +284,7 @@ namespace Game {
     bool AnvilChunkSaver::VerifySavedChunk(Math::ChunkPos position) {
         int regionX, regionZ;
         GetRegionCoords(position, regionX, regionZ);
-        
+
         std::string regionPath = GetRegionFilePath(regionX, regionZ);
         return std::filesystem::exists(regionPath) && ValidateAnvilFormat(regionPath);
     }
@@ -298,10 +298,10 @@ namespace Game {
 
     void AnvilChunkSaver::ClearErrors() {
         std::lock_guard<std::mutex> lock(m_errorMutex);
-        m_lastError.clear();
+        const_cast<std::string&>(m_lastError).clear();  // FIX: Use const_cast for mutable member
     }
 
-    void AnvilChunkSaver::SetErrorPolicy(ErrorPolicy policy) {
+    void AnvilChunkSaver::SetErrorPolicy(IChunkSaver::ErrorPolicy policy) {  // FIX: Use fully qualified name
         m_errorPolicy = policy;
     }
 
@@ -333,7 +333,7 @@ namespace Game {
     void AnvilChunkSaver::SetRegionCacheSize(size_t maxRegions) {
         std::lock_guard<std::mutex> lock(m_configMutex);
         m_config.maxCachedRegions = maxRegions;
-        
+
         // Clean up excess regions if needed
         CleanupRegionCache();
     }
@@ -345,17 +345,17 @@ namespace Game {
 
     void AnvilChunkSaver::FlushRegionCache() {
         std::lock_guard<std::mutex> lock(m_regionCacheMutex);
-        
+
         // Finalize all region writers
         for (auto& [key, writer] : m_regionCache) {
             if (writer) {
                 writer->Finalize();
             }
         }
-        
+
         m_regionCache.clear();
         m_regionAccessTimes.clear();
-        
+
         Log::Debug("AnvilChunkSaver: Flushed region cache");
     }
 
@@ -366,14 +366,14 @@ namespace Game {
 
     std::vector<std::pair<int, int>> AnvilChunkSaver::GetCachedRegions() const {
         std::lock_guard<std::mutex> lock(m_regionCacheMutex);
-        
+
         std::vector<std::pair<int, int>> regions;
         for (const auto& [key, writer] : m_regionCache) {
             int regionX = static_cast<int>(key >> 32);
             int regionZ = static_cast<int>(key & 0xFFFFFFFF);
             regions.emplace_back(regionX, regionZ);
         }
-        
+
         return regions;
     }
 
@@ -391,7 +391,7 @@ namespace Game {
         // Check minimum file size (8KB header)
         file.seekg(0, std::ios::end);
         size_t fileSize = file.tellg();
-        
+
         return fileSize >= AnvilRegionWriter::HEADER_SIZE;
     }
 
@@ -432,42 +432,42 @@ namespace Game {
     std::shared_ptr<AnvilRegionWriter> AnvilChunkSaver::GetRegionWriter(Math::ChunkPos chunkPos) {
         int regionX, regionZ;
         GetRegionCoords(chunkPos, regionX, regionZ);
-        
+
         uint64_t key = GetRegionKey(regionX, regionZ);
-        
+
         std::lock_guard<std::mutex> lock(m_regionCacheMutex);
-        
+
         // Check if already cached
         auto it = m_regionCache.find(key);
         if (it != m_regionCache.end()) {
             m_regionAccessTimes[key] = std::chrono::steady_clock::now();
             return it->second;
         }
-        
+
         // Create new region writer
         auto writer = CreateRegionWriter(regionX, regionZ);
         if (writer) {
             m_regionCache[key] = writer;
             m_regionAccessTimes[key] = std::chrono::steady_clock::now();
-            
+
             // Clean up old regions if cache is full
             if (m_regionCache.size() > m_config.maxCachedRegions) {
                 CleanupRegionCache();
             }
         }
-        
+
         return writer;
     }
 
     std::shared_ptr<AnvilRegionWriter> AnvilChunkSaver::CreateRegionWriter(int regionX, int regionZ) {
         std::string regionPath = GetRegionFilePath(regionX, regionZ);
-        
+
         auto writer = std::make_shared<AnvilRegionWriter>(regionPath);
         if (!writer->Initialize()) {
             LogError("CreateRegionWriter", "Failed to initialize region writer for " + regionPath);
             return nullptr;
         }
-        
+
         Log::Debug("Created region writer for (%d, %d): %s", regionX, regionZ, regionPath.c_str());
         return writer;
     }
@@ -478,12 +478,12 @@ namespace Game {
 
     void AnvilChunkSaver::CleanupRegionCache() {
         auto now = std::chrono::steady_clock::now();
-        
+
         // Remove expired regions
         auto it = m_regionAccessTimes.begin();
         while (it != m_regionAccessTimes.end()) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second);
-            
+
             if (elapsed.count() > m_config.regionCacheTimeoutSeconds) {
                 uint64_t key = it->first;
                 CloseRegion(key);
@@ -492,13 +492,13 @@ namespace Game {
                 ++it;
             }
         }
-        
+
         // Remove excess regions if still over limit
         while (m_regionCache.size() > m_config.maxCachedRegions && !m_regionCache.empty()) {
             // Find oldest accessed region
             auto oldest = std::min_element(m_regionAccessTimes.begin(), m_regionAccessTimes.end(),
                 [](const auto& a, const auto& b) { return a.second < b.second; });
-            
+
             if (oldest != m_regionAccessTimes.end()) {
                 CloseRegion(oldest->first);
                 m_regionAccessTimes.erase(oldest);
@@ -533,10 +533,10 @@ namespace Game {
             // Calculate local coordinates
             int regionX, regionZ;
             GetRegionCoords(chunk.pos, regionX, regionZ);
-            
+
             int localX = chunk.pos.x - (regionX * 32);
             int localZ = chunk.pos.z - (regionZ * 32);
-            
+
             // Write chunk to region
             if (!writer->WriteChunk(localX, localZ, chunk)) {
                 return ChunkSaveResult::Failure(chunk.pos, "Failed to write chunk to region");
@@ -544,10 +544,10 @@ namespace Game {
 
             // Estimate bytes written (simplified)
             size_t bytesWritten = chunk.GetNonAirBlockCount() * 2; // Rough estimate
-            
+
             ChunkSaveResult result = ChunkSaveResult::Success(chunk.pos, bytesWritten);
             result.wasCompressed = true; // Anvil always uses compression
-            
+
             return result;
 
         } catch (const std::exception& e) {
@@ -559,7 +559,7 @@ namespace Game {
 
     void AnvilChunkSaver::ProcessSaveQueue() {
         std::queue<std::shared_ptr<const Chunk>> chunksToSave;
-        
+
         // Move chunks from queue to local processing queue
         {
             std::lock_guard<std::mutex> lock(m_queueMutex);
@@ -567,12 +567,12 @@ namespace Game {
             m_saveQueue = std::queue<std::shared_ptr<const Chunk>>();
             m_pendingChunks.clear();
         }
-        
+
         // Process chunks
         while (!chunksToSave.empty()) {
             auto chunk = chunksToSave.front();
             chunksToSave.pop();
-            
+
             if (chunk) {
                 SaveChunk(*chunk);
             }
@@ -601,7 +601,7 @@ namespace Game {
 
         try {
             std::filesystem::path path(worldPath);
-            
+
             // Check if directory exists or can be created
             if (!std::filesystem::exists(path)) {
                 if (!m_config.createWorldStructure) {
@@ -627,7 +627,7 @@ namespace Game {
 
     void AnvilChunkSaver::SetLastError(const std::string& error) const {
         std::lock_guard<std::mutex> lock(m_errorMutex);
-        m_lastError = error;
+        const_cast<std::string&>(m_lastError) = error;  // FIX: Use const_cast for mutable member
     }
 
     void AnvilChunkSaver::LogError(const std::string& operation, const std::string& error) const {

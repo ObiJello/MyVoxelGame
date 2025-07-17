@@ -14,6 +14,8 @@
 #include <memory>
 #include <unordered_set>
 
+#include "engine/world/ChunkProvider.hpp"
+
 namespace Game {
 
     // Forward declarations

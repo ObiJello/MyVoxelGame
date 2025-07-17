@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <unordered_set>
+
+#include "engine/world/ChunkProvider.hpp"
 
 namespace Game {
 
@@ -133,7 +136,7 @@ namespace Game {
 
         // Error handling
         mutable std::mutex m_errorMutex;
-        std::string m_lastError;
+        mutable std::string m_lastError;
         ErrorPolicy m_errorPolicy = ErrorPolicy::SkipFailed;
 
         // State

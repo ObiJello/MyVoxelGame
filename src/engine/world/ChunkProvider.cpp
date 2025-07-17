@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.cpp - Updated with new system integration
+// File: src/engine/world/ChunkProvider.cpp - FIXED VERSION
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/JobSystem.hpp"
@@ -907,12 +907,20 @@ namespace Game {
 
         // Set up chunk cache dependencies
         if (m_chunkCache && m_chunkSaver) {
-            m_chunkCache->SetChunkSaver(m_chunkSaver);
+            // Create a non-owning shared_ptr that won't delete the object
+            std::shared_ptr<IChunkSaver> saverPtr(m_chunkSaver.get(), [](IChunkSaver*){
+                // Empty deleter - the unique_ptr will handle deletion
+            });
+            m_chunkCache->SetChunkSaver(saverPtr);
         }
 
         // Set up loader fallback generation
         if (m_chunkLoader && m_chunkGenerator) {
-            m_chunkLoader->SetFallbackGenerator(m_chunkGenerator);
+            // Create a non-owning shared_ptr that won't delete the object
+            std::shared_ptr<IChunkGenerator> generatorPtr(m_chunkGenerator.get(), [](IChunkGenerator*){
+                // Empty deleter - the unique_ptr will handle deletion
+            });
+            m_chunkLoader->SetFallbackGenerator(generatorPtr);
         }
 
         // Set up callbacks
@@ -1128,9 +1136,13 @@ namespace Game {
     void ChunkProvider::WorldToLocalCoords(int worldX, int worldY, int worldZ, Math::ChunkPos& chunkPos,
                                           int& localX, int& localY, int& localZ) const {
         chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        localX = Math::WorldCoordinates::WorldXToChunkX(worldX);
+        localX = worldX - (chunkPos.x * Math::CHUNK_SIZE_X);
         localY = worldY; // World Y is used directly
-        localZ = Math::WorldCoordinates::WorldZToChunkZ(worldZ);
+        localZ = worldZ - (chunkPos.z * Math::CHUNK_SIZE_Z);
+        
+        // Handle negative coordinates properly
+        if (localX < 0) localX += Math::CHUNK_SIZE_X;
+        if (localZ < 0) localZ += Math::CHUNK_SIZE_Z;
     }
 
     bool ChunkProvider::IsValidBlockID(BlockID block) const {

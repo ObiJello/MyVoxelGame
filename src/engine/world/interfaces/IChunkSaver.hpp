@@ -11,6 +11,10 @@
 
 namespace Game {
 
+    // Forward declarations
+    class Chunk;
+    struct ChunkSaveResult;
+
     // Result of a chunk saving operation
     struct ChunkSaveResult {
         Math::ChunkPos position;

@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.hpp
+// File: src/engine/world/ChunkProvider.hpp - FIXED VERSION
 #pragma once
 
 #include "Chunk.hpp"
@@ -25,6 +25,20 @@
 #include <shared_mutex>
 
 namespace Game {
+
+    // Forward declarations
+    class IChunkSaver;
+    class IChunkGenerator;
+    struct ChunkSaveResult;
+
+    // Hash function for Math::ChunkPos
+    namespace Math {
+        struct ChunkPosHash {
+            std::size_t operator()(const ChunkPos& pos) const {
+                return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
+            }
+        };
+    }
 
     // Configuration for ChunkProvider composition
     struct ChunkProviderConfig {

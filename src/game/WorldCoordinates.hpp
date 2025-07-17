@@ -50,6 +50,21 @@ namespace Game::Math {
             return Config::MinY + (sectionIndex * SECTION_HEIGHT) + sectionY;
         }
 
+        // Convert world X coordinate to local chunk X coordinate
+        static constexpr int WorldXToChunkX(int worldX) {
+            return worldX - (WorldToChunkPos(worldX, 0).x * CHUNK_SIZE_X);
+        }
+
+        // Convert world Z coordinate to local chunk Z coordinate
+        static constexpr int WorldZToChunkZ(int worldZ) {
+            return worldZ - (WorldToChunkPos(0, worldZ).z * CHUNK_SIZE_Z);
+        }
+
+        // Clamp world Y coordinate to valid range
+        static constexpr int ClampWorldY(int worldY) {
+            return std::clamp(worldY, MIN_WORLD_Y, MAX_WORLD_Y);
+        }
+
         // === CHUNK COORDINATE CONVERSIONS ===
 
         // Convert world X/Z coordinates to chunk coordinates

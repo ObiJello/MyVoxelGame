@@ -14,6 +14,7 @@
 #include <shared_mutex>
 #include <future>
 #include <atomic>
+#include "../ChunkProvider.hpp"
 
 namespace Game {
 
@@ -147,7 +148,7 @@ namespace Game {
         std::shared_ptr<IChunkGenerator> m_fallbackGenerator;
 
         // Region file management
-        std::unique_ptr<RegionFileCache> m_regionCache;
+        std::unique_ptr<World::RegionFileCache> m_regionCache;
 
         // Chunk data caching
         mutable std::shared_mutex m_cacheMutex;
@@ -266,11 +267,11 @@ namespace Game {
         ~RegionFileLock();
 
         bool IsValid() const { return m_valid; }
-        RegionFile* GetRegionFile() const { return m_regionFile; }
+        World::RegionFile* GetRegionFile() const { return m_regionFile; }
 
     private:
         MinecraftChunkLoaderImpl* m_loader;
-        RegionFile* m_regionFile;
+        World::RegionFile* m_regionFile;
         bool m_valid = false;
     };
 

@@ -9,6 +9,8 @@
 #include <functional>
 #include <memory>
 
+#include "glm/vec3.hpp"
+
 // Forward declare FastNoise
 class FastNoiseLite;
 
@@ -188,13 +190,13 @@ namespace Game {
 
         // Performance and debugging
         mutable std::mutex m_statsMutex;
-        GeneratorStats m_stats;
+        mutable GeneratorStats m_stats;
         bool m_debugMode = false;
         bool m_initialized = false;
 
         // Error handling
         mutable std::mutex m_errorMutex;
-        std::string m_lastError;
+        mutable std::string m_lastError;
 
         // Generation pass flags
         std::unordered_map<GenerationPass, bool> m_passEnabled;
@@ -202,7 +204,7 @@ namespace Game {
         // Height map caching
         bool m_heightMapCaching = true;
         mutable std::mutex m_heightMapMutex;
-        std::unordered_map<uint64_t, std::vector<int>> m_heightMapCache;
+        mutable std::unordered_map<uint64_t, std::vector<int>> m_heightMapCache;
 
         // === CORE GENERATION METHODS ===
 

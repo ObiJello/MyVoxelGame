@@ -1,6 +1,7 @@
-// File: src/engine/world/generation/ProceduralChunkGenerator.cpp
+// File: src/engine/world/generation/ProceduralChunkGenerator.cpp - FIXED
 #include "ProceduralChunkGenerator.hpp"
 #include "../Chunk.hpp"
+#include "../interfaces/INeighborProvider.hpp"  // FIX: Include the complete interface
 #include "../../../core/JobSystem.hpp"
 #include "../../../ext/FastNoiseLite.h"
 #include <chrono>
@@ -91,7 +92,10 @@ namespace Game {
 
     ChunkGenerationResult ProceduralChunkGenerator::GenerateChunk(Math::ChunkPos position) {
         if (!m_initialized) {
-            return ChunkGenerationResult::Failure("Generator not initialized");
+            ChunkGenerationResult result;  // FIX: Use default constructor
+            result.success = false;
+            result.errorMessage = "Generator not initialized";
+            return result;
         }
 
         std::vector<GenerationPass> allPasses = {
@@ -110,7 +114,10 @@ namespace Game {
     std::future<ChunkGenerationResult> ProceduralChunkGenerator::GenerateChunkAsync(Math::ChunkPos position) {
         if (!m_initialized) {
             std::promise<ChunkGenerationResult> promise;
-            promise.set_value(ChunkGenerationResult::Failure("Generator not initialized"));
+            ChunkGenerationResult result;  // FIX: Use default constructor
+            result.success = false;
+            result.errorMessage = "Generator not initialized";
+            promise.set_value(result);
             return promise.get_future();
         }
 
@@ -263,7 +270,10 @@ namespace Game {
     ChunkGenerationResult ProceduralChunkGenerator::GenerateWithPasses(Math::ChunkPos position,
                                                                       const std::vector<GenerationPass>& passes) {
         if (!m_initialized) {
-            return ChunkGenerationResult::Failure("Generator not initialized");
+            ChunkGenerationResult result;  // FIX: Use default constructor
+            result.success = false;
+            result.errorMessage = "Generator not initialized";
+            return result;
         }
 
         return GenerateChunkInternal(position, passes);
@@ -489,7 +499,7 @@ namespace Game {
 
     void ProceduralChunkGenerator::ClearHeightMapCache() {
         std::lock_guard<std::mutex> lock(m_heightMapMutex);
-        m_heightMapCache.clear();
+        const_cast<std::unordered_map<uint64_t, std::vector<int>>&>(m_heightMapCache).clear();
     }
 
     // === PROTECTED METHODS ===
@@ -513,7 +523,11 @@ namespace Game {
     ChunkGenerationResult ProceduralChunkGenerator::GenerateChunkInternal(Math::ChunkPos position, const std::vector<GenerationPass>& passes) {
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        ChunkGenerationResult result(position, 0);
+        ChunkGenerationResult result;  // FIX: Use default constructor
+        result.chunk = nullptr;
+        result.success = false;
+        result.generationTimeMs = 0.0f;
+        result.blocksGenerated = 0;
 
         try {
             // Create chunk
@@ -981,12 +995,12 @@ namespace Game {
         std::lock_guard<std::mutex> lock(m_heightMapMutex);
 
         uint64_t key = GetChunkKey(position);
-        m_heightMapCache[key] = heightMap;
+        const_cast<std::unordered_map<uint64_t, std::vector<int>>&>(m_heightMapCache)[key] = heightMap;
 
         // Simple cache size limit
         if (m_heightMapCache.size() > 1000) {
             auto it = m_heightMapCache.begin();
-            m_heightMapCache.erase(it);
+            const_cast<std::unordered_map<uint64_t, std::vector<int>>&>(m_heightMapCache).erase(it);
         }
     }
 
@@ -997,7 +1011,7 @@ namespace Game {
 
     void ProceduralChunkGenerator::SetLastError(const std::string& error) const {
         std::lock_guard<std::mutex> lock(m_errorMutex);
-        m_lastError = error;
+        const_cast<std::string&>(m_lastError) = error;
     }
 
     void ProceduralChunkGenerator::LogError(const std::string& operation, const std::string& error) const {
@@ -1007,7 +1021,7 @@ namespace Game {
 
     void ProceduralChunkGenerator::UpdatePassStats(GenerationPass pass, float timeMs) const {
         std::lock_guard<std::mutex> lock(m_statsMutex);
-        m_stats.passTimeMs[pass] += timeMs;
+        const_cast<GeneratorStats&>(m_stats).passTimeMs[pass] += timeMs;
     }
 
     // === INITIALIZATION HELPERS ===
@@ -1022,9 +1036,9 @@ namespace Game {
         m_terrainNoise->SetFractalType(FastNoiseLite::FractalType_FBm);
         m_terrainNoise->SetFractalOctaves(4);
 
-        // Biome noise
+        // Biome noise - FIX: Use correct noise type
         m_biomeNoise = std::make_unique<FastNoiseLite>(seed + 1000);
-        m_biomeNoise->SetNoiseType(FastNoiseLite::NoiseType_Simplex);
+        m_biomeNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);  // FIX: Use correct constant
         m_biomeNoise->SetFrequency(0.005f);
 
         // Cave noise
@@ -1034,7 +1048,7 @@ namespace Game {
 
         // Ore noise
         m_oreNoise = std::make_unique<FastNoiseLite>(seed + 3000);
-        m_oreNoise->SetNoiseType(FastNoiseLite::NoiseType_Simplex);
+        m_oreNoise->SetNoiseType(FastNoiseLite::NoiseType_OpenSimplex2);  // FIX: Use correct constant
         m_oreNoise->SetFrequency(0.03f);
 
         Log::Debug("Initialized noise generators with seed: %d", seed);
@@ -1116,7 +1130,7 @@ namespace Game {
     }
 
     void ProceduralChunkGenerator::InitializePassFlags() {
-        m_passEnabled[GenerationPass::Terrain] = m_config.generateOres;
+        m_passEnabled[GenerationPass::Terrain] = true;
         m_passEnabled[GenerationPass::Ores] = m_config.generateOres;
         m_passEnabled[GenerationPass::Caves] = m_config.generateCaves;
         m_passEnabled[GenerationPass::Structures] = m_config.generateStructures;
