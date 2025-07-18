@@ -42,72 +42,155 @@ namespace Game {
     // === LIFECYCLE ===
 
     bool ChunkProvider::Initialize() {
+        Log::Info("=== CHUNKPROVIDER INITIALIZATION START ===");
+
         if (m_initialized) {
+            Log::Warning("ChunkProvider already initialized");
             return true;
         }
 
         Log::Info("Initializing ChunkProvider with composition architecture...");
 
         try {
+            // Validate config first
+            if (!m_config.IsValid()) {
+                Log::Error("Invalid ChunkProvider configuration");
+                return false;
+            }
+            Log::Info("Configuration validated");
+
             // Create core components
+            Log::Info("Creating ChunkCache...");
             ChunkCacheConfig cacheConfig;
             cacheConfig.maxSize = m_config.maxLoadedChunks;
             cacheConfig.enableLRUEviction = m_config.enableLRUEviction;
             m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
+            if (!m_chunkCache) {
+                Log::Error("Failed to create ChunkCache");
+                return false;
+            }
+            Log::Info("ChunkCache created");
 
-            MinecraftLoaderConfig loaderConfig;
-            loaderConfig.worldPath = m_config.minecraftWorldPath;
-            loaderConfig.enableFallbackGeneration = m_config.enableFallbackGeneration;
-            m_chunkLoader = std::make_unique<MinecraftChunkLoaderImpl>(loaderConfig);
-
+            // Create chunk generator (ALWAYS create this as fallback)
+            Log::Info("Creating ProceduralChunkGenerator...");
             m_chunkGenerator = std::make_unique<ProceduralChunkGenerator>(m_config.generationConfig);
+            if (!m_chunkGenerator) {
+                Log::Error("Failed to create ProceduralChunkGenerator");
+                return false;
+            }
+            Log::Info("ProceduralChunkGenerator created");
 
+            // Create Minecraft loader only if world path specified
+            if (!m_config.minecraftWorldPath.empty()) {
+                Log::Info("Creating MinecraftChunkLoaderImpl for: %s", m_config.minecraftWorldPath.c_str());
+                MinecraftLoaderConfig loaderConfig;
+                loaderConfig.worldPath = m_config.minecraftWorldPath;
+                loaderConfig.enableFallbackGeneration = m_config.enableFallbackGeneration;
+                m_chunkLoader = std::make_unique<MinecraftChunkLoaderImpl>(loaderConfig);
+                if (!m_chunkLoader) {
+                    Log::Warning("Failed to create MinecraftChunkLoaderImpl");
+                } else {
+                    Log::Info("MinecraftChunkLoaderImpl created");
+                }
+            } else {
+                Log::Info("No Minecraft world path, skipping loader creation");
+                m_chunkLoader = nullptr;
+            }
+
+            // Create chunk saver
+            Log::Info("Creating AsyncChunkSaver...");
             SaveWorkerConfig saverConfig;
             saverConfig.workerThreads = m_config.enableAsyncSaving ? 2 : 1;
             saverConfig.enableAnvilFormat = !m_config.minecraftWorldPath.empty();
             saverConfig.minecraftWorldPath = m_config.minecraftWorldPath;
             m_chunkSaver = std::make_unique<AsyncChunkSaver>(saverConfig);
+            if (!m_chunkSaver) {
+                Log::Error("Failed to create AsyncChunkSaver");
+                return false;
+            }
+            Log::Info("AsyncChunkSaver created");
 
+            // Create dirty tracker
+            Log::Info("Creating DirtyTracker...");
             m_dirtyTracker = std::make_unique<DirtyTracker>(m_config.dirtyConfig);
+            if (!m_dirtyTracker) {
+                Log::Error("Failed to create DirtyTracker");
+                return false;
+            }
+            Log::Info("DirtyTracker created");
 
             // Initialize components
-            if (!m_chunkLoader->Initialize()) {
-                Log::Error("Failed to initialize chunk loader");
-                return false;
+            Log::Info("Initializing components...");
+
+            // Initialize loader (optional)
+            if (m_chunkLoader) {
+                Log::Info("Initializing MinecraftChunkLoaderImpl...");
+                if (!m_chunkLoader->Initialize()) {
+                    Log::Warning("Failed to initialize chunk loader, will use generation only");
+                    m_chunkLoader.reset();
+                } else {
+                    Log::Info("MinecraftChunkLoaderImpl initialized");
+                }
             }
 
+            // Initialize generator (critical)
+            Log::Info("Initializing ProceduralChunkGenerator...");
             if (!m_chunkGenerator->Initialize()) {
-                Log::Error("Failed to initialize chunk generator");
+                Log::Error("Failed to initialize chunk generator - this is critical!");
                 return false;
             }
+            Log::Info("ProceduralChunkGenerator initialized");
 
+            // Initialize saver
+            Log::Info("Initializing AsyncChunkSaver...");
             if (!m_chunkSaver->Initialize()) {
                 Log::Error("Failed to initialize chunk saver");
                 return false;
             }
+            Log::Info("AsyncChunkSaver initialized");
 
+            // Initialize dirty tracker
+            Log::Info("Initializing DirtyTracker...");
             if (!m_dirtyTracker->Initialize()) {
                 Log::Error("Failed to initialize dirty tracker");
                 return false;
             }
+            Log::Info("DirtyTracker initialized");
 
             // Set up component dependencies
+            Log::Info("Setting up component dependencies...");
             SetupComponentDependencies();
+            Log::Info("Component dependencies set up");
+
+            Log::Info("Configuring components...");
             ConfigureComponents();
+            Log::Info("Components configured");
 
             // Reset statistics
             ResetProviderStats();
 
+            // Mark as initialized
             m_initialized = true;
-            Log::Info("ChunkProvider initialized successfully");
+
+            Log::Info("✓ ChunkProvider initialized successfully");
+            Log::Info("  - Generator: %s", m_chunkGenerator ? "Available" : "None");
+            Log::Info("  - Loader: %s", m_chunkLoader ? "Available" : "None");
+            Log::Info("  - Cache size: %zu", m_config.maxLoadedChunks);
+            Log::Info("  - Initialized flag: %s", m_initialized ? "true" : "false");
+            Log::Info("=== CHUNKPROVIDER INITIALIZATION COMPLETE ===");
+
             return true;
 
         } catch (const std::exception& e) {
-            Log::Error("ChunkProvider initialization failed: %s", e.what());
+            Log::Error("ChunkProvider initialization failed with exception: %s", e.what());
+            Shutdown();
+            return false;
+        } catch (...) {
+            Log::Error("ChunkProvider initialization failed with unknown exception");
             Shutdown();
             return false;
         }
-    }
+}
 
     void ChunkProvider::Shutdown() {
         if (!m_initialized) {
@@ -179,48 +262,42 @@ namespace Game {
     }
 
     std::shared_ptr<Chunk> ChunkProvider::GetChunkWithPriority(Math::ChunkPos position, bool highPriority) {
-        if (!m_initialized || !ValidateChunkPosition(position)) {
+        if (!m_initialized) {
+            Log::Error("ChunkProvider::GetChunk: Not initialized");
             return nullptr;
         }
 
-        auto startTime = std::chrono::high_resolution_clock::now();
+        if (!ValidateChunkPosition(position)) {
+            Log::Error("ChunkProvider::GetChunk: Invalid chunk position (%d, %d)", position.x, position.z);
+            return nullptr;
+        }
 
-        // Try to get from cache first
+        // CRITICAL: Always check cache first and return if found
         std::shared_ptr<Chunk> chunk = TryLoadFromCache(position);
         if (chunk) {
-            auto endTime = std::chrono::high_resolution_clock::now();
-            float loadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-            UpdateLoadStats(loadTime, true, false, false);
+            Log::Debug("Chunk (%d, %d) retrieved from cache (not regenerated)", position.x, position.z);
             return chunk;
         }
 
-        // Performance throttling
+        Log::Info("Chunk (%d, %d) not in cache, attempting to load/generate", position.x, position.z);
+
+        // Performance throttling (only if not high priority)
         if (!highPriority && ShouldThrottleLoading()) {
+            Log::Debug("Chunk loading throttled for (%d, %d)", position.x, position.z);
             return nullptr;
         }
 
-        // Load from disk or generate
-        chunk = LoadChunkInternal(position);
-
-        auto endTime = std::chrono::high_resolution_clock::now();
-        float loadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-
-        bool fromCache = false;
-        bool fromDisk = chunk != nullptr;
-        bool generated = false;
-
-        if (!chunk) {
-            // Try generation as fallback
-            chunk = TryGenerateChunk(position);
-            fromDisk = false;
-            generated = chunk != nullptr;
-        }
+        // Load from disk or generate (only if NOT already in cache)
+        chunk = LoadChunkInternal(position, true);
 
         if (chunk) {
+            // Complete chunk loading and add to cache
             chunk = CompleteChunkLoad(chunk);
+            Log::Info("Successfully loaded/generated chunk (%d, %d)", position.x, position.z);
+        } else {
+            Log::Warning("Failed to load/generate chunk (%d, %d)", position.x, position.z);
         }
 
-        UpdateLoadStats(loadTime, fromCache, fromDisk, generated);
         return chunk;
     }
 
@@ -264,7 +341,16 @@ namespace Game {
             return false;
         }
 
-        return m_chunkCache->Contains(position);
+        // Check cache first
+        bool inCache = m_chunkCache->Contains(position);
+
+        if (inCache) {
+            Log::Debug("Chunk (%d, %d) found in cache", position.x, position.z);
+        } else {
+            Log::Debug("Chunk (%d, %d) NOT in cache", position.x, position.z);
+        }
+
+        return inCache;
     }
 
     void ChunkProvider::PreloadChunk(Math::ChunkPos position) {
@@ -842,18 +928,33 @@ namespace Game {
 
     std::shared_ptr<Chunk> ChunkProvider::LoadChunkInternal(Math::ChunkPos position, bool allowGeneration) {
         if (!ValidateChunkPosition(position)) {
+            Log::Error("LoadChunkInternal: Invalid chunk position (%d, %d)", position.x, position.z);
             return nullptr;
         }
 
+        Log::Debug("LoadChunkInternal: Loading chunk (%d, %d)", position.x, position.z);
+
         // Try loading from disk first
         std::shared_ptr<Chunk> chunk = TryLoadFromDisk(position);
-
-        if (!chunk && allowGeneration) {
-            // Generate new chunk
-            chunk = TryGenerateChunk(position);
+        if (chunk) {
+            Log::Debug("Loaded chunk (%d, %d) from disk", position.x, position.z);
+            return chunk;
         }
 
-        return chunk;
+        if (allowGeneration) {
+            // Generate new chunk as fallback
+            Log::Debug("Generating chunk (%d, %d)", position.x, position.z);
+            chunk = TryGenerateChunk(position);
+            if (chunk) {
+                Log::Debug("Generated chunk (%d, %d)", position.x, position.z);
+                return chunk;
+            } else {
+                Log::Error("Failed to generate chunk (%d, %d)", position.x, position.z);
+            }
+        }
+
+        Log::Warning("LoadChunkInternal: All methods failed for chunk (%d, %d)", position.x, position.z);
+        return nullptr;
     }
 
     std::shared_ptr<Chunk> ChunkProvider::TryLoadFromCache(Math::ChunkPos position) {
@@ -875,11 +976,37 @@ namespace Game {
 
     std::shared_ptr<Chunk> ChunkProvider::TryGenerateChunk(Math::ChunkPos position) {
         if (!m_chunkGenerator) {
+            Log::Error("TryGenerateChunk: No chunk generator available");
             return nullptr;
         }
 
-        auto result = m_chunkGenerator->GenerateChunk(position);
-        return result.success ? result.chunk : nullptr;
+        try {
+            Log::Debug("Generating chunk (%d, %d) using generator", position.x, position.z);
+            auto result = m_chunkGenerator->GenerateChunk(position);
+
+            if (!result.success) {
+                Log::Error("TryGenerateChunk: Generator failed for chunk (%d, %d): %s",
+                          position.x, position.z, result.errorMessage.c_str());
+                return nullptr;
+            }
+
+            if (!result.chunk) {
+                Log::Error("TryGenerateChunk: Generator returned null chunk for (%d, %d)",
+                          position.x, position.z);
+                return nullptr;
+            }
+
+            // Ensure chunk position is set correctly
+            result.chunk->pos = position;
+
+            Log::Info("Successfully generated chunk (%d, %d)", position.x, position.z);
+            return result.chunk;
+
+        } catch (const std::exception& e) {
+            Log::Error("TryGenerateChunk: Exception generating chunk (%d, %d): %s",
+                      position.x, position.z, e.what());
+            return nullptr;
+        }
     }
 
     std::shared_ptr<Chunk> ChunkProvider::CompleteChunkLoad(std::shared_ptr<Chunk> chunk) {
@@ -893,8 +1020,16 @@ namespace Game {
             return nullptr;
         }
 
+        // CRITICAL: Check if chunk is already in cache before adding
+        if (m_chunkCache->Contains(chunk->pos)) {
+            Log::Warning("Chunk (%d, %d) already in cache, not adding duplicate", chunk->pos.x, chunk->pos.z);
+            // Return the existing chunk from cache instead
+            return m_chunkCache->Get(chunk->pos);
+        }
+
         // Add to cache
         m_chunkCache->Put(chunk->pos, chunk);
+        Log::Debug("Added chunk (%d, %d) to cache", chunk->pos.x, chunk->pos.z);
 
         return chunk;
     }
@@ -1124,7 +1259,14 @@ namespace Game {
     bool ChunkProvider::ValidateChunkPosition(Math::ChunkPos position) const {
         // Prevent extreme coordinates that might cause issues
         const int MAX_CHUNK_COORD = 1000000;
-        return std::abs(position.x) < MAX_CHUNK_COORD && std::abs(position.z) < MAX_CHUNK_COORD;
+        bool valid = std::abs(position.x) < MAX_CHUNK_COORD && std::abs(position.z) < MAX_CHUNK_COORD;
+
+        if (!valid) {
+            Log::Error("Invalid chunk position: (%d, %d) exceeds maximum coordinate limit",
+                      position.x, position.z);
+        }
+
+        return valid;
     }
 
     bool ChunkProvider::ValidateWorldPosition(int worldX, int worldY, int worldZ) const {

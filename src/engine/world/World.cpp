@@ -24,13 +24,15 @@ namespace Game {
     }
 
     void World::Initialize() {
-        Log::Info("Initializing World...");
+        Log::Info("=== WORLD INITIALIZATION START ===");
 
         // Load world settings from game settings
         LoadWorldSettings();
+        Log::Info("World settings loaded - chunk loading distance: %d", m_chunkLoadingDistance);
 
         // Create and configure chunk provider
         ChunkProviderConfig config = CreateDefaultConfig();
+        Log::Info("Created default config");
 
         // Configure based on world settings
         config.maxLoadedChunks = m_chunkLoadingDistance * m_chunkLoadingDistance * 4; // Square area with buffer
@@ -40,6 +42,9 @@ namespace Game {
         config.enableAutoSave = true;
         config.autoSaveIntervalSeconds = 30.0f;
 
+        Log::Info("Config - Max chunks: %zu, Fallback generation: %s",
+                  config.maxLoadedChunks, config.enableFallbackGeneration ? "enabled" : "disabled");
+
         // Set up generation config
         config.generationConfig.seed = 12345;
         config.generationConfig.worldType = "default";
@@ -47,6 +52,9 @@ namespace Game {
         config.generationConfig.generateCaves = true;
         config.generationConfig.generateStructures = true;
         config.generationConfig.generateVegetation = true;
+
+        Log::Info("Generation config - Seed: %d, Type: %s",
+                  config.generationConfig.seed, config.generationConfig.worldType.c_str());
 
         // Set up dirty tracking config
         config.dirtyConfig.enableBatching = true;
@@ -57,21 +65,49 @@ namespace Game {
         // Set Minecraft world path if available
         if (!m_minecraftWorldPath.empty()) {
             config.minecraftWorldPath = m_minecraftWorldPath;
+            Log::Info("Using Minecraft world path: %s", m_minecraftWorldPath.c_str());
+        } else {
+            Log::Info("No Minecraft world path set, using procedural generation only");
         }
 
-        // Create chunk provider with config
-        m_chunkProvider = std::make_unique<ChunkProvider>(config);
-
-        // Initialize chunk provider
-        if (!m_chunkProvider->Initialize()) {
-            Log::Error("Failed to initialize ChunkProvider");
+        // Validate config before creating chunk provider
+        if (!config.IsValid()) {
+            Log::Error("ChunkProviderConfig validation failed!");
             return;
         }
+        Log::Info("Config validation passed");
+
+        // Create chunk provider with config
+        Log::Info("Creating ChunkProvider...");
+        try {
+            m_chunkProvider = std::make_unique<ChunkProvider>(config);
+            Log::Info("ChunkProvider created successfully");
+        } catch (const std::exception& e) {
+            Log::Error("Failed to create ChunkProvider: %s", e.what());
+            return;
+        }
+
+        // Initialize chunk provider
+        Log::Info("Initializing ChunkProvider...");
+        if (!m_chunkProvider->Initialize()) {
+            Log::Error("Failed to initialize ChunkProvider");
+            m_chunkProvider.reset(); // Clean up
+            return;
+        }
+        Log::Info("ChunkProvider initialized successfully");
+
+        // Verify initialization
+        if (!m_chunkProvider->IsInitialized()) {
+            Log::Error("ChunkProvider reports not initialized after Initialize() returned true!");
+            return;
+        }
+        Log::Info("ChunkProvider initialization verified");
 
         // Set the global block access for physics system
         SetGlobalBlockAccess(this);
 
         Log::Info("✓ World initialized successfully (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
+        Log::Info("=== WORLD INITIALIZATION COMPLETE ===");
     }
 
     void World::Update(float deltaTime) {
@@ -221,8 +257,7 @@ namespace Game {
         // Track newly loaded chunks to trigger mesh updates
         std::vector<Math::ChunkPos> newlyLoadedChunks;
 
-        // Load chunks in a square pattern instead of radius
-        // Create a square of size (viewDistance * 2 + 1) x (viewDistance * 2 + 1)
+        // Load chunks in a square pattern
         int halfSize = viewDistance;
 
         for (int dz = -halfSize; dz <= halfSize; ++dz) {
@@ -232,43 +267,36 @@ namespace Game {
 
                 Math::ChunkPos chunkPos{chunkX, chunkZ};
 
-                // Check if chunk is already loaded
+                // CRITICAL FIX: Check if chunk is already loaded FIRST
                 bool wasLoaded = m_chunkProvider->IsChunkLoaded(chunkPos);
 
                 if (!wasLoaded) {
-                    // Load the chunk
+                    // Only load if not already loaded
                     auto chunk = m_chunkProvider->GetChunk(chunkPos);
                     if (chunk) {
                         newlyLoadedChunks.push_back(chunkPos);
+                        Log::Info("Newly loaded chunk (%d, %d)", chunkX, chunkZ);
+                    } else {
+                        Log::Warning("Failed to load chunk (%d, %d)", chunkX, chunkZ);
                     }
                 }
+                // If wasLoaded is true, do NOTHING - don't reload the chunk
             }
         }
 
-        // Mark newly loaded chunks for mesh generation
+        // Only mark truly NEW chunks for meshing
         if (!newlyLoadedChunks.empty() && Render::g_meshManager) {
+            Log::Info("Marking %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
             for (const auto& chunkPos : newlyLoadedChunks) {
                 // Mark all sections in newly loaded chunks as dirty for meshing
                 for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
                     Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
                 }
             }
-            Log::Info("Marked %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
         }
 
-        // Unload distant chunks (use square distance instead of radius)
+        // Unload distant chunks
         UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
-
-        // Log chunk loading stats periodically
-        static float chunkLogTimer = 0.0f;
-        static float deltaAccumulator = 0.0f;
-        deltaAccumulator += 1.0f; // Assuming this is called once per frame
-        chunkLogTimer += 1.0f;
-        if (chunkLogTimer >= 300.0f) { // Every 5 seconds at 60fps
-            Log::Debug("Chunk loading stats: view distance=%d chunks, loaded chunks=%zu, newly loaded this update=%zu",
-                      viewDistance, GetLoadedChunkCount(), newlyLoadedChunks.size());
-            chunkLogTimer = 0.0f;
-        }
     }
 
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {

@@ -77,19 +77,9 @@ namespace Game {
         // Check if already exists
         auto it = m_cache.find(position);
         if (it != m_cache.end()) {
-            // Update existing entry
-            it->second.chunk = chunk;
-            it->second.MarkAccessed();
-            Log::Debug("Updated existing chunk in cache at (%d, %d)", position.x, position.z);
-            return;
-        }
-
-        // Check if we need to evict before adding
-        if (m_config.enablePreemptiveEviction &&
-            m_cache.size() >= static_cast<size_t>(m_config.maxSize * m_config.preemptiveEvictionThreshold)) {
-            lock.unlock();
-            CheckPreemptiveEviction();
-            lock.lock();
+            // IMPORTANT: Don't replace existing chunks!
+            Log::Warning("Chunk (%d, %d) already exists in cache, NOT replacing", position.x, position.z);
+            return; // Don't overwrite existing chunk
         }
 
         // Add new entry
@@ -97,7 +87,7 @@ namespace Game {
         m_cache.emplace(position, ChunkCacheEntry(chunk));
         m_stats.currentSize = m_cache.size();
 
-        Log::Debug("Added chunk to cache at (%d, %d), cache size: %zu",
+        Log::Info("Added new chunk to cache at (%d, %d), cache size: %zu",
                   position.x, position.z, m_cache.size());
 
         // Hard limit eviction

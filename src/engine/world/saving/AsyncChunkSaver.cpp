@@ -208,7 +208,13 @@ namespace Game {
     // === ASYNC CHUNK SAVER IMPLEMENTATION ===
 
     AsyncChunkSaver::AsyncChunkSaver(const SaveWorkerConfig& config)
-        : m_config(config) {
+    : m_config(config) {
+
+        // Set default destination if not using Anvil format
+        if (!m_config.enableAnvilFormat && m_destinationPath.empty()) {
+            m_destinationPath = "saves/chunks";
+        }
+
         Log::Debug("AsyncChunkSaver created with %d worker threads", config.workerThreads);
     }
 
@@ -390,57 +396,92 @@ namespace Game {
 
         Log::Info("Initializing AsyncChunkSaver...");
 
-        // Validate destination path for custom format
-        if (!m_config.enableAnvilFormat && m_destinationPath.empty()) {
-            SetLastError("No destination path set");
-            return false;
-        }
-
-        // Create destination directory for custom format
-        if (!m_config.enableAnvilFormat && !CreateDirectoryRecursive(m_destinationPath)) {
-            SetLastError("Failed to create destination directory: " + m_destinationPath);
-            return false;
-        }
-
-        // NEW: Initialize Anvil saver if requested
-        if (m_config.enableAnvilFormat) {
-            if (!InitializeAnvilSaver()) {
-                Log::Warning("Failed to initialize Anvil saver, falling back to custom format");
-                m_useAnvilFormat = false;
-                
-                // Fall back to custom format
+        try {
+            // For custom format, validate destination path only if it's set
+            if (!m_config.enableAnvilFormat) {
                 if (m_destinationPath.empty()) {
-                    SetLastError("No destination path set for fallback custom format");
-                    return false;
+                    // Set a default destination path if none provided
+                    m_destinationPath = "saves/chunks";
+                    Log::Info("No destination path set, using default: %s", m_destinationPath.c_str());
                 }
+
+                // Create destination directory for custom format
                 if (!CreateDirectoryRecursive(m_destinationPath)) {
-                    SetLastError("Failed to create destination directory: " + m_destinationPath);
-                    return false;
+                    Log::Warning("Failed to create destination directory: %s", m_destinationPath.c_str());
+                    // Don't fail initialization - we can create it later when needed
                 }
-            } else {
-                m_useAnvilFormat = true;
-                Log::Info("AsyncChunkSaver: Using Anvil .mca format for world: %s", 
-                         m_config.minecraftWorldPath.c_str());
             }
+
+            // Initialize Anvil saver if requested
+            if (m_config.enableAnvilFormat) {
+                if (!m_config.minecraftWorldPath.empty()) {
+                    if (!InitializeAnvilSaver()) {
+                        Log::Warning("Failed to initialize Anvil saver, falling back to custom format");
+                        m_useAnvilFormat = false;
+
+                        // Fall back to custom format
+                        if (m_destinationPath.empty()) {
+                            m_destinationPath = "saves/chunks";
+                            Log::Info("Fallback: Using custom format with destination: %s", m_destinationPath.c_str());
+                        }
+                    } else {
+                        m_useAnvilFormat = true;
+                        Log::Info("AsyncChunkSaver: Using Anvil .mca format for world: %s",
+                                 m_config.minecraftWorldPath.c_str());
+                    }
+                } else {
+                    Log::Warning("Anvil format requested but no world path provided, using custom format");
+                    m_config.enableAnvilFormat = false;
+                    m_useAnvilFormat = false;
+                    if (m_destinationPath.empty()) {
+                        m_destinationPath = "saves/chunks";
+                    }
+                }
+            }
+
+            // Start worker threads
+            m_workersRunning = true;
+            m_shutdownRequested = false;
+
+            try {
+                for (int i = 0; i < m_config.workerThreads; ++i) {
+                    m_workerThreads.emplace_back(&AsyncChunkSaver::WorkerThreadMain, this);
+                    Log::Debug("Started worker thread %d", i);
+                }
+                Log::Info("Started %d worker threads", m_config.workerThreads);
+            } catch (const std::exception& e) {
+                Log::Error("Failed to start worker threads: %s", e.what());
+                // Clean up any started threads
+                m_shutdownRequested = true;
+                for (auto& thread : m_workerThreads) {
+                    if (thread.joinable()) {
+                        thread.join();
+                    }
+                }
+                m_workerThreads.clear();
+                return false;
+            }
+
+            // Reset statistics
+            {
+                std::lock_guard<std::mutex> lock(m_statsMutex);
+                m_stats.Reset();
+            }
+
+            m_initialized = true;
+            Log::Info("AsyncChunkSaver initialized with %d worker threads (format: %s)",
+                     m_config.workerThreads, m_useAnvilFormat ? "Anvil" : "Custom");
+            return true;
+
+        } catch (const std::exception& e) {
+            Log::Error("AsyncChunkSaver initialization failed: %s", e.what());
+            SetLastError("Initialization failed: " + std::string(e.what()));
+            return false;
+        } catch (...) {
+            Log::Error("AsyncChunkSaver initialization failed with unknown exception");
+            SetLastError("Unknown initialization error");
+            return false;
         }
-
-        // Start worker threads
-        m_workersRunning = true;
-        m_shutdownRequested = false;
-
-        for (int i = 0; i < m_config.workerThreads; ++i) {
-            m_workerThreads.emplace_back(&AsyncChunkSaver::WorkerThreadMain, this);
-        }
-
-        // Reset statistics
-        {
-            std::lock_guard<std::mutex> lock(m_statsMutex);
-            m_stats.Reset();
-        }
-
-        m_initialized = true;
-        Log::Info("AsyncChunkSaver initialized with %d worker threads", m_config.workerThreads);
-        return true;
     }
 
     void AsyncChunkSaver::Shutdown() {
@@ -1114,10 +1155,34 @@ namespace Game {
     }
 
     bool AsyncChunkSaver::CreateDirectoryRecursive(const std::string& path) const {
+        if (path.empty()) {
+            return false;
+        }
+
         try {
-            return std::filesystem::create_directories(path);
+            if (std::filesystem::exists(path)) {
+                if (std::filesystem::is_directory(path)) {
+                    return true; // Already exists and is a directory
+                } else {
+                    Log::Error("Path exists but is not a directory: %s", path.c_str());
+                    return false;
+                }
+            }
+
+            // Create the directory and any parent directories
+            bool result = std::filesystem::create_directories(path);
+            if (result) {
+                Log::Debug("Created directory: %s", path.c_str());
+            } else {
+                Log::Warning("Failed to create directory: %s", path.c_str());
+            }
+            return result;
+
+        } catch (const std::filesystem::filesystem_error& e) {
+            Log::Error("Filesystem error creating directory %s: %s", path.c_str(), e.what());
+            return false;
         } catch (const std::exception& e) {
-            Log::Error("Failed to create directory %s: %s", path.c_str(), e.what());
+            Log::Error("Exception creating directory %s: %s", path.c_str(), e.what());
             return false;
         }
     }
@@ -1182,29 +1247,37 @@ namespace Game {
 
     bool AsyncChunkSaver::InitializeAnvilSaver() {
         if (m_config.minecraftWorldPath.empty()) {
-            Log::Error("Anvil format requested but no Minecraft world path specified");
+            Log::Warning("Anvil format requested but no Minecraft world path specified");
             return false;
         }
 
-        // Configure Anvil saver
-        AnvilSaverConfig anvilConfig;
-        anvilConfig.worldPath = m_config.minecraftWorldPath;
-        anvilConfig.createWorldStructure = m_config.createMinecraftStructure;
-        anvilConfig.maxCachedRegions = m_config.maxRegionCacheSize;
-        anvilConfig.enableAsyncSaving = true;
-        anvilConfig.strictAnvilCompliance = true;
+        try {
+            // Configure Anvil saver
+            AnvilSaverConfig anvilConfig;
+            anvilConfig.worldPath = m_config.minecraftWorldPath;
+            anvilConfig.createWorldStructure = m_config.createMinecraftStructure;
+            anvilConfig.maxCachedRegions = m_config.maxRegionCacheSize;
+            anvilConfig.enableAsyncSaving = true;
+            anvilConfig.strictAnvilCompliance = true;
 
-        // Create Anvil saver
-        m_anvilSaver = std::make_unique<AnvilChunkSaver>(anvilConfig);
-        
-        if (!m_anvilSaver->Initialize()) {
-            Log::Error("Failed to initialize AnvilChunkSaver");
+            // Create Anvil saver
+            m_anvilSaver = std::make_unique<AnvilChunkSaver>(anvilConfig);
+
+            if (!m_anvilSaver->Initialize()) {
+                std::string error = m_anvilSaver->GetLastError();
+                Log::Error("Failed to initialize AnvilChunkSaver: %s", error.c_str());
+                m_anvilSaver.reset();
+                return false;
+            }
+
+            Log::Info("AnvilChunkSaver initialized for world: %s", anvilConfig.worldPath.c_str());
+            return true;
+
+        } catch (const std::exception& e) {
+            Log::Error("Exception initializing AnvilChunkSaver: %s", e.what());
             m_anvilSaver.reset();
             return false;
         }
-
-        Log::Info("AnvilChunkSaver initialized for world: %s", anvilConfig.worldPath.c_str());
-        return true;
     }
 
     void AsyncChunkSaver::ShutdownAnvilSaver() {
