@@ -272,14 +272,15 @@ namespace Game {
             return nullptr;
         }
 
-        // CRITICAL: Always check cache first and return if found
+        // **CRITICAL FIX**: Always check cache first and return immediately if found
         std::shared_ptr<Chunk> chunk = TryLoadFromCache(position);
         if (chunk) {
-            Log::Debug("Chunk (%d, %d) retrieved from cache (not regenerated)", position.x, position.z);
-            return chunk;
+            // Log::Debug("Chunk (%d, %d) found in cache, returning existing chunk", position.x, position.z);
+            return chunk; // Return existing chunk - do NOT regenerate!
         }
 
-        Log::Info("Chunk (%d, %d) not in cache, attempting to load/generate", position.x, position.z);
+        // **FIX**: Only proceed with loading/generation if chunk is NOT in cache
+        Log::Debug("Chunk (%d, %d) not in cache, need to load/generate", position.x, position.z);
 
         // Performance throttling (only if not high priority)
         if (!highPriority && ShouldThrottleLoading()) {
@@ -1020,14 +1021,15 @@ namespace Game {
             return nullptr;
         }
 
-        // CRITICAL: Check if chunk is already in cache before adding
+        // **CRITICAL FIX**: Check if chunk is already in cache before adding
         if (m_chunkCache->Contains(chunk->pos)) {
-            Log::Warning("Chunk (%d, %d) already in cache, not adding duplicate", chunk->pos.x, chunk->pos.z);
-            // Return the existing chunk from cache instead
+            Log::Debug("Chunk (%d, %d) already in cache during CompleteChunkLoad, returning existing",
+                      chunk->pos.x, chunk->pos.z);
+            // Return the existing chunk from cache instead of adding duplicate
             return m_chunkCache->Get(chunk->pos);
         }
 
-        // Add to cache
+        // Add to cache only if not already present
         m_chunkCache->Put(chunk->pos, chunk);
         Log::Debug("Added chunk (%d, %d) to cache", chunk->pos.x, chunk->pos.z);
 

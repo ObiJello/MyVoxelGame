@@ -1,4 +1,4 @@
-// File: src/engine/world/World.cpp - Updated for new ChunkProvider integration
+// File: src/engine/world/World.cpp - FIXED VERSION to prevent chunk regeneration
 #include "World.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
@@ -254,49 +254,113 @@ namespace Game {
             viewDistance = m_chunkLoadingDistance;
         }
 
-        // Track newly loaded chunks to trigger mesh updates
-        std::vector<Math::ChunkPos> newlyLoadedChunks;
+        // **CORRECTED**: Use static variables to track state but allow initial loading
+        static int lastPlayerChunkX = INT_MAX; // Use INT_MAX to force initial load
+        static int lastPlayerChunkZ = INT_MAX;
+        static float lastLoadTime = -10.0f; // Start negative to allow immediate first load
+        static float currentTime = 0.0f;
+        currentTime += 0.016f; // Approximate frame time
 
-        // Load chunks in a square pattern
+        // Check if player moved to a different chunk
+        bool playerMoved = (lastPlayerChunkX == INT_MAX || lastPlayerChunkZ == INT_MAX ||
+                           std::abs(playerChunkX - lastPlayerChunkX) > 0 ||
+                           std::abs(playerChunkZ - lastPlayerChunkZ) > 0);
+
+        // Allow updates every 1 second instead of 2 seconds for more responsive loading
+        bool timeToUpdate = (currentTime - lastLoadTime) > 1.0f;
+
+        // **KEY FIX**: Always allow initial loading, then be more conservative
+        bool isInitialLoad = (lastPlayerChunkX == INT_MAX || lastPlayerChunkZ == INT_MAX);
+
+        if (!isInitialLoad && !playerMoved && !timeToUpdate) {
+            // Log::Debug("Skipping chunk update - no movement and not time yet");
+            return; // Skip this update to prevent continuous loading
+        }
+
+        if (isInitialLoad) {
+            Log::Info("Initial chunk loading for player at (%d, %d)", playerChunkX, playerChunkZ);
+        } else if (playerMoved) {
+            Log::Debug("Player moved to chunk (%d, %d), updating chunks", playerChunkX, playerChunkZ);
+        } else {
+            Log::Debug("Periodic chunk update (timer-based)");
+        }
+
+        // Track which chunks we need to consider
+        std::vector<Math::ChunkPos> chunksToCheck;
+
+        // **CORRECTED**: Check all chunks in range and load missing ones
         int halfSize = viewDistance;
-
         for (int dz = -halfSize; dz <= halfSize; ++dz) {
             for (int dx = -halfSize; dx <= halfSize; ++dx) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
-
                 Math::ChunkPos chunkPos{chunkX, chunkZ};
 
-                // CRITICAL FIX: Check if chunk is already loaded FIRST
-                bool wasLoaded = m_chunkProvider->IsChunkLoaded(chunkPos);
+                // **KEY FIX**: Only add to list if chunk is NOT already loaded
+                if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
+                    chunksToCheck.push_back(chunkPos);
+                }
+            }
+        }
 
-                if (!wasLoaded) {
-                    // Only load if not already loaded
-                    auto chunk = m_chunkProvider->GetChunk(chunkPos);
-                    if (chunk) {
-                        newlyLoadedChunks.push_back(chunkPos);
-                        Log::Info("Newly loaded chunk (%d, %d)", chunkX, chunkZ);
-                    } else {
-                        Log::Warning("Failed to load chunk (%d, %d)", chunkX, chunkZ);
+        Log::Debug("UpdateLoadedChunks: Found %zu chunks that need loading out of %d total in range",
+                  chunksToCheck.size(), (2 * halfSize + 1) * (2 * halfSize + 1));
+
+        // **CORRECTED**: More generous chunk loading for initial load, conservative for updates
+        size_t maxChunksPerFrame = isInitialLoad ? 16 : 4; // Allow more chunks on initial load
+        size_t chunksLoaded = 0;
+
+        // Sort chunks by distance for better loading order
+        glm::vec2 playerPos(playerChunkX, playerChunkZ);
+        std::sort(chunksToCheck.begin(), chunksToCheck.end(),
+                 [&playerPos](const Math::ChunkPos& a, const Math::ChunkPos& b) {
+                     float distA = glm::length(glm::vec2(a.x, a.z) - playerPos);
+                     float distB = glm::length(glm::vec2(b.x, b.z) - playerPos);
+                     return distA < distB;
+                 });
+
+        for (const auto& chunkPos : chunksToCheck) {
+            if (chunksLoaded >= maxChunksPerFrame) {
+                Log::Debug("Hit chunk loading limit for this frame (%zu/%zu chunks loaded)",
+                          chunksLoaded, chunksToCheck.size());
+                break;
+            }
+
+            // **DOUBLE-CHECK**: Make sure chunk still needs loading
+            if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
+                auto chunk = m_chunkProvider->GetChunk(chunkPos);
+                if (chunk) {
+                    Log::Debug("Successfully loaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
+
+                    // Mark all sections in this chunk for meshing (only for newly loaded chunks)
+                    if (Render::g_meshManager) {
+                        for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                            Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
+                        }
                     }
+                    chunksLoaded++;
+                } else {
+                    Log::Warning("Failed to load chunk (%d, %d)", chunkPos.x, chunkPos.z);
                 }
-                // If wasLoaded is true, do NOTHING - don't reload the chunk
+            } else {
+                // Chunk was loaded by another call, that's fine
+                Log::Debug("Chunk (%d, %d) was loaded by another call", chunkPos.x, chunkPos.z);
             }
         }
 
-        // Only mark truly NEW chunks for meshing
-        if (!newlyLoadedChunks.empty() && Render::g_meshManager) {
-            Log::Info("Marking %zu newly loaded chunks for meshing", newlyLoadedChunks.size());
-            for (const auto& chunkPos : newlyLoadedChunks) {
-                // Mark all sections in newly loaded chunks as dirty for meshing
-                for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                    Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
-                }
-            }
+        // Update tracking variables only after successful processing
+        lastPlayerChunkX = playerChunkX;
+        lastPlayerChunkZ = playerChunkZ;
+        lastLoadTime = currentTime;
+
+        // **CORRECTED**: Only unload occasionally and less aggressively
+        if (timeToUpdate && !isInitialLoad) {
+            UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 3); // Smaller buffer but still conservative
         }
 
-        // Unload distant chunks
-        UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
+        if (chunksLoaded > 0 || isInitialLoad) {
+            Log::Info("Chunk loading complete: %zu chunks loaded this frame", chunksLoaded);
+        }
     }
 
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {
@@ -435,42 +499,50 @@ namespace Game {
             return;
         }
 
-        // Get loaded chunks and find those to unload
-        std::vector<Math::ChunkPos> chunksToUnload;
-
-        // Since we don't have a direct way to get loaded chunk bounds from the new system,
-        // we'll use a different approach - get all loaded chunks and check distance
-        auto cacheState = m_chunkProvider->GetCacheStats();
+        // **FIX 6**: Make unloading less aggressive by increasing the actual distance
+        int unloadDistance = keepDistance + 4; // Give even more buffer
 
         // For now, we'll implement a simple distance-based unloading
-        // In a full implementation, you'd want to get the actual loaded chunk list
+        // Since we don't have direct access to loaded chunk list, we'll use a heuristic
 
-        // This is a placeholder - in practice, you'd need to add a method to ChunkProvider
-        // to get all loaded chunk positions
-        for (int x = centerX - keepDistance - 10; x <= centerX + keepDistance + 10; ++x) {
-            for (int z = centerZ - keepDistance - 10; z <= centerZ + keepDistance + 10; ++z) {
+        // Create a reasonable search area
+        int searchRadius = unloadDistance + 10;
+        std::vector<Math::ChunkPos> chunksToUnload;
+
+        for (int x = centerX - searchRadius; x <= centerX + searchRadius; ++x) {
+            for (int z = centerZ - searchRadius; z <= centerZ + searchRadius; ++z) {
                 Math::ChunkPos pos{x, z};
+
                 if (m_chunkProvider->IsChunkLoaded(pos)) {
                     // Calculate square distance (Chebyshev distance)
                     int distanceX = std::abs(x - centerX);
                     int distanceZ = std::abs(z - centerZ);
                     int squareDistance = std::max(distanceX, distanceZ);
 
-                    if (squareDistance > keepDistance) {
+                    if (squareDistance > unloadDistance) {
                         chunksToUnload.push_back(pos);
                     }
                 }
             }
         }
 
-        // Unload chunks outside the distance
+        // **FIX 7**: Limit unloading per frame to prevent lag
+        size_t maxUnloadsPerFrame = 2; // Very conservative
+        size_t unloaded = 0;
+
         for (const Math::ChunkPos& pos : chunksToUnload) {
-            m_chunkProvider->UnloadChunk(pos);
+            if (unloaded >= maxUnloadsPerFrame) {
+                break;
+            }
+
+            if (m_chunkProvider->UnloadChunk(pos)) {
+                unloaded++;
+            }
         }
 
-        if (!chunksToUnload.empty()) {
-            Log::Debug("Unloaded %zu distant chunks (keep distance: %d)",
-                      chunksToUnload.size(), keepDistance);
+        if (unloaded > 0) {
+            Log::Debug("Unloaded %zu distant chunks (total candidates: %zu, keep distance: %d)",
+                      unloaded, chunksToUnload.size(), keepDistance);
         }
     }
 
