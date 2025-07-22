@@ -242,26 +242,27 @@ namespace Game {
             viewDistance = m_chunkLoadingDistance;
         }
 
-        // **CORRECTED**: Use static variables to track state but allow initial loading
-        static int lastPlayerChunkX = INT_MAX; // Use INT_MAX to force initial load
-        static int lastPlayerChunkZ = INT_MAX;
+        // **FIX**: Use proper static variable initialization and tracking
+        static int lastPlayerChunkX = std::numeric_limits<int>::max(); // Sentinel value
+        static int lastPlayerChunkZ = std::numeric_limits<int>::max();
         static float lastLoadTime = -10.0f; // Start negative to allow immediate first load
         static float currentTime = 0.0f;
         currentTime += 0.016f; // Approximate frame time
 
-        // Check if player moved to a different chunk
-        bool playerMoved = (lastPlayerChunkX == INT_MAX || lastPlayerChunkZ == INT_MAX ||
-                           std::abs(playerChunkX - lastPlayerChunkX) > 0 ||
-                           std::abs(playerChunkZ - lastPlayerChunkZ) > 0);
+        // **FIX**: Proper movement detection
+        bool isInitialLoad = (lastPlayerChunkX == std::numeric_limits<int>::max());
+        bool playerMoved = false;
 
-        // Allow updates every 1 second instead of 2 seconds for more responsive loading
-        bool timeToUpdate = (currentTime - lastLoadTime) > 1.0f;
+        if (!isInitialLoad) {
+            // Only check movement if we've loaded before
+            playerMoved = (std::abs(playerChunkX - lastPlayerChunkX) > 0 ||
+                          std::abs(playerChunkZ - lastPlayerChunkZ) > 0);
+        }
 
-        // **KEY FIX**: Always allow initial loading, then be more conservative
-        bool isInitialLoad = (lastPlayerChunkX == INT_MAX || lastPlayerChunkZ == INT_MAX);
+        // Allow updates every 2 seconds for responsive loading
+        bool timeToUpdate = (currentTime - lastLoadTime) > 2.0f;
 
         if (!isInitialLoad && !playerMoved && !timeToUpdate) {
-            // Log::Debug("Skipping chunk update - no movement and not time yet");
             return; // Skip this update to prevent continuous loading
         }
 
@@ -273,10 +274,9 @@ namespace Game {
             Log::Debug("Periodic chunk update (timer-based)");
         }
 
-        // Track which chunks we need to consider
-        std::vector<Math::ChunkPos> chunksToCheck;
+        // **FIX**: Build chunks list more carefully and recheck during loading
+        std::vector<Math::ChunkPos> chunksToLoad;
 
-        // **CORRECTED**: Check all chunks in range and load missing ones
         int halfSize = viewDistance;
         for (int dz = -halfSize; dz <= halfSize; ++dz) {
             for (int dx = -halfSize; dx <= halfSize; ++dx) {
@@ -284,37 +284,38 @@ namespace Game {
                 int chunkZ = playerChunkZ + dz;
                 Math::ChunkPos chunkPos{chunkX, chunkZ};
 
-                // **KEY FIX**: Only add to list if chunk is NOT already loaded
+                // Only add to list if chunk is NOT already loaded
                 if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
-                    chunksToCheck.push_back(chunkPos);
+                    chunksToLoad.push_back(chunkPos);
                 }
             }
         }
 
         Log::Debug("UpdateLoadedChunks: Found %zu chunks that need loading out of %d total in range",
-                  chunksToCheck.size(), (2 * halfSize + 1) * (2 * halfSize + 1));
+                  chunksToLoad.size(), (2 * halfSize + 1) * (2 * halfSize + 1));
 
-        // **CORRECTED**: More generous chunk loading for initial load, conservative for updates
-        size_t maxChunksPerFrame = isInitialLoad ? 16 : 4; // Allow more chunks on initial load
+        // **FIX**: More conservative chunk loading
+        size_t maxChunksPerFrame = isInitialLoad ? 8 : 2; // Reduced from 16/4
         size_t chunksLoaded = 0;
 
         // Sort chunks by distance for better loading order
         glm::vec2 playerPos(playerChunkX, playerChunkZ);
-        std::sort(chunksToCheck.begin(), chunksToCheck.end(),
+        std::sort(chunksToLoad.begin(), chunksToLoad.end(),
                  [&playerPos](const Math::ChunkPos& a, const Math::ChunkPos& b) {
                      float distA = glm::length(glm::vec2(a.x, a.z) - playerPos);
                      float distB = glm::length(glm::vec2(b.x, b.z) - playerPos);
                      return distA < distB;
                  });
 
-        for (const auto& chunkPos : chunksToCheck) {
+        // **FIX**: Double-check each chunk before loading to prevent duplicates
+        for (const auto& chunkPos : chunksToLoad) {
             if (chunksLoaded >= maxChunksPerFrame) {
                 Log::Debug("Hit chunk loading limit for this frame (%zu/%zu chunks loaded)",
-                          chunksLoaded, chunksToCheck.size());
+                          chunksLoaded, chunksToLoad.size());
                 break;
             }
 
-            // **DOUBLE-CHECK**: Make sure chunk still needs loading
+            // **CRITICAL FIX**: Recheck if chunk is still needed (might have been loaded by another call)
             if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
                 auto chunk = m_chunkProvider->GetChunk(chunkPos);
                 if (chunk) {
@@ -331,19 +332,21 @@ namespace Game {
                     Log::Warning("Failed to load chunk (%d, %d)", chunkPos.x, chunkPos.z);
                 }
             } else {
-                // Chunk was loaded by another call, that's fine
-                Log::Debug("Chunk (%d, %d) was loaded by another call", chunkPos.x, chunkPos.z);
+                // Chunk was loaded by another call or thread - this is actually good!
+                Log::Debug("Chunk (%d, %d) was already loaded, skipping", chunkPos.x, chunkPos.z);
             }
         }
 
-        // Update tracking variables only after successful processing
-        lastPlayerChunkX = playerChunkX;
-        lastPlayerChunkZ = playerChunkZ;
+        // **FIX**: Only update tracking variables after successful processing
+        if (isInitialLoad || playerMoved) {
+            lastPlayerChunkX = playerChunkX;
+            lastPlayerChunkZ = playerChunkZ;
+        }
         lastLoadTime = currentTime;
 
-        // **CORRECTED**: Only unload occasionally and less aggressively
+        // Unload distant chunks less frequently and less aggressively
         if (timeToUpdate && !isInitialLoad) {
-            UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 3); // Smaller buffer but still conservative
+            UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 4); // More conservative buffer
         }
 
         if (chunksLoaded > 0 || isInitialLoad) {

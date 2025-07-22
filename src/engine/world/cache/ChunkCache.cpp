@@ -77,8 +77,9 @@ namespace Game {
         // Check if already exists
         auto it = m_cache.find(position);
         if (it != m_cache.end()) {
-            // IMPORTANT: Don't replace existing chunks!
-            Log::Warning("Chunk (%d, %d) already exists in cache, NOT replacing", position.x, position.z);
+            // **FIX**: Don't log this as a warning since it's normal behavior
+            // Just return early - the existing chunk should remain
+            Log::Debug("Chunk (%d, %d) already exists in cache, keeping existing", position.x, position.z);
             return; // Don't overwrite existing chunk
         }
 
@@ -87,13 +88,14 @@ namespace Game {
         m_cache.emplace(position, ChunkCacheEntry(chunk));
         m_stats.currentSize = m_cache.size();
 
-        Log::Info("Added new chunk to cache at (%d, %d), cache size: %zu",
+        Log::Debug("Added new chunk to cache at (%d, %d), cache size: %zu",
                   position.x, position.z, m_cache.size());
 
         // Hard limit eviction
         if (m_cache.size() > m_config.maxSize) {
             lock.unlock();
-            EvictLRU(m_cache.size() - m_config.maxSize);
+            size_t toEvict = m_cache.size() - m_config.maxSize;
+            EvictLRU(toEvict);
         }
     }
 
