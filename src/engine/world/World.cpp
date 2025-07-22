@@ -1,4 +1,4 @@
-// File: src/engine/world/World.cpp - FIXED VERSION to prevent chunk regeneration
+// File: src/engine/world/World.cpp - SIMPLIFIED VERSION for square chunk loading
 #include "World.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"
@@ -15,7 +15,7 @@ namespace Game {
 
     World::World() {
         LoadWorldSettings();
-        Log::Info("World created (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
+        Log::Info("World created (render distance: %d chunks)", m_renderDistance);
     }
 
     World::~World() {
@@ -24,26 +24,23 @@ namespace Game {
     }
 
     void World::Initialize() {
-        Log::Info("=== WORLD INITIALIZATION START ===");
+        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION START ===");
 
         // Load world settings from game settings
         LoadWorldSettings();
-        Log::Info("World settings loaded - chunk loading distance: %d", m_chunkLoadingDistance);
+        Log::Info("World settings loaded - render distance: %d", m_renderDistance);
 
         // Create and configure chunk provider
         ChunkProviderConfig config = CreateDefaultConfig();
-        Log::Info("Created default config");
 
-        // Configure based on world settings
-        config.maxLoadedChunks = m_chunkLoadingDistance * m_chunkLoadingDistance * 4; // Square area with buffer
-        config.enableLRUEviction = true;
+        // Configure based on world settings - square area calculation
+        int squareSize = 2 * m_renderDistance + 1;
+        config.maxLoadedChunks = squareSize * squareSize + 50; // Add buffer for loading/unloading
         config.enableFallbackGeneration = false;
-        config.enableAsyncSaving = true;
-        config.enableAutoSave = true;
-        config.autoSaveIntervalSeconds = 30.0f;
 
-        Log::Info("Config - Max chunks: %zu, Fallback generation: %s",
-                  config.maxLoadedChunks, config.enableFallbackGeneration ? "enabled" : "disabled");
+        Log::Info("Config - Max chunks: %zu for %dx%d square, Fallback generation: %s",
+                  config.maxLoadedChunks, squareSize, squareSize,
+                  config.enableFallbackGeneration ? "enabled" : "disabled");
 
         // Set up generation config
         config.generationConfig.seed = 123764;
@@ -53,13 +50,7 @@ namespace Game {
         config.generationConfig.generateStructures = true;
         config.generationConfig.generateVegetation = true;
 
-        Log::Info("Generation config - Seed: %d, Type: %s",
-                  config.generationConfig.seed, config.generationConfig.worldType.c_str());
-
         // Set up dirty tracking config
-        config.dirtyConfig.enableBatching = true;
-        config.dirtyConfig.maxBatchSize = 64;
-        config.dirtyConfig.batchTimeoutMs = 160.0f;
         config.dirtyConfig.enableNeighborInvalidation = true;
 
         // Set Minecraft world path if available
@@ -75,7 +66,6 @@ namespace Game {
             Log::Error("ChunkProviderConfig validation failed!");
             return;
         }
-        Log::Info("Config validation passed");
 
         // Create chunk provider with config
         Log::Info("Creating ChunkProvider...");
@@ -91,23 +81,15 @@ namespace Game {
         Log::Info("Initializing ChunkProvider...");
         if (!m_chunkProvider->Initialize()) {
             Log::Error("Failed to initialize ChunkProvider");
-            m_chunkProvider.reset(); // Clean up
+            m_chunkProvider.reset();
             return;
         }
-        Log::Info("ChunkProvider initialized successfully");
-
-        // Verify initialization
-        if (!m_chunkProvider->IsInitialized()) {
-            Log::Error("ChunkProvider reports not initialized after Initialize() returned true!");
-            return;
-        }
-        Log::Info("ChunkProvider initialization verified");
 
         // Set the global block access for physics system
         SetGlobalBlockAccess(this);
 
-        Log::Info("✓ World initialized successfully (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
-        Log::Info("=== WORLD INITIALIZATION COMPLETE ===");
+        Log::Info("✓ World initialized successfully (render distance: %d chunks)", m_renderDistance);
+        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION COMPLETE ===");
     }
 
     void World::Update(float deltaTime) {
@@ -131,21 +113,17 @@ namespace Game {
 
     void World::RefreshSettings() {
         LoadWorldSettings();
-        Log::Info("World settings refreshed (chunk loading distance: %d chunks)", m_chunkLoadingDistance);
+        Log::Info("World settings refreshed (render distance: %d chunks)", m_renderDistance);
     }
 
     void World::LoadWorldSettings() {
-        // Load render distance from game settings and use it for chunk loading
-        int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
-
-        // Use render distance for chunk loading, but add a buffer for smooth loading
-        m_chunkLoadingDistance = renderDistanceChunks + 2; // Load 2 extra chunks beyond render distance
+        // Load render distance from game settings
+        m_renderDistance = Platform::g_gameSettings.GetRenderDistance();
 
         // Clamp to reasonable values
-        m_chunkLoadingDistance = std::clamp(m_chunkLoadingDistance, 4, 64);
+        m_renderDistance = std::clamp(m_renderDistance, 4, 32);
 
-        Log::Debug("Loaded world settings: render distance=%d chunks, chunk loading distance=%d chunks",
-                  renderDistanceChunks, m_chunkLoadingDistance);
+        Log::Debug("Loaded world settings: render distance=%d chunks", m_renderDistance);
     }
 
     // IBlockAccess implementation
@@ -219,14 +197,6 @@ namespace Game {
         // Notify about block change
         OnBlockChanged(worldX, worldY, worldZ);
 
-        // Log block changes occasionally for debugging
-        static int changeCount = 0;
-        if (++changeCount % 100 == 0) {
-            const Block& block = BlockRegistry::Get(blockId);
-            Log::Debug("Block changes: %d (latest: %s at %d,%d,%d)",
-                      changeCount, block.name.c_str(), worldX, worldY, worldZ);
-        }
-
         return true;
     }
 
@@ -235,122 +205,77 @@ namespace Game {
             return;
         }
 
-        m_chunkLoadRequests++;
-
         // Use setting-based view distance if not provided
         if (viewDistance <= 0) {
-            viewDistance = m_chunkLoadingDistance;
+            viewDistance = m_renderDistance;
         }
 
-        // **FIX**: Use proper static variable initialization and tracking
-        static int lastPlayerChunkX = std::numeric_limits<int>::max(); // Sentinel value
-        static int lastPlayerChunkZ = std::numeric_limits<int>::max();
-        static float lastLoadTime = -10.0f; // Start negative to allow immediate first load
-        static float currentTime = 0.0f;
-        currentTime += 0.016f; // Approximate frame time
-
-        // **FIX**: Proper movement detection
-        bool isInitialLoad = (lastPlayerChunkX == std::numeric_limits<int>::max());
-        bool playerMoved = false;
-
-        if (!isInitialLoad) {
-            // Only check movement if we've loaded before
-            playerMoved = (std::abs(playerChunkX - lastPlayerChunkX) > 0 ||
-                          std::abs(playerChunkZ - lastPlayerChunkZ) > 0);
-        }
-
-        // Allow updates every 2 seconds for responsive loading
-        bool timeToUpdate = (currentTime - lastLoadTime) > 2.0f;
-
-        if (!isInitialLoad && !playerMoved && !timeToUpdate) {
-            return; // Skip this update to prevent continuous loading
-        }
-
-        if (isInitialLoad) {
-            Log::Info("Initial chunk loading for player at (%d, %d)", playerChunkX, playerChunkZ);
-        } else if (playerMoved) {
-            Log::Debug("Player moved to chunk (%d, %d), updating chunks", playerChunkX, playerChunkZ);
-        } else {
-            Log::Debug("Periodic chunk update (timer-based)");
-        }
-
-        // **FIX**: Build chunks list more carefully and recheck during loading
+        // Create list of all chunk positions in the square area
         std::vector<Math::ChunkPos> chunksToLoad;
-
-        int halfSize = viewDistance;
-        for (int dz = -halfSize; dz <= halfSize; ++dz) {
-            for (int dx = -halfSize; dx <= halfSize; ++dx) {
+        for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
+            for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
                 int chunkX = playerChunkX + dx;
                 int chunkZ = playerChunkZ + dz;
                 Math::ChunkPos chunkPos{chunkX, chunkZ};
 
-                // Only add to list if chunk is NOT already loaded
+                // Only add chunks that aren't already loaded
                 if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
                     chunksToLoad.push_back(chunkPos);
                 }
             }
         }
 
-        Log::Debug("UpdateLoadedChunks: Found %zu chunks that need loading out of %d total in range",
-                  chunksToLoad.size(), (2 * halfSize + 1) * (2 * halfSize + 1));
-
-        // **FIX**: More conservative chunk loading
-        size_t maxChunksPerFrame = isInitialLoad ? 8 : 2; // Reduced from 16/4
-        size_t chunksLoaded = 0;
-
-        // Sort chunks by distance for better loading order
-        glm::vec2 playerPos(playerChunkX, playerChunkZ);
+        // Sort chunks by distance from player (nearest first)
         std::sort(chunksToLoad.begin(), chunksToLoad.end(),
-                 [&playerPos](const Math::ChunkPos& a, const Math::ChunkPos& b) {
-                     float distA = glm::length(glm::vec2(a.x, a.z) - playerPos);
-                     float distB = glm::length(glm::vec2(b.x, b.z) - playerPos);
-                     return distA < distB;
+                 [playerChunkX, playerChunkZ](const Math::ChunkPos& a, const Math::ChunkPos& b) {
+                     // Calculate squared distance (avoid sqrt for performance)
+                     int distASq = (a.x - playerChunkX) * (a.x - playerChunkX) +
+                                   (a.z - playerChunkZ) * (a.z - playerChunkZ);
+                     int distBSq = (b.x - playerChunkX) * (b.x - playerChunkX) +
+                                   (b.z - playerChunkZ) * (b.z - playerChunkZ);
+                     return distASq < distBSq;
                  });
 
-        // **FIX**: Double-check each chunk before loading to prevent duplicates
+        Log::Debug("Loading %zu chunks in %dx%d square around player chunk (%d, %d) - nearest first",
+                  chunksToLoad.size(), 2 * viewDistance + 1, 2 * viewDistance + 1,
+                  playerChunkX, playerChunkZ);
+
+        size_t chunksLoaded = 0;
+        size_t totalChunksInArea = (2 * viewDistance + 1) * (2 * viewDistance + 1);
+        size_t chunksSkipped = totalChunksInArea - chunksToLoad.size();
+
+        // Load chunks in order of proximity to player
         for (const auto& chunkPos : chunksToLoad) {
-            if (chunksLoaded >= maxChunksPerFrame) {
-                Log::Debug("Hit chunk loading limit for this frame (%zu/%zu chunks loaded)",
-                          chunksLoaded, chunksToLoad.size());
-                break;
-            }
+            // Load the chunk
+            auto chunk = m_chunkProvider->GetChunk(chunkPos);
+            if (chunk) {
+                chunksLoaded++;
 
-            // **CRITICAL FIX**: Recheck if chunk is still needed (might have been loaded by another call)
-            if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
-                auto chunk = m_chunkProvider->GetChunk(chunkPos);
-                if (chunk) {
-                    Log::Debug("Successfully loaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
-
-                    // Mark all sections in this chunk for meshing (only for newly loaded chunks)
-                    if (Render::g_meshManager) {
-                        for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                            Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
-                        }
+                // Mark all sections in this chunk for meshing
+                if (Render::g_meshManager) {
+                    for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                        Render::g_meshManager->MarkSectionDirty(chunkPos, sectionY);
                     }
-                    chunksLoaded++;
-                } else {
-                    Log::Warning("Failed to load chunk (%d, %d)", chunkPos.x, chunkPos.z);
+                }
+
+                // Log progress for nearest chunks
+                int distanceSq = (chunkPos.x - playerChunkX) * (chunkPos.x - playerChunkX) +
+                                (chunkPos.z - playerChunkZ) * (chunkPos.z - playerChunkZ);
+                if (distanceSq <= 4) { // Within 2 chunk radius
+                    Log::Debug("Loaded nearby chunk (%d, %d) - distance: %.1f",
+                              chunkPos.x, chunkPos.z, std::sqrt(distanceSq));
                 }
             } else {
-                // Chunk was loaded by another call or thread - this is actually good!
-                Log::Debug("Chunk (%d, %d) was already loaded, skipping", chunkPos.x, chunkPos.z);
+                Log::Warning("Failed to load chunk (%d, %d)", chunkPos.x, chunkPos.z);
             }
         }
 
-        // **FIX**: Only update tracking variables after successful processing
-        if (isInitialLoad || playerMoved) {
-            lastPlayerChunkX = playerChunkX;
-            lastPlayerChunkZ = playerChunkZ;
-        }
-        lastLoadTime = currentTime;
+        // Unload chunks outside the square area
+        UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
 
-        // Unload distant chunks less frequently and less aggressively
-        if (timeToUpdate && !isInitialLoad) {
-            UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 4); // More conservative buffer
-        }
-
-        if (chunksLoaded > 0 || isInitialLoad) {
-            Log::Info("Chunk loading complete: %zu chunks loaded this frame", chunksLoaded);
+        if (chunksLoaded > 0) {
+            Log::Info("Chunk loading complete: %zu new chunks loaded, %zu already loaded (nearest-first order)",
+                     chunksLoaded, chunksSkipped);
         }
     }
 
@@ -421,13 +346,6 @@ namespace Game {
             // Also mark neighboring sections if block is on boundary
             MarkNeighboringSectionsIfNeeded(worldX, worldY, worldZ);
         }
-
-        // Calculate which section was modified for logging
-        Math::ChunkPos chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        int sectionIndex = Math::WorldCoordinates::WorldYToSectionIndex(worldY);
-
-        Log::Debug("Block changed at (%d, %d, %d) - chunk (%d, %d) section %d",
-                  worldX, worldY, worldZ, chunkPos.x, chunkPos.z, sectionIndex);
     }
 
     void World::MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ) {
@@ -490,14 +408,9 @@ namespace Game {
             return;
         }
 
-        // **FIX 6**: Make unloading less aggressive by increasing the actual distance
-        int unloadDistance = keepDistance + 4; // Give even more buffer
-
-        // For now, we'll implement a simple distance-based unloading
-        // Since we don't have direct access to loaded chunk list, we'll use a heuristic
-
+        // Simple square-based unloading
         // Create a reasonable search area
-        int searchRadius = unloadDistance + 10;
+        int searchRadius = keepDistance + 10;
         std::vector<Math::ChunkPos> chunksToUnload;
 
         for (int x = centerX - searchRadius; x <= centerX + searchRadius; ++x) {
@@ -505,27 +418,21 @@ namespace Game {
                 Math::ChunkPos pos{x, z};
 
                 if (m_chunkProvider->IsChunkLoaded(pos)) {
-                    // Calculate square distance (Chebyshev distance)
+                    // Check if outside keep distance (square pattern)
                     int distanceX = std::abs(x - centerX);
                     int distanceZ = std::abs(z - centerZ);
                     int squareDistance = std::max(distanceX, distanceZ);
 
-                    if (squareDistance > unloadDistance) {
+                    if (squareDistance > keepDistance) {
                         chunksToUnload.push_back(pos);
                     }
                 }
             }
         }
 
-        // **FIX 7**: Limit unloading per frame to prevent lag
-        size_t maxUnloadsPerFrame = 2; // Very conservative
+        // Unload chunks
         size_t unloaded = 0;
-
         for (const Math::ChunkPos& pos : chunksToUnload) {
-            if (unloaded >= maxUnloadsPerFrame) {
-                break;
-            }
-
             if (m_chunkProvider->UnloadChunk(pos)) {
                 unloaded++;
             }
@@ -587,15 +494,6 @@ namespace Game {
         }
 
         return m_chunkProvider->GetGenerationSeed();
-    }
-
-    void World::PreloadArea(int centerChunkX, int centerChunkZ, int radius) {
-        if (!m_chunkProvider) {
-            return;
-        }
-
-        Math::ChunkPos center{centerChunkX, centerChunkZ};
-        m_chunkProvider->PreloadArea(center, radius);
     }
 
     size_t World::GetMemoryUsage() const {

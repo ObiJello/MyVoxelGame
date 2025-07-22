@@ -1,4 +1,4 @@
-// File: src/engine/world/World.hpp - Updated for new ChunkProvider integration
+// File: src/engine/world/World.hpp - SIMPLIFIED VERSION
 #pragma once
 
 #include "IBlockAccess.hpp"
@@ -35,8 +35,7 @@ namespace Game {
         // World modification
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
 
-        // Chunk management (delegates to ChunkProvider)
-        // Updated: Now uses square-based loading pattern instead of radius
+        // Simplified chunk management - loads ALL chunks in square pattern
         void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance = 0);
 
         // Mesh system integration
@@ -50,8 +49,8 @@ namespace Game {
         // Get loaded chunk count for debugging
         size_t GetLoadedChunkCount() const;
 
-        // Get current chunk loading distance from settings
-        int GetChunkLoadingDistance() const { return m_chunkLoadingDistance; }
+        // Get current render distance from settings
+        int GetRenderDistance() const { return m_renderDistance; }
 
         // World bounds (from Config)
         static constexpr int MIN_Y = -64;
@@ -79,9 +78,6 @@ namespace Game {
         void SetGenerationSeed(int32_t seed);
         int32_t GetGenerationSeed() const;
 
-        // Chunk preloading
-        void PreloadArea(int centerChunkX, int centerChunkZ, int radius);
-
         // Direct access to chunk provider for advanced use cases
         ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }
 
@@ -90,7 +86,7 @@ namespace Game {
         std::string m_minecraftWorldPath;
 
         // Settings-based configuration
-        int m_chunkLoadingDistance = 10; // Will be loaded from settings
+        int m_renderDistance = 10; // Will be loaded from settings
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
@@ -105,7 +101,6 @@ namespace Game {
 
         // Statistics
         mutable size_t m_blockAccessCount = 0;
-        mutable size_t m_chunkLoadRequests = 0;
     };
 
 } // namespace Game
