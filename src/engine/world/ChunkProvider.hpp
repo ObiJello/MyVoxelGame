@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.hpp - SIMPLIFIED VERSION
+// File: src/engine/world/ChunkProvider.hpp
 #pragma once
 
 #include "Chunk.hpp"

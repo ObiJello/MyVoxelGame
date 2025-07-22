@@ -1,4 +1,4 @@
-// File: src/engine/world/World.hpp - SIMPLIFIED VERSION
+// File: src/engine/world/World.hpp
 #pragma once
 
 #include "IBlockAccess.hpp"

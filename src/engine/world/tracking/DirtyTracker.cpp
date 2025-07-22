@@ -1,4 +1,4 @@
-// File: src/engine/world/tracking/DirtyTracker.cpp - SIMPLIFIED VERSION
+// File: src/engine/world/tracking/DirtyTracker.cpp
 #include "DirtyTracker.hpp"
 #include "../../../game/WorldCoordinates.hpp"
 #include "../../../core/Log.hpp"

@@ -1,4 +1,4 @@
-// File: src/engine/world/ChunkProvider.cpp - SIMPLIFIED VERSION
+// File: src/engine/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
 #include "../../core/Log.hpp"
 #include "loading/MinecraftChunkLoaderImpl.hpp"

@@ -1,4 +1,4 @@
-// File: src/engine/world/World.cpp - SIMPLIFIED VERSION for square chunk loading
+// File: src/engine/world/World.cpp
 #include "World.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Config.hpp"

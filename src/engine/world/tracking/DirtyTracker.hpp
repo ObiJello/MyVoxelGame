@@ -1,4 +1,4 @@
-// File: src/engine/world/tracking/DirtyTracker.hpp - SIMPLIFIED VERSION
+// File: src/engine/world/tracking/DirtyTracker.hpp
 #pragma once
 
 #include "../../../game/WorldMath.hpp"

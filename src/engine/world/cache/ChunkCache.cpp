@@ -1,4 +1,4 @@
-// File: src/engine/world/cache/ChunkCache.cpp - SIMPLIFIED VERSION
+// File: src/engine/world/cache/ChunkCache.cpp
 #include "ChunkCache.hpp"
 #include "../interfaces/IChunkSaver.hpp"
 
