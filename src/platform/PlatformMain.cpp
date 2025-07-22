@@ -106,23 +106,6 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    void InitializeGameSystems() {
-        Log::Info("Initializing game systems...");
-
-        // Initialize block registries
-        Game::BlockRegistry::Init();
-
-        // Use platform-specific asset path function
-        std::string modelsPath = GetAssetPath("assets/models/block");
-
-        // Load block models
-        if (!Game::BlockModelRegistry::LoadModels(modelsPath)) {
-            Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
-        }
-
-        Log::Info("✓ Game systems initialized");
-    }
-
     Shader InitializeShaders() {
         // Use platform-specific asset paths
         std::string vertPath = GetAssetPath("shaders/block.vert");
@@ -231,64 +214,6 @@ namespace PlatformMain {
         Log::Error("[GL DEBUG] %s", message);
     }
 
-    bool InitializeMinecraftSupport() {
-        Log::Info("=== MINECRAFT WORLD SUPPORT INITIALIZATION ===");
-
-        // Check for common Minecraft world locations
-        std::vector<std::string> commonPaths = {
-            "world",                    // Current directory
-            "../world",                 // Parent directory
-            "saves/New World",          // Typical save name
-            "saves/World",              // Another common name
-            std::string(getenv("HOME") ? getenv("HOME") : "") + "/Library/Application Support/minecraft/saves/New World",  // macOS Minecraft location
-            std::string(getenv("APPDATA") ? getenv("APPDATA") : "") + "/.minecraft/saves/New World",  // Windows Minecraft location
-        };
-
-        bool foundWorld = false;
-        std::string detectedWorldPath;
-
-        for (const auto& path : commonPaths) {
-            if (path.empty()) continue;
-
-            if (std::filesystem::exists(path) && std::filesystem::is_directory(path)) {
-                // Check if it looks like a Minecraft world (has level.dat)
-                std::string levelDatPath = path + "/level.dat";
-                if (std::filesystem::exists(levelDatPath)) {
-                    Log::Info("✓ Found Minecraft world: %s", path.c_str());
-                    detectedWorldPath = path;
-                    foundWorld = true;
-                    break;
-                }
-            }
-        }
-
-        if (!foundWorld) {
-            Log::Info("No Minecraft world auto-detected, will use procedural generation");
-        }
-
-        // Store the detected world path globally for use during world initialization
-        if (foundWorld) {
-            // We'll pass this to the world during initialization
-            Log::Info("Will use Minecraft world: %s", detectedWorldPath.c_str());
-        }
-
-        Log::Info("=== MINECRAFT WORLD SUPPORT READY ===");
-        return true;
-    }
-
-    std::string ProcessWorldArguments(int argc, char* argv[]) {
-        for (int i = 1; i < argc - 1; ++i) {
-            std::string arg = argv[i];
-
-            if (arg == "--world" || arg == "-w") {
-                std::string worldPath = argv[i + 1];
-                Log::Info("Using Minecraft world from command line: %s", worldPath.c_str());
-                return worldPath;
-            }
-        }
-
-        return ""; // No world argument found
-    }
 
     void UpdateMeshSystemIntegration(Game::World& world) {
         // Get dirty sections from the world's chunk provider
@@ -305,23 +230,51 @@ namespace PlatformMain {
         world.ClearDirtySections(dirtySections);
     }
 
-    int Run(int argc, char** argv) {
-        // Initialize systems
-        Log::Init();
-        Log::Info("Starting Enhanced Voxel Engine v0.2 with New Chunk System");
+    bool InitializeGameSystems(GLFWwindow* window) {
+        Log::Info("Initializing game systems...");
 
-        // Initialize game directory system (creates obeycraft folder and loads options.txt)
-        if (!Platform::InitializeGameDirectorySystem()) {
-            Log::Error("Failed to initialize game directory system");
-            return -1;
+        // Initialize block registries
+        Game::BlockRegistry::Init();
+
+        // Use platform-specific asset path function
+        std::string modelsPath = GetAssetPath("assets/models/block");
+
+        // Load block models
+        if (!Game::BlockModelRegistry::LoadModels(modelsPath)) {
+            Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
 
-        // Process world arguments and initialize Minecraft support
-        std::string worldPath = ProcessWorldArguments(argc, argv);
-        InitializeMinecraftSupport();
+        // Initialize texture systems
+        if (!InitializeTextureSystem()) {
+            Log::Error("Failed to initialize texture systems");
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return false;
+        }
 
-        // Initialize game systems BEFORE any chunk loading
-        InitializeGameSystems();
+        if (!Render::g_blockHighlight.Initialize()) {
+            Log::Error("Failed to initialize block highlight system");
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return false;
+        }
+
+        // Initialize crosshair with proper asset path
+        std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
+        if (!Render::g_crosshair.Initialize(crosshairPath)) {
+            Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
+        }
+
+        // Compile shaders
+        Shader blockShader = InitializeShaders();
+
+        Log::Info("✓ Game systems initialized");
+        return true;
+    }
+
+    int Run(int argc, char** argv) {
+        // Initialize systems
+        Log::Info("Starting Voxel Engine");
 
         // Initialize GLFW
         if (!glfwInit()) {
@@ -358,10 +311,6 @@ namespace PlatformMain {
             return -3;
         }
 
-        // Initialize input
-        Input::Init(window);
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
         // Log system info
         Log::Info("Vendor: %s", glGetString(GL_VENDOR));
         Log::Info("Renderer: %s", glGetString(GL_RENDERER));
@@ -376,30 +325,6 @@ namespace PlatformMain {
         }
     #endif
 
-        // Initialize texture systems
-        if (!InitializeTextureSystem()) {
-            Log::Error("Failed to initialize texture systems");
-            glfwDestroyWindow(window);
-            glfwTerminate();
-            return -4;
-        }
-
-        if (!Render::g_blockHighlight.Initialize()) {
-            Log::Error("Failed to initialize block highlight system");
-            glfwDestroyWindow(window);
-            glfwTerminate();
-            return -5;
-        }
-
-        // Initialize crosshair with proper asset path
-        std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
-        if (!Render::g_crosshair.Initialize(crosshairPath)) {
-            Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
-        }
-
-        // Compile shaders
-        Shader blockShader = InitializeShaders();
-
         // Setup OpenGL state
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
@@ -407,31 +332,45 @@ namespace PlatformMain {
         glFrontFace(GL_CCW);
         glfwSwapInterval(1); // VSync
 
+        // Initialize game directory system (creates obeycraft folder and loads options.txt)
+        if (!Platform::InitializeGameDirectorySystem()) {
+            Log::Error("Failed to initialize game directory system");
+            return -1;
+        }
+
+        // Initialize input
+        Input::Init(window);
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+        // Initialize game systems BEFORE any chunk loading
+        if (!InitializeGameSystems(window)) {
+            Log::Error("Failure to init");
+            return 1;
+        }
+
         // Initialize game systems
         Render::Camera camera;
-        camera.position = glm::vec3(0.0f, 97.0f, 0.0f);
+        camera.position = glm::vec3(0.0f, 67.0f, 0.0f);
         camera.physicsControlled = true;
 
-        // Create PlayerController
-        Game::PlayerController playerController;
-
-        // Initialize the world with the new chunk system
+        // Initialize the world
         Game::World world;
-
-        // Set Minecraft world path if specified
-        if (!worldPath.empty()) {
-            world.SetMinecraftWorldPath(worldPath);
-        }
 
         world.Initialize();
 
         // Set global world reference
         Game::g_world = &world;
 
+        // Create PlayerController
+        Game::PlayerController playerController;
+
+        // Set world reference for player controller
+        playerController.SetWorld(&world);
+
         // Initialize mesh system with the world
         Render::MeshManagerConfig meshConfig;
-        meshConfig.maxMeshesPerFrame = 3;        // Limit uploads per frame
-        meshConfig.maxBuildTimeMs = 8.0f;        // Max time per frame for processing
+        meshConfig.maxMeshesPerFrame = 1536;     // Limit uploads per frame
+        meshConfig.maxBuildTimeMs = 80000.0f;    // Max time per frame for processing
         meshConfig.enableAsyncBuilding = true;   // Use background threads
         meshConfig.highPriorityRadius = 64.0f;   // High priority radius
 
@@ -443,17 +382,15 @@ namespace PlatformMain {
             return -7;
         }
 
-        // Set world reference for player controller
-        playerController.SetWorld(&world);
-
         // Initialize debug system
         Debug::DebugSystem::Initialize(window);
 
         // Performance tracking
         Debug::PerformanceMetrics metrics;
-        auto frameStartTime = std::chrono::high_resolution_clock::now();
 
         Log::Info("Entering main render loop with Enhanced Chunk System");
+
+        auto frameStartTime = std::chrono::high_resolution_clock::now();
 
         // MAIN LOOP
         while (!glfwWindowShouldClose(window)) {

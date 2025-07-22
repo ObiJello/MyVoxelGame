@@ -37,7 +37,7 @@ namespace Game {
         // Configure based on world settings
         config.maxLoadedChunks = m_chunkLoadingDistance * m_chunkLoadingDistance * 4; // Square area with buffer
         config.enableLRUEviction = true;
-        config.enableFallbackGeneration = true;
+        config.enableFallbackGeneration = false;
         config.enableAsyncSaving = true;
         config.enableAutoSave = true;
         config.autoSaveIntervalSeconds = 30.0f;
@@ -46,7 +46,7 @@ namespace Game {
                   config.maxLoadedChunks, config.enableFallbackGeneration ? "enabled" : "disabled");
 
         // Set up generation config
-        config.generationConfig.seed = 12345;
+        config.generationConfig.seed = 123764;
         config.generationConfig.worldType = "default";
         config.generationConfig.generateOres = true;
         config.generationConfig.generateCaves = true;
@@ -58,8 +58,8 @@ namespace Game {
 
         // Set up dirty tracking config
         config.dirtyConfig.enableBatching = true;
-        config.dirtyConfig.maxBatchSize = 50;
-        config.dirtyConfig.batchTimeoutMs = 10.0f;
+        config.dirtyConfig.maxBatchSize = 64;
+        config.dirtyConfig.batchTimeoutMs = 160.0f;
         config.dirtyConfig.enableNeighborInvalidation = true;
 
         // Set Minecraft world path if available
@@ -114,18 +114,6 @@ namespace Game {
         // Update chunk provider
         if (m_chunkProvider) {
             m_chunkProvider->Update(deltaTime);
-        }
-
-        // Log statistics occasionally
-        static float logTimer = 0.0f;
-        logTimer += deltaTime;
-        if (logTimer >= 5.0f) { // Every 5 seconds
-            size_t loadedChunks = GetLoadedChunkCount();
-            if (loadedChunks > 0) {
-                Log::Debug("World stats: %zu chunks loaded, %zu block accesses",
-                          loadedChunks, m_blockAccessCount);
-            }
-            logTimer = 0.0f;
         }
     }
 

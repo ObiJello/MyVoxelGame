@@ -71,7 +71,7 @@ namespace Game {
             }
             Log::Info("ChunkCache created");
 
-            // Create chunk generator (ALWAYS create this as fallback)
+            // Create chunk generator
             Log::Info("Creating ProceduralChunkGenerator...");
             m_chunkGenerator = std::make_unique<ProceduralChunkGenerator>(m_config.generationConfig);
             if (!m_chunkGenerator) {
@@ -280,7 +280,7 @@ namespace Game {
         }
 
         // **FIX**: Only proceed with loading/generation if chunk is NOT in cache
-        Log::Debug("Chunk (%d, %d) not in cache, need to load/generate", position.x, position.z);
+        //Log::Debug("Chunk (%d, %d) not in cache, need to load/generate", position.x, position.z);
 
         // Performance throttling (only if not high priority)
         if (!highPriority && ShouldThrottleLoading()) {
@@ -346,9 +346,9 @@ namespace Game {
         bool inCache = m_chunkCache->Contains(position);
 
         if (inCache) {
-            Log::Debug("Chunk (%d, %d) found in cache", position.x, position.z);
+            //Log::Debug("Chunk (%d, %d) found in cache", position.x, position.z);
         } else {
-            Log::Debug("Chunk (%d, %d) NOT in cache", position.x, position.z);
+            //Log::Debug("Chunk (%d, %d) NOT in cache", position.x, position.z);
         }
 
         return inCache;
@@ -1401,12 +1401,12 @@ namespace Game {
         ChunkProviderConfig config;
         config.maxLoadedChunks = 1024;
         config.enableLRUEviction = true;
-        config.enableFallbackGeneration = true;
+        config.enableFallbackGeneration = false;
         config.enableAsyncSaving = true;
-        config.enableAutoSave = true;
+        config.enableAutoSave = false;
         config.autoSaveIntervalSeconds = 30.0f;
-        config.maxChunksPerFrame = 4;
-        config.maxLoadTimePerFrame = 10.0f;
+        config.maxChunksPerFrame = 64;
+        config.maxLoadTimePerFrame = 160.0f;
 
         // Set up generation config
         config.generationConfig.seed = 12345;
@@ -1418,8 +1418,8 @@ namespace Game {
 
         // Set up dirty tracking config
         config.dirtyConfig.enableBatching = true;
-        config.dirtyConfig.maxBatchSize = 50;
-        config.dirtyConfig.batchTimeoutMs = 10.0f;
+        config.dirtyConfig.maxBatchSize = 100;
+        config.dirtyConfig.batchTimeoutMs = 1000.0f;
         config.dirtyConfig.enableNeighborInvalidation = true;
 
         return config;
@@ -1430,8 +1430,8 @@ namespace Game {
 
         // Optimize for performance
         config.maxLoadedChunks = 2048;           // More chunks in memory
-        config.maxChunksPerFrame = 8;            // Load more chunks per frame
-        config.maxLoadTimePerFrame = 20.0f;      // Allow more time for loading
+        config.maxChunksPerFrame = 64;            // Load more chunks per frame
+        config.maxLoadTimePerFrame = 1600.0f;      // Allow more time for loading
         config.autoSaveIntervalSeconds = 60.0f;  // Save less frequently
 
         // Faster dirty tracking

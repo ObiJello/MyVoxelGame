@@ -276,66 +276,6 @@ target_link_libraries(MyVoxelGame PRIVATE
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
 )
 
-# ── NEW: Create standalone Region Dumper tool ─────────────────────────────
-add_executable(RegionDumper
-        src/tools/RegionDumperMain.cpp
-        ${WORLD_SOURCES}
-        src/core/Log.cpp  # Need logging
-)
-
-# Link required libraries to the region dumper
-target_link_libraries(RegionDumper PRIVATE
-        ZLIB::ZLIBSTATIC
-)
-
-# Set include directories for the region dumper
-target_include_directories(RegionDumper PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/src/core
-        ${PROJECT_SOURCE_DIR}/src/world
-        ${PROJECT_SOURCE_DIR}/ext/zlib
-)
-
-# Compiler options for region dumper
-target_compile_features(RegionDumper PRIVATE cxx_std_17)
-
-if(MSVC)
-    target_compile_options(RegionDumper PRIVATE /W4)
-else()
-    target_compile_options(RegionDumper PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-
-# ── NEW: Create test executable for region dumper ─────────────────────────
-add_executable(TestRegionDumper
-        src/tests/test_region_dumper.cpp
-        ${WORLD_SOURCES}
-        src/core/Log.cpp
-        # Need logging
-)
-
-# Link required libraries to the test
-target_link_libraries(TestRegionDumper PRIVATE
-        ZLIB::ZLIBSTATIC
-)
-
-# Set include directories for the test
-target_include_directories(TestRegionDumper PRIVATE
-        ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/src/core
-        ${PROJECT_SOURCE_DIR}/src/world
-        ${PROJECT_SOURCE_DIR}/ext/zlib
-)
-
-# Compiler options for test
-target_compile_features(TestRegionDumper PRIVATE cxx_std_17)
-
-if(MSVC)
-    target_compile_options(TestRegionDumper PRIVATE /W4)
-else()
-    target_compile_options(TestRegionDumper PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-# ────────────────────────────────────────────────────────────────────────────
-
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
 if(APPLE)
     add_custom_command(TARGET MyVoxelGame POST_BUILD
@@ -383,8 +323,6 @@ endif()
 
 # ── Optional: Install targets ──────────────────────────────────────────────
 install(TARGETS MyVoxelGame DESTINATION bin)
-install(TARGETS RegionDumper DESTINATION bin)
-install(TARGETS TestRegionDumper DESTINATION bin)
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── Optional: Print configuration summary ──────────────────────────────────────

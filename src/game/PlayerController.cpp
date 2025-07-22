@@ -23,7 +23,7 @@ namespace Game {
         inventory.InitializeDefaults();
 
         // Initialize physics at a safe spawn position
-        physics.position = glm::vec3(0.0f, 97.0f, 0.0f);
+        physics.position = glm::vec3(0.0f, 67.0f, 0.0f);
         physics.velocity = glm::vec3(0.0f);
         physics.isOnGround = false;
         physics.isSneaking = false;
@@ -51,7 +51,7 @@ namespace Game {
         // Update camera position to follow player
         UpdateCamera(camera);
 
-        // **NEW**: Update mesh system with player position
+        // Update mesh system with player position
         if (Render::g_meshManager) {
             Render::g_meshManager->SetPlayerPosition(physics.position);
         }
