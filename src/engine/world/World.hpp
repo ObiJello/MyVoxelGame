@@ -18,7 +18,6 @@ namespace Game {
 
         // Core world operations
         void Initialize();
-        void Update(float deltaTime);
         void Shutdown();
 
         // Refresh settings from game settings
@@ -43,7 +42,7 @@ namespace Game {
         bool HasDirtySections() const;
 
         // Get dirty sections for mesh rebuilding
-        std::vector<DirtySection> GetDirtySections(size_t maxCount = SIZE_MAX);
+        std::vector<DirtySection> GetDirtySections();
         void ClearDirtySections(const std::vector<DirtySection>& sections);
 
         // Get loaded chunk count for debugging

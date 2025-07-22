@@ -80,8 +80,6 @@ namespace Game {
         void Shutdown();
         bool IsInitialized() const { return m_initialized; }
 
-        void Update(float deltaTime);
-
         // === CORE CHUNK OPERATIONS ===
 
         // Get chunk (loads if necessary, returns null if not available)
@@ -116,7 +114,7 @@ namespace Game {
         void MarkChunkDirty(Math::ChunkPos chunkPos);
         void MarkBlockDirty(int worldX, int worldY, int worldZ);
 
-        std::vector<DirtySection> GetDirtySections(size_t maxCount = SIZE_MAX);
+        std::vector<DirtySection> GetDirtySections();
         std::vector<DirtySection> GetAndClearDirtySections();
         void ClearDirtySections(const std::vector<DirtySection>& sections);
 

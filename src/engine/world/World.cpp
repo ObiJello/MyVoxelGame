@@ -92,13 +92,6 @@ namespace Game {
         Log::Info("=== SIMPLIFIED WORLD INITIALIZATION COMPLETE ===");
     }
 
-    void World::Update(float deltaTime) {
-        // Update chunk provider
-        if (m_chunkProvider) {
-            m_chunkProvider->Update(deltaTime);
-        }
-    }
-
     void World::Shutdown() {
         if (m_chunkProvider) {
             m_chunkProvider->Shutdown();
@@ -445,12 +438,12 @@ namespace Game {
     }
 
     // Additional helper methods for integration with mesh system
-    std::vector<DirtySection> World::GetDirtySections(size_t maxCount) {
+    std::vector<DirtySection> World::GetDirtySections() {
         if (!m_chunkProvider) {
             return {};
         }
 
-        return m_chunkProvider->GetDirtySections(maxCount);
+        return m_chunkProvider->GetDirtySections();
     }
 
     void World::ClearDirtySections(const std::vector<DirtySection>& sections) {

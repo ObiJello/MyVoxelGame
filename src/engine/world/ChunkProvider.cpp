@@ -167,17 +167,6 @@ namespace Game {
         Log::Info("ChunkProvider shutdown complete");
     }
 
-    void ChunkProvider::Update(float deltaTime) {
-        if (!m_initialized) {
-            return;
-        }
-
-        // Update components
-        if (m_dirtyTracker) {
-            m_dirtyTracker->Update(deltaTime);
-        }
-    }
-
     // === CORE CHUNK OPERATIONS ===
 
     std::shared_ptr<Chunk> ChunkProvider::GetChunk(Math::ChunkPos position) {
@@ -344,12 +333,12 @@ namespace Game {
         }
     }
 
-    std::vector<DirtySection> ChunkProvider::GetDirtySections(size_t maxCount) {
+    std::vector<DirtySection> ChunkProvider::GetDirtySections() {
         if (!m_initialized || !m_dirtyTracker) {
             return {};
         }
 
-        return m_dirtyTracker->GetDirtySections(maxCount);
+        return m_dirtyTracker->GetDirtySections();
     }
 
     std::vector<DirtySection> ChunkProvider::GetAndClearDirtySections() {

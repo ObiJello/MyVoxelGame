@@ -124,18 +124,15 @@ namespace Game {
         return result;
     }
 
-    std::vector<DirtySection> DirtyTracker::GetDirtySections(size_t maxCount) {
-        if (maxCount == 0) {
-            return {};
-        }
+    std::vector<DirtySection> DirtyTracker::GetDirtySections() {
 
         std::lock_guard<std::mutex> lock(m_dirtyMutex);
 
         std::vector<DirtySection> result;
-        result.reserve(std::min(maxCount, m_dirtySections.size()));
+        result.reserve(m_dirtySections.size());
 
         auto it = m_dirtySections.begin();
-        for (size_t i = 0; i < maxCount && it != m_dirtySections.end(); ++i, ++it) {
+        for (size_t i = 0; i < m_dirtySections.size() && it != m_dirtySections.end(); ++i, ++it) {
             result.push_back(*it);
         }
 
@@ -233,10 +230,6 @@ namespace Game {
 
         m_initialized = false;
         Log::Info("DirtyTracker shutdown complete");
-    }
-
-    void DirtyTracker::Update(float deltaTime) {
-        // No complex processing needed in simplified version
     }
 
     // === STATISTICS ===

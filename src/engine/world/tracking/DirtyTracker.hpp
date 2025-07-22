@@ -97,7 +97,7 @@ namespace Game {
         std::vector<DirtySection> GetAndClearAllDirtySections();
 
         // Get dirty sections up to a maximum count (leaves remaining dirty)
-        std::vector<DirtySection> GetDirtySections(size_t maxCount);
+        std::vector<DirtySection> GetDirtySections();
 
         // Clear specific dirty sections
         void ClearDirtySections(const std::vector<DirtySection>& sections);
@@ -118,7 +118,6 @@ namespace Game {
 
         bool Initialize();
         void Shutdown();
-        void Update(float deltaTime);
 
         // === STATISTICS ===
 

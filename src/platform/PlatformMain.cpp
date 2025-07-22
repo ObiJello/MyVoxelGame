@@ -217,7 +217,7 @@ namespace PlatformMain {
 
     void UpdateMeshSystemIntegration(Game::World& world) {
         // Get dirty sections from the world's chunk provider
-        auto dirtySections = world.GetDirtySections(50); // Process up to 50 sections per frame
+        auto dirtySections = world.GetDirtySections();
 
         // Mark them dirty in the mesh system
         if (Render::g_meshManager) {
@@ -416,7 +416,6 @@ namespace PlatformMain {
             // Update game systems
             camera.Update(dt);
             playerController.Update(dt, camera);
-            world.Update(dt);  // Update world with new chunk system
 
             // Set player position for mesh system prioritization
             glm::vec3 playerPos = playerController.GetPhysics().position;
@@ -469,7 +468,7 @@ namespace PlatformMain {
                 }
             }
 
-            // Render chunks using the enhanced system
+            // Render chunks
             Render::RenderChunksAll(camera, frustum);
 
             // Render UI elements
