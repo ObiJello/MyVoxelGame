@@ -320,7 +320,14 @@ namespace PlatformMain {
     #ifndef NDEBUG
         if (GLAD_GL_KHR_debug) {
             glEnable(GL_DEBUG_OUTPUT);
+            glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS); // Optional but recommended for debugging
             glDebugMessageCallback(glDebugOutput, nullptr);
+
+            // Suppress all notifications
+            glDebugMessageControl(GL_DONT_CARE, // source
+                                  GL_DONT_CARE, // type
+                                  GL_DEBUG_SEVERITY_NOTIFICATION,
+                                  0, nullptr, GL_FALSE);
             Log::Info("KHR_debug enabled");
         }
     #endif
