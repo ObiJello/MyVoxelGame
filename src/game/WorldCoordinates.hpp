@@ -70,7 +70,7 @@ namespace Game::Math {
         // === CHUNK COORDINATE CONVERSIONS ===
 
         // Convert world X/Z coordinates to chunk coordinates
-        static ChunkPos WorldToChunkPos(int worldX, int worldZ) {
+        static constexpr ChunkPos WorldToChunkPos(int worldX, int worldZ) {
             return ChunkPos{
                 static_cast<int32_t>(worldX >= 0 ? worldX / CHUNK_SIZE_X : (worldX - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X),
                 static_cast<int32_t>(worldZ >= 0 ? worldZ / CHUNK_SIZE_Z : (worldZ - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z)
