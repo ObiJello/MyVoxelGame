@@ -10,7 +10,7 @@ endif()
 # ────────────────────────────────────────────────────────────────────────────
 
 # 1) Force C++17
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -78,6 +78,7 @@ target_include_directories(imgui PRIVATE
         ext/imgui
         ext/imgui/backends
         ${PROJECT_SOURCE_DIR}/ext/glm  # ADDED: GLM include for DebugSystem
+        ${PROJECT_SOURCE_DIR}/ext/zlib
         ${PROJECT_SOURCE_DIR}/src      # ADDED: Source root for Log.hpp and other headers
         ${PROJECT_SOURCE_DIR}/src/core # ADDED: Core directory for Log.hpp
         ${PROJECT_SOURCE_DIR}/src/render # ADDED: Render directory
@@ -270,7 +271,7 @@ target_link_libraries(MyVoxelGame PRIVATE
         glfw
         glad
         stb_image
-        ZLIB::ZLIBSTATIC     # static zlib
+        zlibstatic     # static zlib
         OpenAL::OpenAL       # static OpenAL
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models

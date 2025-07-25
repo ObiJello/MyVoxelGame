@@ -12,8 +12,6 @@
 #include <future>
 #include <chrono>
 
-#include "world/World.hpp"
-
 namespace Render {
 
     // Forward declarations
