@@ -20,6 +20,7 @@
 #include "../render/mesh/BlockHighlight.hpp"
 #include "../render/debug/Crosshair.hpp"
 #include "../render/atlas/AtlasBuilder.hpp"
+#include "../render/TextureAnimator.hpp"
 
 // Include world system headers
 #include "../engine/world/World.hpp"
@@ -52,6 +53,7 @@ namespace Game {
     // Global world reference for debug system
     World* g_world = nullptr;
 }
+
 
 namespace PlatformMain {
 
@@ -123,8 +125,15 @@ namespace PlatformMain {
     }
 
     bool InitializeTextureSystem() {
+        // Initialize TextureAnimator first
+        Render::g_textureAnimator = std::make_unique<Render::TextureAnimator>();
+        
         // Initialize AtlasBuilder
         Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
+        
+        // Connect the TextureAnimator to the AtlasBuilder
+        Render::g_atlasBuilder->SetTextureAnimator(Render::g_textureAnimator.get());
+        
         std::string atlasJsonPath = GetAssetPath("assets/atlases/blocks.json");
         std::string texturesPath = GetAssetPath("assets/textures");
 
@@ -132,6 +141,7 @@ namespace PlatformMain {
             Log::Warning("AtlasBuilder failed to build from JSON at %s",
                         atlasJsonPath.c_str());
             Render::g_atlasBuilder.reset();
+            Render::g_textureAnimator.reset();
             return false;
         }
         Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
@@ -425,6 +435,11 @@ namespace PlatformMain {
             // Update mesh system
             Render::UpdateMeshSystem(dt);
 
+            // Update texture animations
+            if (Render::g_textureAnimator) {
+                Render::g_textureAnimator->UpdateAnimations(dt);
+            }
+
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
 
@@ -538,6 +553,9 @@ namespace PlatformMain {
                 // Clean up global rendering resources
                 if (Render::g_atlasBuilder) {
                     Render::g_atlasBuilder.reset();
+                }
+                if (Render::g_textureAnimator) {
+                    Render::g_textureAnimator.reset();
                 }
 
                 // Clear any remaining OpenGL errors

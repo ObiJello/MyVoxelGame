@@ -1,5 +1,6 @@
 // File: src/render/atlas/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
+#include "../TextureAnimator.hpp"
 #include "../../core/Log.hpp"
 #include <filesystem>
 #include <fstream>
@@ -25,7 +26,8 @@ namespace Render {
         , foliageColormapID(0)
         , atlasWidth(DEFAULT_ATLAS_SIZE)
         , atlasHeight(DEFAULT_ATLAS_SIZE)
-    , mipmapEnabled(false) {  // **NEW**: Default to mipmaps enabled
+        , mipmapEnabled(false)
+        , textureAnimator(nullptr) {
     }
 
     AtlasBuilder::~AtlasBuilder() {
@@ -290,27 +292,55 @@ namespace Render {
         size_t failedCount = 0;
 
         for (auto& source : sources) {
-            if (LoadPNG(source.path, source.width, source.height, source.data)) {
-                loadedCount++;
-
-                // Log every 100th texture to avoid spam
-                if (loadedCount % 100 == 0) {
-                    Log::Debug("Loaded %zu textures...", loadedCount);
+            // Check for .mcmeta file first
+            std::string mcmetaPath = source.path + ".mcmeta";
+            TextureAnimation animation;
+            std::vector<std::vector<unsigned char>> animationFrames;
+            
+            bool hasAnimation = ParseMcMetaFile(mcmetaPath, animation);
+            bool isAnimatedTexture = false;
+            
+            if (hasAnimation) {
+                // Try to load as animated texture
+                if (LoadAnimatedTexture(source.path, source, animation, animationFrames)) {
+                    isAnimatedTexture = true;
+                    loadedCount++;
+                    
+                    // Store animation data for later registration
+                    PendingAnimation pending;
+                    pending.textureKey = source.key;
+                    pending.animation = animation;
+                    pending.frames = animationFrames;
+                    pendingAnimations.push_back(pending);
+                    
+                    Log::Debug("Found animated texture: %s", source.key.c_str());
                 }
-            } else {
-                Log::Warning("Failed to load texture: %s", source.path.c_str());
-                failedCount++;
+            }
+            
+            // If not animated or animation loading failed, load as regular texture
+            if (!isAnimatedTexture) {
+                if (LoadPNG(source.path, source.width, source.height, source.data)) {
+                    loadedCount++;
+                } else {
+                    Log::Warning("Failed to load texture: %s", source.path.c_str());
+                    failedCount++;
 
-                // Create a magenta error texture
-                source.width = 16;
-                source.height = 16;
-                source.data.resize(16 * 16 * 4);
-                for (int i = 0; i < 16 * 16; ++i) {
-                    source.data[i * 4 + 0] = 255; // R
-                    source.data[i * 4 + 1] = 0;   // G
-                    source.data[i * 4 + 2] = 255; // B
-                    source.data[i * 4 + 3] = 255; // A
+                    // Create a magenta error texture
+                    source.width = 16;
+                    source.height = 16;
+                    source.data.resize(16 * 16 * 4);
+                    for (int i = 0; i < 16 * 16; ++i) {
+                        source.data[i * 4 + 0] = 255; // R
+                        source.data[i * 4 + 1] = 0;   // G
+                        source.data[i * 4 + 2] = 255; // B
+                        source.data[i * 4 + 3] = 255; // A
+                    }
                 }
+            }
+
+            // Log every 100th texture to avoid spam
+            if (loadedCount % 100 == 0) {
+                Log::Debug("Loaded %zu textures...", loadedCount);
             }
         }
 
@@ -494,6 +524,36 @@ namespace Render {
         Log::Info("✓ Created atlas texture ID %u (%dx%d, mipmaps: %s)",
                  atlasTextureID, atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
 
+        // **NEW**: Register pending animations with texture animator
+        if (textureAnimator && !pendingAnimations.empty()) {
+            textureAnimator->Initialize(atlasTextureID);
+            
+            for (const auto& pending : pendingAnimations) {
+                // Find atlas position for this texture
+                auto uvIt = textureKeyToUV.find(pending.textureKey);
+                if (uvIt != textureKeyToUV.end()) {
+                    const AtlasUVRect& uvRect = uvIt->second;
+                    
+                    // Convert UV coordinates back to pixel coordinates
+                    int atlasX = static_cast<int>(uvRect.uvMin.x * atlasWidth);
+                    int atlasY = static_cast<int>(uvRect.uvMin.y * atlasHeight);
+                    
+                    // Register animated texture
+                    textureAnimator->RegisterAnimatedTexture(
+                        pending.textureKey,
+                        pending.animation,
+                        pending.frames,
+                        atlasX, atlasY
+                    );
+                    
+                    Log::Debug("Registered animated texture: %s at atlas pos (%d,%d)",
+                              pending.textureKey.c_str(), atlasX, atlasY);
+                }
+            }
+            
+            Log::Info("✓ Registered %zu animated textures", pendingAnimations.size());
+        }
+
         return true;
     }
 
@@ -603,6 +663,126 @@ namespace Render {
             Log::Error("Failed to save atlas debug image");
             return false;
         }
+    }
+
+    // **NEW**: Animation support methods
+    void AtlasBuilder::SetTextureAnimator(TextureAnimator* animator) {
+        textureAnimator = animator;
+        if (textureAnimator && atlasTextureID != 0) {
+            textureAnimator->Initialize(atlasTextureID);
+        }
+    }
+
+    bool AtlasBuilder::ParseMcMetaFile(const std::string& mcmetaPath, TextureAnimation& animation) {
+        if (!std::filesystem::exists(mcmetaPath)) {
+            return false;
+        }
+
+        std::ifstream file(mcmetaPath);
+        if (!file.is_open()) {
+            return false;
+        }
+
+        nlohmann::json mcmeta;
+        try {
+            file >> mcmeta;
+        } catch (const nlohmann::json::exception& e) {
+            Log::Warning("Failed to parse .mcmeta file %s: %s", mcmetaPath.c_str(), e.what());
+            return false;
+        }
+
+        // Check for animation section
+        if (!mcmeta.contains("animation")) {
+            return false;
+        }
+
+        const auto& animData = mcmeta["animation"];
+
+        // Parse frametime (default 1)
+        animation.frametime = animData.value("frametime", 1);
+
+        // Parse interpolate flag (default false)
+        animation.interpolate = animData.value("interpolate", false);
+
+        // Parse custom frame sequence if present
+        if (animData.contains("frames") && animData["frames"].is_array()) {
+            animation.frames.clear();
+            for (const auto& frame : animData["frames"]) {
+                if (frame.is_number_integer()) {
+                    animation.frames.push_back(frame.get<int>());
+                } else if (frame.is_object() && frame.contains("index")) {
+                    // Frame object with index and optional time
+                    animation.frames.push_back(frame["index"].get<int>());
+                    // TODO: Handle per-frame timing if needed
+                }
+            }
+        }
+
+        Log::Debug("Parsed .mcmeta: frametime=%d, interpolate=%s, custom_frames=%zu",
+                  animation.frametime, animation.interpolate ? "true" : "false",
+                  animation.frames.size());
+
+        return true;
+    }
+
+    bool AtlasBuilder::LoadAnimatedTexture(const std::string& texturePath,
+                                         TextureSource& source,
+                                         TextureAnimation& animation,
+                                         std::vector<std::vector<unsigned char>>& frames) {
+        
+        // First, load the full texture strip
+        int fullWidth, fullHeight;
+        std::vector<unsigned char> fullData;
+        
+        if (!LoadPNG(texturePath, fullWidth, fullHeight, fullData)) {
+            return false;
+        }
+
+        // Assume frame width is same as texture width, frames are stacked vertically
+        animation.width = fullWidth;
+        animation.height = 16; // Standard frame height
+        int totalFrames = fullHeight / animation.height;
+
+        if (totalFrames <= 1) {
+            // Not an animated texture
+            return false;
+        }
+
+        animation.frameCount = totalFrames;
+
+        // Extract each frame
+        frames.clear();
+        frames.reserve(totalFrames);
+
+        for (int frameIndex = 0; frameIndex < totalFrames; ++frameIndex) {
+            std::vector<unsigned char> frameData(animation.width * animation.height * 4);
+            
+            // Copy frame data from full texture
+            for (int y = 0; y < animation.height; ++y) {
+                for (int x = 0; x < animation.width; ++x) {
+                    int srcY = frameIndex * animation.height + y;
+                    int srcIdx = (srcY * fullWidth + x) * 4;
+                    int dstIdx = (y * animation.width + x) * 4;
+                    
+                    frameData[dstIdx + 0] = fullData[srcIdx + 0]; // R
+                    frameData[dstIdx + 1] = fullData[srcIdx + 1]; // G
+                    frameData[dstIdx + 2] = fullData[srcIdx + 2]; // B
+                    frameData[dstIdx + 3] = fullData[srcIdx + 3]; // A
+                }
+            }
+            
+            frames.push_back(frameData);
+        }
+
+        // Set up source with only the first frame (16x16)
+        source.width = animation.width;
+        source.height = animation.height;
+        source.data = frames[0]; // Use first frame for atlas
+
+        Log::Info("Loaded animated texture: %s (%d frames, %dx%d each)",
+                 texturePath.c_str(), totalFrames, animation.width, animation.height);
+
+        return true;
     }
 
 } // namespace Render

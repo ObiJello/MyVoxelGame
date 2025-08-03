@@ -6,6 +6,7 @@
 #include "../gfx/Camera.hpp"
 #include "../gfx/Frustum.hpp"
 #include "../gfx/Shader.hpp"
+#include "../TextureAnimator.hpp"
 #include <vector>
 #include <memory>
 

@@ -146,6 +146,7 @@ if(APPLE)
             src/render/mesh/ChunkMeshData.cpp
             src/render/debug/Crosshair.cpp
             src/render/atlas/AtlasBuilder.cpp
+            src/render/TextureAnimator.cpp
             src/engine/block/BlockRegistry.cpp
             src/engine/world/SectionDataUnpacker.cpp
             src/engine/world/MinecraftChunkLoader.cpp
@@ -205,6 +206,8 @@ else()
             src/render/debug/Crosshair.hpp
             src/render/atlas/AtlasBuilder.cpp
             src/render/atlas/AtlasBuilder.hpp
+            src/render/TextureAnimator.cpp
+            src/render/TextureAnimator.hpp
             src/engine/block/BlockRegistry.cpp
             src/engine/block/BlockRegistry.hpp
             src/engine/world/SectionDataUnpacker.cpp

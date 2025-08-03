@@ -9,6 +9,21 @@
 #include <glad/glad.h>
 #include <nlohmann/json.hpp>
 
+// Forward declaration for animation system
+namespace Render {
+    class TextureAnimator;
+}
+
+// Animation data structure
+struct TextureAnimation {
+    int width = 16;           // Frame width
+    int height = 16;          // Frame height 
+    int frameCount = 1;       // Total number of frames
+    int frametime = 1;        // Ticks per frame (20 ticks = 1 second)
+    bool interpolate = false; // Whether to interpolate between frames
+    std::vector<int> frames;  // Custom frame sequence (empty = use all frames in order)
+};
+
 namespace Render {
 
     // Represents a single texture source from the atlas JSON
@@ -89,6 +104,10 @@ namespace Render {
         // Debug: Save atlas to file
         bool SaveAtlasDebugImage(const std::string& outputPath) const;
 
+        // **NEW**: Animation support
+        void SetTextureAnimator(TextureAnimator* animator);
+        TextureAnimator* GetTextureAnimator() const { return textureAnimator; }
+
     private:
         // OpenGL texture IDs
         GLuint atlasTextureID;
@@ -101,6 +120,17 @@ namespace Render {
 
         // **NEW**: Mipmap state
         bool mipmapEnabled;
+
+        // **NEW**: Animation support
+        TextureAnimator* textureAnimator;
+        
+        // **NEW**: Animation data storage
+        struct PendingAnimation {
+            std::string textureKey;
+            TextureAnimation animation;
+            std::vector<std::vector<unsigned char>> frames;
+        };
+        std::vector<PendingAnimation> pendingAnimations;
 
         // Texture sources and packed data
         std::vector<TextureSource> textureSources;
@@ -160,6 +190,13 @@ namespace Render {
         // Helper: Copy texture to atlas at specified position
         void CopyTextureToAtlas(const TextureSource& source,
                                int destX, int destY);
+
+        // **NEW**: Animation helper methods
+        bool ParseMcMetaFile(const std::string& mcmetaPath, TextureAnimation& animation);
+        bool LoadAnimatedTexture(const std::string& texturePath, 
+                                TextureSource& source,
+                                TextureAnimation& animation,
+                                std::vector<std::vector<unsigned char>>& frames);
     };
 
     // Global atlas builder instance (optional - can be created as needed)
