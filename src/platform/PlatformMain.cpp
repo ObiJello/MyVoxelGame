@@ -316,22 +316,6 @@ namespace PlatformMain {
         Log::Info("Renderer: %s", glGetString(GL_RENDERER));
         Log::Info("Version: %s", glGetString(GL_VERSION));
 
-        // Setup debug output
-    #ifndef NDEBUG
-        if (GLAD_GL_KHR_debug) {
-            glEnable(GL_DEBUG_OUTPUT);
-            glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS); // Optional but recommended for debugging
-            glDebugMessageCallback(glDebugOutput, nullptr);
-
-            // Suppress all notifications
-            glDebugMessageControl(GL_DONT_CARE, // source
-                                  GL_DONT_CARE, // type
-                                  GL_DEBUG_SEVERITY_NOTIFICATION,
-                                  0, nullptr, GL_FALSE);
-            Log::Info("KHR_debug enabled");
-        }
-    #endif
-
         // Setup OpenGL state
         glEnable(GL_DEPTH_TEST);
         glEnable(GL_CULL_FACE);
@@ -428,12 +412,6 @@ namespace PlatformMain {
             glm::vec3 playerPos = playerController.GetPhysics().position;
             Render::SetMeshSystemPlayerPosition(playerPos);
 
-            // Update mesh system
-            Render::UpdateMeshSystem(dt);
-
-            // Integrate mesh system with chunk provider's dirty tracking
-            UpdateMeshSystemIntegration(world);
-
             // Get player chunk position for chunk loading
             int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
             int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
@@ -441,11 +419,18 @@ namespace PlatformMain {
             // Update chunk loading around player
             world.UpdateLoadedChunks(playerChunkX, playerChunkZ);
 
+            // Integrate mesh system with chunk provider's dirty tracking
+            UpdateMeshSystemIntegration(world);
+
+            // Update mesh system
+            Render::UpdateMeshSystem(dt);
+
             // Start debug frame
             Debug::DebugSystem::BeginFrame();
 
             // Clear and setup rendering
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
+            //glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
             // Calculate matrices

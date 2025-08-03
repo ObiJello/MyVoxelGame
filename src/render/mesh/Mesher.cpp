@@ -109,6 +109,7 @@ namespace Render {
         // Handle fluid blocks separately
         if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava) {
             FluidMeshBuilder fluidBuilder;
+            fluidBuilder.SetWorld(m_world);  // **FIXED**: Pass world reference for cross-chunk access
             fluidBuilder.BuildFluidBlock(chunk, localX, worldY, localZ, sectionY, mesh);
             return;
         }

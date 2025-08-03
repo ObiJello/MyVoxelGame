@@ -23,8 +23,6 @@ cd build && make clean && make
 
 ### Other Build Targets
 ```bash
-make RegionDumper        # Minecraft region file parser tool
-make TestRegionDumper    # Test suite for region parser
 make install            # Install binaries to system
 ```
 
@@ -78,7 +76,7 @@ MyVoxelGame is a voxel-based game engine with Minecraft world loading capabiliti
 - **External Libraries**: All bundled in `ext/` (GLFW, GLAD, GLM, ImGui, zlib, OpenAL)
 - **JSON Processing**: Uses nlohmann/json (FetchContent)
 - **Build System**: CMake with ninja/make support
-- **Platform Support**: macOS (universal binary), Windows, Linux
+- **Platform Support**: macOS (universal binary) and Windows
 
 ### Testing
 - `TestRegionDumper`: Tests Minecraft region file parsing
@@ -97,6 +95,5 @@ MyVoxelGame is a voxel-based game engine with Minecraft world loading capabiliti
 
 ### Key Configuration
 - Chunk loading distance configurable
-- Render distance separate from loading distance
 - Debug rendering options available
 - Settings system for runtime configuration changes

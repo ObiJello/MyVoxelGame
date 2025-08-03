@@ -216,10 +216,7 @@ namespace Render {
         auto startTime = std::chrono::steady_clock::now();
         int processed = 0;
 
-        // **FIX**: Increase processing limit to handle backlog faster
-        int maxProcessThisFrame = std::max(m_config.maxMeshesPerFrame * 3, 1000000); // Process up to 10 per frame
-
-        while (processed < maxProcessThisFrame) {
+        while (true) {
             // Try to get a result from the queue
             std::optional<MeshResult> result;
 
@@ -242,13 +239,6 @@ namespace Render {
             }
 
             processed++;
-
-            // **FIX**: Increase time limit for processing
-            auto currentTime = std::chrono::steady_clock::now();
-            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
-            if (elapsedMs >= m_config.maxBuildTimeMs * 2.0f) { // Double the time limit
-                break;
-            }
         }
 
         if (processed > 0) {

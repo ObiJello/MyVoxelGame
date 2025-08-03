@@ -3,13 +3,14 @@
 #include "Mesher.hpp" // For BlockFace enum
 #include "../atlas/AtlasBuilder.hpp"
 #include "../../core/Log.hpp"
+#include "../../engine/world/World.hpp" // For cross-chunk access
 #include <algorithm>
 
 #include "block/BlockRegistry.hpp"
 
 namespace Render {
 
-    FluidMeshBuilder::FluidMeshBuilder(const FluidMeshConfig& config) : m_config(config) {
+    FluidMeshBuilder::FluidMeshBuilder(const FluidMeshConfig& config) : m_config(config), m_world(nullptr) {
     }
 
     void FluidMeshBuilder::BuildFluidBlock(const Game::Chunk& chunk, int localX, int localY, int localZ,
@@ -232,7 +233,6 @@ namespace Render {
             return true;  // Always render if culling disabled
         }
 
-        // **SIMPLIFIED**: All coordinates are now consistent - no more conversion needed!
         Game::BlockID currentFluid = chunk.GetBlock(localX, worldY, localZ);
 
         // Get neighbor position
@@ -250,25 +250,50 @@ namespace Render {
         int neighborWorldY = worldY + offset.y;
         int neighborLocalZ = localZ + offset.z;
 
-        // Check bounds using the chunk's validation method
-        if (!chunk.IsValidLocalPosition(neighborLocalX, neighborWorldY, neighborLocalZ)) {
-            return true; // Assume exposed at chunk boundaries
+        Game::BlockID neighbor;
+
+        // Check if neighbor is within current chunk bounds
+        if (chunk.IsValidLocalPosition(neighborLocalX, neighborWorldY, neighborLocalZ)) {
+            // Neighbor is within chunk - use chunk's GetBlock
+            neighbor = chunk.GetBlock(neighborLocalX, neighborWorldY, neighborLocalZ);
+        } else if (m_world) {
+            // **FIXED**: Cross-chunk neighbor lookup using World
+            // Convert to world coordinates
+            int worldX = chunk.pos.x * Game::Math::CHUNK_SIZE_X + neighborLocalX;
+            int worldZ = chunk.pos.z * Game::Math::CHUNK_SIZE_Z + neighborLocalZ;
+
+            // Check world bounds
+            if (neighborWorldY < Game::Math::WorldCoordinates::MIN_WORLD_Y || 
+                neighborWorldY > Game::Math::WorldCoordinates::MAX_WORLD_Y) {
+                neighbor = Game::BlockID::Air;
+            } else {
+                // Get block from world (handles cross-chunk access)
+                neighbor = m_world->GetBlock(worldX, neighborWorldY, worldZ);
+            }
+        } else {
+            // **FALLBACK**: No world access - assume air to expose face
+            // This maintains compatibility but may show extra faces
+            static bool warned = false;
+            if (!warned) {
+                Log::Warning("FluidMeshBuilder: No world reference - cross-chunk culling disabled");
+                warned = true;
+            }
+            neighbor = Game::BlockID::Air;
         }
 
-        Game::BlockID neighbor = chunk.GetBlock(neighborLocalX, neighborWorldY, neighborLocalZ);
-
-        // Face is exposed if neighbor is AIR or NOT the same fluid type
+        // Face is exposed if neighbor is AIR
         if (neighbor == Game::BlockID::Air) {
             return true; // Always expose to air
         }
 
-        // **KEY DECISION**: Cull face if neighbor is the same fluid type
+        // Cull face if neighbor is the same fluid type
         if (IsSameFluid(neighbor, currentFluid)) {
-            return false; // ⭐ THIS SHOULD CULL THE FACE ⭐
+            return false; // Hide internal fluid-to-fluid interfaces
         }
 
-        // Expose to different blocks (including different fluid types)
-        return true;
+        // **FIXED**: Don't show side face if there's a solid block adjacent
+        // This prevents water/lava sides from showing against solid blocks
+        return false;
     }
 
     bool FluidMeshBuilder::IsFluid(Game::BlockID blockId) const {

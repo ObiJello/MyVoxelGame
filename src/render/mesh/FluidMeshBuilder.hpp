@@ -6,6 +6,10 @@
 #include "../../engine/block/Blocks.hpp"
 #include <glm/glm.hpp>
 
+namespace Game {
+    class World; // Forward declaration
+}
+
 namespace Render {
 
     // Block face enum for fluid builder (matching Mesher.hpp)
@@ -38,6 +42,9 @@ namespace Render {
     public:
         explicit FluidMeshBuilder(const FluidMeshConfig& config = FluidMeshConfig{});
 
+        // Set world reference for cross-chunk access
+        void SetWorld(Game::World* world) { m_world = world; }
+
         // Build fluid geometry for one block
         void BuildFluidBlock(const Game::Chunk& chunk, int localX, int localY, int localZ,
                            int sectionY, SectionMesh& outMesh);
@@ -51,6 +58,7 @@ namespace Render {
 
     private:
         FluidMeshConfig m_config;
+        Game::World* m_world = nullptr; // For cross-chunk block access
 
         // Core fluid meshing functions
         void AddFluidFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
