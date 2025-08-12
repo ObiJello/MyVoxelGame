@@ -58,6 +58,23 @@ namespace Network {
             return true;
         }
 
+        // Check if queue has messages without removing them
+        bool has_message() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return !m_queue.empty();
+        }
+        
+        // Peek at the front message and apply a function to it (for move-only types)
+        template<typename Func>
+        bool peek_front(Func&& func) const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_queue.empty()) {
+                return false;
+            }
+            func(m_queue.front());
+            return true;
+        }
+
         // Legacy methods for backward compatibility
         void Enqueue(T&& message) {
             try_push(std::move(message));

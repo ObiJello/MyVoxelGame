@@ -91,53 +91,76 @@ namespace Server {
     }
     
     void ServerConnection::tick() {
-        // DIAGNOSTIC: Log tick start
-        static int tickCount = 0;
-        tickCount++;
-        if (tickCount % 20 == 0) { // Log every second (20 ticks)
-            size_t queueSize = GetIncomingQueueSize();
-            if (queueSize > 0) {
-                Log::Info("[ServerConnection %u] tick() #%d - Queue has %zu packets waiting", 
-                          GetConnectionId(), tickCount, queueSize);
-            }
-        }
-        
         // Drain incoming packets queue and apply to listener
         int packetsProcessed = 0;
-        const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit only - time budget is primary control
-        const float INBOUND_PROCESS_BUDGET_MS = 0.5f;  // Time budget for processing inbound packets
+        const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit
+        
+        // State-aware budgeting (Minecraft-style)
+        float budgetMs;
+        switch (m_phase) {
+            case ConnectionPhase::HANDSHAKING:
+            case ConnectionPhase::LOGIN:
+            case ConnectionPhase::STATUS:
+                budgetMs = 5.0f;  // Generous 5ms for connection setup
+                break;
+            case ConnectionPhase::PLAY:
+                budgetMs = 1.0f;  // 1ms for normal play (increased from 0.5ms for older systems)
+                break;
+            default:
+                budgetMs = 1.0f;
+                break;
+        }
         
         auto startTime = std::chrono::steady_clock::now();
         
-        Network::IncomingPacket packet;
-        while (packetsProcessed < MAX_PACKETS_PER_TICK && TryPopIncoming(packet)) {
-            // Get packet info BEFORE any processing
-            uint8_t packetId = packet.packet ? static_cast<uint8_t>(packet.packet->getId()) : 0xFF;
-            Log::Debug("[ServerConnection %u] Dequeued packet ID 0x%02X from queue (iteration %d)", 
-                      GetConnectionId(), packetId, packetsProcessed + 1);
-            
-            // Check time budget
-            auto currentTime = std::chrono::steady_clock::now();
-            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
-            if (elapsedMs >= INBOUND_PROCESS_BUDGET_MS) {
-                Log::Debug("[ServerConnection %u] Time budget exceeded after %.2fms", GetConnectionId(), elapsedMs);
-                break;  // Time budget exceeded
+        // Peek-then-pop pattern (Minecraft-style: never lose packets)
+        while (packetsProcessed < MAX_PACKETS_PER_TICK) {
+            // Check if queue is empty
+            if (!HasIncomingPackets()) {
+                break;
             }
             
+            // Check time budget (but always process at least 1 packet to prevent starvation)
+            if (packetsProcessed > 0) {  // Already processed at least one
+                auto currentTime = std::chrono::steady_clock::now();
+                float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
+                
+                // Peek at the next packet to check if it's critical
+                bool isCritical = false;
+                PeekIncoming([&isCritical](const Network::IncomingPacket& pkt) {
+                    if (pkt.packet) {
+                        auto packetId = pkt.packet->getId();
+                        isCritical = (packetId == Network::PacketId::KeepAliveC2S ||
+                                     packetId == Network::PacketId::Disconnect ||
+                                     packetId == Network::PacketId::Handshake ||
+                                     packetId == Network::PacketId::LoginStart);
+                    }
+                });
+                
+                // Stop if over budget and not a critical packet
+                if (elapsedMs >= budgetMs && !isCritical) {
+                    Log::Debug("[ServerConnection %u] Time budget of %.1fms exceeded after %.2fms, leaving %zu packets for next tick", 
+                              GetConnectionId(), budgetMs, elapsedMs, GetIncomingQueueSize());
+                    break;
+                }
+            }
+            
+            // NOW we're committed to processing this packet, so pop it
+            Network::IncomingPacket packet;
+            if (!TryPopIncoming(packet)) {
+                // Shouldn't happen since we checked HasIncomingPackets, but be safe
+                Log::Warning("[ServerConnection %u] Failed to pop packet from non-empty queue", GetConnectionId());
+                break;
+            }
+            
+            // Process the packet
             if (packet.packet) {
-                Log::Debug("[ServerConnection %u] Packet is valid, checking listener...", GetConnectionId());
                 // Check if we need to create a listener based on the packet type
-                // This happens on server thread after I/O thread has already switched protocol state
                 if (!m_listener) {
                     if (packet.packet->getId() == Network::PacketId::Handshake) {
-                        // Handshake packet - listener will be created by setProtocolState
-                        // which is called by the HandshakePacketListener
                         m_listener = std::make_unique<HandshakePacketListener>(*this);
                     } else if (packet.packet->getId() == Network::PacketId::LoginStart && 
                                m_phase == ConnectionPhase::LOGIN) {
-                        // LoginStart arrived but no listener yet - create it
-                        Log::Debug("[ServerConnection %u] Creating LoginPacketListener for queued LoginStart", 
-                                   GetConnectionId());
                         m_listener = std::make_unique<LoginPacketListener>(*this, m_server);
                     }
                 }
@@ -149,23 +172,16 @@ namespace Server {
                             // Store listener name before apply (it might change during apply)
                             std::string listenerName = m_listener->getName();
                             
-                            Log::Debug("[ServerConnection %u] Iteration %d: Applying packet ID 0x%02X to listener %s", 
-                                      GetConnectionId(), packetsProcessed + 1, static_cast<int>(packet.packet->getId()), 
-                                      listenerName.c_str());
-                            
                             // Apply the packet - this might change m_listener!
                             c2sPacket->apply(*m_listener);
                             packetsProcessed++;
-                            Log::Debug("[ServerConnection %u] Successfully processed packet %d (ID 0x%02X)", 
-                                      GetConnectionId(), packetsProcessed, static_cast<int>(packet.packet->getId()));
                             
-                            // Log if listener changed
+                            // Log if listener changed (for debugging)
                             if (m_listener && m_listener->getName() != listenerName) {
-                                Log::Debug("[ServerConnection %u] Listener changed from %s to %s after processing packet",
-                                          GetConnectionId(), listenerName.c_str(), m_listener->getName());
+                                Log::Debug("[ServerConnection %u] Listener changed from %s to %s after packet 0x%02X",
+                                          GetConnectionId(), listenerName.c_str(), m_listener->getName(),
+                                          static_cast<int>(packet.packet->getId()));
                             }
-                        } else {
-                            Log::Warning("[ServerConnection %u] Packet is not a C2S packet (dynamic_cast failed)", GetConnectionId());
                         }
                     } catch (const std::exception& e) {
                         Log::Error("[ServerConnection %u] Exception processing packet: %s", 
@@ -176,15 +192,13 @@ namespace Server {
                                 GetConnectionId(), static_cast<int>(packet.packet->getId()), 
                                 static_cast<int>(m_phase));
                 }
-            } else {
-                Log::Warning("[ServerConnection %u] Iteration %d: Dequeued null packet from queue", 
-                            GetConnectionId(), packetsProcessed + 1);
             }
         }
         
-        if (packetsProcessed > 0) {
-            Log::Debug("[ServerConnection %u] Processed %d packets this tick", 
-                      GetConnectionId(), packetsProcessed);
+        // Log only if we processed packets or have a backlog
+        if (packetsProcessed > 0 || GetIncomingQueueSize() > 10) {
+            Log::Debug("[ServerConnection %u] Processed %d packets, %zu remaining in queue", 
+                      GetConnectionId(), packetsProcessed, GetIncomingQueueSize());
         }
         
         // Send periodic keep-alives during PLAY phase

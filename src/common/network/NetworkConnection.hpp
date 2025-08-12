@@ -85,6 +85,17 @@ namespace Network {
             return m_incomingPackets.try_pop(packet);
         }
         
+        // Check if there are incoming packets without removing them
+        bool HasIncomingPackets() const {
+            return m_incomingPackets.has_message();
+        }
+        
+        // Peek at the next incoming packet's details without removing it
+        template<typename Func>
+        bool PeekIncoming(Func&& func) const {
+            return m_incomingPackets.peek_front(std::forward<Func>(func));
+        }
+        
         // Get incoming queue stats
         size_t GetIncomingQueueSize() const { return m_incomingPackets.Size(); }
         size_t GetDroppedPacketCount() const { return m_incomingPackets.GetDroppedCount(); }
