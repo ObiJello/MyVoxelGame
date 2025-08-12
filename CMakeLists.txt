@@ -50,7 +50,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── Add Boost.Asio for networking (header-only) ────────────────────────────
-find_package(Boost 1.70 REQUIRED)
+find_package(Boost 1.70)
 if(NOT Boost_FOUND)
     # Fallback to FetchContent if Boost is not found
     FetchContent_Declare(
