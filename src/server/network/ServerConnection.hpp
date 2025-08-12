@@ -96,7 +96,7 @@ namespace Server {
         void OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) override;
         void OnConnected() override;
         void OnDisconnected() override;
-        void OnError(const boost::system::error_code& error) override;
+        void OnError(const error_code& error) override;
 
     private:
         // Connection ID (assigned on creation)

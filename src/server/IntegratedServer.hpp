@@ -6,7 +6,7 @@
 #include "common/world/math/WorldCoordinates.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/level/World.hpp"
-#include <boost/asio.hpp>
+#include "common/network/AsioInclude.hpp"
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -285,11 +285,11 @@ namespace Server {
         void LogServerState() const;
         
         // Network server
-        std::unique_ptr<boost::asio::io_context> m_ioContext;
+        std::unique_ptr<net::io_context> m_ioContext;
         std::unique_ptr<class NetworkServer> m_networkServer;
         
         // Dedicated I/O thread and work guard (Minecraft-style Netty pattern)
-        using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
+        using WorkGuard = net::executor_work_guard<net::io_context::executor_type>;
         std::unique_ptr<WorkGuard> m_ioWorkGuard;
         std::unique_ptr<std::thread> m_networkThread;
         

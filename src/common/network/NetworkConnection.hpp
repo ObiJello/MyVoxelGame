@@ -1,8 +1,7 @@
 // File: src/common/network/NetworkConnection.hpp
 #pragma once
 
-#include <boost/asio.hpp>
-#include <boost/asio/strand.hpp>
+#include "AsioInclude.hpp"
 #include <memory>
 #include <vector>
 #include <deque>
@@ -43,7 +42,7 @@ namespace Network {
     // Both client and server connections inherit from this
     class NetworkConnection : public std::enable_shared_from_this<NetworkConnection> {
     public:
-        using tcp = boost::asio::ip::tcp;
+        using tcp = net::ip::tcp;
         
         // Constructor takes ownership of socket
         explicit NetworkConnection(tcp::socket socket);
@@ -107,7 +106,7 @@ namespace Network {
         virtual void OnDisconnected() {}
         
         // Called on error
-        virtual void OnError(const boost::system::error_code& error) {}
+        virtual void OnError(const error_code& error) {}
 
         // ========================================================================
         // CONNECTION INFO
@@ -149,19 +148,19 @@ namespace Network {
         void StartRead();
         
         // Handle header read completion
-        void HandleReadHeader(const boost::system::error_code& error, size_t bytesTransferred);
+        void HandleReadHeader(const error_code& error, size_t bytesTransferred);
         
         // Handle payload read completion
-        void HandleReadPayload(const boost::system::error_code& error, size_t bytesTransferred);
+        void HandleReadPayload(const error_code& error, size_t bytesTransferred);
         
         // Process send queue
         void ProcessSendQueue();
         
         // Handle write completion
-        void HandleWrite(const boost::system::error_code& error, size_t bytesTransferred);
+        void HandleWrite(const error_code& error, size_t bytesTransferred);
         
         // Handle errors
-        void HandleError(const boost::system::error_code& error);
+        void HandleError(const error_code& error);
 
         // ========================================================================
         // VARINT ENCODING/DECODING
@@ -179,7 +178,7 @@ namespace Network {
     protected:
         // Socket and strand for thread safety
         tcp::socket m_socket;
-        boost::asio::any_io_executor m_strand;
+        net::any_io_executor m_strand;
         
         // Incoming packet queue (thread-safe, written by I/O thread, read by main thread)
         MessageQueue<IncomingPacket> m_incomingPackets{2048}; // Allow up to 2048 packets queued

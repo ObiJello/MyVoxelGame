@@ -83,7 +83,7 @@ namespace Server {
         Log::Info("Starting IntegratedServer thread...");
 
         // Create io_context and NetworkServer
-        m_ioContext = std::make_unique<boost::asio::io_context>();
+        m_ioContext = std::make_unique<net::io_context>();
         m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 25565);
         
         // Start NetworkServer on localhost
@@ -95,7 +95,7 @@ namespace Server {
         Log::Info("NetworkServer listening on 127.0.0.1:25565");
         
         // Create work guard to keep io_context alive
-        m_ioWorkGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(*m_ioContext));
+        m_ioWorkGuard = std::make_unique<WorkGuard>(net::make_work_guard(*m_ioContext));
         
         // Start dedicated network I/O thread (Minecraft-style Netty pattern)
         m_networkThread = std::make_unique<std::thread>([this]() {

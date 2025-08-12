@@ -2,7 +2,7 @@
 #pragma once
 
 #include "common/network/NetworkConnection.hpp"
-#include <boost/asio.hpp>
+#include "common/network/AsioInclude.hpp"
 #include <memory>
 #include <string>
 #include <atomic>
@@ -18,10 +18,10 @@ namespace Client {
     
     class NetworkClient {
     public:
-        using tcp = boost::asio::ip::tcp;
+        using tcp = net::ip::tcp;
         
         // Constructor
-        explicit NetworkClient(boost::asio::io_context& ioContext);
+        explicit NetworkClient(net::io_context& ioContext);
         ~NetworkClient();
         
         // Non-copyable, non-movable
@@ -114,7 +114,7 @@ namespace Client {
         // ========================================================================
 
         // Handle connection result
-        void HandleConnect(const boost::system::error_code& error);
+        void HandleConnect(const error_code& error);
         
         // Connection event handlers (called by ClientConnection)
         friend class ClientConnection;
@@ -129,7 +129,7 @@ namespace Client {
 
     private:
         // IO context
-        boost::asio::io_context& m_ioContext;
+        net::io_context& m_ioContext;
         
         // Connection
         ClientConnectionPtr m_connection;

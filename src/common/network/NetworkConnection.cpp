@@ -9,7 +9,7 @@ namespace Network {
 
     NetworkConnection::NetworkConnection(tcp::socket socket)
         : m_socket(std::move(socket))
-        , m_strand(boost::asio::make_strand(m_socket.get_executor()))
+        , m_strand(net::make_strand(m_socket.get_executor()))
         , m_connectionId(s_nextConnectionId.fetch_add(1))
         , m_name("Connection#" + std::to_string(m_connectionId))
     {
@@ -36,7 +36,7 @@ namespace Network {
         if (m_state.compare_exchange_strong(expected, ConnectionState::DISCONNECTING)) {
             Log::Info("[%s] Closing connection gracefully", m_name.c_str());
             
-            boost::system::error_code ec;
+            error_code ec;
             m_socket.shutdown(tcp::socket::shutdown_both, ec);
             m_socket.close(ec);
             
@@ -49,7 +49,7 @@ namespace Network {
         if (m_state.exchange(ConnectionState::DISCONNECTED) != ConnectionState::DISCONNECTED) {
             Log::Info("[%s] Force disconnecting", m_name.c_str());
             
-            boost::system::error_code ec;
+            error_code ec;
             m_socket.close(ec);
             
             OnDisconnected();
@@ -123,7 +123,7 @@ namespace Network {
         
         // Start async send if not already sending
         if (startSend) {
-            boost::asio::post(m_strand, [self = shared_from_this()]() {
+            net::post(m_strand, [self = shared_from_this()]() {
                 self->ProcessSendQueue();
             });
         }
@@ -144,15 +144,15 @@ namespace Network {
         m_currentPacket = RawPacket();
         
         // Start async read for VarInt length (1-5 bytes)
-        boost::asio::async_read(m_socket,
-            boost::asio::buffer(m_readBuffer.data(), 1),
-            boost::asio::bind_executor(m_strand,
-                [self = shared_from_this()](const boost::system::error_code& ec, size_t bytes) {
+        net::async_read(m_socket,
+            net::buffer(m_readBuffer.data(), 1),
+            net::bind_executor(m_strand,
+                [self = shared_from_this()](const error_code& ec, size_t bytes) {
                     self->HandleReadHeader(ec, bytes);
                 }));
     }
 
-    void NetworkConnection::HandleReadHeader(const boost::system::error_code& error, size_t bytesTransferred) {
+    void NetworkConnection::HandleReadHeader(const error_code& error, size_t bytesTransferred) {
         if (error) {
             HandleError(error);
             return;
@@ -174,10 +174,10 @@ namespace Network {
                 return;
             }
             
-            boost::asio::async_read(m_socket,
-                boost::asio::buffer(m_readBuffer.data() + m_readPos, 1),
-                boost::asio::bind_executor(m_strand,
-                    [self = shared_from_this()](const boost::system::error_code& ec, size_t bytes) {
+            net::async_read(m_socket,
+                net::buffer(m_readBuffer.data() + m_readPos, 1),
+                net::bind_executor(m_strand,
+                    [self = shared_from_this()](const error_code& ec, size_t bytes) {
                         self->HandleReadHeader(ec, bytes);
                     }));
             return;
@@ -201,15 +201,15 @@ namespace Network {
         m_currentPacket.header.length = packetLength;
         m_readingHeader = false;
         
-        boost::asio::async_read(m_socket,
-            boost::asio::buffer(m_readBuffer.data(), packetLength),
-            boost::asio::bind_executor(m_strand,
-                [self = shared_from_this()](const boost::system::error_code& ec, size_t bytes) {
+        net::async_read(m_socket,
+            net::buffer(m_readBuffer.data(), packetLength),
+            net::bind_executor(m_strand,
+                [self = shared_from_this()](const error_code& ec, size_t bytes) {
                     self->HandleReadPayload(ec, bytes);
                 }));
     }
 
-    void NetworkConnection::HandleReadPayload(const boost::system::error_code& error, size_t bytesTransferred) {
+    void NetworkConnection::HandleReadPayload(const error_code& error, size_t bytesTransferred) {
         if (error) {
             HandleError(error);
             return;
@@ -296,15 +296,15 @@ namespace Network {
         }
         
         // Async write
-        boost::asio::async_write(m_socket,
-            boost::asio::buffer(data),
-            boost::asio::bind_executor(m_strand,
-                [self = shared_from_this(), dataSize = data.size()](const boost::system::error_code& ec, size_t bytes) {
+        net::async_write(m_socket,
+            net::buffer(data),
+            net::bind_executor(m_strand,
+                [self = shared_from_this(), dataSize = data.size()](const error_code& ec, size_t bytes) {
                     self->HandleWrite(ec, bytes);
                 }));
     }
 
-    void NetworkConnection::HandleWrite(const boost::system::error_code& error, size_t bytesTransferred) {
+    void NetworkConnection::HandleWrite(const error_code& error, size_t bytesTransferred) {
         if (error) {
             HandleError(error);
             return;
@@ -316,12 +316,12 @@ namespace Network {
         ProcessSendQueue();
     }
 
-    void NetworkConnection::HandleError(const boost::system::error_code& error) {
-        if (error == boost::asio::error::eof || 
-            error == boost::asio::error::connection_reset ||
-            error == boost::asio::error::broken_pipe) {
+    void NetworkConnection::HandleError(const error_code& error) {
+        if (error == net::error::eof || 
+            error == net::error::connection_reset ||
+            error == net::error::broken_pipe) {
             Log::Info("[%s] Connection closed by peer", m_name.c_str());
-        } else if (error != boost::asio::error::operation_aborted) {
+        } else if (error != net::error::operation_aborted) {
             Log::Error("[%s] Network error: %s", m_name.c_str(), error.message().c_str());
         }
         
@@ -329,13 +329,13 @@ namespace Network {
         Disconnect();
     }
 
-    boost::asio::ip::tcp::endpoint NetworkConnection::GetRemoteEndpoint() const {
-        boost::system::error_code ec;
+    net::ip::tcp::endpoint NetworkConnection::GetRemoteEndpoint() const {
+        error_code ec;
         return m_socket.remote_endpoint(ec);
     }
 
-    boost::asio::ip::tcp::endpoint NetworkConnection::GetLocalEndpoint() const {
-        boost::system::error_code ec;
+    net::ip::tcp::endpoint NetworkConnection::GetLocalEndpoint() const {
+        error_code ec;
         return m_socket.local_endpoint(ec);
     }
 

@@ -1,7 +1,7 @@
 // File: src/client/network/NetworkIOService.hpp
 #pragma once
 
-#include <boost/asio.hpp>
+#include "common/network/AsioInclude.hpp"
 #include <thread>
 #include <memory>
 #include <atomic>
@@ -26,7 +26,7 @@ namespace Client {
         void Stop();
         
         // Get the io_context for creating sockets/connections
-        boost::asio::io_context& GetIOContext() { return m_ioContext; }
+        net::io_context& GetIOContext() { return m_ioContext; }
         
         // Check if running
         bool IsRunning() const { return m_running.load(); }
@@ -37,10 +37,10 @@ namespace Client {
         
     private:
         // The I/O context that runs on the dedicated thread
-        boost::asio::io_context m_ioContext;
+        net::io_context m_ioContext;
         
         // Work guard to keep the I/O context alive when no work
-        using WorkGuard = boost::asio::executor_work_guard<boost::asio::io_context::executor_type>;
+        using WorkGuard = net::executor_work_guard<net::io_context::executor_type>;
         std::unique_ptr<WorkGuard> m_workGuard;
         
         // The dedicated I/O thread

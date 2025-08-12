@@ -50,16 +50,36 @@ FetchContent_MakeAvailable(nlohmann_json)
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── Add Boost.Asio for networking (header-only) ────────────────────────────
-find_package(Boost 1.70)
-if(NOT Boost_FOUND)
-    # Fallback to FetchContent if Boost is not found
+# Try to find system Boost first
+find_package(Boost 1.70 QUIET)
+
+if(Boost_FOUND)
+    message(STATUS "Found system Boost: ${Boost_VERSION}")
+else()
+    message(STATUS "System Boost not found, downloading standalone Asio...")
+    
+    # Download standalone Asio which includes necessary Boost components
     FetchContent_Declare(
-            boost
-            GIT_REPOSITORY https://github.com/boostorg/boost.git
-            GIT_TAG boost-1.83.0
-            GIT_SHALLOW TRUE
+        asio
+        GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+        GIT_TAG asio-1-28-0
+        GIT_SHALLOW TRUE
     )
-    FetchContent_MakeAvailable(boost)
+    
+    FetchContent_GetProperties(asio)
+    if(NOT asio_POPULATED)
+        FetchContent_Populate(asio)
+        # Add Asio include directory (it includes its own Boost subset)
+        set(ASIO_INCLUDE_DIR ${asio_SOURCE_DIR}/asio/include)
+        # Create an interface library for Asio
+        add_library(asio INTERFACE)
+        target_include_directories(asio INTERFACE ${ASIO_INCLUDE_DIR})
+        # Define ASIO_STANDALONE to use Asio without Boost
+        target_compile_definitions(asio INTERFACE ASIO_STANDALONE)
+        # Set Boost variables for compatibility
+        set(Boost_FOUND TRUE)
+        set(Boost_INCLUDE_DIRS ${ASIO_INCLUDE_DIR})
+    endif()
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -423,6 +443,11 @@ target_include_directories(MyVoxelGame PRIVATE
         ${Boost_INCLUDE_DIRS}
 )
 
+# Add Asio or Boost includes
+if(TARGET asio)
+    target_include_directories(MyVoxelGame PRIVATE ${ASIO_INCLUDE_DIR})
+endif()
+
 # 9) Link libraries
 target_link_libraries(MyVoxelGame PRIVATE
         glfw
@@ -433,6 +458,11 @@ target_link_libraries(MyVoxelGame PRIVATE
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
 )
+
+# Link with Asio if using standalone
+if(TARGET asio)
+    target_link_libraries(MyVoxelGame PRIVATE asio)
+endif()
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
 if(APPLE)

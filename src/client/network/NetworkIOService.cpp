@@ -26,7 +26,7 @@ namespace Client {
         }
         
         // Create work guard to keep io_context alive
-        m_workGuard = std::make_unique<WorkGuard>(boost::asio::make_work_guard(m_ioContext));
+        m_workGuard = std::make_unique<WorkGuard>(net::make_work_guard(m_ioContext));
         
         // Start the I/O thread
         m_ioThread = std::make_unique<std::thread>([this]() {

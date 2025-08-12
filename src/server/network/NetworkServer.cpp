@@ -7,7 +7,7 @@
 
 namespace Server {
 
-    NetworkServer::NetworkServer(boost::asio::io_context& ioContext, uint16_t port)
+    NetworkServer::NetworkServer(net::io_context& ioContext, uint16_t port)
         : m_ioContext(ioContext)
         , m_acceptor(ioContext)
         , m_port(port)
@@ -29,7 +29,7 @@ namespace Server {
         
         try {
             // Create endpoint
-            tcp::endpoint endpoint(boost::asio::ip::make_address(bindAddress), m_port);
+            tcp::endpoint endpoint(net::ip::make_address(bindAddress), m_port);
             
             // Open acceptor
             m_acceptor.open(endpoint.protocol());
@@ -59,7 +59,7 @@ namespace Server {
         Log::Info("Stopping NetworkServer...");
         
         // Stop accepting new connections
-        boost::system::error_code ec;
+        error_code ec;
         m_acceptor.close(ec);
         
         // Disconnect all clients
@@ -91,7 +91,7 @@ namespace Server {
         auto socket = std::make_shared<tcp::socket>(m_ioContext);
         
         m_acceptor.async_accept(*socket,
-            [this, socket](const boost::system::error_code& error) {
+            [this, socket](const error_code& error) {
                 if (!error) {
                     HandleAccept(error, std::move(*socket));
                 } else if (m_running.load()) {
@@ -102,7 +102,7 @@ namespace Server {
             });
     }
 
-    void NetworkServer::HandleAccept(const boost::system::error_code& error, tcp::socket socket) {
+    void NetworkServer::HandleAccept(const error_code& error, tcp::socket socket) {
         if (error) {
             Log::Error("HandleAccept error: %s", error.message().c_str());
             StartAccept();

@@ -2,7 +2,7 @@
 #pragma once
 
 #include "common/network/NetworkConnection.hpp"
-#include <boost/asio.hpp>
+#include "common/network/AsioInclude.hpp"
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -17,10 +17,10 @@ namespace Server {
     // TCP server that accepts connections and manages ServerConnection instances
     class NetworkServer {
     public:
-        using tcp = boost::asio::ip::tcp;
+        using tcp = net::ip::tcp;
         
         // Constructor
-        explicit NetworkServer(boost::asio::io_context& ioContext, uint16_t port = 25565);
+        explicit NetworkServer(net::io_context& ioContext, uint16_t port = 25565);
         ~NetworkServer();
         
         // Non-copyable, non-movable
@@ -116,7 +116,7 @@ namespace Server {
         void StartAccept();
         
         // Handle accept completion
-        void HandleAccept(const boost::system::error_code& error, tcp::socket socket);
+        void HandleAccept(const error_code& error, tcp::socket socket);
         
         // Add connection to list
         void AddConnection(ServerConnectionPtr connection);
@@ -136,7 +136,7 @@ namespace Server {
 
     private:
         // IO context and acceptor
-        boost::asio::io_context& m_ioContext;
+        net::io_context& m_ioContext;
         tcp::acceptor m_acceptor;
         
         // Server configuration

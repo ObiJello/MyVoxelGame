@@ -9,7 +9,7 @@ namespace Client {
     // Global instance
     NetworkClient* g_networkClient = nullptr;
 
-    NetworkClient::NetworkClient(boost::asio::io_context& ioContext)
+    NetworkClient::NetworkClient(net::io_context& ioContext)
         : m_ioContext(ioContext)
         , m_resolver(ioContext)
         , m_packetHandler(std::make_shared<ClientPacketHandler>())
@@ -38,7 +38,7 @@ namespace Client {
             tcp::socket socket(m_ioContext);
             
             // Connect synchronously
-            boost::asio::connect(socket, endpoints);
+            net::connect(socket, endpoints);
             
             // Create ClientConnection
             m_connection = std::make_shared<ClientConnection>(std::move(socket), this);
@@ -81,7 +81,7 @@ namespace Client {
         
         // Resolve server address asynchronously
         m_resolver.async_resolve(host, std::to_string(port),
-            [this](const boost::system::error_code& error, tcp::resolver::results_type endpoints) {
+            [this](const error_code& error, tcp::resolver::results_type endpoints) {
                 if (error) {
                     Log::Error("NetworkClient: Failed to resolve server: %s", error.message().c_str());
                     CompleteError(error.message());
@@ -90,8 +90,8 @@ namespace Client {
                 
                 // Create socket and connect
                 auto socket = std::make_shared<tcp::socket>(m_ioContext);
-                boost::asio::async_connect(*socket, endpoints,
-                    [this, socket](const boost::system::error_code& error, const tcp::endpoint&) {
+                net::async_connect(*socket, endpoints,
+                    [this, socket](const error_code& error, const tcp::endpoint&) {
                         if (error) {
                             HandleConnect(error);
                         } else {
@@ -136,7 +136,7 @@ namespace Client {
                m_connection->IsConnected();
     }
 
-    void NetworkClient::HandleConnect(const boost::system::error_code& error) {
+    void NetworkClient::HandleConnect(const error_code& error) {
         if (error) {
             Log::Error("NetworkClient: Connection failed: %s", error.message().c_str());
             CompleteError(error.message());

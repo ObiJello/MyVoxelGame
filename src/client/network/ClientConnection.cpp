@@ -53,7 +53,7 @@ namespace Client {
         }
     }
 
-    void ClientConnection::OnError(const boost::system::error_code& error) {
+    void ClientConnection::OnError(const error_code& error) {
         Log::Error("[ClientConnection] Error: %s", error.message().c_str());
         
         if (m_client) {

@@ -79,7 +79,7 @@ namespace Server {
         }
     }
 
-    void ServerConnection::OnError(const boost::system::error_code& error) {
+    void ServerConnection::OnError(const error_code& error) {
         Log::Error("[ServerConnection %u] Error: %s", 
             GetConnectionId(), error.message().c_str());
     }
