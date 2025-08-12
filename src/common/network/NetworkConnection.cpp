@@ -284,22 +284,24 @@ namespace Network {
     }
 
     void NetworkConnection::ProcessSendQueue() {
-        std::vector<uint8_t> data;
+        // Use shared_ptr to keep data alive during async operation
+        auto data = std::make_shared<std::vector<uint8_t>>();
         {
             std::lock_guard<std::mutex> lock(m_sendMutex);
             if (m_sendQueue.empty()) {
                 m_sending = false;
                 return;
             }
-            data = std::move(m_sendQueue.front());
+            *data = std::move(m_sendQueue.front());
             m_sendQueue.pop_front();
         }
         
-        // Async write
+        // Async write - data is kept alive by the shared_ptr captured in lambda
         net::async_write(m_socket,
-            net::buffer(data),
+            net::buffer(*data),
             net::bind_executor(m_strand,
-                [self = shared_from_this(), dataSize = data.size()](const error_code& ec, size_t bytes) {
+                [self = shared_from_this(), data](const error_code& ec, size_t bytes) {
+                    // data shared_ptr keeps the buffer alive until this handler completes
                     self->HandleWrite(ec, bytes);
                 }));
     }
