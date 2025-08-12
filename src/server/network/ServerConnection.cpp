@@ -422,6 +422,10 @@ namespace Server {
             std::string formattedMessage = "<" + m_playerName + "> " + packet.message;
             auto connections = m_server->GetConnections();
             for (auto& conn : connections) {
+                // Skip disconnected connections to avoid iterator issues
+                if (!conn || conn->GetState() == ConnectionState::DISCONNECTED) {
+                    continue;
+                }
                 if (conn->IsAuthenticated()) {
                     conn->SendChatMessage(formattedMessage, 0);
                 }

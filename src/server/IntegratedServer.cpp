@@ -316,7 +316,13 @@ namespace Server {
         if (m_networkServer) {
             auto connections = m_networkServer->GetConnections();
             for (auto& conn : connections) {
+                // Skip disconnected connections to avoid iterator issues
+                if (!conn || conn->GetState() == ConnectionState::DISCONNECTED) {
+                    continue;
+                }
                 conn->tick();  // Drain incoming packets and apply to listeners
+                // Note: tick() may cause the connection to disconnect itself,
+                // but that's handled through callbacks, not during this iteration
             }
         }
         
