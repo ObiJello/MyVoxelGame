@@ -421,13 +421,21 @@ namespace Server {
         if (m_server) {
             std::string formattedMessage = "<" + m_playerName + "> " + packet.message;
             auto connections = m_server->GetConnections();
+            
+            // Create a vector of active connections to safely iterate
+            std::vector<ServerConnectionPtr> activeConnections;
             for (auto& conn : connections) {
-                // Skip disconnected connections to avoid iterator issues
-                if (!conn || conn->GetState() == Network::ConnectionState::DISCONNECTED) {
-                    continue;
+                if (conn && conn->GetState() != Network::ConnectionState::DISCONNECTED && conn->IsAuthenticated()) {
+                    activeConnections.push_back(conn);
                 }
-                if (conn->IsAuthenticated()) {
+            }
+            
+            // Now safely send to all active connections
+            for (auto& conn : activeConnections) {
+                try {
                     conn->SendChatMessage(formattedMessage, 0);
+                } catch (const std::exception& e) {
+                    Log::Warning("Failed to send chat message to connection: %s", e.what());
                 }
             }
         }

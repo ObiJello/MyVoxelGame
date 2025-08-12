@@ -314,16 +314,33 @@ namespace Server {
         // CRITICAL: Tick all connections to drain their packet queues
         // This is the Minecraft way - process packets on the server thread
         if (m_networkServer) {
+            // Get a snapshot of current connections
             auto connections = m_networkServer->GetConnections();
+            
+            // Create a separate vector to hold strong references during iteration
+            // This prevents connections from being destroyed while we're using them
+            std::vector<Server::ServerConnectionPtr> activeConnections;
+            activeConnections.reserve(connections.size());
+            
+            // Filter out null and disconnected connections
             for (auto& conn : connections) {
-                // Skip disconnected connections to avoid iterator issues
-                if (!conn || conn->GetState() == Network::ConnectionState::DISCONNECTED) {
-                    continue;
+                if (conn && conn->GetState() != Network::ConnectionState::DISCONNECTED) {
+                    activeConnections.push_back(conn);
                 }
-                conn->tick();  // Drain incoming packets and apply to listeners
-                // Note: tick() may cause the connection to disconnect itself,
-                // but that's handled through callbacks, not during this iteration
             }
+            
+            // Now tick each active connection
+            // Even if a connection disconnects itself during tick(), 
+            // our shared_ptr in activeConnections keeps it alive
+            for (auto& conn : activeConnections) {
+                try {
+                    conn->tick();  // Drain incoming packets and apply to listeners
+                } catch (const std::exception& e) {
+                    Log::Warning("Exception during connection tick: %s", e.what());
+                }
+            }
+            
+            // activeConnections will be destroyed here, releasing any disconnected connections
         }
         
         // Process the new session management system
