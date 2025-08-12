@@ -22,12 +22,6 @@ if(WIN32)
         add_compile_options(-m32)
         add_link_options(-m32)
     endif()
-    
-    # Disable iterator debugging in Debug mode to avoid crashes from iterator invalidation
-    # This is a workaround for a race condition when connections disconnect during iteration
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        add_compile_definitions(_ITERATOR_DEBUG_LEVEL=0)
-    endif()
 endif()
 
 # 2) Binaries go into bin/
