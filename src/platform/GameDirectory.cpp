@@ -1,6 +1,6 @@
 // File: src/platform/GameDirectory.cpp
 #include "GameDirectory.hpp"
-#include "../core/Log.hpp"
+#include "common/core/Log.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>

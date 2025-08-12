@@ -41,7 +41,7 @@
     - Internally subdivided into 16×16×16 “sub‐chunks” for mesh building.  
     - Mesh building jobs enqueued on `JobSystem::g_ThreadPool`.  
   - **Server Stub / Integrated Server** (to be implemented in Phase 4):  
-    - Single‐player spins up an internal server thread running at 20 TPS, communicating via loopback packets.  
+    - Single‐player spins up an internal server thread running at 20 TPS, communicating via TCP loopback packets. (Note: Vanilla Minecraft uses in-process transport; we currently use TCP loopback for simplicity; a LocalConnection path may be added later.)
     - Dedicated headless server build spawns the same code without rendering.
 - **Interactions**:
   - On startup: `PlatformMain` calls `BlockRegistry::Init()`.  
@@ -74,7 +74,8 @@
          // then queue a main‐thread task to upload to GPU
      });
      ```
-   - Worker threads run `BuildChunkMesh(...)`; once ready, they pass the mesh to the Render layer.
+   - Worker threads run `BuildChunkMesh(...)`; once ready, they pass the mesh to the Render layer. 
+   - **CRITICAL**: GPU uploads must always happen on the render thread (OpenGL context affinity).
 
 4. **Block Registry Lookups**:  
    - When generating chunk data, the world code does:  

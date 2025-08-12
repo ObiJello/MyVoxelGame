@@ -8,22 +8,21 @@ The project uses CMake with multiple build configurations:
 
 ### Quick Build Commands
 ```bash
-# Build main game executable
-cd build && make MyVoxelGame
+# Configure the build (first time)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B cmake-build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
 
-# Build using debug configuration
+# Build main game executable
+cd build && make MyVoxelGame -j$(nproc)
+
+# Build using debug configuration with ninja (faster)
 cd cmake-build-debug && ninja MyVoxelGame
 
 # Build all targets
-cd build && make all
+cd build && make all -j$(nproc)
 
 # Clean and rebuild
-cd build && make clean && make
-```
-
-### Other Build Targets
-```bash
-make install            # Install binaries to system
+cd build && make clean && make -j$(nproc)
 ```
 
 ### Running the Game
@@ -37,63 +36,91 @@ make install            # Install binaries to system
 
 ## Architecture Overview
 
-MyVoxelGame is a voxel-based game engine with Minecraft world loading capabilities. The architecture follows a layered design:
+MyVoxelGame is a Minecraft-compatible voxel engine with a client-server architecture designed for both single-player (integrated server) and future multiplayer support.
 
-### Core Systems
-- **Platform Layer** (`src/platform/`): GLFW/OpenGL abstraction, input handling, time management
-- **Core Systems** (`src/core/`): Logging, job system, configuration management  
-- **Render System** (`src/render/`): OpenGL rendering, mesh management, shaders, chunk rendering
-- **Game Logic** (`src/game/`): Player controller, inventory, world coordinates, game math
+### Three-Layer Architecture
 
-### World Engine (`src/engine/`)
-- **Block System**: Block registry, model loading, texture atlas management
-- **World Management**: Chunk loading/unloading, world coordinate system, Minecraft region file parsing
-- **Physics**: Ray casting, collision detection
-- **Mesh Generation**: Three-layer rendering pipeline (opaque, cutout, translucent)
+#### 1. Client Layer (`src/client/`)
+- **Input System**: Keyboard/mouse handling, player controller
+- **Rendering Pipeline**: 
+  - Three-pass rendering (opaque → cutout → translucent)
+  - Frustum culling for performance
+  - Chunk mesh generation and caching
+  - Block highlight and crosshair rendering
+- **Client Networking**: Connection management, packet handling
+- **Client World Management**: Receives chunks from server, manages local cache
 
-### Key Components
+#### 2. Common Layer (`src/common/`)
+Shared code between client and server:
+- **Core Systems**: Logging, job system for parallelization, configuration
+- **World Data Structures**: Chunks (16x16x384), sections (16x16x16), blocks
+- **Physics**: Ray casting, AABB collision detection  
+- **Block System**: Registry, models (JSON format), texture management
+- **Network Protocol**: Packet definitions, message queue
+- **World Generation**: Procedural terrain generation interface
 
-#### World Loading System
-- `MinecraftChunkLoader`: Loads chunks from Minecraft world files
-- `ChunkProvider`: Manages chunk loading/unloading with configurable view distances
-- `RegionFile` + `NBTParser`: Parses Minecraft region files and NBT data
+#### 3. Server Layer (`src/server/`)
+- **Integrated Server**: Runs in same process for single-player
+- **Chunk Management**: Loading/unloading, view distance, dirty tracking
+- **World Storage**: 
+  - Minecraft Anvil format support (read/write)
+  - Region file handling (.mca files)
+  - NBT parsing for Minecraft compatibility
+  - Async chunk saving
+- **Server Networking**: Client connections, packet distribution
+- **Worker Pools**: Parallel chunk loading/generation
 
-#### Rendering Pipeline
-- **Three-Layer System**: Opaque → Cutout → Translucent rendering for proper transparency
-- **Chunk Meshing**: Converts voxel data to optimized triangle meshes
-- **Frustum Culling**: Only renders visible sections for performance
-- **Block Models**: JSON-based block model system compatible with Minecraft assets
+### Key Systems
 
-#### Coordinate Systems
-- World coordinates: Global 3D positions
-- Chunk coordinates: 16x16 horizontal sections
-- Section coordinates: 16x16x16 voxel cubes (24 sections per chunk vertically)
-- Y-range: -64 to 319 (384 blocks total height)
+#### World Coordinate System
+- **World Space**: Global 3D positions
+- **Chunks**: 16x16 blocks horizontally, 384 blocks tall (-64 to 319)
+- **Sections**: 16x16x16 voxel cubes, 24 per chunk
+- **Blocks**: Individual voxels with 16-bit IDs
 
-## Development Notes
+#### Minecraft Compatibility
+- Loads existing Minecraft Java Edition worlds (1.18+)
+- Supports Anvil region format (.mca files)
+- Compatible block models and texture atlas system
+- NBT data structure parsing
+
+#### Performance Optimizations
+- **Job System**: Thread pool for parallel processing
+- **Chunk Caching**: LRU cache for loaded chunks
+- **Mesh Optimization**: Greedy meshing, face culling
+- **Frustum Culling**: Section-level visibility testing
+- **Dirty Tracking**: Only remesh modified chunks
+
+## Development Guidelines
+
+### Build Requirements
+- CMake 3.19+
+- C++20 compiler
+- Platform: macOS (universal binary), Windows, Linux
 
 ### Dependencies
-- **External Libraries**: All bundled in `ext/` (GLFW, GLAD, GLM, ImGui, zlib, OpenAL)
-- **JSON Processing**: Uses nlohmann/json (FetchContent)
-- **Build System**: CMake with ninja/make support
-- **Platform Support**: macOS (universal binary) and Windows
+All external dependencies are vendored in `ext/`:
+- GLFW (windowing)
+- GLAD (OpenGL loader)
+- GLM (math)
+- ImGui (debug UI)
+- zlib (compression)
+- OpenAL (audio)
+- STB Image (texture loading)
+- nlohmann/json (via FetchContent)
+- Boost.Asio (networking, header-only)
 
-### Testing
-- `TestRegionDumper`: Tests Minecraft region file parsing
-- No formal unit testing framework - uses manual testing approach
+### Code Organization
+- Platform-specific code isolated in `src/platform/`
+- Client-server separation enforced at directory level
+- Common code shared via `src/common/`
+- No direct file access from client code
+- Server handles all world I/O operations
 
-### Asset Management
-- Minecraft-compatible block models in `assets/models/`
-- Texture atlas building from individual textures
-- Shaders in `shaders/` directory (GLSL)
+### Testing Approach
+Manual testing with debug UI (ImGui integration). No formal unit test framework currently in place.
 
-### Performance Considerations
-- Asynchronous chunk loading system
-- Chunk mesh caching and dirty flagging
-- Frustum culling for render optimization
-- Job system for parallel processing
-
-### Key Configuration
-- Chunk loading distance configurable
-- Debug rendering options available
-- Settings system for runtime configuration changes
+### Asset Pipeline
+- Block models: JSON format in `assets/models/block/`
+- Textures: Atlas generation from individual images
+- Shaders: GLSL in `shaders/` directory

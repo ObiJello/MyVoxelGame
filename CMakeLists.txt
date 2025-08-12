@@ -49,6 +49,20 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 # ────────────────────────────────────────────────────────────────────────────
 
+# ── Add Boost.Asio for networking (header-only) ────────────────────────────
+find_package(Boost 1.70 REQUIRED)
+if(NOT Boost_FOUND)
+    # Fallback to FetchContent if Boost is not found
+    FetchContent_Declare(
+            boost
+            GIT_REPOSITORY https://github.com/boostorg/boost.git
+            GIT_TAG boost-1.83.0
+            GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(boost)
+endif()
+# ────────────────────────────────────────────────────────────────────────────
+
 # 4) ImGui
 add_library(imgui
         ext/imgui/imgui.cpp
@@ -57,32 +71,29 @@ add_library(imgui
         ext/imgui/imgui_widgets.cpp
         ext/imgui/backends/imgui_impl_glfw.cpp
         ext/imgui/backends/imgui_impl_opengl3.cpp
-        src/render/debug/DebugSystem.cpp
-        src/render/debug/DebugSystem.hpp
-        src/engine/world/interfaces/IChunkLoader.hpp
-        src/engine/world/interfaces/IChunkSaver.hpp
-        src/engine/world/interfaces/IChunkGenerator.hpp
-        src/engine/world/interfaces/INeighborProvider.hpp
-        src/engine/world/cache/ChunkCache.cpp
-        src/engine/world/cache/ChunkCache.hpp
-        src/engine/world/generation/ProceduralChunkGenerator.cpp
-        src/engine/world/generation/ProceduralChunkGenerator.hpp
-        src/engine/world/saving/AsyncChunkSaver.cpp
-        src/engine/world/saving/AsyncChunkSaver.hpp
-        src/engine/world/saving/AnvilRegionWriter.cpp
-        src/engine/world/saving/AnvilRegionWriter.hpp
-        src/engine/world/saving/AnvilChunkSaver.cpp
-        src/engine/world/saving/AnvilChunkSaver.hpp
+        src/client/renderer/debug/DebugSystem.cpp
+        src/client/renderer/debug/DebugSystem.hpp
+        src/server/world/interfaces/IChunkLoader.hpp
+        src/server/world/interfaces/IChunkSaver.hpp
+        src/common/world/gen/IChunkGenerator.hpp
+        src/server/world/interfaces/INeighborProvider.hpp
+        src/server/world/cache/ChunkCache.cpp
+        src/server/world/cache/ChunkCache.hpp
+        src/common/world/gen/ProceduralChunkGenerator.cpp
+        src/common/world/gen/ProceduralChunkGenerator.hpp
+        src/server/world/storage/AsyncChunkSaver.cpp
+        src/server/world/storage/AsyncChunkSaver.hpp
+        src/server/world/storage/AnvilRegionWriter.cpp
+        src/server/world/storage/AnvilRegionWriter.hpp
+        src/server/world/storage/AnvilChunkSaver.cpp
+        src/server/world/storage/AnvilChunkSaver.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
         ext/imgui/backends
-        ${PROJECT_SOURCE_DIR}/ext/glm  # ADDED: GLM include for DebugSystem
+        ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/zlib
-        ${PROJECT_SOURCE_DIR}/src      # ADDED: Source root for Log.hpp and other headers
-        ${PROJECT_SOURCE_DIR}/src/core # ADDED: Core directory for Log.hpp
-        ${PROJECT_SOURCE_DIR}/src/render # ADDED: Render directory
-        ${PROJECT_SOURCE_DIR}/src/game   # ADDED: Game directory
+        ${PROJECT_SOURCE_DIR}/src
 )
 
 # Link JSON library so DebugSystem can include <nlohmann/json.hpp>
@@ -111,57 +122,80 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
-# ── Define world parsing sources for region file dumper AND main executable ──────────────
-set(WORLD_SOURCES
-        src/engine/world/RegionFile.cpp
-        src/engine/world/RegionFileCache.cpp
-        src/engine/world/NBTParser.cpp
-        src/engine/world/RegionDumper.cpp
-)
-# ────────────────────────────────────────────────────────────────────────────
-
 # 6) The game executable (on macOS, it's a bundle)
 if(APPLE)
     add_executable(MyVoxelGame MACOSX_BUNDLE
             src/main.cpp
             src/platform/PlatformMain.cpp
             src/platform/Time.cpp
-            src/platform/Input.cpp
-            src/core/Log.cpp
-            src/core/JobSystem.cpp
-            src/render/gfx/Shader.cpp
-            src/engine/block/BlockModel.cpp
-            ${WORLD_SOURCES}
-            src/engine/physics/RayCast.cpp
-            src/engine/physics/Physics.cpp
-            src/game/Inventory.cpp
-            src/game/PlayerController.cpp
-            src/render/mesh/BlockHighlight.cpp
-            src/render/mesh/ChunkRenderer.cpp
-            src/render/mesh/MeshManager.cpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/Mesher.cpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/debug/Crosshair.cpp
-            src/render/atlas/AtlasBuilder.cpp
-            src/render/TextureAnimator.cpp
-            src/engine/block/BlockRegistry.cpp
-            src/engine/world/SectionDataUnpacker.cpp
-            src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/world/World.cpp
-            src/engine/world/ChunkProvider.cpp
-            src/engine/world/Chunk.cpp
-            src/engine/world/tracking/DirtyTracker.cpp
-            src/engine/world/saving/AsyncChunkSaver.cpp
-            src/engine/world/saving/AnvilRegionWriter.cpp
-            src/engine/world/saving/AnvilChunkSaver.cpp
-            src/engine/world/loading/MinecraftChunkLoaderImpl.cpp
-            src/engine/world/generation/ProceduralChunkGenerator.cpp
-            src/engine/world/cache/ChunkCache.cpp
+            src/client/input/Input.cpp
+            src/common/core/Log.cpp
+            src/common/core/JobSystem.cpp
+            src/common/core/ThreadAllocator.cpp
+            src/client/renderer/shader/Shader.cpp
+            src/common/world/block/BlockModel.cpp
+            src/server/world/storage/RegionFile.cpp
+            src/server/world/storage/RegionFileCache.cpp
+            src/server/world/storage/NBTParser.cpp
+            src/server/world/storage/RegionDumper.cpp
+            src/common/physics/RayCast.cpp
+            src/common/physics/Physics.cpp
+            src/common/entity/Inventory.cpp
+            src/client/input/PlayerController.cpp
+            src/client/renderer/mesh/BlockHighlight.cpp
+            src/client/renderer/mesh/ChunkRenderer.cpp
+            src/client/renderer/mesh/ChunkMeshData.cpp
+            src/client/renderer/mesh/FluidMeshBuilder.cpp
+            src/client/renderer/mesh/Mesher.cpp
+            src/client/renderer/debug/Crosshair.cpp
+            src/client/renderer/texture/AtlasBuilder.cpp
+            src/client/renderer/texture/TextureAnimator.cpp
+            src/common/world/block/BlockRegistry.cpp
+            src/server/world/storage/SectionDataUnpacker.cpp
+            src/server/world/storage/MinecraftChunkLoader.cpp
+            src/common/world/level/World.cpp
+            src/server/world/ChunkProvider.cpp
+            src/common/world/chunk/Chunk.cpp
+            src/server/world/tracking/DirtyTracker.cpp
+            src/server/world/storage/AsyncChunkSaver.cpp
+            src/server/world/storage/AnvilRegionWriter.cpp
+            src/server/world/storage/AnvilChunkSaver.cpp
+            src/server/world/storage/MinecraftChunkLoaderImpl.cpp
+            src/common/world/gen/ProceduralChunkGenerator.cpp
+            src/server/world/cache/ChunkCache.cpp
             src/platform/GameDirectory.cpp
-            src/game/WorldCoordinates.cpp
+            src/common/world/math/WorldCoordinates.cpp
+            # Minecraft Java Edition Architecture files
+            src/server/IntegratedServer.cpp
+            src/client/world/ClientChunkManager.cpp
+            src/client/world/PendingDiffsManager.cpp
+            src/server/world/ServerWorkerPool.cpp
+            src/client/world/ClientWorkerPool.cpp
+            src/server/world/ignore.cpp
+            src/client/renderer/mesh/ClientMeshManager.cpp
+            # Network layer
+            src/common/network/NetworkConnection.cpp
+            src/server/network/NetworkServer.cpp
+            src/server/network/ServerConnection.cpp
+            src/server/network/listeners/HandshakePacketListener.cpp
+            src/server/network/listeners/LoginPacketListener.cpp
+            src/server/network/listeners/ServerPlayPacketListener.cpp
+            
+            # New session management system
+            src/server/world/ticketing/ChunkTicketManager.cpp
+            src/server/world/watch/ChunkWatchIndex.cpp
+            src/server/world/status/ChunkStatusManager.cpp
+            src/server/network/SendScheduler.cpp
+            src/server/session/PlayerSession.cpp
+            src/server/session/PlayerSessionManager.cpp
+            
+            src/common/network/packets/HandshakeC2S.cpp
+            src/common/network/packets/LoginStartC2S.cpp
+            src/common/network/packets/KeepAliveC2S.cpp
+            src/client/network/NetworkClient.cpp
+            src/client/network/ClientConnection.cpp
+            src/client/network/NetworkIOService.cpp
+            src/client/network/ClientPacketHandler.cpp
     )
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
@@ -169,81 +203,206 @@ if(APPLE)
 else()
     add_executable(MyVoxelGame
             src/main.cpp
+            src/pch.hpp
             src/platform/PlatformMain.cpp
+            src/platform/PlatformMain.hpp
             src/platform/Time.cpp
-            src/platform/Input.cpp
-            src/core/Log.cpp
-            src/core/JobSystem.cpp
-            src/render/gfx/Shader.cpp
-            src/engine/block/BlockModel.cpp
-            ${WORLD_SOURCES}
-            src/engine/physics/RayCast.cpp
-            src/engine/physics/RayCast.hpp
-            src/engine/physics/Physics.cpp
-            src/engine/physics/Physics.hpp
-            src/game/Inventory.cpp
-            src/game/Inventory.hpp
-            src/game/PlayerController.cpp
-            src/game/PlayerController.hpp
-            src/render/mesh/BlockHighlight.hpp
-            src/render/mesh/BlockHighlight.cpp
-            src/render/mesh/ChunkRenderer.cpp
-            src/render/mesh/ChunkRenderer.hpp
-            src/render/mesh/MeshManager.cpp
-            src/render/mesh/MeshManager.hpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/mesh/ChunkMeshData.hpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/FluidMeshBuilder.hpp
-            src/render/mesh/Mesher.cpp
-            src/render/mesh/Mesher.hpp
-            src/render/mesh/SectionMesh.hpp
-            src/render/mesh/FluidMeshBuilder.cpp
-            src/render/mesh/FluidMeshBuilder.hpp
-            src/render/mesh/ChunkMeshData.cpp
-            src/render/mesh/ChunkMeshData.hpp
-            src/render/debug/Crosshair.cpp
-            src/render/debug/Crosshair.hpp
-            src/render/atlas/AtlasBuilder.cpp
-            src/render/atlas/AtlasBuilder.hpp
-            src/render/TextureAnimator.cpp
-            src/render/TextureAnimator.hpp
-            src/engine/block/BlockRegistry.cpp
-            src/engine/block/BlockRegistry.hpp
-            src/engine/world/SectionDataUnpacker.cpp
-            src/engine/world/SectionDataUnpacker.hpp
-            src/engine/world/MinecraftChunkLoader.cpp
-            src/engine/world/MinecraftChunkLoader.hpp
-            src/engine/world/IBlockAccess.hpp
-            src/engine/world/World.cpp
-            src/engine/world/World.hpp
-            src/engine/world/ChunkProvider.cpp
-            src/engine/world/ChunkProvider.hpp
-            src/engine/world/Chunk.cpp
-            src/engine/world/Chunk.hpp
-            src/engine/world/tracking/DirtyTracker.cpp
-            src/engine/world/tracking/DirtyTracker.hpp
-            src/engine/world/saving/AsyncChunkSaver.cpp
-            src/engine/world/saving/AsyncChunkSaver.hpp
-            src/engine/world/saving/AnvilRegionWriter.cpp
-            src/engine/world/saving/AnvilRegionWriter.hpp
-            src/engine/world/saving/AnvilChunkSaver.cpp
-            src/engine/world/saving/AnvilChunkSaver.hpp
-            src/engine/world/loading/MinecraftChunkLoaderImpl.cpp
-            src/engine/world/loading/MinecraftChunkLoaderImpl.hpp
-            src/engine/world/generation/ProceduralChunkGenerator.cpp
-            src/engine/world/generation/ProceduralChunkGenerator.hpp
-            src/engine/world/cache/ChunkCache.cpp
-            src/engine/world/cache/ChunkCache.hpp
-            src/engine/world/interfaces/IChunkGenerator.hpp
-            src/engine/world/interfaces/IChunkLoader.hpp
-            src/engine/world/interfaces/IChunkSaver.hpp
-            src/engine/world/interfaces/INeighborProvider.hpp
-            src/engine/world/WorldGlobals.hpp
+            src/platform/Time.hpp
             src/platform/GameDirectory.cpp
             src/platform/GameDirectory.hpp
-            src/game/WorldCoordinates.hpp
-            src/game/WorldCoordinates.cpp
+
+            # Core systems
+            src/common/core/Log.cpp
+            src/common/core/Log.hpp
+            src/common/core/JobSystem.cpp
+            src/common/core/JobSystem.hpp
+            src/common/core/Config.hpp
+
+            # Client input
+            src/client/input/Input.cpp
+            src/client/input/Input.hpp
+            src/client/input/PlayerController.cpp
+            src/client/input/PlayerController.hpp
+
+            # Client rendering - Shader
+            src/client/renderer/shader/Shader.cpp
+            src/client/renderer/shader/Shader.hpp
+
+            # Client rendering - Mesh
+            src/client/renderer/mesh/BlockHighlight.cpp
+            src/client/renderer/mesh/BlockHighlight.hpp
+            src/client/renderer/mesh/ChunkMeshData.cpp
+            src/client/renderer/mesh/ChunkMeshData.hpp
+            src/client/renderer/mesh/ChunkRenderer.cpp
+            src/client/renderer/mesh/ChunkRenderer.hpp
+            src/client/renderer/mesh/ClientMeshManager.cpp
+            src/client/renderer/mesh/ClientMeshManager.hpp
+            src/client/renderer/mesh/FluidMeshBuilder.cpp
+            src/client/renderer/mesh/FluidMeshBuilder.hpp
+            src/client/renderer/mesh/MeshManager.cpp
+            src/client/renderer/mesh/MeshManager.hpp
+            src/client/renderer/mesh/Mesher.cpp
+            src/client/renderer/mesh/Mesher.hpp
+            src/client/renderer/mesh/SectionMesh.hpp
+            src/client/renderer/mesh/MeshJobData.hpp
+            src/client/renderer/mesh/SnapshotBuilder.hpp
+
+            # Client rendering - Debug
+            src/client/renderer/debug/Crosshair.cpp
+            src/client/renderer/debug/Crosshair.hpp
+            src/client/renderer/debug/DebugSystem.cpp
+            src/client/renderer/debug/DebugSystem.hpp
+
+            # Client rendering - Core
+            src/client/renderer/core/Camera.hpp
+            src/client/renderer/core/Frustum.hpp
+            src/client/renderer/core/Vertex.hpp
+
+            # Client rendering - Texture
+            src/client/renderer/texture/AtlasBuilder.cpp
+            src/client/renderer/texture/AtlasBuilder.hpp
+            src/client/renderer/texture/TextureAnimator.cpp
+            src/client/renderer/texture/TextureAnimator.hpp
+
+            # Client world
+            src/client/world/ClientChunkManager.cpp
+            src/client/world/ClientChunkManager.hpp
+            src/client/world/ClientWorkerPool.cpp
+            src/client/world/ClientWorkerPool.hpp
+            src/client/world/PendingDiffsManager.cpp
+            src/client/world/PendingDiffsManager.hpp
+
+            # Client networking
+            src/client/network/ClientConnection.cpp
+            src/client/network/ClientConnection.hpp
+            src/client/network/NetworkClient.cpp
+            src/client/network/NetworkClient.hpp
+            src/client/network/NetworkIOService.cpp
+            src/client/network/NetworkIOService.hpp
+            src/client/network/ClientPacketHandler.cpp
+            src/client/network/ClientPacketHandler.hpp
+
+            # Common world - Block
+            src/common/world/block/BlockModel.cpp
+            src/common/world/block/BlockModel.hpp
+            src/common/world/block/BlockRegistry.cpp
+            src/common/world/block/BlockRegistry.hpp
+            src/common/world/block/Blocks.hpp
+
+            # Common world - Chunk
+            src/common/world/chunk/Chunk.cpp
+            src/common/world/chunk/Chunk.hpp
+            src/common/world/chunk/ChunkSection.hpp
+            src/common/world/chunk/IBlockAccess.hpp
+
+            # Common world - Level
+            src/common/world/level/World.cpp
+            src/common/world/level/World.hpp
+            src/common/world/level/WorldGlobals.hpp
+
+            # Common world - Gen
+            src/common/world/gen/ProceduralChunkGenerator.cpp
+            src/common/world/gen/ProceduralChunkGenerator.hpp
+            src/common/world/gen/IChunkGenerator.hpp
+
+            # Common world - Math
+            src/common/world/math/WorldCoordinates.cpp
+            src/common/world/math/WorldCoordinates.hpp
+            src/common/world/math/WorldMath.hpp
+
+            # Common physics
+            src/common/physics/Physics.cpp
+            src/common/physics/Physics.hpp
+            src/common/physics/RayCast.cpp
+            src/common/physics/RayCast.hpp
+
+            # Common entity
+            src/common/entity/Inventory.cpp
+            src/common/entity/Inventory.hpp
+
+            # Common network
+            src/common/network/MessageQueue.hpp
+            src/common/network/PacketTypes.hpp
+            src/common/network/PacketRegistry.hpp
+            src/common/network/NetworkConnection.cpp
+            src/common/network/NetworkConnection.hpp
+            src/common/network/IPacket.hpp
+            src/common/network/packets/S2CPackets.hpp
+
+            # Server
+            src/server/IntegratedServer.cpp
+            src/server/IntegratedServer.hpp
+            src/server/world/ChunkProvider.cpp
+            src/server/world/ChunkProvider.hpp
+            src/server/world/ServerWorkerPool.cpp
+            src/server/world/ServerWorkerPool.hpp
+            src/server/world/ignore.cpp
+            src/server/world/ignore.hpp
+
+            # Server world - Cache
+            src/server/world/cache/ChunkCache.cpp
+            src/server/world/cache/ChunkCache.hpp
+
+            # Server world - Interfaces
+            src/server/world/interfaces/IChunkLoader.hpp
+            src/server/world/interfaces/IChunkSaver.hpp
+            src/server/world/interfaces/INeighborProvider.hpp
+
+            # Server world - Storage
+            src/server/world/storage/AnvilChunkSaver.cpp
+            src/server/world/storage/AnvilChunkSaver.hpp
+            src/server/world/storage/AnvilRegionWriter.cpp
+            src/server/world/storage/AnvilRegionWriter.hpp
+            src/server/world/storage/AsyncChunkSaver.cpp
+            src/server/world/storage/AsyncChunkSaver.hpp
+            src/server/world/storage/MinecraftChunkLoader.cpp
+            src/server/world/storage/MinecraftChunkLoader.hpp
+            src/server/world/storage/MinecraftChunkLoaderImpl.cpp
+            src/server/world/storage/MinecraftChunkLoaderImpl.hpp
+            src/server/world/storage/NBTParser.cpp
+            src/server/world/storage/NBTParser.hpp
+            src/server/world/storage/RegionDumper.cpp
+            src/server/world/storage/RegionDumper.hpp
+            src/server/world/storage/RegionFile.cpp
+            src/server/world/storage/RegionFile.hpp
+            src/server/world/storage/RegionFileCache.cpp
+            src/server/world/storage/RegionFileCache.hpp
+            src/server/world/storage/SectionDataUnpacker.cpp
+            src/server/world/storage/SectionDataUnpacker.hpp
+
+            # Server world - Tracking
+            src/server/world/tracking/DirtyTracker.cpp
+            src/server/world/tracking/DirtyTracker.hpp
+
+            # Server networking
+            src/server/network/NetworkServer.cpp
+            src/server/network/NetworkServer.hpp
+            src/server/network/ServerConnection.cpp
+            src/server/network/ServerConnection.hpp
+            src/server/network/listeners/HandshakePacketListener.cpp
+            src/server/network/listeners/HandshakePacketListener.hpp
+            src/server/network/listeners/LoginPacketListener.cpp
+            src/server/network/listeners/LoginPacketListener.hpp
+            
+            # New session management system
+            src/server/world/ticketing/ChunkTicketManager.cpp
+            src/server/world/ticketing/ChunkTicketManager.hpp
+            src/server/world/watch/ChunkWatchIndex.cpp
+            src/server/world/watch/ChunkWatchIndex.hpp
+            src/server/world/status/ChunkStatusManager.cpp
+            src/server/world/status/ChunkStatusManager.hpp
+            src/server/network/SendScheduler.cpp
+            src/server/network/SendScheduler.hpp
+            src/server/session/PlayerSession.cpp
+            src/server/session/PlayerSession.hpp
+            src/server/session/PlayerSessionManager.cpp
+            src/server/session/PlayerSessionManager.hpp
+            
+            # Common network packets
+            src/common/network/packets/HandshakeC2S.cpp
+            src/common/network/packets/HandshakeC2S.hpp
+            src/common/network/packets/LoginStartC2S.cpp
+            src/common/network/packets/LoginStartC2S.hpp
     )
 endif()
 
@@ -253,12 +412,6 @@ target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
 # 8) Includes
 target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/src
-        ${PROJECT_SOURCE_DIR}/src/platform
-        ${PROJECT_SOURCE_DIR}/src/core
-        ${PROJECT_SOURCE_DIR}/src/render
-        ${PROJECT_SOURCE_DIR}/src/game
-        ${PROJECT_SOURCE_DIR}/src/engine
-        ${PROJECT_SOURCE_DIR}/src/world
         ${PROJECT_SOURCE_DIR}/ext/glfw/include
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
@@ -267,6 +420,7 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
+        ${Boost_INCLUDE_DIRS}
 )
 
 # 9) Link libraries
@@ -361,6 +515,7 @@ message(STATUS "  zlib:               Bundled (ext/zlib)")
 message(STATUS "  OpenAL:             Bundled (ext/OpenAL)")
 message(STATUS "  ImGui:              Bundled (ext/imgui)")
 message(STATUS "  nlohmann/json:      FetchContent (v3.11.3)")
+message(STATUS "  Boost.Asio:         System (header-only)")
 message(STATUS "")
 message(STATUS "Output Directory:     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 message(STATUS "═══════════════════════════════════════════════════════════════")

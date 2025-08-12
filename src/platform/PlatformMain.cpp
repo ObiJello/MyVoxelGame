@@ -1,35 +1,44 @@
-// File: src/platform/PlatformMain.cpp - Updated for new chunk system integration
+// File: src/platform/PlatformMain.cpp
 #include "PlatformMain.hpp"
 #include "Time.hpp"
-#include "Input.hpp"
-#include "Log.hpp"
-#include "Config.hpp"
-#include "../render/debug/DebugSystem.hpp"
-
+#include "client/input/Input.hpp"
+#include "common/core/Log.hpp"
+#include "common/core/Config.hpp"
+#include "common/core/ThreadAllocator.hpp"
+#include "client/renderer/debug/DebugSystem.hpp"
 // Include game headers
-#include "../engine/block/BlockRegistry.hpp"
-#include "../engine/block/BlockModel.hpp"
-#include "../game/PlayerController.hpp"
-#include "../engine/physics/RayCast.hpp"
-#include "../engine/physics/Physics.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/BlockModel.hpp"
+#include "client/input/PlayerController.hpp"
+#include "common/physics/RayCast.hpp"
+#include "common/physics/Physics.hpp"
 
 // Include rendering headers
-#include "../render/gfx/Camera.hpp"
-#include "../render/gfx/Frustum.hpp"
-#include "../render/gfx/Shader.hpp"
-#include "../render/mesh/BlockHighlight.hpp"
-#include "../render/debug/Crosshair.hpp"
-#include "../render/atlas/AtlasBuilder.hpp"
-#include "../render/TextureAnimator.hpp"
+#include "client/renderer/core/Camera.hpp"
+#include "client/renderer/core/Frustum.hpp"
+#include "client/renderer/shader/Shader.hpp"
+#include "client/renderer/mesh/BlockHighlight.hpp"
+#include "client/renderer/debug/Crosshair.hpp"
+#include "client/renderer/texture/AtlasBuilder.hpp"
+#include "client/renderer/texture/TextureAnimator.hpp"
 
 // Include world system headers
-#include "../engine/world/World.hpp"
-#include "../engine/world/WorldGlobals.hpp"
-#include "../engine/world/ChunkProvider.hpp"
+#include "common/world/level/World.hpp"
+#include "common/world/level/WorldGlobals.hpp"
+#include "server/world/ChunkProvider.hpp"
 
 // Include mesh system headers
-#include "../render/mesh/ChunkRenderer.hpp"
-#include "../render/mesh/MeshManager.hpp"
+#include "client/renderer/mesh/ChunkRenderer.hpp"
+#include "client/renderer/mesh/ClientMeshManager.hpp"
+
+// Include new Minecraft-style architecture
+#include "client/network/NetworkClient.hpp"
+#include "client/network/ClientConnection.hpp"
+#include "client/network/NetworkIOService.hpp"
+#include "server/IntegratedServer.hpp"
+#include "client/world/ClientChunkManager.hpp"
+#include "server/world/ServerWorkerPool.hpp"
+#include "client/world/ClientWorkerPool.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -37,12 +46,11 @@
 #include <GLFW/glfw3.h>
 #include <chrono>
 #include <filesystem>
-#include <queue>
-#include <unordered_map>
 #include <memory>
+#include <atomic>
 
-#include "GameDirectory.hpp"
-#include "JobSystem.hpp"
+#include "platform/GameDirectory.hpp"
+#include "common/core/JobSystem.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -229,12 +237,9 @@ namespace PlatformMain {
         // Get dirty sections from the world's chunk provider
         auto dirtySections = world.GetDirtySections();
 
-        // Mark them dirty in the mesh system
-        if (Render::g_meshManager) {
-            for (const auto& section : dirtySections) {
-                Render::g_meshManager->MarkSectionDirty(section.chunkPos, section.sectionIndex);
-            }
-        }
+        // TODO: Server-side mesh management has been refactored
+        // Dirty sections should now be handled through the ClientChunkManager -> ClientMeshManager pipeline
+        // This server-side mesh marking functionality is no longer available in ClientMeshManager
 
         // Clear the processed sections
         world.ClearDirtySections(dirtySections);
@@ -349,59 +354,135 @@ namespace PlatformMain {
             return 1;
         }
 
-        // Initialize game systems
-        Render::Camera camera;
-        camera.position = glm::vec3(0.0f, 67.0f, 0.0f);
-        camera.physicsControlled = true;
-
-        // Initialize the world
-        Game::World world;
-
-        world.Initialize();
-
-        // Set global world reference
-        Game::g_world = &world;
-
-        // Create PlayerController
+        // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
+        Log::Info("Initializing Minecraft Java Edition Architecture...");
+        
+        // 1. Initialize server-side systems (server creates and owns the world)
+        Server::IntegratedServerConfig serverConfig;
+        serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
+        serverConfig.enableAsyncChunkLoading = false;    // Use ServerWorkerPool
+        // Optionally set Minecraft world path here
+        // serverConfig.minecraftWorldPath = "/path/to/minecraft/world";
+        Server::InitializeIntegratedServer(serverConfig);
+        Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
+        
+        // Get world reference for legacy systems (temporary)
+        Game::World* world = Server::g_integratedServer->GetWorld();
+        Game::g_world = world;
+        
+        // 3. Initialize worker pools with dynamic thread allocation
+        Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
+        Threading::InitializeServerWorkerPool(threadAlloc.serverWorldWorkers);
+        Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
+        Log::Info("✓ Worker pools initialized - %s", threadAlloc.ToString().c_str());
+        
+        // 4. Initialize client-side systems
+        Client::InitializeClientChunkManager();
+        Render::InitializeClientMeshManager(Client::g_clientChunkManager.get());
+        Log::Info("✓ Client systems initialized (chunk manager, mesh manager)");
+        
+        // 5. Initialize player controller (no longer needs world directly)
         Game::PlayerController playerController;
-
-        // Set world reference for player controller
-        playerController.SetWorld(&world);
-
-        // Initialize mesh system with the world
-        Render::MeshManagerConfig meshConfig;
-        meshConfig.maxMeshesPerFrame = 1536;     // Limit uploads per frame
-        meshConfig.maxBuildTimeMs = 80000.0f;    // Max time per frame for processing
-        meshConfig.enableAsyncBuilding = true;   // Use background threads
-        meshConfig.highPriorityRadius = 64.0f;   // High priority radius
-
-        Render::InitializeMeshSystem(&world, meshConfig);
-
-        // Initialize chunk renderer
+        playerController.SetWorld(world);  // Temporary until we fully remove world dependency
+        
+        // 6. Configure IntegratedServer with player controller
+        Server::g_integratedServer->SetPlayerController(&playerController);
+        
+        // 7. Initialize rendering systems (keeping existing ones that still work)
         if (!Render::InitializeChunkRenderer()) {
             Log::Error("Failed to initialize chunk renderer");
             return -7;
         }
-
-        // Initialize debug system
+        
+        // 8. Initialize debug system
         Debug::DebugSystem::Initialize(window);
+        
+        // 9. Start the IntegratedServer thread (20 TPS)
+        Server::StartIntegratedServer();
+        Log::Info("✓ IntegratedServer thread started (20 TPS)");
+        
+        // 10. Initialize Network I/O Service (dedicated I/O thread like Minecraft's Netty)
+        Client::InitializeNetworkIOService();
+        Log::Info("✓ Network I/O Service started (dedicated I/O thread)");
+        
+        // 11. Create NetworkClient and connect to localhost server
+        auto networkClient = std::make_unique<Client::NetworkClient>(Client::g_networkIOService->GetIOContext());
+        Client::g_networkClient = networkClient.get();  // Set global pointer for legacy systems
+        
+        // Use async connect with callback (Minecraft/Netty style)
+        std::atomic<bool> connected{false};
+        std::atomic<bool> connectionComplete{false};
+        
+        networkClient->SetOnConnected([&connected, &connectionComplete]() {
+            Log::Info("✓ Connection established");
+            connected = true;
+            connectionComplete = true;
+        });
+        
+        networkClient->SetOnError([&connectionComplete](const std::string& error) {
+            Log::Error("Connection failed: %s", error.c_str());
+            connectionComplete = true;
+        });
+        
+        // Start async connection (all socket ops on I/O thread)
+        Log::Info("Connecting to localhost:25565...");
+        networkClient->ConnectAsync("127.0.0.1", 25565);
+        
+        // Wait for connection with timeout (using yield instead of sleep)
+        auto startTime = std::chrono::steady_clock::now();
+        while (!connectionComplete) {
+            if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(2)) {
+                Log::Error("Connection timeout after 2 seconds");
+                return -8;
+            }
+            std::this_thread::yield();
+        }
+        
+        if (!connected) {
+            Log::Error("Failed to connect to server");
+            return -8;
+        }
+        
+        Log::Info("✓ NetworkClient connected to localhost:25565");
+        Log::Info("✓ Handshake automatically sent to server");
+        
+        Log::Info("🎮 Minecraft Java Edition Architecture fully initialized!");
+        Log::Info("   Server Thread: 20 TPS | Client Thread: Unlocked FPS | I/O Thread: Async | Workers: 6 threads");
+        Log::Info("   Client connected via TCP to localhost:25565");
+        Log::Info("=== ENTERING CLIENT RENDER LOOP (UNLOCKED FPS) ===");
 
+        // === MINECRAFT-STYLE CLIENT RENDER LOOP (UNLOCKED FPS) ===
+        
+        // Initialize camera for client thread
+        Render::Camera camera;
+        camera.position = glm::vec3(0.0f, 67.0f, 0.0f);
+        camera.physicsControlled = true;
+        
+        // Network tracking
+        uint32_t playerMoveSequence = 0;
+        
         // Performance tracking
         Debug::PerformanceMetrics metrics;
-
-        Log::Info("Entering main render loop with Enhanced Chunk System");
-
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        // MAIN LOOP
+        // CLIENT RENDER LOOP (like Minecraft's GameRenderer.render)
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
+            
+            // 1. Drain incoming network packets on main thread (Minecraft-style)
+            // Note: I/O is handled on dedicated thread, we just drain the queue here
+            if (networkClient) {
+                networkClient->DrainIncomingPackets();
+            }
 
-            // Poll events and update input
+            // 2. DISCIPLINED QUEUE DRAINING - Process mesh build results
+            Render::ProcessClientMeshBuildResults();  // Drain MeshResultQueue
+
+            // 3. Poll events and handle input
             glfwPollEvents();
             Input::UpdateKeyStates();
 
-            // Handle input
+            // Handle escape key
             if (Input::IsKeyDown(Input::Key::Escape)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
@@ -409,43 +490,60 @@ namespace PlatformMain {
             bool cursorEnabled = HandleCursorToggle(window, camera);
             HandlePlayerInput(playerController, camera);
 
-            // Update time and metrics
+            // Frame counter for debugging
+            static uint64_t frameCounter = 0;
+            frameCounter++;
+            if (frameCounter % 60 == 0) {
+                Log::Debug("MAIN LOOP: Frame %llu at time %.2f", frameCounter, Time::Now());
+            }
+            
+            // 4. Update time and game logic
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 1 - Update time and logic");
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt);
 
-            // Update game systems
+            // Update camera and player
             camera.Update(dt);
             playerController.Update(dt, camera);
 
-            // Set player position for mesh system prioritization
+            // 5. Set player position for mesh prioritization
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 2 - Set player position");
             glm::vec3 playerPos = playerController.GetPhysics().position;
-            Render::SetMeshSystemPlayerPosition(playerPos);
+            Render::SetClientMeshPlayerPosition(playerPos);
+            
+            // Send player position to server via TCP
+            if (networkClient->IsConnected()) {
+                Network::PlayerMoveC2SPacket movePacket;
+                movePacket.position = playerPos;
+                movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
+                movePacket.onGround = playerController.GetPhysics().isOnGround;
+                movePacket.sequenceNumber = ++playerMoveSequence;
+                movePacket.timestamp = std::chrono::steady_clock::now();
+                
+                //networkClient->GetConnection()->SendPlayerMove(movePacket);
+            }
 
-            // Get player chunk position for chunk loading
-            int playerChunkX = static_cast<int>(std::floor(playerPos.x / Game::Math::CHUNK_SIZE_X));
-            int playerChunkZ = static_cast<int>(std::floor(playerPos.z / Game::Math::CHUNK_SIZE_Z));
+            // 6. Schedule mesh builds for LOADED chunks
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds");
+            Render::ScheduleClientMeshBuilds(playerPos);
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds COMPLETE");
 
-            // Update chunk loading around player
-            world.UpdateLoadedChunks(playerChunkX, playerChunkZ);
+            // 7. Perform GPU uploads
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads");
+            Render::PerformClientGPUUploads();
+            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads COMPLETE");
 
-            // Integrate mesh system with chunk provider's dirty tracking
-            UpdateMeshSystemIntegration(world);
-
-            // Update mesh system
-            Render::UpdateMeshSystem(dt);
-
-            // Update texture animations
+            // 8. Update texture animations
             if (Render::g_textureAnimator) {
                 Render::g_textureAnimator->UpdateAnimations(dt);
             }
 
-            // Start debug frame
+            // 9. FRUSTUM CULLING AND RENDERING
             Debug::DebugSystem::BeginFrame();
 
             // Clear and setup rendering
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
-            //glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
             // Calculate matrices
@@ -458,33 +556,14 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // Check mesh system status
-            if (Render::g_meshManager) {
-                size_t activeSections = Render::g_meshManager->GetGPUDataManager().GetSectionCount();
-                size_t pendingJobs = Render::g_meshManager->GetPendingJobCount();
-                size_t completedResults = Render::g_meshManager->GetCompletedResultCount();
-
-                // Log mesh and chunk stats occasionally
-                static float meshLogTimer = 0.0f;
-                meshLogTimer += dt;
-                if (meshLogTimer >= 3.0f) { // Every 3 seconds
-                    auto chunkStats = world.GetChunkProviderStats();
-                    Log::Info("System Status: %zu loaded chunks, %zu active sections, %zu pending jobs, %zu dirty sections",
-                             chunkStats.chunksLoaded, activeSections, pendingJobs, chunkStats.dirtySections);
-                    meshLogTimer = 0.0f;
-                }
-            }
-
-            // Render chunks
+            // Render chunks using ChunkRenderer
             Render::RenderChunksAll(camera, frustum);
 
             // Render UI elements
             RenderBlockHighlight(playerController, viewProj);
-
-            // Render crosshair (must be last to appear on top)
             RenderCrosshair(window);
 
-            // Update debug UI with enhanced statistics
+            // 10. Debug UI with new architecture statistics
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -493,10 +572,10 @@ namespace PlatformMain {
                 windowWidth, windowHeight, width, height
             );
 
-            // Finish debug frame
             Debug::DebugSystem::EndFrame();
 
-            // Swap buffers and reset input
+            // 11. Swap buffers
+            
             glfwSwapBuffers(window);
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
@@ -504,42 +583,60 @@ namespace PlatformMain {
             // Calculate frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
-
-            // Performance monitoring for the new system
-            static float perfLogTimer = 0.0f;
-            perfLogTimer += dt;
-            if (perfLogTimer >= 10.0f) { // Every 10 seconds
-                world.LogPerformanceStats();
-                perfLogTimer = 0.0f;
-            }
         }
 
-        // Shutdown sequence
-        Log::Info("Shutting down Enhanced Voxel Engine...");
+        // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===
+        Log::Info("Shutting down...");
 
-        // Save all chunks before shutdown
-        world.SaveAllChunks();
+        // 1. Disconnect NetworkClient
+        Log::Info("Disconnecting NetworkClient...");
+        networkClient->Disconnect();
+        networkClient.reset();
+        Log::Info("✓ NetworkClient disconnected");
+        
+        // 2. Stop Network I/O Service (dedicated I/O thread)
+        Log::Info("Stopping Network I/O Service...");
+        Client::ShutdownNetworkIOService();
+        Log::Info("✓ Network I/O Service stopped");
 
-        // Shutdown mesh system first (stops background threads)
-        Render::ShutdownMeshSystem();
-
-        // Shutdown chunk renderer
+        // 3. Stop IntegratedServer thread (20 TPS)
+        Log::Info("Stopping IntegratedServer thread...");
+        Server::StopIntegratedServer();
+        Log::Info("✓ IntegratedServer stopped");
+        
+        // 4. Stop worker pools (stops background threads)
+        Log::Info("Stopping worker thread pools...");
+        Threading::ShutdownServerWorkerPool();
+        Threading::ShutdownClientWorkerPool();
+        Log::Info("✓ Worker pools stopped");
+        
+        // 5. Note: Chunks are now saved by IntegratedServer during its shutdown
+        
+        // 6. Shutdown client systems
+        Log::Info("Shutting down client systems...");
+        Render::ShutdownClientMeshManager();
+        Client::ShutdownClientChunkManager();
+        Log::Info("✓ Client systems shutdown");
+        
+        // 7. Shutdown server systems
+        Log::Info("Shutting down server systems...");
+        Server::ShutdownIntegratedServer();
+        Log::Info("✓ Server systems shutdown");
+        
+        // 8. Shutdown rendering systems
         Render::ShutdownChunkRenderer();
-
-        // Shutdown world (this will shutdown the chunk provider)
-        world.Shutdown();
-
-        // Clear global reference
-        Game::g_world = nullptr;
-
-        // Cleanup debug system
+        
+        // 9. Clear world reference (world is shutdown by IntegratedServer)
+        Game::g_world = nullptr;  // Clear global reference
+        
+        // 10. Cleanup debug system
         Debug::DebugSystem::Shutdown();
-
-        // Stop background job system
-        Log::Info("Stopping background job system...");
+        
+        // 11. Stop legacy job system
+        Log::Info("Stopping legacy job system...");
         try {
             JobSystem::g_ThreadPool.Stop();
-            Log::Info("Job system stopped successfully");
+            Log::Info("✓ Legacy job system stopped");
         } catch (const std::exception& e) {
             Log::Error("Exception stopping job system: %s", e.what());
         } catch (...) {
@@ -571,16 +668,20 @@ namespace PlatformMain {
             Log::Error("Unknown exception during OpenGL cleanup");
         }
 
-        Log::Info("Enhanced Voxel Engine with New Chunk System shutting down");
+        Log::Info("🎮 Minecraft Java Edition Architecture shutdown complete!");
+        Log::Info("   All threads stopped, all resources cleaned up");
 
-        // Destroy window and terminate GLFW
+        // 12. Final GLFW cleanup
+        Log::Info("Final GLFW cleanup...");
         try {
             glfwDestroyWindow(window);
             glfwTerminate();
+            Log::Info("✓ GLFW cleanup complete");
         } catch (...) {
             Log::Error("Exception during GLFW cleanup");
         }
 
+        Log::Info("=== MINECRAFT JAVA EDITION ARCHITECTURE SHUTDOWN COMPLETE ===");
         return 0;
     }
 

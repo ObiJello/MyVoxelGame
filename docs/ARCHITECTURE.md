@@ -19,19 +19,27 @@ This document provides a high-level diagram and explanation of the main subsyste
        └─────┬──────┘
              │
              ▼
-       ┌────────────┐
-       │   Render   │
-       │ (Shader,   │
-       │  Quad,     │
-       │  Mesh,     │
-       │  Renderer) │
-       └─────┬──────┘
-             │
-             ▼
-       ┌────────────┐
-       │    Game    │
-       │ (World,    │
-       │  Chunk,    │
-       │  BlockReg, │
-       │  Server)   │
-       └────────────┘
+       ┌────────────┐        ┌────────────┐
+       │   Render   │        │  Network   │
+       │ (Shader,   │        │ (Boost.    │
+       │  Quad,     │        │  Asio,     │
+       │  Mesh,     │        │  I/O       │
+       │  Renderer) │        │  Threads)  │
+       └─────┬──────┘        └─────┬──────┘
+             │                     │
+             ▼                     ▼
+       ┌─────────────────────────────────┐
+       │            Game                 │
+       │        (World, Chunk,           │
+       │       BlockReg, Server)         │
+       └─────────────────────────────────┘
+
+## Network Layer
+
+The Network layer handles all I/O operations through Boost.Asio:
+- **NetworkServer**: TCP server binding and connection acceptance
+- **ServerConnection**: Per-connection packet handling with protocol state management
+- **I/O Threads**: Run `io_context::run()` continuously with work guards
+- **Message Queues**: Bounded queues for thread-safe packet passing
+
+For detailed networking patterns, see docs/threads-and-queues/ and docs/protocol/.
