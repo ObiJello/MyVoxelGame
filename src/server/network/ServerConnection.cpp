@@ -88,9 +88,18 @@ namespace Server {
         // Drain incoming packets queue and apply to listener
         Network::IncomingPacket packet;
         int packetsProcessed = 0;
-        const int MAX_PACKETS_PER_TICK = 50;  // Prevent starvation
+        const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit only - time budget is primary control
+        const float INBOUND_PROCESS_BUDGET_MS = 0.5f;  // Time budget for processing inbound packets
+        
+        auto startTime = std::chrono::steady_clock::now();
         
         while (packetsProcessed < MAX_PACKETS_PER_TICK && TryPopIncoming(packet)) {
+            // Check time budget
+            auto currentTime = std::chrono::steady_clock::now();
+            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
+            if (elapsedMs >= INBOUND_PROCESS_BUDGET_MS) {
+                break;  // Time budget exceeded
+            }
             if (packet.packet) {
                 // Check if we need to create a listener based on the packet type
                 // This happens on server thread after I/O thread has already switched protocol state

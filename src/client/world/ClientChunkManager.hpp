@@ -8,12 +8,8 @@
 #include "PendingDiffsManager.hpp"
 #include <glad/glad.h>
 
-// Forward declarations
-namespace Client {
-namespace Render {
-    class MeshJobData;
-}
-}
+// Include mesh job data types
+#include "../renderer/mesh/MeshJobData.hpp"
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -216,9 +212,15 @@ namespace Client {
         // Schedule mesh builds using snapshots (main thread only) - public for ClientMeshManager
         void ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition);
         
-        // Build snapshot directly from chunk data (main thread only)
-        std::shared_ptr<Render::MeshJobData> BuildSnapshotDirect(
-            Game::Math::ChunkPos chunkPos, int sectionY);
+        // Build snapshot for a single section with version checking (Minecraft-style)
+        // Returns false if section missing or version changed during capture
+        bool BuildSectionSnapshot(Game::Math::ChunkPos chunkPos, int sectionY, 
+                                 uint32_t expectedVersion, 
+                                 std::shared_ptr<Render::MeshJobData>& outSnapshot);
+        
+        // Helper to copy neighbor data for a section
+        void CopyNeighborData(Game::Math::ChunkPos chunkPos, int sectionY, 
+                            Render::SectionSnapshot& snapshot);
         
         // Accept or reject mesh build result based on version and state
         MeshAcceptance AcceptMeshResult(const Network::MeshBuildResult& result);

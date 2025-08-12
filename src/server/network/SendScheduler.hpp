@@ -67,8 +67,8 @@ namespace Server {
         struct Config {
             size_t defaultMaxOutboxBytes = 4194304;     // 4MB per connection
             size_t globalMaxBytesPerTick = 10485760;    // 10MB total per tick
-            size_t maxPacketsPerConnectionPerTick = 100;
-            size_t maxGlobalPacketsPerTick = 1000;
+            size_t maxPacketsPerConnectionPerTick = 10000;  // Failsafe only - byte limits are primary control
+            size_t maxGlobalPacketsPerTick = 100000;  // Failsafe only - byte limits are primary control
             bool enableCompression = true;
             int compressionThreshold = 256;  // Min size to compress
             bool dropOldPackets = true;      // Drop old low-priority packets

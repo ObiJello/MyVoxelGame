@@ -110,21 +110,7 @@ namespace Network {
             return;
         }
         
-        // Check queue size limit
-        size_t queueSize = 0;
-        {
-            std::lock_guard<std::mutex> lock(m_sendMutex);
-            for (const auto& packet : m_sendQueue) {
-                queueSize += packet.size();
-            }
-        }
-        
-        if (queueSize + data.size() > MAX_SEND_QUEUE_SIZE) {
-            Log::Error("[%s] Send queue full, dropping packet", m_name.c_str());
-            return;
-        }
-        
-        // Add to send queue
+        // Add to send queue (SendScheduler manages outbox limits)
         bool startSend = false;
         {
             std::lock_guard<std::mutex> lock(m_sendMutex);

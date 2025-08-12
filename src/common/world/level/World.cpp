@@ -36,11 +36,11 @@ namespace Game {
 
         // Configure based on world settings - square area calculation
         int squareSize = 2 * m_renderDistance + 1;
-        config.maxLoadedChunks = squareSize * squareSize + 50; // Add buffer for loading/unloading
+        // ChunkCache now manages its own size (defaults to 2048)
         config.enableFallbackGeneration = false;
 
-        Log::Info("Config - Max chunks: %zu for %dx%d square, Fallback generation: %s",
-                  config.maxLoadedChunks, squareSize, squareSize,
+        Log::Info("Config - %dx%d square area, Fallback generation: %s",
+                  squareSize, squareSize,
                   config.enableFallbackGeneration ? "enabled" : "disabled");
 
         // Set up generation config

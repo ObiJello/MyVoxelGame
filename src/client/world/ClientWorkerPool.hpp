@@ -25,42 +25,26 @@ namespace Threading {
     
     // Client-side mesh building job (uses snapshot for thread safety)
     struct MeshJob {
-        // Snapshot of section data (COPY, not shared reference)
+        // Section snapshot data
         std::shared_ptr<Client::Render::MeshJobData> snapshot;
         
-        // Legacy fields for backward compatibility - will be removed
+        // Fields for priority queue
         Game::Math::ChunkPos chunkPos;
         int sectionY;
         float priority = 0.0f;
         std::chrono::steady_clock::time_point submitTime;
 
-        // New constructor using snapshot
+        // Constructor
         MeshJob(std::shared_ptr<Client::Render::MeshJobData> snap)
             : snapshot(std::move(snap))
             , chunkPos(snapshot->chunkPos)
             , sectionY(snapshot->sectionY)
             , priority(snapshot->distanceToPlayer)
             , submitTime(snapshot->submitTime) {}
-        
-        // Legacy constructor - deprecated
-        MeshJob(Game::Math::ChunkPos pos, int secY, std::shared_ptr<Game::Chunk> chunk, float prio = 0.0f)
-            : chunkPos(pos), sectionY(secY), priority(prio)
-            , submitTime(std::chrono::steady_clock::now()) {
-            // NOTE: This constructor is unsafe and will be removed
-            Log::Warning("Using deprecated MeshJob constructor - should use snapshot instead");
-        }
 
         // For priority queue (higher priority = more important)
         bool operator<(const MeshJob& other) const {
-            if (snapshot && other.snapshot) {
-                // High priority jobs first
-                if (snapshot->isHighPriority != other.snapshot->isHighPriority) {
-                    return !snapshot->isHighPriority;
-                }
-                // Then by distance
-                return snapshot->distanceToPlayer > other.snapshot->distanceToPlayer;
-            }
-            return priority < other.priority; // Legacy fallback
+            return priority > other.priority;
         }
     };
 
@@ -180,7 +164,7 @@ namespace Threading {
         mutable std::mutex m_jobQueueMutex;
         std::priority_queue<MeshJob> m_jobQueue;
         std::condition_variable m_jobCondition;
-        size_t m_maxQueueSize = 500;
+        size_t m_maxQueueSize = 2048;  // Increased for better throughput
         bool m_prioritizationEnabled = true;
 
         // Job cancellation tracking

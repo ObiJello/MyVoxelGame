@@ -165,14 +165,18 @@ namespace Server {
         }
         
         auto& state = it->second;
-        size_t maxPackets = 100;  // Limit to prevent blocking
         
-        while (!state.packetQueue.empty() && maxPackets > 0) {
+        // Process packets based on byte limit, not count
+        while (!state.packetQueue.empty()) {
             auto packet = state.packetQueue.top();
-            state.packetQueue.pop();
             
+            // Check if we have room in the outbox
+            if (state.outboxBytes + packet.estimatedSize > state.maxOutboxBytes) {
+                break;  // Outbox full
+            }
+            
+            state.packetQueue.pop();
             SendPacketToConnection(connectionId, packet);
-            maxPackets--;
         }
     }
 

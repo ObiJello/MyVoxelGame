@@ -344,11 +344,10 @@ namespace Client {
         if (!handler) return;
         
         // Process packets in batches to avoid stalling
-        constexpr size_t MAX_PACKETS_PER_FRAME = 100;
         size_t processed = 0;
         
         Network::IncomingPacket packet;
-        while (processed < MAX_PACKETS_PER_FRAME && TryPopIncoming(packet)) {
+        while (TryPopIncoming(packet)) {
             try {
                 // Apply packet through visitor pattern (main thread only)
                 if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {

@@ -600,10 +600,9 @@ namespace Client {
         }
     }
     
-    // Clear all chunks
+    // Schedule mesh builds for dirty sections (Minecraft-style per-section)
     void ClientChunkManager::ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition) {
         ASSERT_MAIN_THREAD();
-        // Removed noisy debug log that was called every frame
         
         // Check if worker pool is available
         auto workerPool = Threading::g_clientWorkerPool.get();
@@ -612,91 +611,122 @@ namespace Client {
             return;
         }
         
-        // Only log when there are actually chunks to process (commented out to reduce spam)
-        // Log::Debug("SCHEDULE: Processing %zu chunks", m_chunks.size());
-        
-        // Step 1: Collect candidates (no locks needed - main thread only)
-        struct Candidate {
-            Game::Math::ChunkPos pos;
+        // Step 1: Collect sections that need meshing
+        struct SectionCandidate {
+            Game::Math::ChunkPos chunkPos;
             int sectionY;
-            uint32_t version;
             float priority;
         };
-        std::vector<Candidate> candidates;
+        std::vector<SectionCandidate> sectionCandidates;
+        
+        // View distance limit (in blocks)
+        const float MAX_VIEW_DISTANCE = 256.0f;  // 16 chunks
         
         for (auto& [chunkPos, chunk] : m_chunks) {
-            if (!chunk || !chunk->IsLoaded()) {
+            if (!chunk || !chunk->chunkData) {
                 continue;
             }
             
-            // Use new section state tracking
+            // Calculate chunk center distance for priority
+            float centerX = chunkPos.x * 16.0f + 8.0f;
+            float centerZ = chunkPos.z * 16.0f + 8.0f;
+            
+            // Check each section
             for (int sectionY = 0; sectionY < 24; ++sectionY) {
                 auto& sectionInfo = chunk->sectionInfos[sectionY];
                 
-                // Check legacy dirty set OR new dirty flag
-                bool needsMesh = (chunk->dirtySections.count(sectionY) > 0) || 
-                                (sectionInfo.dirty && sectionInfo.state == SectionState::LOADED);
+                // Check if section is dirty and not already being meshed
+                bool isDirty = sectionInfo.dirty || chunk->dirtySections.count(sectionY) > 0;
+                bool canMesh = (sectionInfo.state == SectionState::LOADED || 
+                               sectionInfo.state == SectionState::EMPTY) && !sectionInfo.meshingVersion;
                 
-                if (needsMesh) {
-                    // Calculate priority based on distance
-                    float centerX = chunkPos.x * 16.0f + 8.0f;
-                    float centerY = sectionY * 16.0f - 64.0f + 8.0f;
-                    float centerZ = chunkPos.z * 16.0f + 8.0f;
-                    glm::vec3 sectionCenter(centerX, centerY, centerZ);
+                if (isDirty && canMesh) {
+                    // Calculate section-specific priority
+                    float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
+                    glm::vec3 sectionCenter(centerX, sectionCenterY, centerZ);
                     float distance = glm::distance(playerPosition, sectionCenter);
                     
-                    candidates.push_back({chunkPos, sectionY, sectionInfo.version, distance});
+                    // Skip sections beyond view distance
+                    if (distance <= MAX_VIEW_DISTANCE) {
+                        sectionCandidates.push_back({chunkPos, sectionY, distance});
+                    }
                 }
             }
         }
         
-        // Step 2: Sort by priority (closer = higher priority = lower distance)
-        std::sort(candidates.begin(), candidates.end(), 
+        // Step 2: Sort sections by priority (closer = higher priority)
+        std::sort(sectionCandidates.begin(), sectionCandidates.end(), 
                   [](const auto& a, const auto& b) { return a.priority < b.priority; });
         
-        // Step 3: Apply budget
-        const size_t MAX_JOBS = 10;
-        size_t jobsSubmitted = 0;
+        // Step 3: Process sections with budget and queue limits
+        const size_t SECTION_SAFETY_CAP = 256;  // Max sections per frame
+        size_t sectionsSubmitted = 0;
+        auto startTime = std::chrono::steady_clock::now();
+        const float budgetMs = 50.0f;  // Time budget for scheduling
         
-        // Step 4: Build snapshots and submit (no locks needed)
-        for (const auto& candidate : candidates) {
-            if (jobsSubmitted >= MAX_JOBS) break;
-            
-            // Build snapshot directly without locks
-            auto snapshot = BuildSnapshotDirect(candidate.pos, candidate.sectionY);
-            if (!snapshot) continue;
-            
-            // Update section state
-            auto it = m_chunks.find(candidate.pos);
-            if (it != m_chunks.end()) {
-                auto& chunk = it->second;
-                auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
-                
-                // Mark as meshing
-                sectionInfo.state = SectionState::MESHING;
-                sectionInfo.meshingVersion = candidate.version;
-                // DON'T clear dirty flag here - only clear after successful upload
-                // sectionInfo.dirty stays true so if the mesh is dropped, it gets rescheduled
-                
-                // DON'T clear from legacy dirty set either
-                // chunk->dirtySections.erase(candidate.sectionY);
-                
-                // Set snapshot metadata
-                snapshot->generation = candidate.version;
-                snapshot->distanceToPlayer = candidate.priority;
-                snapshot->isHighPriority = (candidate.priority < 48.0f);
-                
-                // Submit to worker
-                workerPool->SubmitMeshJobWithSnapshot(snapshot);
-                jobsSubmitted++;
-                
-                // Log::Debug("[mesh] schedule cx=%d cz=%d sy=%d ver=%u", 
-                //           candidate.pos.x, candidate.pos.z, candidate.sectionY, candidate.version);
+        // Step 4: Build section snapshots and submit
+        for (const auto& candidate : sectionCandidates) {
+            // Check safety cap
+            if (sectionsSubmitted >= SECTION_SAFETY_CAP) {
+                Log::Debug("SCHEDULE: Hit safety cap of %zu sections", SECTION_SAFETY_CAP);
+                break;
             }
+            
+            // Check time budget
+            auto currentTime = std::chrono::steady_clock::now();
+            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
+            if (elapsedMs >= budgetMs) {
+                Log::Debug("SCHEDULE: Hit time budget of %.1fms", budgetMs);
+                break;
+            }
+            
+            // Check queue capacity BEFORE building expensive snapshot
+            size_t queueSize = workerPool->GetPendingJobCount();
+            const size_t maxQueueSize = workerPool->GetMaxQueueSize();
+            if (queueSize >= maxQueueSize * 0.8) {  // Stop at 80% capacity
+                Log::Debug("SCHEDULE: Queue nearly full (%zu/%zu), stopping submission", 
+                         queueSize, maxQueueSize);
+                break;
+            }
+            
+            // Get chunk and section
+            auto it = m_chunks.find(candidate.chunkPos);
+            if (it == m_chunks.end()) continue;
+            
+            auto& chunk = it->second;
+            auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
+            
+            // Double-check section is still dirty and not in flight
+            if (sectionInfo.state != SectionState::LOADED || sectionInfo.meshingVersion != 0) {
+                continue; // Already being processed or state changed
+            }
+            
+            // Read version optimistically (Minecraft-style)
+            const uint32_t expectedVersion = sectionInfo.version;
+            
+            // Build snapshot (no state checks inside)
+            std::shared_ptr<Render::MeshJobData> snapshot;
+            if (!BuildSectionSnapshot(candidate.chunkPos, candidate.sectionY, expectedVersion, snapshot)) {
+                // Version changed or data missing, retry next frame
+                continue;
+            }
+            
+            // Now claim the work after we have a valid snapshot
+            sectionInfo.meshingVersion = expectedVersion;
+            sectionInfo.state = SectionState::MESHING;
+            
+            // Set priority metadata
+            snapshot->distanceToPlayer = candidate.priority;
+            snapshot->isHighPriority = (candidate.priority < 128.0f);
+            snapshot->submitTime = std::chrono::steady_clock::now();
+            
+            // Submit section job to worker
+            workerPool->SubmitMeshJobWithSnapshot(snapshot);
+            sectionsSubmitted++;
         }
         
-        if (jobsSubmitted > 0) {
-            // Log::Debug("SCHEDULE: Submitted %zu mesh jobs", jobsSubmitted);
+        if (sectionsSubmitted > 0) {
+            Log::Debug("SCHEDULE: Submitted %zu section mesh jobs", sectionsSubmitted);
         }
     }
     
@@ -706,48 +736,148 @@ namespace Client {
         ScheduleMeshBuildsWithSnapshots(playerPos);
     }
     
-    std::shared_ptr<Render::MeshJobData> ClientChunkManager::BuildSnapshotDirect(
-        Game::Math::ChunkPos chunkPos, int sectionY) {
+    void ClientChunkManager::CopyNeighborData(Game::Math::ChunkPos chunkPos, int sectionY, 
+                                             Render::SectionSnapshot& snapshot) {
+        // Copy neighbor chunks (north, south, east, west)
+        auto northIt = m_chunks.find({chunkPos.x, chunkPos.z - 1});
+        if (northIt != m_chunks.end() && northIt->second && northIt->second->chunkData) {
+            auto* neighborSection = northIt->second->chunkData->GetSection(sectionY);
+            if (neighborSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[0][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[0].begin(), snapshot.neighbors[0].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[0].begin(), snapshot.neighbors[0].end(), Game::BlockID::Air);
+        }
+        
+        // South (+z)
+        auto southIt = m_chunks.find({chunkPos.x, chunkPos.z + 1});
+        if (southIt != m_chunks.end() && southIt->second && southIt->second->chunkData) {
+            auto* neighborSection = southIt->second->chunkData->GetSection(sectionY);
+            if (neighborSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[1][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[1].begin(), snapshot.neighbors[1].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[1].begin(), snapshot.neighbors[1].end(), Game::BlockID::Air);
+        }
+        
+        // East (+x)
+        auto eastIt = m_chunks.find({chunkPos.x + 1, chunkPos.z});
+        if (eastIt != m_chunks.end() && eastIt->second && eastIt->second->chunkData) {
+            auto* neighborSection = eastIt->second->chunkData->GetSection(sectionY);
+            if (neighborSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[2][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[2].begin(), snapshot.neighbors[2].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[2].begin(), snapshot.neighbors[2].end(), Game::BlockID::Air);
+        }
+        
+        // West (-x)
+        auto westIt = m_chunks.find({chunkPos.x - 1, chunkPos.z});
+        if (westIt != m_chunks.end() && westIt->second && westIt->second->chunkData) {
+            auto* neighborSection = westIt->second->chunkData->GetSection(sectionY);
+            if (neighborSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[3][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[3].begin(), snapshot.neighbors[3].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[3].begin(), snapshot.neighbors[3].end(), Game::BlockID::Air);
+        }
+        
+        // Up (same chunk, section above)
+        auto& chunk = m_chunks[chunkPos];
+        if (sectionY < 23) {
+            auto* upSection = chunk->chunkData->GetSection(sectionY + 1);
+            if (upSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[4][i] = static_cast<Game::BlockID>(upSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[4].begin(), snapshot.neighbors[4].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[4].begin(), snapshot.neighbors[4].end(), Game::BlockID::Air);
+        }
+        
+        // Down (same chunk, section below)
+        if (sectionY > 0) {
+            auto* downSection = chunk->chunkData->GetSection(sectionY - 1);
+            if (downSection) {
+                for (int i = 0; i < 4096; ++i) {
+                    snapshot.neighbors[5][i] = static_cast<Game::BlockID>(downSection->blocks[i]);
+                }
+            } else {
+                std::fill(snapshot.neighbors[5].begin(), snapshot.neighbors[5].end(), Game::BlockID::Air);
+            }
+        } else {
+            std::fill(snapshot.neighbors[5].begin(), snapshot.neighbors[5].end(), Game::BlockID::Air);
+        }
+    }
+    
+    bool ClientChunkManager::BuildSectionSnapshot(
+        Game::Math::ChunkPos chunkPos, int sectionY, 
+        uint32_t expectedVersion,
+        std::shared_ptr<Render::MeshJobData>& outSnapshot) {
         
         ASSERT_MAIN_THREAD();
         
         // Direct access to chunks - no locks needed on main thread
         auto it = m_chunks.find(chunkPos);
         if (it == m_chunks.end() || !it->second || !it->second->chunkData) {
-            return nullptr;
+            return false; // No chunk data
         }
         
         auto& chunk = it->second;
+        
+        // NO STATE CHECK - only check data presence (Minecraft-style)
         auto* section = chunk->chunkData->GetSection(sectionY);
         if (!section) {
-            return nullptr;
+            return false; // Section doesn't exist
+        }
+        
+        // Check version before reading (optimistic read)
+        if (chunk->sectionInfos[sectionY].version != expectedVersion) {
+            return false; // Version already changed
         }
         
         // Create snapshot
-        auto snapshot = std::make_shared<Render::MeshJobData>(chunkPos, sectionY);
+        outSnapshot = std::make_shared<Render::MeshJobData>(chunkPos, sectionY);
+        outSnapshot->generation = expectedVersion;
         
         // Copy center section blocks
-        snapshot->sectionData.isEmpty = true;
-        snapshot->sectionData.sectionY = sectionY;
+        outSnapshot->sectionData.isEmpty = true;
+        outSnapshot->sectionData.sectionY = sectionY;
         
         for (int y = 0; y < 16; ++y) {
             for (int z = 0; z < 16; ++z) {
                 for (int x = 0; x < 16; ++x) {
                     int index = y * 256 + z * 16 + x;
                     Game::BlockID block = static_cast<Game::BlockID>(section->blocks[index]);
-                    snapshot->sectionData.blocks[index] = block;
+                    outSnapshot->sectionData.blocks[index] = block;
                     
                     if (block != Game::BlockID::Air) {
-                        snapshot->sectionData.isEmpty = false;
+                        outSnapshot->sectionData.isEmpty = false;
                     }
                 }
             }
         }
         
-        // If section is empty, no need to copy neighbors
-        if (snapshot->sectionData.isEmpty) {
-            return snapshot;
-        }
+        // Always copy neighbor data for 1-voxel halo (even for empty sections)
+        // This ensures proper face culling at chunk boundaries
         
         // Copy neighbor data directly (no GetChunk calls, direct map access)
         // Face indices: 0=north(-z), 1=south(+z), 2=east(+x), 3=west(-x), 4=up(+y), 5=down(-y)
@@ -758,15 +888,15 @@ namespace Client {
             auto* neighborSection = northIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[0][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[0][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[0].begin(), 
-                         snapshot->sectionData.neighbors[0].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[0].begin(), 
+                         outSnapshot->sectionData.neighbors[0].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[0].begin(), 
-                     snapshot->sectionData.neighbors[0].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[0].begin(), 
+                     outSnapshot->sectionData.neighbors[0].end(), Game::BlockID::Air);
         }
         
         // South neighbor (+z)
@@ -775,15 +905,15 @@ namespace Client {
             auto* neighborSection = southIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[1][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[1][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[1].begin(), 
-                         snapshot->sectionData.neighbors[1].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[1].begin(), 
+                         outSnapshot->sectionData.neighbors[1].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[1].begin(), 
-                     snapshot->sectionData.neighbors[1].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[1].begin(), 
+                     outSnapshot->sectionData.neighbors[1].end(), Game::BlockID::Air);
         }
         
         // East neighbor (+x)
@@ -792,15 +922,15 @@ namespace Client {
             auto* neighborSection = eastIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[2][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[2][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[2].begin(), 
-                         snapshot->sectionData.neighbors[2].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[2].begin(), 
+                         outSnapshot->sectionData.neighbors[2].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[2].begin(), 
-                     snapshot->sectionData.neighbors[2].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[2].begin(), 
+                     outSnapshot->sectionData.neighbors[2].end(), Game::BlockID::Air);
         }
         
         // West neighbor (-x)
@@ -809,15 +939,15 @@ namespace Client {
             auto* neighborSection = westIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[3][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[3][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[3].begin(), 
-                         snapshot->sectionData.neighbors[3].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[3].begin(), 
+                         outSnapshot->sectionData.neighbors[3].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[3].begin(), 
-                     snapshot->sectionData.neighbors[3].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[3].begin(), 
+                     outSnapshot->sectionData.neighbors[3].end(), Game::BlockID::Air);
         }
         
         // Up neighbor (same chunk, section above)
@@ -825,15 +955,15 @@ namespace Client {
             auto* upSection = chunk->chunkData->GetSection(sectionY + 1);
             if (upSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[4][i] = static_cast<Game::BlockID>(upSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[4][i] = static_cast<Game::BlockID>(upSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[4].begin(), 
-                         snapshot->sectionData.neighbors[4].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[4].begin(), 
+                         outSnapshot->sectionData.neighbors[4].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[4].begin(), 
-                     snapshot->sectionData.neighbors[4].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[4].begin(), 
+                     outSnapshot->sectionData.neighbors[4].end(), Game::BlockID::Air);
         }
         
         // Down neighbor (same chunk, section below)
@@ -841,22 +971,27 @@ namespace Client {
             auto* downSection = chunk->chunkData->GetSection(sectionY - 1);
             if (downSection) {
                 for (int i = 0; i < 4096; ++i) {
-                    snapshot->sectionData.neighbors[5][i] = static_cast<Game::BlockID>(downSection->blocks[i]);
+                    outSnapshot->sectionData.neighbors[5][i] = static_cast<Game::BlockID>(downSection->blocks[i]);
                 }
             } else {
-                std::fill(snapshot->sectionData.neighbors[5].begin(), 
-                         snapshot->sectionData.neighbors[5].end(), Game::BlockID::Air);
+                std::fill(outSnapshot->sectionData.neighbors[5].begin(), 
+                         outSnapshot->sectionData.neighbors[5].end(), Game::BlockID::Air);
             }
         } else {
-            std::fill(snapshot->sectionData.neighbors[5].begin(), 
-                     snapshot->sectionData.neighbors[5].end(), Game::BlockID::Air);
+            std::fill(outSnapshot->sectionData.neighbors[5].begin(), 
+                     outSnapshot->sectionData.neighbors[5].end(), Game::BlockID::Air);
         }
         
         // Fill light data with default values
-        std::fill(snapshot->sectionData.lightData.begin(), 
-                 snapshot->sectionData.lightData.end(), 0xFF);
+        std::fill(outSnapshot->sectionData.lightData.begin(), 
+                 outSnapshot->sectionData.lightData.end(), 0xFF);
         
-        return snapshot;
+        // Final version check to ensure nothing changed during capture
+        if (chunk->sectionInfos[sectionY].version != expectedVersion) {
+            return false; // Version changed during capture, retry next frame
+        }
+        
+        return true;
     }
     
     MeshAcceptance ClientChunkManager::AcceptMeshResult(const Network::MeshBuildResult& result) {

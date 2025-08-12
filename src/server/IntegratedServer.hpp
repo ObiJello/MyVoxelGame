@@ -30,12 +30,11 @@ namespace Server {
     // Server configuration
     struct IntegratedServerConfig {
         int tickRate = 20;                      // Server ticks per second (20 TPS like Minecraft)
-        int maxChunksPerTick = 5;              // Max chunks to process per tick
-        int maxBlockChangesPerTick = 100;      // Max block changes to process per tick
-        float chunkSendRadius = 128.0f;        // Radius for sending chunks to client
+        int maxChunksPerTick = 32;             // Max chunks to process per tick (increased from 5)
+        float chunkProcessBudgetMs = 2.0f;     // Time budget for chunk processing per tick
+        int defaultViewDistance = 8;           // Default view distance in chunks (Minecraft-like)
         bool enableAsyncChunkLoading = true;   // Use ServerWorkerPool for chunk loading
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
-        size_t maxCachedChunks = 1024;         // Max chunks to keep cached
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
     };
 

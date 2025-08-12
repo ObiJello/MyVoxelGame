@@ -29,8 +29,7 @@ namespace Game {
 
     // Simple configuration
     struct ChunkProviderConfig {
-        // Cache settings
-        size_t maxLoadedChunks = 1024;
+        // Cache settings removed - now uses ChunkCache directly
 
         // Loading settings
         std::string minecraftWorldPath;
@@ -43,7 +42,7 @@ namespace Game {
         DirtyTrackerConfig dirtyConfig;
 
         bool IsValid() const {
-            return maxLoadedChunks > 0 && generationConfig.IsValid();
+            return generationConfig.IsValid();
         }
     };
 

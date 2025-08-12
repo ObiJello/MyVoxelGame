@@ -37,6 +37,8 @@ namespace Server {
             // Performance settings
             int maxPlayersPerTick = 100;  // Max players to process per tick
             int maxChunksPerPlayerPerTick = 12;
+            int maxBytesPerPlayerPerTick = 1048576;  // 1MB per player per tick
+            int maxDiffBytesPerPlayerPerTick = 524288;  // 512KB for block changes per player
             int maxGlobalChunksPerTick = 100;
             size_t maxGlobalBytesPerTick = 10485760;  // 10MB
             

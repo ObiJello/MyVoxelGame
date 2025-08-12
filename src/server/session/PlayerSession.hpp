@@ -89,7 +89,7 @@ namespace Server {
             int viewDistance = 8;          // Chunks sent to client (≤ simulationDistance)
             int maxChunksPerTick = 12;     // Max chunks to send per tick
             int maxBytesPerTick = 1048576; // 1MB per tick max
-            int maxDiffsPerTick = 100;     // Max block changes per tick
+            int maxDiffBytesPerTick = 524288; // 512KB for block changes per tick
             bool compressPackets = true;   // Enable compression
             int compressionLevel = 3;      // zlib compression level (1-9)
         };

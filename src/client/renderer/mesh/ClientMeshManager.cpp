@@ -112,26 +112,39 @@ namespace Render {
         
         SetPlayerPosition(playerPosition);
         
+        // Throttle scheduling to prevent overwhelming the queue
+        static std::chrono::steady_clock::time_point lastScheduleTime;
+        auto now = std::chrono::steady_clock::now();
+        const auto SCHEDULE_INTERVAL = std::chrono::milliseconds(100); // Schedule every 100ms max
+        
+        if (now - lastScheduleTime < SCHEDULE_INTERVAL) {
+            return; // Skip this frame
+        }
+        lastScheduleTime = now;
+        
         auto startTime = std::chrono::steady_clock::now();
         
         // Delegate to ClientChunkManager to schedule mesh builds for dirty sections
         // This will create snapshots and submit them to the worker pool
+        // The ClientChunkManager now enforces time budgets internally
         m_chunkManager->ScheduleMeshBuildsWithSnapshots(playerPosition);
         
         // Record timing
         auto endTime = std::chrono::steady_clock::now();
         float schedulingTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+        m_stats.meshSchedulingTimeMs = schedulingTime;
         
-        // Note: m_stats.meshBuildsThisFrame is updated in ProcessMeshBuildResults
-        if (schedulingTime > 1.0f) {
-            Log::Debug("Mesh scheduling took %.2fms", schedulingTime);
+        // Warn if we exceed budget
+        if (schedulingTime > m_config.meshBuildBudgetMs) {
+            Log::Debug("Mesh scheduling exceeded budget: %.2fms > %.2fms", 
+                      schedulingTime, m_config.meshBuildBudgetMs);
         }
     }
 
     void ClientMeshManager::PerformGPUUploads() {
         if (!m_chunkManager) return;
         
-        
+        m_stats.meshUploadsThisFrame = 0;
         auto startTime = std::chrono::steady_clock::now();
         
         UploadMeshResultsWithBudget();
@@ -139,10 +152,11 @@ namespace Render {
         // Record timing
         auto endTime = std::chrono::steady_clock::now();
         float uploadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+        m_stats.gpuUploadTimeMs = uploadTime;
         
-        if (m_stats.meshUploadsThisFrame > 0) {
-            // Log::Debug("Uploaded %d meshes to GPU in %.2fms", 
-            //           m_stats.meshUploadsThisFrame, uploadTime);
+        if (uploadTime > m_config.gpuUploadBudgetMs && m_stats.meshUploadsThisFrame > 0) {
+            Log::Debug("GPU uploads exceeded budget: %.2fms > %.2fms (uploaded %d meshes)", 
+                      uploadTime, m_config.gpuUploadBudgetMs, m_stats.meshUploadsThisFrame);
         }
     }
 
@@ -355,9 +369,34 @@ namespace Render {
     }
     
     void ClientMeshManager::UploadMeshResultsWithBudget() {
-        // TODO: Implement time-budgeted mesh uploads
-        // For now, uploads happen immediately in ProcessMeshBuildResult
-        m_stats.ResetFrameCounters();
+        auto startTime = std::chrono::steady_clock::now();
+        int uploadsThisFrame = 0;
+        
+        // Process pending upload queue with time and count budgets
+        auto& meshResultQueue = GetMeshResultQueue();
+        
+        while (uploadsThisFrame < m_config.maxGPUUploadsPerFrame) {
+            // Check time budget
+            auto currentTime = std::chrono::steady_clock::now();
+            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
+            if (elapsedMs >= m_config.gpuUploadBudgetMs) {
+                break; // Time budget exceeded
+            }
+            
+            // Get next result to upload
+            Network::MeshBuildResult result;
+            if (!meshResultQueue.try_pop(result)) {
+                break; // No more results
+            }
+            
+            // Upload to GPU
+            if (ValidateMeshBuildResult(result)) {
+                UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData);
+                uploadsThisFrame++;
+                m_stats.meshUploadsThisFrame++;
+                m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
     }
     
     bool ClientMeshManager::ChunkNeedsMeshBuild(::Game::Math::ChunkPos chunkPos) const {

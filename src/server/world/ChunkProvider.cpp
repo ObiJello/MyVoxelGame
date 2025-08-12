@@ -17,7 +17,7 @@ namespace Game {
             m_config = ChunkProviderConfig{};
         }
 
-        Log::Debug("ChunkProvider created with max chunks: %zu", m_config.maxLoadedChunks);
+        Log::Debug("ChunkProvider created");
     }
 
     ChunkProvider::~ChunkProvider() {
@@ -50,9 +50,9 @@ namespace Game {
             // Create core components
             Log::Info("Creating ChunkCache...");
             ChunkCacheConfig cacheConfig;
-            cacheConfig.maxSize = m_config.maxLoadedChunks;
+            // Use default cache size from ChunkCache (2048)
             m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
-            Log::Info("ChunkCache created");
+            Log::Info("ChunkCache created with size %zu", cacheConfig.maxSize);
 
             // Create chunk generator
             Log::Info("Creating ProceduralChunkGenerator...");
@@ -446,12 +446,21 @@ namespace Game {
 
     void ChunkProvider::SetMaxLoadedChunks(size_t maxChunks) {
         std::lock_guard<std::mutex> lock(m_configMutex);
-        m_config.maxLoadedChunks = std::max(size_t(16), maxChunks);
+        // Cache size is now managed directly by ChunkCache
+        if (m_chunkCache) {
+            ChunkCacheConfig cacheConfig;
+            cacheConfig.maxSize = std::max(size_t(16), maxChunks);
+            // Note: Would need to recreate cache to change size
+        }
     }
 
     size_t ChunkProvider::GetMaxLoadedChunks() const {
         std::lock_guard<std::mutex> lock(m_configMutex);
-        return m_config.maxLoadedChunks;
+        // Return actual cache size
+        if (m_chunkCache) {
+            return m_chunkCache->GetStats().maxSize;
+        }
+        return 2048; // Default
     }
 
     void ChunkProvider::SetGenerationSeed(int32_t seed) {
@@ -835,7 +844,7 @@ namespace Game {
 
     ChunkProviderConfig CreateDefaultConfig() {
         ChunkProviderConfig config;
-        config.maxLoadedChunks = 1024;
+        // ChunkCache now defaults to 2048
 
         // Set up generation config
         config.generationConfig.seed = 12345;

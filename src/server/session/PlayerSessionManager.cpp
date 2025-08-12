@@ -201,6 +201,8 @@ namespace Server {
         sessionConfig.simulationDistance = m_config.defaultSimulationDistance;
         sessionConfig.viewDistance = m_config.defaultViewDistance;
         sessionConfig.maxChunksPerTick = m_config.maxChunksPerPlayerPerTick;
+        sessionConfig.maxBytesPerTick = m_config.maxBytesPerPlayerPerTick;
+        sessionConfig.maxDiffBytesPerTick = m_config.maxDiffBytesPerPlayerPerTick;
         
         session->Initialize(sessionConfig, 0, spawnPos);  // Dimension 0 = overworld
         

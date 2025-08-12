@@ -210,11 +210,8 @@ namespace Network {
         // Static connection ID counter
         static std::atomic<uint32_t> s_nextConnectionId;
         
-        // Maximum packet size (2 MiB)
+        // Maximum packet size (2 MiB) - matches typical Minecraft cap
         static constexpr size_t MAX_PACKET_SIZE = 2 * 1024 * 1024;
-        
-        // Maximum send queue size (2 MiB)
-        static constexpr size_t MAX_SEND_QUEUE_SIZE = 2 * 1024 * 1024;
     };
 
 } // namespace Network

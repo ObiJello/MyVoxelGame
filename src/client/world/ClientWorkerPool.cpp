@@ -77,6 +77,7 @@ namespace Threading {
         Log::Info("ClientWorkerPool shutdown complete");
     }
 
+
     void ClientWorkerPool::SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit mesh job - ClientWorkerPool not running");
@@ -365,52 +366,47 @@ namespace Threading {
     }
 
     bool ClientWorkerPool::ShouldCancelJob(const MeshJob& job) const {
+        // Check both section and chunk cancellation
         return IsSectionCancelled(job.chunkPos, job.sectionY) || IsChunkCancelled(job.chunkPos);
     }
 
     Network::MeshBuildResult ClientWorkerPool::BuildSectionMesh(const MeshJob& job) {
         Network::MeshBuildResult result(job.chunkPos, job.sectionY);
         
-        // Check if we're using snapshot (new system) or chunkData (legacy)
-        if (job.snapshot) {
-            // Set generation from snapshot for version checking
-            result.generation = job.snapshot->generation;
-            // New snapshot-based meshing (thread-safe)
-            if (job.snapshot->sectionData.isEmpty) {
-                result.success = true; // Empty section is valid, just no geometry
-                return result;
-            }
-            
-            // Build mesh using the real Mesher with snapshot data
-            // Create read-only block access adapter
-            Client::Render::SnapshotBlockAccess blockAccess(
-                job.snapshot->sectionData,
-                job.chunkPos,
-                job.sectionY
-            );
-            
-            // Use the real Mesher
-            Render::Mesher mesher;
-            Render::SectionMesh sectionMesh;
-            mesher.BuildSectionMesh(blockAccess, job.chunkPos, job.sectionY, sectionMesh);
-            
-            // Convert SectionMesh to MeshBuildResult format
-            result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
-            result.generation = job.snapshot->generation;  // Restore generation after conversion
-            
-            result.success = true;
-            // Note: generation tracking is handled at ClientChunkManager level
-            
-            // Log::Debug("Built mesh for chunk (%d, %d) section %d: %zu vertices, %zu indices",
-            //           job.chunkPos.x, job.chunkPos.z, job.sectionY,
-            //           result.meshData.vertexCount, result.meshData.indexCount);
-            
+        // Check if we have snapshot
+        if (!job.snapshot) {
+            Log::Warning("BuildSectionMesh: No section snapshot data");
+            result.success = false;
             return result;
         }
         
-        // Legacy path - will be removed
-        Log::Warning("Using legacy non-snapshot mesh building - not thread safe!");
-        result.success = false;
+        // Set generation from snapshot for version checking
+        result.generation = job.snapshot->generation;
+        
+        // Fast path for empty sections
+        if (job.snapshot->sectionData.isEmpty) {
+            result.success = true; // Empty section is valid, just no geometry
+            return result;
+        }
+        
+        // Build mesh using the real Mesher with snapshot data
+        // Create read-only block access adapter
+        Client::Render::SnapshotBlockAccess blockAccess(
+            job.snapshot->sectionData,
+            job.chunkPos,
+            job.sectionY
+        );
+        
+        // Use the real Mesher
+        Render::Mesher mesher;
+        Render::SectionMesh sectionMesh;
+        mesher.BuildSectionMesh(blockAccess, job.chunkPos, job.sectionY, sectionMesh);
+        
+        // Convert SectionMesh to MeshBuildResult format
+        result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
+        result.generation = job.snapshot->generation;  // Restore generation after conversion
+        result.success = true;
+        
         return result;
     }
 
@@ -419,7 +415,15 @@ namespace Threading {
         
         // Check queue size limit
         if (m_jobQueue.size() >= m_maxQueueSize) {
-            Log::Warning("Client worker queue full, dropping mesh job");
+            // Don't spam warnings for every dropped job
+            static std::chrono::steady_clock::time_point lastWarning;
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastWarning).count() >= 1) {
+                Log::Warning("Client worker queue full (%zu/%zu), dropping mesh jobs", 
+                           m_jobQueue.size(), m_maxQueueSize);
+                lastWarning = now;
+            }
+            m_stats.meshJobsCancelled.fetch_add(1, std::memory_order_relaxed);
             return;
         }
 

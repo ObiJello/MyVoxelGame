@@ -34,7 +34,7 @@ namespace Game {
 
     // Simple configuration
     struct ChunkCacheConfig {
-        size_t maxSize = 1024;
+        size_t maxSize = 2048;  // Increased for better performance with VD 10-12
 
         bool IsValid() const {
             return maxSize > 0;

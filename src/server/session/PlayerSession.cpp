@@ -286,7 +286,7 @@ namespace Server {
 
     void PlayerSession::ProcessChunkSends(ChunkStatusManager* statusMgr, SendScheduler* scheduler) {
         // Process removals first (up to N per tick)
-        size_t maxRemovals = 10;
+        size_t maxRemovals = 16;  // Increased from 10 for faster unloading
         while (!m_pendingRemove.empty() && maxRemovals > 0) {
             auto chunk = m_pendingRemove.back();
             m_pendingRemove.pop_back();
@@ -385,9 +385,10 @@ namespace Server {
     }
 
     void PlayerSession::ProcessDiffs(SendScheduler* scheduler) {
-        size_t maxDiffs = m_config.maxDiffsPerTick;
+        size_t maxDiffBytes = m_config.maxDiffBytesPerTick;
+        size_t diffBytesThisTick = 0;
         
-        while (!m_diffQueue.empty() && m_diffsOutThisTick < maxDiffs) {
+        while (!m_diffQueue.empty() && diffBytesThisTick < maxDiffBytes) {
             auto [chunk, section] = m_diffQueue.front();
             m_diffQueue.pop();
             
@@ -408,6 +409,9 @@ namespace Server {
             }
             
             // TODO: Build and send MultiBlockChangeS2CPacket via scheduler
+            // Estimate diff packet size (each block change is roughly 12 bytes)
+            size_t estimatedPacketSize = diffs.changes.size() * 12 + 16; // +16 for packet header
+            diffBytesThisTick += estimatedPacketSize;
             
             // Clear processed diffs
             chunkIt->second.erase(sectionIt);

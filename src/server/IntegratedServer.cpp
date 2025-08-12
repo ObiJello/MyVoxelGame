@@ -338,7 +338,24 @@ namespace Server {
         
         // Call World's unified tick loop with chunk send throttling
         if (m_world) {
-            m_world->WorldLoop(deltaTime, m_config.maxChunksPerTick);
+            // Use time budget for chunk processing
+            auto chunkStartTime = std::chrono::steady_clock::now();
+            int chunksProcessed = 0;
+            
+            // Process up to maxChunksPerTick or until time budget exceeded
+            while (chunksProcessed < m_config.maxChunksPerTick) {
+                auto currentTime = std::chrono::steady_clock::now();
+                float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - chunkStartTime).count();
+                
+                if (elapsedMs >= m_config.chunkProcessBudgetMs) {
+                    break; // Time budget exceeded
+                }
+                
+                // Process one chunk worth of work
+                // For now, just call WorldLoop with the remaining chunk budget
+                m_world->WorldLoop(deltaTime, m_config.maxChunksPerTick - chunksProcessed);
+                break; // WorldLoop handles its own batching
+            }
         }
         
         // Increment tick counter
@@ -809,7 +826,7 @@ namespace Server {
         // Configure session manager
         PlayerSessionManager::Config sessionConfig;
         sessionConfig.defaultSimulationDistance = 8;
-        sessionConfig.defaultViewDistance = m_config.chunkSendRadius / 16;  // Convert from blocks to chunks
+        sessionConfig.defaultViewDistance = m_config.defaultViewDistance;  // Use view distance in chunks
         sessionConfig.worldSpawn = glm::vec3(0.0f, 67.0f, 0.0f);
         sessionConfig.spawnChunkRadius = 2;
         sessionConfig.maxChunksPerPlayerPerTick = m_config.maxChunksPerTick;

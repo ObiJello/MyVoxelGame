@@ -119,6 +119,11 @@ namespace Render {
 
         // LRU management
         void SetMaxSections(size_t maxSections) { m_maxSections = maxSections; }
+        void SetMaxSectionsFromViewDistance(int viewDistance) { 
+            // Formula: ((2*viewDistance+3)^2) * 24 sections per chunk
+            int diameter = 2 * viewDistance + 3;
+            m_maxSections = diameter * diameter * 24;
+        }
         void EnforceLRU();
 
     private:
@@ -144,7 +149,7 @@ namespace Render {
         };
 
         std::unordered_map<SectionKey, std::unique_ptr<ManagedGPUSectionData>, SectionKeyHash> m_sections;
-        size_t m_maxSections = 10000; // Default limit
+        size_t m_maxSections = 12000; // Default for reasonable view distance (computed as ((2*VD+3)^2)*24)
 
         // Helper methods
         SectionKey MakeKey(Game::Math::ChunkPos chunkPos, int sectionY) const;

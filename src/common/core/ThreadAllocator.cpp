@@ -83,22 +83,15 @@ namespace Core {
     }
 
     void ThreadAllocator::DistributeWorkers(ThreadAllocation& allocation) {
-        // Strategy: Split available workers, with slight preference to server for chunk generation
+        // Strategy: 50/50 split between client and server for balanced performance
         if (allocation.availableWorkers <= 2) {
             // Minimum allocation
             allocation.clientMeshWorkers = 1;
             allocation.serverWorldWorkers = std::max(size_t(1), allocation.availableWorkers - 1);
-        } else if (allocation.availableWorkers <= 4) {
-            // Small systems: equal split
-            allocation.clientMeshWorkers = allocation.availableWorkers / 2;
-            allocation.serverWorldWorkers = allocation.availableWorkers - allocation.clientMeshWorkers;
-        } else if (allocation.availableWorkers <= 8) {
-            // Medium systems: slight preference to server
-            allocation.clientMeshWorkers = (allocation.availableWorkers * 2) / 5; // 40%
-            allocation.serverWorldWorkers = allocation.availableWorkers - allocation.clientMeshWorkers;
         } else {
-            // Large systems: cap client workers at 4, rest to server
-            allocation.clientMeshWorkers = std::min(size_t(4), allocation.availableWorkers / 3);
+            // Equal split for all systems (no cap on client workers)
+            // Client mesh building is critical for smooth gameplay
+            allocation.clientMeshWorkers = allocation.availableWorkers / 2;
             allocation.serverWorldWorkers = allocation.availableWorkers - allocation.clientMeshWorkers;
         }
     }
