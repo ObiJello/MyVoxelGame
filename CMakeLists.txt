@@ -236,6 +236,8 @@ else()
             src/common/core/Log.hpp
             src/common/core/JobSystem.cpp
             src/common/core/JobSystem.hpp
+            src/common/core/ThreadAllocator.cpp
+            src/common/core/ThreadAllocator.hpp
             src/common/core/Config.hpp
 
             # Client input
@@ -403,6 +405,8 @@ else()
             src/server/network/listeners/HandshakePacketListener.hpp
             src/server/network/listeners/LoginPacketListener.cpp
             src/server/network/listeners/LoginPacketListener.hpp
+            src/server/network/listeners/ServerPlayPacketListener.cpp
+            src/server/network/listeners/ServerPlayPacketListener.hpp
             
             # New session management system
             src/server/world/ticketing/ChunkTicketManager.cpp
@@ -423,6 +427,8 @@ else()
             src/common/network/packets/HandshakeC2S.hpp
             src/common/network/packets/LoginStartC2S.cpp
             src/common/network/packets/LoginStartC2S.hpp
+            src/common/network/packets/KeepAliveC2S.cpp
+            src/common/network/packets/KeepAliveC2S.hpp
     )
 endif()
 
