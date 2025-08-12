@@ -12,22 +12,7 @@ namespace Server {
                    m_connection.GetConnectionId());
     }
     
-    void ServerPlayPacketListener::onBlockAction(const Network::BlockActionC2SPacket& packet) {
-        // TODO: Implement block action handling
-        Log::Debug("[ServerPlayPacketListener] Received block action packet");
-    }
-    
-    void ServerPlayPacketListener::onPlayerMove(const Network::PlayerMoveC2SPacket& packet) {
-        // TODO: Implement player move handling
-        Log::Debug("[ServerPlayPacketListener] Received player move packet");
-    }
-    
-    void ServerPlayPacketListener::onChatMessage(const Network::ChatMessageC2SPacket& packet) {
-        // TODO: Implement chat message handling
-        Log::Debug("[ServerPlayPacketListener] Received chat message packet");
-    }
-    
-    void ServerPlayPacketListener::onKeepAlive(const Network::KeepAliveC2SPacket& packet) {
+    void ServerPlayPacketListener::onKeepAliveResponse(const Network::KeepAliveC2SPacket& packet) {
         // Create a temporary payload for the legacy handler
         // This is a temporary solution until we fully migrate to typed packets
         Network::PacketBuffer buffer;

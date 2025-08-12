@@ -1,13 +1,13 @@
 // File: src/common/network/packets/HandshakeC2S.cpp
 #include "HandshakeC2S.hpp"
-#include "server/network/listeners/IHandshakePacketListener.hpp"
+#include "common/network/IPacketListener.hpp"
 
 namespace Network {
 
     void HandshakeC2SPacket::apply(IPacketListener& listener) {
-        if (auto* handshakeListener = dynamic_cast<Server::IHandshakePacketListener*>(&listener)) {
-            handshakeListener->onHandshake(*this);
-        }
+        // Direct virtual call - no dynamic_cast needed!
+        // This fixes the Windows RTTI issue
+        listener.onHandshake(*this);
     }
 
 } // namespace Network

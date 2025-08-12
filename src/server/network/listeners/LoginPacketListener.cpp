@@ -68,11 +68,6 @@ namespace Server {
                   username.c_str());
     }
 
-    void LoginPacketListener::onEncryptionResponse(const Network::EncryptionResponseC2SPacket& packet) {
-        // Not implemented for offline/integrated server
-        Log::Warning("[LoginPacketListener] Encryption not supported in integrated server mode");
-    }
-
     void LoginPacketListener::onDisconnect(const std::string& reason) {
         Log::Info("[LoginPacketListener] Connection closed during login: %s", reason.c_str());
     }

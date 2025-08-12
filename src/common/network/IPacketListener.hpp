@@ -14,6 +14,11 @@ namespace Network {
     struct BlockChangeS2CPacket;
     struct MultiBlockChangeS2CPacket;
     struct PlayerUpdateS2CPacket;
+    
+    // C2S packet types
+    class LoginStartC2SPacket;
+    class HandshakeC2SPacket;
+    class KeepAliveC2SPacket;
 
     // Base interface for all packet listeners
     // This follows Minecraft's visitor pattern for type-safe packet handling
@@ -44,6 +49,17 @@ namespace Network {
         // Connection management
         virtual void onDisconnect(const std::string& reason) {}
         virtual void onKeepAlive(uint64_t id) {}
+        
+        // ========================================================================
+        // CLIENT → SERVER PACKET HANDLERS
+        // ========================================================================
+        
+        // Login phase
+        virtual void onHandshake(const HandshakeC2SPacket& packet) {}
+        virtual void onLoginStart(const LoginStartC2SPacket& packet) {}
+        
+        // Play phase
+        virtual void onKeepAliveResponse(const KeepAliveC2SPacket& packet) {}
     };
 
 } // namespace Network

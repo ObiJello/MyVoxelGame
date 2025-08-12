@@ -1,7 +1,7 @@
 // File: src/server/network/listeners/LoginPacketListener.hpp
 #pragma once
 
-#include "ILoginPacketListener.hpp"
+#include "common/network/IPacketListener.hpp"
 #include "common/network/packets/LoginStartC2S.hpp"
 
 namespace Server {
@@ -9,7 +9,7 @@ namespace Server {
     class ServerConnection;
     class NetworkServer;
 
-    class LoginPacketListener : public ILoginPacketListener {
+    class LoginPacketListener : public Network::IPacketListener {
     private:
         ServerConnection& m_connection;
         NetworkServer* m_server;
@@ -25,8 +25,8 @@ namespace Server {
         // Handle login start packet
         void onLoginStart(const Network::LoginStartC2SPacket& packet) override;
         
-        // Handle encryption response (for online mode)
-        void onEncryptionResponse(const Network::EncryptionResponseC2SPacket& packet) override;
+        // Get listener name for debugging
+        const char* getName() const override { return "LoginPacketListener"; }
         
         // Handle disconnect
         void onDisconnect(const std::string& reason) override;
