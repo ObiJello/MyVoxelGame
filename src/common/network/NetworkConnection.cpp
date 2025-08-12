@@ -274,11 +274,24 @@ namespace Network {
         try {
             PacketPtr packet = DecodePacket(m_currentPacket.header.packetId, m_currentPacket.payload);
             if (packet) {
+                // Debug logging for critical packets on Windows debugging
+                if (m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::LoginStart) ||
+                    m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::KeepAliveC2S)) {
+                    Log::Debug("[%s] I/O thread queueing packet ID 0x%02X for main thread", 
+                              m_name.c_str(), m_currentPacket.header.packetId);
+                }
+                
                 // Queue for main thread processing
                 IncomingPacket incoming(std::move(packet));
                 if (!m_incomingPackets.try_push(std::move(incoming))) {
                     Log::Warning("[%s] Incoming packet queue full, dropping packet ID 0x%02X", 
                                 m_name.c_str(), m_currentPacket.header.packetId);
+                } else {
+                    // Log successful queueing for debugging
+                    if (m_currentPacket.header.packetId == static_cast<uint8_t>(Network::PacketId::LoginStart)) {
+                        Log::Debug("[%s] LoginStart packet successfully queued (queue size: %zu)", 
+                                  m_name.c_str(), m_incomingPackets.Size());
+                    }
                 }
             } else {
                 // Fallback to legacy callback for backward compatibility

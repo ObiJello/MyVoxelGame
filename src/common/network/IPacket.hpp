@@ -46,10 +46,36 @@ namespace Network {
         PacketPtr packet;
         std::chrono::steady_clock::time_point timestamp;
         
+        // Default constructor
         IncomingPacket() = default;
+        
+        // Constructor from packet
         IncomingPacket(PacketPtr p) 
             : packet(std::move(p))
             , timestamp(std::chrono::steady_clock::now()) {}
+        
+        // Explicit move constructor - critical for Windows compatibility
+        IncomingPacket(IncomingPacket&& other) noexcept
+            : packet(std::move(other.packet))
+            , timestamp(other.timestamp) {
+            // Clear the moved-from object to ensure it's in a valid state
+            other.packet.reset();
+        }
+        
+        // Explicit move assignment operator
+        IncomingPacket& operator=(IncomingPacket&& other) noexcept {
+            if (this != &other) {
+                packet = std::move(other.packet);
+                timestamp = other.timestamp;
+                // Clear the moved-from object
+                other.packet.reset();
+            }
+            return *this;
+        }
+        
+        // Delete copy operations to prevent accidental copies
+        IncomingPacket(const IncomingPacket&) = delete;
+        IncomingPacket& operator=(const IncomingPacket&) = delete;
     };
 
     // Outgoing packet wrapper for queueing
