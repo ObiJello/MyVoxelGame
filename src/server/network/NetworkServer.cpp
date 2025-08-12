@@ -117,6 +117,14 @@ namespace Server {
             return;
         }
         
+        // Set TCP_NODELAY to disable Nagle's algorithm for low-latency
+        // This is critical for real-time game networking, especially on Windows
+        try {
+            socket.set_option(tcp::no_delay(true));
+        } catch (const std::exception& e) {
+            Log::Warning("Failed to set TCP_NODELAY: %s", e.what());
+        }
+        
         // Create new ServerConnection
         auto connection = std::make_shared<ServerConnection>(std::move(socket), this);
         

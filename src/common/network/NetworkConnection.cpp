@@ -13,6 +13,15 @@ namespace Network {
         , m_connectionId(s_nextConnectionId.fetch_add(1))
         , m_name("Connection#" + std::to_string(m_connectionId))
     {
+        // Set TCP_NODELAY to disable Nagle's algorithm
+        // This ensures low-latency packet delivery, critical for game networking
+        // Especially important on Windows where Nagle's algorithm can cause delays
+        try {
+            m_socket.set_option(tcp::no_delay(true));
+        } catch (const std::exception& e) {
+            Log::Warning("[%s] Failed to set TCP_NODELAY: %s", m_name.c_str(), e.what());
+        }
+        
         m_readBuffer.resize(4096); // Initial read buffer size
         m_stats.connectedTime = std::chrono::steady_clock::now();
     }
