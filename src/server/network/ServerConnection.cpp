@@ -103,22 +103,29 @@ namespace Server {
         }
         
         // Drain incoming packets queue and apply to listener
-        Network::IncomingPacket packet;
         int packetsProcessed = 0;
         const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit only - time budget is primary control
         const float INBOUND_PROCESS_BUDGET_MS = 0.5f;  // Time budget for processing inbound packets
         
         auto startTime = std::chrono::steady_clock::now();
         
+        Network::IncomingPacket packet;
         while (packetsProcessed < MAX_PACKETS_PER_TICK && TryPopIncoming(packet)) {
-            Log::Debug("[ServerConnection %u] Dequeued packet from queue", GetConnectionId());
+            // Get packet info BEFORE any processing
+            uint8_t packetId = packet.packet ? static_cast<uint8_t>(packet.packet->getId()) : 0xFF;
+            Log::Debug("[ServerConnection %u] Dequeued packet ID 0x%02X from queue (iteration %d)", 
+                      GetConnectionId(), packetId, packetsProcessed + 1);
+            
             // Check time budget
             auto currentTime = std::chrono::steady_clock::now();
             float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
             if (elapsedMs >= INBOUND_PROCESS_BUDGET_MS) {
+                Log::Debug("[ServerConnection %u] Time budget exceeded after %.2fms", GetConnectionId(), elapsedMs);
                 break;  // Time budget exceeded
             }
+            
             if (packet.packet) {
+                Log::Debug("[ServerConnection %u] Packet is valid, checking listener...", GetConnectionId());
                 // Check if we need to create a listener based on the packet type
                 // This happens on server thread after I/O thread has already switched protocol state
                 if (!m_listener) {
@@ -139,13 +146,26 @@ namespace Server {
                     try {
                         // Apply packet to current listener (visitor pattern)
                         if (auto* c2sPacket = dynamic_cast<Network::IC2SPacket*>(packet.packet.get())) {
-                            Log::Debug("[ServerConnection %u] Applying packet ID 0x%02X to listener %s", 
-                                      GetConnectionId(), static_cast<int>(packet.packet->getId()), 
-                                      m_listener->getName());
+                            // Store listener name before apply (it might change during apply)
+                            std::string listenerName = m_listener->getName();
+                            
+                            Log::Debug("[ServerConnection %u] Iteration %d: Applying packet ID 0x%02X to listener %s", 
+                                      GetConnectionId(), packetsProcessed + 1, static_cast<int>(packet.packet->getId()), 
+                                      listenerName.c_str());
+                            
+                            // Apply the packet - this might change m_listener!
                             c2sPacket->apply(*m_listener);
                             packetsProcessed++;
+                            Log::Debug("[ServerConnection %u] Successfully processed packet %d (ID 0x%02X)", 
+                                      GetConnectionId(), packetsProcessed, static_cast<int>(packet.packet->getId()));
+                            
+                            // Log if listener changed
+                            if (m_listener && m_listener->getName() != listenerName) {
+                                Log::Debug("[ServerConnection %u] Listener changed from %s to %s after processing packet",
+                                          GetConnectionId(), listenerName.c_str(), m_listener->getName());
+                            }
                         } else {
-                            Log::Warning("[ServerConnection %u] Packet is not a C2S packet", GetConnectionId());
+                            Log::Warning("[ServerConnection %u] Packet is not a C2S packet (dynamic_cast failed)", GetConnectionId());
                         }
                     } catch (const std::exception& e) {
                         Log::Error("[ServerConnection %u] Exception processing packet: %s", 
@@ -157,7 +177,8 @@ namespace Server {
                                 static_cast<int>(m_phase));
                 }
             } else {
-                Log::Warning("[ServerConnection %u] Dequeued null packet from queue", GetConnectionId());
+                Log::Warning("[ServerConnection %u] Iteration %d: Dequeued null packet from queue", 
+                            GetConnectionId(), packetsProcessed + 1);
             }
         }
         
