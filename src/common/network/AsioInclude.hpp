@@ -2,6 +2,16 @@
 // Compatibility header for Boost.Asio and standalone Asio
 #pragma once
 
+// Windows-specific configuration for ASIO
+#ifdef _WIN32
+    #ifndef _WIN32_WINNT
+        #define _WIN32_WINNT 0x0601  // Windows 7 minimum
+    #endif
+    #ifndef WINVER
+        #define WINVER 0x0601
+    #endif
+#endif
+
 #ifdef ASIO_STANDALONE
     // Using standalone Asio
     #include <asio.hpp>

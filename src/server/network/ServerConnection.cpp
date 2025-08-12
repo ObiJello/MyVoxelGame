@@ -69,10 +69,16 @@ namespace Server {
         
         if (m_server) {
             try {
+                // Safely get shared_ptr - this can throw if we're being destroyed
+                auto self = shared_from_this();
                 m_server->OnConnectionClosed(
-                    std::static_pointer_cast<ServerConnection>(shared_from_this()));
+                    std::static_pointer_cast<ServerConnection>(self));
+            } catch (const std::bad_weak_ptr& e) {
+                // Object is being destroyed, can't get shared_ptr
+                Log::Debug("[ServerConnection %u] Already being destroyed, skipping server notification", 
+                    GetConnectionId());
             } catch (const std::exception& e) {
-                // Log but don't rethrow - this can be called during destruction
+                // Other errors during notification
                 Log::Warning("[ServerConnection %u] Failed to notify server of disconnection: %s", 
                     GetConnectionId(), e.what());
             }

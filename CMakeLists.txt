@@ -22,6 +22,11 @@ if(WIN32)
         add_compile_options(-m32)
         add_link_options(-m32)
     endif()
+    
+    # Define Windows version for ASIO and Windows APIs
+    # Windows 7 (0x0601) as minimum for proper ASIO support
+    add_compile_definitions(_WIN32_WINNT=0x0601)
+    add_compile_definitions(WINVER=0x0601)
 endif()
 
 # 2) Binaries go into bin/
