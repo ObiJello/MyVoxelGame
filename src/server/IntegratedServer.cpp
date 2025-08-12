@@ -317,7 +317,7 @@ namespace Server {
             auto connections = m_networkServer->GetConnections();
             for (auto& conn : connections) {
                 // Skip disconnected connections to avoid iterator issues
-                if (!conn || conn->GetState() == ConnectionState::DISCONNECTED) {
+                if (!conn || conn->GetState() == Network::ConnectionState::DISCONNECTED) {
                     continue;
                 }
                 conn->tick();  // Drain incoming packets and apply to listeners

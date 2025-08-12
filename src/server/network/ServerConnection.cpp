@@ -423,7 +423,7 @@ namespace Server {
             auto connections = m_server->GetConnections();
             for (auto& conn : connections) {
                 // Skip disconnected connections to avoid iterator issues
-                if (!conn || conn->GetState() == ConnectionState::DISCONNECTED) {
+                if (!conn || conn->GetState() == Network::ConnectionState::DISCONNECTED) {
                     continue;
                 }
                 if (conn->IsAuthenticated()) {
