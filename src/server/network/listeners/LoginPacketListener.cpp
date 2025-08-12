@@ -13,7 +13,10 @@ namespace Server {
     }
 
     void LoginPacketListener::onLoginStart(const Network::LoginStartC2SPacket& packet) {
-        Log::Info("[LoginPacketListener] Login start received for player: %s", packet.username.c_str());
+        // DIAGNOSTIC: Log method entry
+        Log::Info("[LoginPacketListener] *** onLoginStart() CALLED *** for player: %s", packet.username.c_str());
+        Log::Debug("[LoginPacketListener] Connection ID: %u, Current phase: %d", 
+                  m_connection.GetConnectionId(), static_cast<int>(m_connection.GetPhase()));
         
         // Enable compression if configured (Minecraft uses 256 bytes by default)
         if (m_compressionThreshold > 0) {
@@ -33,6 +36,7 @@ namespace Server {
     }
 
     void LoginPacketListener::finalizeLogin(const std::string& username) {
+        Log::Debug("[LoginPacketListener] finalizeLogin() called for %s", username.c_str());
         // Generate player ID (use connection ID for now)
         uint32_t playerId = m_connection.GetConnectionId();
         

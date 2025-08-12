@@ -91,6 +91,17 @@ namespace Server {
     }
     
     void ServerConnection::tick() {
+        // DIAGNOSTIC: Log tick start
+        static int tickCount = 0;
+        tickCount++;
+        if (tickCount % 20 == 0) { // Log every second (20 ticks)
+            size_t queueSize = GetIncomingQueueSize();
+            if (queueSize > 0) {
+                Log::Info("[ServerConnection %u] tick() #%d - Queue has %zu packets waiting", 
+                          GetConnectionId(), tickCount, queueSize);
+            }
+        }
+        
         // Drain incoming packets queue and apply to listener
         Network::IncomingPacket packet;
         int packetsProcessed = 0;
@@ -100,6 +111,7 @@ namespace Server {
         auto startTime = std::chrono::steady_clock::now();
         
         while (packetsProcessed < MAX_PACKETS_PER_TICK && TryPopIncoming(packet)) {
+            Log::Debug("[ServerConnection %u] Dequeued packet from queue", GetConnectionId());
             // Check time budget
             auto currentTime = std::chrono::steady_clock::now();
             float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
@@ -127,6 +139,9 @@ namespace Server {
                     try {
                         // Apply packet to current listener (visitor pattern)
                         if (auto* c2sPacket = dynamic_cast<Network::IC2SPacket*>(packet.packet.get())) {
+                            Log::Debug("[ServerConnection %u] Applying packet ID 0x%02X to listener %s", 
+                                      GetConnectionId(), static_cast<int>(packet.packet->getId()), 
+                                      m_listener->getName());
                             c2sPacket->apply(*m_listener);
                             packetsProcessed++;
                         } else {
@@ -136,7 +151,13 @@ namespace Server {
                         Log::Error("[ServerConnection %u] Exception processing packet: %s", 
                                   GetConnectionId(), e.what());
                     }
+                } else {
+                    Log::Warning("[ServerConnection %u] No listener set for packet ID 0x%02X in phase %d", 
+                                GetConnectionId(), static_cast<int>(packet.packet->getId()), 
+                                static_cast<int>(m_phase));
                 }
+            } else {
+                Log::Warning("[ServerConnection %u] Dequeued null packet from queue", GetConnectionId());
             }
         }
         
