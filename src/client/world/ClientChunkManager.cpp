@@ -113,27 +113,46 @@ namespace Client {
         Log::Debug("PIPELINE: Chunk data deserialized successfully for (%d, %d), %zu sections created", 
                   chunkPos.x, chunkPos.z, chunk->chunkData->GetSectionCount());
         
-        // Mark all sections with data as dirty for initial mesh generation
+        // Initialize ALL 24 sections for proper neighbor culling (Minecraft-style)
         for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+            auto& sectionInfo = chunk->sectionInfos[sectionY];
+            
             if (chunk->chunkData->HasSection(sectionY)) {
-                // Update new section state tracking
-                chunk->sectionInfos[sectionY].state = SectionState::LOADED;
-                chunk->sectionInfos[sectionY].version++;
-                chunk->sectionInfos[sectionY].dirty = true;
+                // Section has data
+                sectionInfo.hasCpuData = true;
+                sectionInfo.isAllAir = false;  // Assume non-empty if it has a section
+                sectionInfo.state = SectionState::LOADED;
+                sectionInfo.version++;
+                sectionInfo.dirty = true;  // Needs meshing
                 
                 // Also update legacy dirty set for compatibility
                 chunk->dirtySections.insert(sectionY);
-                
-                // Log::Debug("[mesh] loaded cx=%d cz=%d sy=%d ver=%u",
-                //           chunkPos.x, chunkPos.z, sectionY, chunk->sectionInfos[sectionY].version);
+            } else {
+                // Section is empty (all air)
+                sectionInfo.hasCpuData = true;  // We know it's air
+                sectionInfo.isAllAir = true;
+                sectionInfo.state = SectionState::LOADED;
+                sectionInfo.version++;
+                sectionInfo.dirty = false;  // No need to mesh empty sections
             }
         }
         
         // Transition to LOADED state
         TransitionChunkState(chunk, ChunkState::LOADED);
         
-        Log::Debug("PIPELINE: LoadChunk COMPLETE for chunk (%d, %d) - chunk is now LOADED with %zu dirty sections", 
-                  chunkPos.x, chunkPos.z, chunk->dirtySections.size());
+        // Mark neighbor chunks' sections as dirty for proper face culling
+        MarkNeighborSectionsDirty(chunkPos);
+        
+        // Count how many sections have data vs are empty
+        int nonEmptyCount = 0;
+        for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+            if (!chunk->sectionInfos[sy].isAllAir) {
+                nonEmptyCount++;
+            }
+        }
+        
+        Log::Debug("PIPELINE: LoadChunk COMPLETE for chunk (%d, %d) - %d non-empty sections, %zu dirty sections", 
+                  chunkPos.x, chunkPos.z, nonEmptyCount, chunk->dirtySections.size());
     }
 
     // Unload chunk from packet
@@ -150,6 +169,11 @@ namespace Client {
 
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
         ASSERT_MAIN_THREAD();
+        
+        // Mark neighbor chunks' sections as dirty BEFORE unloading
+        // This ensures they rebuild their meshes to show previously culled faces
+        MarkNeighborSectionsDirty(chunkPos);
+        
         // Cancel mesh jobs for this chunk
         Threading::CancelClientMeshJob(chunkPos);
         
@@ -196,6 +220,75 @@ namespace Client {
             }
         }
     }
+    
+    void ClientChunkManager::MarkNeighborSectionsDirty(Game::Math::ChunkPos chunkPos) {
+        ASSERT_MAIN_THREAD();
+        
+        Log::Debug("=== MarkNeighborSectionsDirty for chunk (%d, %d) ===", chunkPos.x, chunkPos.z);
+        
+        // Mark all sections of the 4 adjacent chunks as dirty (Minecraft-style)
+        // Don't change states - just increment version and set dirty flag
+        
+        // North neighbor (-z)
+        auto northPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z - 1};
+        auto northIt = m_chunks.find(northPos);
+        if (northIt != m_chunks.end() && northIt->second->state == ChunkState::LOADED) {
+            int dirtyCount = 0;
+            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                auto& sectionInfo = northIt->second->sectionInfos[sectionY];
+                bool wasAlreadyDirty = sectionInfo.dirty;
+                sectionInfo.version++;  // Increment version (will cause in-flight meshes to be dropped)
+                sectionInfo.dirty = true;
+                northIt->second->dirtySections.insert(sectionY);  // Legacy support
+                if (!wasAlreadyDirty && !sectionInfo.isAllAir) {
+                    dirtyCount++;
+                }
+            }
+            Log::Debug("  North neighbor (%d, %d): marked %d non-empty sections dirty", 
+                      northPos.x, northPos.z, dirtyCount);
+        } else {
+            Log::Debug("  North neighbor (%d, %d): NOT FOUND or NOT LOADED", northPos.x, northPos.z);
+        }
+        
+        // South neighbor (+z)
+        auto southPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z + 1};
+        auto southIt = m_chunks.find(southPos);
+        if (southIt != m_chunks.end() && southIt->second->state == ChunkState::LOADED) {
+            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                auto& sectionInfo = southIt->second->sectionInfos[sectionY];
+                sectionInfo.version++;
+                sectionInfo.dirty = true;
+                southIt->second->dirtySections.insert(sectionY);
+            }
+            Log::Debug("Marked south neighbor chunk (%d, %d) sections dirty", southPos.x, southPos.z);
+        }
+        
+        // East neighbor (+x)
+        auto eastPos = Game::Math::ChunkPos{chunkPos.x + 1, chunkPos.z};
+        auto eastIt = m_chunks.find(eastPos);
+        if (eastIt != m_chunks.end() && eastIt->second->state == ChunkState::LOADED) {
+            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                auto& sectionInfo = eastIt->second->sectionInfos[sectionY];
+                sectionInfo.version++;
+                sectionInfo.dirty = true;
+                eastIt->second->dirtySections.insert(sectionY);
+            }
+            Log::Debug("Marked east neighbor chunk (%d, %d) sections dirty", eastPos.x, eastPos.z);
+        }
+        
+        // West neighbor (-x)
+        auto westPos = Game::Math::ChunkPos{chunkPos.x - 1, chunkPos.z};
+        auto westIt = m_chunks.find(westPos);
+        if (westIt != m_chunks.end() && westIt->second->state == ChunkState::LOADED) {
+            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                auto& sectionInfo = westIt->second->sectionInfos[sectionY];
+                sectionInfo.version++;
+                sectionInfo.dirty = true;
+                westIt->second->dirtySections.insert(sectionY);
+            }
+            Log::Debug("Marked west neighbor chunk (%d, %d) sections dirty", westPos.x, westPos.z);
+        }
+    }
 
     // ========================================================================
     // CHUNK ACCESS
@@ -226,6 +319,49 @@ namespace Client {
     bool ClientChunkManager::IsChunkLoaded(Game::Math::ChunkPos chunkPos) const {
         ChunkState state = GetChunkState(chunkPos);
         return state == ChunkState::LOADED;
+    }
+
+    // ========================================================================
+    // STATISTICS
+    // ========================================================================
+    
+    size_t ClientChunkManager::GetLoadedChunkCount() const {
+        size_t count = 0;
+        for (const auto& [pos, chunk] : m_chunks) {
+            if (chunk && chunk->state == ChunkState::LOADED) {
+                count++;
+            }
+        }
+        return count;
+    }
+    
+    void ClientChunkManager::GetSectionStats(size_t& totalSections, size_t& readySections, 
+                                            size_t& meshingSections, size_t& dirtySections) const {
+        totalSections = 0;
+        readySections = 0;
+        meshingSections = 0;
+        dirtySections = 0;
+        
+        for (const auto& [pos, chunk] : m_chunks) {
+            if (chunk && chunk->state == ChunkState::LOADED) {
+                for (int sectionY = 0; sectionY < 24; ++sectionY) {
+                    const auto& sectionInfo = chunk->sectionInfos[sectionY];
+                    if (sectionInfo.hasCpuData) {
+                        totalSections++;
+                        
+                        if (sectionInfo.state == SectionState::READY) {
+                            readySections++;
+                        } else if (sectionInfo.state == SectionState::MESHING) {
+                            meshingSections++;
+                        }
+                        
+                        if (sectionInfo.dirty) {
+                            dirtySections++;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -422,6 +558,20 @@ namespace Client {
             chunk->chunkData = std::make_shared<Game::Chunk>();
         }
         
+        // Initialize ALL sections first (for ground-up loads)
+        if (packet.groundUpContinuous) {
+            for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
+                auto& sectionInfo = chunk->sectionInfos[y];
+                // Reset to default state for ground-up load
+                sectionInfo.hasCpuData = true;  // We'll know the state after parsing
+                sectionInfo.isAllAir = true;    // Assume air until proven otherwise
+                sectionInfo.state = SectionState::LOADED;
+                sectionInfo.version = 0;
+                sectionInfo.dirty = false;
+                sectionInfo.meshingVersion = 0;
+            }
+        }
+        
         // Apply section data
         int sectionIndex = 0;
         for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
@@ -506,9 +656,11 @@ namespace Client {
                         if (decodedSuccessfully) {
                             // Initialize section state properly (MC-style)
                             auto& sectionInfo = chunk->sectionInfos[y];
+                            sectionInfo.hasCpuData = true;
+                            sectionInfo.isAllAir = false;  // Has non-air blocks
                             sectionInfo.version++;        // 0→1 on first load, +1 on updates
                             sectionInfo.state = SectionState::LOADED;
-                            sectionInfo.dirty = true;
+                            sectionInfo.dirty = true;  // Needs meshing
                             
                             // Also update legacy dirty set for now (will remove later)
                             chunk->dirtySections.insert(y);
@@ -523,6 +675,11 @@ namespace Client {
                     
                     sectionIndex++;
                 }
+            } else if (packet.groundUpContinuous) {
+                // For ground-up loads, sections not in bitmask are empty
+                auto& sectionInfo = chunk->sectionInfos[y];
+                sectionInfo.version++;  // Still increment version for neighbor culling
+                // hasCpuData and isAllAir already set to true in initialization
             }
         }
         
@@ -534,6 +691,9 @@ namespace Client {
         
         // Transition to LOADED state
         TransitionChunkState(chunk, ChunkState::LOADED);
+        
+        // Mark neighbor chunks' sections as dirty for proper face culling
+        MarkNeighborSectionsDirty(chunkPos);
         
         // Apply any pending diffs for this chunk
         ApplyPendingDiffsForChunk(chunkPos, chunk);
@@ -635,12 +795,30 @@ namespace Client {
             for (int sectionY = 0; sectionY < 24; ++sectionY) {
                 auto& sectionInfo = chunk->sectionInfos[sectionY];
                 
-                // Check if section is dirty and not already being meshed
+                // Minecraft-style: check dirty and not in-flight
                 bool isDirty = sectionInfo.dirty || chunk->dirtySections.count(sectionY) > 0;
-                bool canMesh = (sectionInfo.state == SectionState::LOADED || 
-                               sectionInfo.state == SectionState::EMPTY) && !sectionInfo.meshingVersion;
+                bool notInFlight = (sectionInfo.meshingVersion != sectionInfo.version);
                 
-                if (isDirty && canMesh) {
+                if (isDirty && notInFlight) {
+                    // Determine if we need to process this section
+                    bool needsProcessing = false;
+                    
+                    if (sectionInfo.isAllAir) {
+                        // Empty section - only process if never built or neighbors might have changed
+                        if (!sectionInfo.builtOnce || sectionInfo.dirty) {
+                            needsProcessing = true;  // Will use BorderOnly job type
+                        }
+                    } else {
+                        // Non-empty section always needs processing when dirty
+                        needsProcessing = true;
+                    }
+                    
+                    if (!needsProcessing) {
+                        // Clear dirty flag for empty sections that don't need processing
+                        sectionInfo.dirty = false;
+                        chunk->dirtySections.erase(sectionY);
+                        continue;
+                    }
                     // Calculate section-specific priority
                     float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
                     glm::vec3 sectionCenter(centerX, sectionCenterY, centerZ);
@@ -697,8 +875,8 @@ namespace Client {
             auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
             
             // Double-check section is still dirty and not in flight
-            if (sectionInfo.state != SectionState::LOADED || sectionInfo.meshingVersion != 0) {
-                continue; // Already being processed or state changed
+            if (!sectionInfo.dirty || sectionInfo.meshingVersion != 0) {
+                continue; // Not dirty or already being processed
             }
             
             // Read version optimistically (Minecraft-style)
@@ -715,12 +893,24 @@ namespace Client {
             sectionInfo.meshingVersion = expectedVersion;
             sectionInfo.state = SectionState::MESHING;
             
+            // Set job type based on section content
+            if (sectionInfo.isAllAir) {
+                snapshot->jobType = Render::MeshJobType::BorderOnly;
+            } else {
+                snapshot->jobType = Render::MeshJobType::Full;
+            }
+            
             // Set priority metadata
             snapshot->distanceToPlayer = candidate.priority;
             snapshot->isHighPriority = (candidate.priority < 128.0f);
             snapshot->submitTime = std::chrono::steady_clock::now();
             
             // Submit section job to worker
+            Log::Debug("  Scheduling mesh: chunk(%d,%d) sy=%d ver=%u type=%s neighborMask=0x%X",
+                      candidate.chunkPos.x, candidate.chunkPos.z, candidate.sectionY,
+                      expectedVersion,
+                      sectionInfo.isAllAir ? "BorderOnly" : "Full",
+                      snapshot->neighborMask);
             workerPool->SubmitMeshJobWithSnapshot(snapshot);
             sectionsSubmitted++;
         }
@@ -842,38 +1032,53 @@ namespace Client {
         }
         
         auto& chunk = it->second;
+        auto& sectionInfo = chunk->sectionInfos[sectionY];
         
-        // NO STATE CHECK - only check data presence (Minecraft-style)
-        auto* section = chunk->chunkData->GetSection(sectionY);
-        if (!section) {
-            return false; // Section doesn't exist
+        // Check if we have CPU data for this section
+        if (!sectionInfo.hasCpuData) {
+            return false; // No data available
         }
         
         // Check version before reading (optimistic read)
-        if (chunk->sectionInfos[sectionY].version != expectedVersion) {
+        if (sectionInfo.version != expectedVersion) {
             return false; // Version already changed
         }
+        
+        // Get section data (may be null for empty sections)
+        auto* section = chunk->chunkData->GetSection(sectionY);
         
         // Create snapshot
         outSnapshot = std::make_shared<Render::MeshJobData>(chunkPos, sectionY);
         outSnapshot->generation = expectedVersion;
         
+        // Compute neighbor chunk presence mask (PX=1, NX=2, PZ=4, NZ=8)
+        uint8_t neighborMask = 0;
+        
         // Copy center section blocks
-        outSnapshot->sectionData.isEmpty = true;
         outSnapshot->sectionData.sectionY = sectionY;
         
-        for (int y = 0; y < 16; ++y) {
-            for (int z = 0; z < 16; ++z) {
-                for (int x = 0; x < 16; ++x) {
-                    int index = y * 256 + z * 16 + x;
-                    Game::BlockID block = static_cast<Game::BlockID>(section->blocks[index]);
-                    outSnapshot->sectionData.blocks[index] = block;
-                    
-                    if (block != Game::BlockID::Air) {
-                        outSnapshot->sectionData.isEmpty = false;
+        if (section) {
+            // Section has data - copy blocks
+            outSnapshot->sectionData.isEmpty = true;
+            for (int y = 0; y < 16; ++y) {
+                for (int z = 0; z < 16; ++z) {
+                    for (int x = 0; x < 16; ++x) {
+                        int index = y * 256 + z * 16 + x;
+                        Game::BlockID block = static_cast<Game::BlockID>(section->blocks[index]);
+                        outSnapshot->sectionData.blocks[index] = block;
+                        
+                        if (block != Game::BlockID::Air) {
+                            outSnapshot->sectionData.isEmpty = false;
+                        }
                     }
                 }
             }
+        } else {
+            // Empty section - fill with air
+            outSnapshot->sectionData.isEmpty = true;
+            std::fill(outSnapshot->sectionData.blocks.begin(), 
+                     outSnapshot->sectionData.blocks.end(), 
+                     Game::BlockID::Air);
         }
         
         // Always copy neighbor data for 1-voxel halo (even for empty sections)
@@ -885,6 +1090,7 @@ namespace Client {
         // North neighbor (-z)
         auto northIt = m_chunks.find({chunkPos.x, chunkPos.z - 1});
         if (northIt != m_chunks.end() && northIt->second && northIt->second->chunkData) {
+            neighborMask |= 8;  // NZ bit
             auto* neighborSection = northIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
@@ -902,6 +1108,7 @@ namespace Client {
         // South neighbor (+z)
         auto southIt = m_chunks.find({chunkPos.x, chunkPos.z + 1});
         if (southIt != m_chunks.end() && southIt->second && southIt->second->chunkData) {
+            neighborMask |= 4;  // PZ bit
             auto* neighborSection = southIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
@@ -919,6 +1126,7 @@ namespace Client {
         // East neighbor (+x)
         auto eastIt = m_chunks.find({chunkPos.x + 1, chunkPos.z});
         if (eastIt != m_chunks.end() && eastIt->second && eastIt->second->chunkData) {
+            neighborMask |= 1;  // PX bit
             auto* neighborSection = eastIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
@@ -936,6 +1144,7 @@ namespace Client {
         // West neighbor (-x)
         auto westIt = m_chunks.find({chunkPos.x - 1, chunkPos.z});
         if (westIt != m_chunks.end() && westIt->second && westIt->second->chunkData) {
+            neighborMask |= 2;  // NX bit
             auto* neighborSection = westIt->second->chunkData->GetSection(sectionY);
             if (neighborSection) {
                 for (int i = 0; i < 4096; ++i) {
@@ -986,8 +1195,11 @@ namespace Client {
         std::fill(outSnapshot->sectionData.lightData.begin(), 
                  outSnapshot->sectionData.lightData.end(), 0xFF);
         
+        // Set the neighbor mask we computed based on actual chunk presence
+        outSnapshot->neighborMask = neighborMask;
+        
         // Final version check to ensure nothing changed during capture
-        if (chunk->sectionInfos[sectionY].version != expectedVersion) {
+        if (sectionInfo.version != expectedVersion) {
             return false; // Version changed during capture, retry next frame
         }
         
@@ -1024,29 +1236,45 @@ namespace Client {
         auto& sectionInfo = chunk->sectionInfos[result.sectionY];
         
         // Check if this result is stale (version mismatch)
-        if (result. generation != sectionInfo.meshingVersion) {
+        if (result.generation != sectionInfo.meshingVersion) {
             // Stale result - section was modified while meshing
             // Log::Debug("[mesh] drop STALE cx=%d cz=%d sy=%d resVer=%u curVer=%u",
             //           result.chunkPos.x, result.chunkPos.z, result.sectionY,
             //           result.generation, sectionInfo.meshingVersion);
             
-            // Clear in-flight flag so it can be rescheduled
-            if (sectionInfo.state == SectionState::MESHING) {
-                sectionInfo.state = SectionState::LOADED;
-            }
+            // Reset meshingVersion to allow rescheduling with new version
+            sectionInfo.meshingVersion = 0;
+            // Keep dirty flag true so it gets rescheduled
+            
+            return { MeshApplyAction::Drop_StaleVersion };
+        }
+        
+        // Check if section was modified after mesh was scheduled
+        if (sectionInfo.meshingVersion != sectionInfo.version) {
+            // Section changed while mesh was in flight (e.g., another neighbor loaded)
+            Log::Debug("[mesh] DROP STALE: chunk(%d,%d) sy=%d meshVer=%u curVer=%u neighborMask=0x%X (modified after scheduling)",
+                      result.chunkPos.x, result.chunkPos.z, result.sectionY,
+                      sectionInfo.meshingVersion, sectionInfo.version, result.neighborMask);
+            
+            // Reset meshingVersion to allow rescheduling with new version
+            sectionInfo.meshingVersion = 0;
             // Keep dirty flag true so it gets rescheduled
             
             return { MeshApplyAction::Drop_StaleVersion };
         }
         
         // Version matches - good to upload!
-        // Log::Debug("[mesh] accept UPLOAD cx=%d cz=%d sy=%d ver=%u",
-        //           result.chunkPos.x, result.chunkPos.z, result.sectionY, result.generation);
+        // Keep meshingVersion at the current version to prevent duplicate scheduling
+        // It will be different from version if the section gets dirtied again
+        
+        Log::Debug("[mesh] ACCEPT: chunk(%d,%d) sy=%d ver=%u neighborMask=0x%X prevMask=0x%X",
+                  result.chunkPos.x, result.chunkPos.z, result.sectionY, result.generation, 
+                  result.neighborMask, sectionInfo.lastNeighborMask);
         
         return { MeshApplyAction::Upload };
     }
     
-    void ClientChunkManager::FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY) {
+    void ClientChunkManager::FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask) {
         ASSERT_MAIN_THREAD();
         
         auto it = m_chunks.find(chunkPos);
@@ -1058,6 +1286,11 @@ namespace Client {
         auto& chunk = it->second;
         auto& sectionInfo = chunk->sectionInfos[sectionY];
         
+        // Update neighbor mask BEFORE version check to prevent infinite loops
+        // This ensures we don't keep rescheduling the same section thinking neighbors changed
+        uint8_t prevMask = sectionInfo.lastNeighborMask;
+        sectionInfo.lastNeighborMask = neighborMask;  // Update neighbor presence mask
+        
         // Double-check version hasn't changed (extremely rare race)
         if (sectionInfo.version != sectionInfo.meshingVersion) {
             Log::Warning("Version changed during upload for chunk (%d, %d) section %d",
@@ -1068,12 +1301,15 @@ namespace Client {
         // Mark section as ready and clear dirty flag
         sectionInfo.state = SectionState::READY;
         sectionInfo.dirty = false;
+        sectionInfo.builtOnce = true;  // Mark as built at least once
         
         // Clear from legacy dirty set if present
         chunk->dirtySections.erase(sectionY);
         
-        // Log::Debug("[mesh] ready cx=%d cz=%d sy=%d",
-        //           chunkPos.x, chunkPos.z, sectionY);
+        Log::Debug("[mesh] FINALIZED: chunk(%d,%d) sy=%d neighborMask: 0x%X -> 0x%X (changed=%s)",
+                  chunkPos.x, chunkPos.z, sectionY, 
+                  prevMask, neighborMask,
+                  prevMask != neighborMask ? "YES" : "NO");
     }
     
     void ClientChunkManager::ClearAllChunks() {

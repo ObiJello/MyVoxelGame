@@ -218,6 +218,7 @@ namespace Network {
         Game::Math::ChunkPos chunkPos;
         int sectionY;
         uint32_t generation = 0;  // Version number for staleness checking
+        uint8_t neighborMask = 0;  // Neighbor presence mask (PX=1, NX=2, PZ=4, NZ=8)
         struct SectionMeshData {
             // Opaque geometry (solid blocks like stone, dirt)
             std::vector<float> opaqueVertices;

@@ -267,9 +267,11 @@ namespace Render {
             }
         }
 
+        // Track total sections available before culling
+        m_stats.sectionsAvailable = static_cast<int>(m_visibleSections.size());
+
         if (m_enableFrustumCulling) {
-            //TODO Enable fustrum culling
-            //PerformFrustumCulling(frustum, m_visibleSections);
+            PerformFrustumCulling(frustum, m_visibleSections);
         }
 
         auto endTime = std::chrono::high_resolution_clock::now();
@@ -595,6 +597,13 @@ namespace Render {
         if (g_chunkRenderer) {
             g_chunkRenderer->RenderAll(camera, frustum);
         }
+    }
+    
+    const RenderStats* GetChunkRendererStats() {
+        if (g_chunkRenderer) {
+            return &g_chunkRenderer->GetStats();
+        }
+        return nullptr;
     }
 
 } // namespace Render

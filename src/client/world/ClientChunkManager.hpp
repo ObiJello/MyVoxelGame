@@ -39,7 +39,6 @@ namespace Client {
     
     // Section state tracking for mesh building
     enum class SectionState {
-        EMPTY,     // No data
         LOADED,    // Has block data, can be meshed
         MESHING,   // Snapshot sent to worker
         READY      // Mesh built and uploaded
@@ -59,12 +58,22 @@ namespace Client {
         // Additional data could go here for upload
     };
     
+    // Mesh job types for different processing paths
+    enum class MeshJobType {
+        Full,        // Normal meshing for non-empty sections
+        BorderOnly   // Fast path for empty sections - only compute neighbor mask
+    };
+    
     // Per-section tracking info
     struct SectionInfo {
-        SectionState state = SectionState::EMPTY;
-        uint32_t version = 0;        // Incremented on block changes
+        SectionState state = SectionState::LOADED;
+        uint32_t version = 0;         // Incremented on block changes
         uint32_t meshingVersion = 0;  // Version being meshed
         bool dirty = false;           // Needs remeshing
+        bool hasCpuData = false;      // True when we have valid CPU view
+        bool isAllAir = true;         // True when section contains only air
+        uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
+        bool builtOnce = false;       // True after first successful build
     };
 
     // Client-side chunk data
@@ -146,6 +155,8 @@ namespace Client {
         // Clear dirty flag for a section (called when mesh build completes)
         void ClearSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY);
 
+        // Mark border sections of neighbor chunks as dirty when a chunk loads/unloads
+        void MarkNeighborSectionsDirty(Game::Math::ChunkPos chunkPos);
 
         // ========================================================================
         // CHUNK ACCESS
@@ -171,6 +182,10 @@ namespace Client {
         // ========================================================================
         // BASIC STATISTICS
         // ========================================================================
+
+        size_t GetLoadedChunkCount() const;
+        void GetSectionStats(size_t& totalSections, size_t& readySections, 
+                            size_t& meshingSections, size_t& dirtySections) const;
 
         struct ClientChunkStats {
             size_t totalChunks = 0;
@@ -226,7 +241,7 @@ namespace Client {
         MeshAcceptance AcceptMeshResult(const Network::MeshBuildResult& result);
         
         // Finalize section after successful GPU upload
-        void FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY);
+        void FinalizeSectionUpload(Game::Math::ChunkPos chunkPos, int sectionY, uint8_t neighborMask = 0);
         
     private:
 

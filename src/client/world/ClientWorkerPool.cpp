@@ -383,7 +383,17 @@ namespace Threading {
         // Set generation from snapshot for version checking
         result.generation = job.snapshot->generation;
         
-        // Fast path for empty sections
+        // Copy neighbor mask from snapshot (computed on main thread where chunk presence is known)
+        result.neighborMask = job.snapshot->neighborMask;
+        
+        // Handle based on job type
+        if (job.snapshot->jobType == Client::Render::MeshJobType::BorderOnly) {
+            // BorderOnly job - just compute neighbor mask (already done) and return empty geometry
+            result.success = true;
+            return result;
+        }
+        
+        // Full mesh job - check if section is empty
         if (job.snapshot->sectionData.isEmpty) {
             result.success = true; // Empty section is valid, just no geometry
             return result;
@@ -405,6 +415,7 @@ namespace Threading {
         // Convert SectionMesh to MeshBuildResult format
         result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
         result.generation = job.snapshot->generation;  // Restore generation after conversion
+        result.neighborMask = job.snapshot->neighborMask;  // Restore neighbor mask after conversion
         result.success = true;
         
         return result;

@@ -8,9 +8,15 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldGlobals.hpp"
+#include "../../world/ClientChunkManager.hpp"
+#include "../mesh/ClientMeshManager.hpp"
+#include "../mesh/ChunkRenderer.hpp"
+#include "../../world/ClientWorkerPool.hpp"
 #include <unordered_set>
 #include <cmath>
 #include <filesystem>
+#include <algorithm>
+#include <GLFW/glfw3.h>
 
 namespace Debug {
 
@@ -90,23 +96,126 @@ namespace Debug {
 
         ImGui::Begin("Voxel Engine Debug");
 
-        // Performance metrics
-        ImGui::Text("Performance");
+        // Performance metrics with detailed breakdown
+        ImGui::Text("Performance Breakdown");
         ImGui::Separator();
-        ImGui::Text("FPS: %.1f (%.2f ms)", metrics.GetFPS(), metrics.GetAverageFrameTime() * 1000.0f);
+        ImGui::Text("FPS: %.1f (Avg: %.2f ms)", metrics.GetFPS(), metrics.GetAverageFrameTime() * 1000.0f);
         ImGui::Text("Frame Time: %.2f ms", metrics.frameTime);
-        ImGui::Text("Mesh Upload: %.2f ms", metrics.meshUploadTime);
-        ImGui::Text("Render Time: %.2f ms", metrics.renderTime);
+        
+        // Show detailed timing breakdown
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "Network Processing: %.2f ms", metrics.networkProcessingTime);
+        ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Mesh Results: %.2f ms", metrics.meshResultProcessingTime);
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.7f, 1.0f), "Input Handling: %.2f ms", metrics.inputHandlingTime);
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "Game Logic: %.2f ms", metrics.gameLogicTime);
+        ImGui::TextColored(ImVec4(0.7f, 1.0f, 1.0f, 1.0f), "Mesh Scheduling: %.2f ms", metrics.meshSchedulingTime);
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 1.0f, 1.0f), "GPU Upload: %.2f ms", metrics.gpuUploadTime);
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "Rendering: %.2f ms", metrics.renderTime);
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Debug UI: %.2f ms", metrics.debugUITime);
+        
+        // Highlight VSync wait time - this is often the bottleneck
+        if (metrics.vsyncWaitTime > 5.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "VSync Wait: %.2f ms ⚠", metrics.vsyncWaitTime);
+        } else {
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "VSync Wait: %.2f ms", metrics.vsyncWaitTime);
+        }
+        
+        // Show total accounted time vs actual frame time
+        float totalAccounted = metrics.networkProcessingTime + metrics.meshResultProcessingTime + 
+                              metrics.inputHandlingTime + metrics.gameLogicTime + 
+                              metrics.meshSchedulingTime + metrics.gpuUploadTime + 
+                              metrics.renderTime + metrics.debugUITime + metrics.vsyncWaitTime;
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Total Accounted: %.2f ms", totalAccounted);
+        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Unaccounted: %.2f ms", metrics.frameTime - totalAccounted);
+        ImGui::Unindent();
+        
+        // Identify bottleneck
+        float maxTime = std::max({metrics.networkProcessingTime, metrics.meshResultProcessingTime, 
+                                  metrics.inputHandlingTime, metrics.gameLogicTime,
+                                  metrics.meshSchedulingTime, metrics.gpuUploadTime, 
+                                  metrics.renderTime, metrics.debugUITime});
+        if (maxTime > 5.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "⚠ Performance Bottleneck Detected!");
+        }
         ImGui::Spacing();
 
-        // Enhanced mesh system metrics
-        ImGui::Text("Enhanced Mesh System");
+        // Client-Server Architecture Stats
+        ImGui::Text("Client-Server System");
         ImGui::Separator();
-        ImGui::Text("Meshes Built This Frame: %d", metrics.meshesUploadedThisFrame);
-        ImGui::Text("Meshes Rendered This Frame: %d", metrics.meshesRenderedThisFrame);
-        ImGui::Text("Total Vertices Rendered: %zu", metrics.totalVerticesRendered);
-        ImGui::Text("Total Indices Rendered: %zu", metrics.totalIndicesRendered);
-
+        
+        // Get stats from ClientChunkManager if available
+        if (Client::g_clientChunkManager) {
+            size_t loadedChunks = Client::g_clientChunkManager->GetLoadedChunkCount();
+            ImGui::Text("Client Chunks Loaded: %zu", loadedChunks);
+            
+            // Calculate sections stats
+            size_t totalSections = 0;
+            size_t readySections = 0;
+            size_t meshingSections = 0;
+            size_t dirtySections = 0;
+            Client::g_clientChunkManager->GetSectionStats(totalSections, readySections, meshingSections, dirtySections);
+            
+            ImGui::Text("Sections - Total: %zu, Ready: %zu", totalSections, readySections);
+            ImGui::Text("Sections - Meshing: %zu, Dirty: %zu", meshingSections, dirtySections);
+        } else {
+            ImGui::TextDisabled("ClientChunkManager not available");
+        }
+        
+        // Get stats from ClientMeshManager if available
+        if (Render::g_clientMeshManager) {
+            const auto& meshStats = Render::g_clientMeshManager->GetStats();
+            ImGui::Text("Mesh Builds - Scheduled: %zu, Completed: %zu", 
+                       meshStats.meshBuildsScheduled.load(), meshStats.meshBuildsCompleted.load());
+            ImGui::Text("GPU Uploads This Frame: %d", meshStats.meshUploadsThisFrame);
+        } else {
+            ImGui::TextDisabled("ClientMeshManager not available");
+        }
+        
+        // Get worker pool stats
+        if (Threading::g_clientWorkerPool) {
+            size_t pendingJobs = Threading::g_clientWorkerPool->GetPendingJobCount();
+            size_t activeJobs = Threading::g_clientWorkerPool->GetActiveJobCount();
+            ImGui::Text("Worker Jobs - Pending: %zu, Active: %zu", pendingJobs, activeJobs);
+        } else {
+            ImGui::TextDisabled("ClientWorkerPool not available");
+        }
+        
+        ImGui::Spacing();
+        
+        // Mesh Rendering Stats  
+        ImGui::Text("Mesh Rendering");
+        ImGui::Separator();
+        
+        // Get frustum culling stats from ChunkRenderer
+        int sectionsAvailable = 0;
+        int sectionsCulled = 0;
+        if (auto* renderStats = Render::GetChunkRendererStats()) {
+            sectionsAvailable = renderStats->sectionsAvailable;
+            sectionsCulled = renderStats->sectionsSkipped;
+        }
+        
+        // Show frustum culling effectiveness
+        ImGui::Text("Sections Available: %d", sectionsAvailable);
+        ImGui::Text("Sections Rendered: %d", metrics.meshesRenderedThisFrame);
+        ImGui::Text("Sections Culled: %d", sectionsCulled);
+        if (sectionsAvailable > 0) {
+            float cullPercent = (float)sectionsCulled / sectionsAvailable * 100.0f;
+            if (cullPercent < 30.0f) {
+                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
+                                  "Culling Effectiveness: %.1f%% (Low!)", cullPercent);
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), 
+                                  "Culling Effectiveness: %.1f%%", cullPercent);
+            }
+        }
+        
+        ImGui::Text("By Layer - Opaque:%d, Cutout:%d, Translucent:%d", 
+                   metrics.opaqueMeshesRendered,
+                   metrics.cutoutMeshesRendered,
+                   metrics.translucentMeshesRendered);
+        ImGui::Text("Geometry - Vertices: %zu, Indices: %zu", 
+                   metrics.totalVerticesRendered, metrics.totalIndicesRendered);
+        
         // Memory usage estimate
         float memoryMB = (metrics.totalVerticesRendered * sizeof(Render::Vertex) +
                          metrics.totalIndicesRendered * sizeof(uint32_t)) / (1024.0f * 1024.0f);
@@ -116,6 +225,21 @@ namespace Debug {
         // Display Information
         ImGui::Text("Display Information");
         ImGui::Separator();
+        
+        // VSync toggle button
+        static bool vsyncEnabled = true;  // On by default
+        if (ImGui::Checkbox("VSync Enabled", &vsyncEnabled)) {
+            glfwSwapInterval(vsyncEnabled ? 1 : 0);
+            Log::Info("VSync %s", vsyncEnabled ? "enabled" : "disabled");
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("VSync synchronizes frame rate with monitor refresh\n"
+                             "Enabled: Prevents tearing, caps at monitor Hz\n"
+                             "Disabled: Unlimited FPS, may cause tearing");
+        }
+        
         ImGui::Text("Window Size: %dx%d", windowWidth, windowHeight);
         ImGui::Text("Framebuffer Size: %dx%d", framebufferWidth, framebufferHeight);
 
@@ -149,24 +273,18 @@ namespace Debug {
 
         ImGui::Spacing();
 
-        // World statistics
-        ImGui::Text("World Statistics");
+        // Player & Camera
+        ImGui::Text("Player & Camera");
         ImGui::Separator();
         glm::vec3 camPos = camera.position;
-        ImGui::Text("Camera Position: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
-        ImGui::Text("Camera Rotation: Yaw=%.1f°, Pitch=%.1f°", camera.yaw, camera.pitch);
+        ImGui::Text("Position: (%.1f, %.1f, %.1f)", camPos.x, camPos.y, camPos.z);
+        ImGui::Text("Rotation: Yaw=%.1f°, Pitch=%.1f°", camera.yaw, camera.pitch);
 
         // Calculate current chunk
-        int cameraChunkX = static_cast<int>(std::floor(camPos.x / Game::Math::CHUNK_SIZE_X));
-        int cameraChunkZ = static_cast<int>(std::floor(camPos.z / Game::Math::CHUNK_SIZE_Z));
-        ImGui::Text("Current Chunk: (%d, %d)", cameraChunkX, cameraChunkZ);
-
-        // Get loaded chunks count from world if available
-        size_t loadedChunks = 0;
-        if (Game::g_world) {
-            loadedChunks = Game::g_world->GetLoadedChunkCount();
-        }
-        ImGui::Text("Loaded Chunks: %zu", loadedChunks);
+        int cameraChunkX = static_cast<int>(std::floor(camPos.x / 16.0f));
+        int cameraChunkZ = static_cast<int>(std::floor(camPos.z / 16.0f));
+        int cameraSection = static_cast<int>(std::floor((camPos.y + 64.0f) / 16.0f));
+        ImGui::Text("Current Chunk: (%d, %d), Section: %d", cameraChunkX, cameraChunkZ, cameraSection);
         ImGui::Spacing();
 
         // Physics information

@@ -100,7 +100,7 @@ namespace Network {
                 snprintf(buf, sizeof(buf), "%02X ", packet[i]);
                 hexDump += buf;
             }
-            Log::Debug("[%s] Packet hex (first 20 bytes): %s", m_name.c_str(), hexDump.c_str());
+            // Log::Debug("[%s] Packet hex (first 20 bytes): %s", m_name.c_str(), hexDump.c_str());
         }
         
         // Send the packet
@@ -145,7 +145,7 @@ namespace Network {
             return;
         }
         
-        Log::Debug("[%s] Starting async read chain", m_name.c_str());
+        // Log::Debug("[%s] Starting async read chain", m_name.c_str());
         
         // Reset read state for new packet
         m_readingHeader = true;
@@ -334,7 +334,7 @@ namespace Network {
             return;
         }
         
-        Log::Debug("[%s] Successfully wrote %zu bytes to socket", m_name.c_str(), bytesTransferred);
+        // Log::Debug("[%s] Successfully wrote %zu bytes to socket", m_name.c_str(), bytesTransferred);
         
         // Continue processing send queue
         ProcessSendQueue();

@@ -55,6 +55,12 @@ namespace Render {
         }
     };
 
+    // Job type for mesh processing
+    enum class MeshJobType {
+        Full,        // Normal meshing for non-empty sections
+        BorderOnly   // Fast path for empty sections - only compute neighbor mask
+    };
+    
     // Complete mesh job data with all information needed for meshing
     struct MeshJobData {
         // Chunk position
@@ -66,6 +72,9 @@ namespace Render {
         // Snapshot of this section's data
         SectionSnapshot sectionData;
         
+        // Job type (full mesh or border-only for empty sections)
+        MeshJobType jobType = MeshJobType::Full;
+        
         // Priority information
         bool isHighPriority = false;
         float distanceToPlayer = 0.0f;
@@ -75,6 +84,10 @@ namespace Render {
         
         // Generation ID for staleness checking
         uint32_t generation = 0;
+        
+        // Neighbor chunk presence mask (PX=1, NX=2, PZ=4, NZ=8)
+        // Computed on main thread where we know which chunks exist
+        uint8_t neighborMask = 0;
         
         MeshJobData() : submitTime(std::chrono::steady_clock::now()) {}
         
@@ -112,6 +125,9 @@ namespace Render {
         LayerData opaqueLayer;      // Solid blocks (stone, dirt, etc.)
         LayerData cutoutLayer;      // Alpha-tested blocks (leaves, grass)
         LayerData translucentLayer; // Blended blocks (water, glass, ice)
+        
+        // Neighbor presence mask computed during meshing (PX=1, NX=2, PZ=4, NZ=8)
+        uint8_t neighborMask = 0;
         
         // =====================================================================
         // TRANSLUCENCY REBUILD POLICY

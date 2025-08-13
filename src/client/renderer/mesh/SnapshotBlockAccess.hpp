@@ -92,57 +92,45 @@ namespace Render {
             // Check each neighbor direction
             if (localX < 0 && localX >= -1) {
                 // West neighbor (negative X)
-                int nx = 15; // Wrap to east side of neighbor
-                int ny = localY;
-                int nz = localZ;
-                if (ny >= 0 && ny < 16 && nz >= 0 && nz < 16) {
-                    return m_sectionData.GetNeighborBlock(3, nx, ny, nz); // West = index 3
-                }
+                int nx = 15; // Get east edge of west neighbor
+                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
+                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
+                return m_sectionData.GetNeighborBlock(3, nx, ny, nz); // West = index 3
             }
             else if (localX > 15 && localX <= 16) {
                 // East neighbor (positive X)
-                int nx = 0; // Wrap to west side of neighbor
-                int ny = localY;
-                int nz = localZ;
-                if (ny >= 0 && ny < 16 && nz >= 0 && nz < 16) {
-                    return m_sectionData.GetNeighborBlock(2, nx, ny, nz); // East = index 2
-                }
+                int nx = 0; // Get west edge of east neighbor
+                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
+                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
+                return m_sectionData.GetNeighborBlock(2, nx, ny, nz); // East = index 2
             }
             else if (localZ < 0 && localZ >= -1) {
                 // North neighbor (negative Z)
-                int nx = localX;
-                int ny = localY;
-                int nz = 15; // Wrap to south side of neighbor
-                if (nx >= 0 && nx < 16 && ny >= 0 && ny < 16) {
-                    return m_sectionData.GetNeighborBlock(0, nx, ny, nz); // North = index 0
-                }
+                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
+                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
+                int nz = 15; // Get south edge of north neighbor
+                return m_sectionData.GetNeighborBlock(0, nx, ny, nz); // North = index 0
             }
             else if (localZ > 15 && localZ <= 16) {
                 // South neighbor (positive Z)
-                int nx = localX;
-                int ny = localY;
-                int nz = 0; // Wrap to north side of neighbor
-                if (nx >= 0 && nx < 16 && ny >= 0 && ny < 16) {
-                    return m_sectionData.GetNeighborBlock(1, nx, ny, nz); // South = index 1
-                }
+                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
+                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
+                int nz = 0; // Get north edge of south neighbor
+                return m_sectionData.GetNeighborBlock(1, nx, ny, nz); // South = index 1
             }
             else if (localY < 0 && localY >= -1) {
                 // Down neighbor (negative Y)
-                int nx = localX;
-                int ny = 15; // Wrap to top of neighbor below
-                int nz = localZ;
-                if (nx >= 0 && nx < 16 && nz >= 0 && nz < 16) {
-                    return m_sectionData.GetNeighborBlock(5, nx, ny, nz); // Down = index 5
-                }
+                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
+                int ny = 15; // Get top edge of neighbor below
+                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
+                return m_sectionData.GetNeighborBlock(5, nx, ny, nz); // Down = index 5
             }
             else if (localY > 15 && localY <= 16) {
                 // Up neighbor (positive Y)
-                int nx = localX;
-                int ny = 0; // Wrap to bottom of neighbor above
-                int nz = localZ;
-                if (nx >= 0 && nx < 16 && nz >= 0 && nz < 16) {
-                    return m_sectionData.GetNeighborBlock(4, nx, ny, nz); // Up = index 4
-                }
+                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
+                int ny = 0; // Get bottom edge of neighbor above
+                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
+                return m_sectionData.GetNeighborBlock(4, nx, ny, nz); // Up = index 4
             }
 
             return Game::BlockID::Air;

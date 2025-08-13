@@ -338,7 +338,7 @@ namespace Render {
                 UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData);
                 
                 // Tell ClientChunkManager the upload completed successfully
-                m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY);
+                m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY, result.neighborMask);
                 
                 // Update statistics
                 m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);

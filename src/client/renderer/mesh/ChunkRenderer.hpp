@@ -48,7 +48,8 @@ namespace Render {
     struct RenderStats {
         // Per-frame counters
         int sectionsRendered = 0;
-        int sectionsSkipped = 0;
+        int sectionsSkipped = 0;  // Culled by frustum
+        int sectionsAvailable = 0;  // Total sections checked before culling
         int totalDrawCalls = 0;
 
         // Per-layer counters
@@ -66,7 +67,7 @@ namespace Render {
         float renderTimeMs = 0.0f;
 
         void Reset() {
-            sectionsRendered = sectionsSkipped = totalDrawCalls = 0;
+            sectionsRendered = sectionsSkipped = sectionsAvailable = totalDrawCalls = 0;
             opaqueSections = cutoutSections = translucentSections = 0;
             totalVerticesRendered = totalIndicesRendered = 0;
             frustumCullTimeMs = sortTimeMs = renderTimeMs = 0.0f;
@@ -172,5 +173,8 @@ namespace Render {
     void RenderChunksCutout(const Camera& camera, const Frustum& frustum);
     void RenderChunksTranslucent(const Camera& camera, const Frustum& frustum);
     void RenderChunksAll(const Camera& camera, const Frustum& frustum);
+    
+    // Get current frame's rendering statistics
+    const RenderStats* GetChunkRendererStats();
 
 } // namespace Render

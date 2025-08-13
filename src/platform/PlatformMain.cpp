@@ -410,18 +410,19 @@ namespace PlatformMain {
         Client::g_networkClient = networkClient.get();  // Set global pointer for legacy systems
         
         // Use async connect with callback (Minecraft/Netty style)
-        std::atomic<bool> connected{false};
-        std::atomic<bool> connectionComplete{false};
+        // Use shared_ptr to ensure atomics remain valid for async callbacks
+        auto connected = std::make_shared<std::atomic<bool>>(false);
+        auto connectionComplete = std::make_shared<std::atomic<bool>>(false);
         
-        networkClient->SetOnConnected([&connected, &connectionComplete]() {
+        networkClient->SetOnConnected([connected, connectionComplete]() {
             Log::Info("✓ Connection established");
-            connected = true;
-            connectionComplete = true;
+            *connected = true;
+            *connectionComplete = true;
         });
         
-        networkClient->SetOnError([&connectionComplete](const std::string& error) {
+        networkClient->SetOnError([connectionComplete](const std::string& error) {
             Log::Error("Connection failed: %s", error.c_str());
-            connectionComplete = true;
+            *connectionComplete = true;
         });
         
         // Start async connection (all socket ops on I/O thread)
@@ -430,7 +431,7 @@ namespace PlatformMain {
         
         // Wait for connection with timeout (using yield instead of sleep)
         auto startTime = std::chrono::steady_clock::now();
-        while (!connectionComplete) {
+        while (!*connectionComplete) {
             if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(2)) {
                 Log::Error("Connection timeout after 2 seconds");
                 return -8;
@@ -438,7 +439,7 @@ namespace PlatformMain {
             std::this_thread::yield();
         }
         
-        if (!connected) {
+        if (!*connected) {
             Log::Error("Failed to connect to server");
             return -8;
         }
@@ -468,17 +469,24 @@ namespace PlatformMain {
         // CLIENT RENDER LOOP (like Minecraft's GameRenderer.render)
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
+            auto phaseStart = frameStartTime;
             
             // 1. Drain incoming network packets on main thread (Minecraft-style)
             // Note: I/O is handled on dedicated thread, we just drain the queue here
             if (networkClient) {
                 networkClient->DrainIncomingPackets();
             }
+            auto phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.networkProcessingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
             // 2. DISCIPLINED QUEUE DRAINING - Process mesh build results
+            phaseStart = std::chrono::high_resolution_clock::now();
             Render::ProcessClientMeshBuildResults();  // Drain MeshResultQueue
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.meshResultProcessingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
             // 3. Poll events and handle input
+            phaseStart = std::chrono::high_resolution_clock::now();
             glfwPollEvents();
             Input::UpdateKeyStates();
 
@@ -489,6 +497,8 @@ namespace PlatformMain {
 
             bool cursorEnabled = HandleCursorToggle(window, camera);
             HandlePlayerInput(playerController, camera);
+            auto phaseEnd2 = std::chrono::high_resolution_clock::now();
+            metrics.inputHandlingTime = std::chrono::duration<float, std::milli>(phaseEnd2 - phaseStart).count();
 
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
@@ -498,6 +508,7 @@ namespace PlatformMain {
             }
             
             // 4. Update time and game logic
+            phaseStart = std::chrono::high_resolution_clock::now();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 1 - Update time and logic");
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
@@ -506,33 +517,63 @@ namespace PlatformMain {
             // Update camera and player
             camera.Update(dt);
             playerController.Update(dt, camera);
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.gameLogicTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
             // 5. Set player position for mesh prioritization
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 2 - Set player position");
             glm::vec3 playerPos = playerController.GetPhysics().position;
             Render::SetClientMeshPlayerPosition(playerPos);
             
-            // Send player position to server via TCP
+            // Send player position to server via TCP (throttled to 50ms / 20Hz)
+            // Static variables MUST be outside the if block to ensure they persist
+            static auto lastPlayerSendTime = std::chrono::steady_clock::now();
+            static bool playerSendInitialized = false;
+            
             if (networkClient->IsConnected()) {
-                Network::PlayerMoveC2SPacket movePacket;
-                movePacket.position = playerPos;
-                movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
-                movePacket.onGround = playerController.GetPhysics().isOnGround;
-                movePacket.sequenceNumber = ++playerMoveSequence;
-                movePacket.timestamp = std::chrono::steady_clock::now();
+                auto now = std::chrono::steady_clock::now();
                 
-                //networkClient->GetConnection()->SendPlayerMove(movePacket);
+                // Initialize on first run
+                if (!playerSendInitialized) {
+                    lastPlayerSendTime = now;
+                    playerSendInitialized = true;
+                }
+                
+                auto timeSinceLastSend = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPlayerSendTime);
+                
+                // Only send every 50ms (20 times per second)
+                if (timeSinceLastSend.count() >= 50) {
+                    // Send player movement packet
+                    Network::PlayerMoveC2SPacket movePacket;
+                    movePacket.position = playerPos;
+                    movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
+                    movePacket.onGround = playerController.GetPhysics().isOnGround;
+                    movePacket.sequenceNumber = ++playerMoveSequence;
+                    movePacket.timestamp = std::chrono::steady_clock::now();
+                    
+                    networkClient->GetConnection()->SendPlayerMove(movePacket);
+                    
+                    // Update last send time
+                    lastPlayerSendTime = now;
+                }
             }
 
             // 6. Schedule mesh builds for LOADED chunks
+            phaseStart = std::chrono::high_resolution_clock::now();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds");
             Render::ScheduleClientMeshBuilds(playerPos);
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds COMPLETE");
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.meshSchedulingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
             // 7. Perform GPU uploads
+            phaseStart = std::chrono::high_resolution_clock::now();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads");
             Render::PerformClientGPUUploads();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads COMPLETE");
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.gpuUploadTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            metrics.meshUploadTime = metrics.gpuUploadTime;  // Legacy compatibility
 
             // 8. Update texture animations
             if (Render::g_textureAnimator) {
@@ -540,7 +581,11 @@ namespace PlatformMain {
             }
 
             // 9. FRUSTUM CULLING AND RENDERING
+            phaseStart = std::chrono::high_resolution_clock::now();
             Debug::DebugSystem::BeginFrame();
+            
+            // Reset per-frame render stats
+            metrics.ResetFrameMetrics();
 
             // Clear and setup rendering
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
@@ -558,12 +603,25 @@ namespace PlatformMain {
 
             // Render chunks using ChunkRenderer
             Render::RenderChunksAll(camera, frustum);
+            
+            // Get rendering statistics from ChunkRenderer
+            if (auto* renderStats = Render::GetChunkRendererStats()) {
+                metrics.meshesRenderedThisFrame = renderStats->sectionsRendered;
+                metrics.totalVerticesRendered = renderStats->totalVerticesRendered;
+                metrics.totalIndicesRendered = renderStats->totalIndicesRendered;
+                metrics.opaqueMeshesRendered = renderStats->opaqueSections;
+                metrics.cutoutMeshesRendered = renderStats->cutoutSections;
+                metrics.translucentMeshesRendered = renderStats->translucentSections;
+            }
 
             // Render UI elements
             RenderBlockHighlight(playerController, viewProj);
             RenderCrosshair(window);
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.renderTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
             // 10. Debug UI with new architecture statistics
+            phaseStart = std::chrono::high_resolution_clock::now();
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -573,14 +631,19 @@ namespace PlatformMain {
             );
 
             Debug::DebugSystem::EndFrame();
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.debugUITime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
-            // 11. Swap buffers
-            
+            // 11. Swap buffers (includes VSync wait)
+            phaseStart = std::chrono::high_resolution_clock::now();
             glfwSwapBuffers(window);
+            phaseEnd = std::chrono::high_resolution_clock::now();
+            metrics.vsyncWaitTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // Calculate frame time
+            // Calculate total frame time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
         }

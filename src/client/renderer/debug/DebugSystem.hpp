@@ -15,15 +15,28 @@
 namespace Debug {
 
     struct PerformanceMetrics {
+        // Overall frame timing
         float frameTime = 0.0f;
-        float meshUploadTime = 0.0f;
+        
+        // Detailed phase timings (all in milliseconds)
+        float networkProcessingTime = 0.0f;
+        float meshResultProcessingTime = 0.0f;
+        float inputHandlingTime = 0.0f;
+        float gameLogicTime = 0.0f;
+        float meshSchedulingTime = 0.0f;
+        float gpuUploadTime = 0.0f;
         float renderTime = 0.0f;
+        float debugUITime = 0.0f;
+        float vsyncWaitTime = 0.0f;  // Time spent in glfwSwapBuffers waiting for VSync
+        
+        // Legacy fields (kept for compatibility)
+        float meshUploadTime = 0.0f;  // Same as gpuUploadTime
         int meshesUploadedThisFrame = 0;
         int meshesRenderedThisFrame = 0;
         size_t totalVerticesRendered = 0;
         size_t totalIndicesRendered = 0;
 
-        // **NEW**: Enhanced mesh system metrics
+        // Enhanced mesh system metrics
         int opaqueMeshesRendered = 0;
         int cutoutMeshesRendered = 0;
         int translucentMeshesRendered = 0;
