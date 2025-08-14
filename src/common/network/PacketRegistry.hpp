@@ -414,6 +414,21 @@
                 return str;
             }
 
+            // Read string with maximum length validation
+            std::string ReadString(size_t maxLength) {
+                uint32_t length = ReadVarInt();
+                if (length > maxLength) {
+                    throw std::runtime_error("PacketReader: string length " + std::to_string(length) + 
+                                           " exceeds maximum " + std::to_string(maxLength));
+                }
+                if (m_pos + length > m_data.size()) {
+                    throw std::runtime_error("PacketReader: string out of bounds");
+                }
+                std::string str(m_data.begin() + m_pos, m_data.begin() + m_pos + length);
+                m_pos += length;
+                return str;
+            }
+
             void ReadBytes(uint8_t* buffer, size_t length) {
                 if (m_pos + length > m_data.size()) {
                     throw std::runtime_error("PacketReader: bytes out of bounds");

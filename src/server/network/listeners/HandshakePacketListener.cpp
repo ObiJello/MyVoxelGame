@@ -23,18 +23,18 @@ namespace Server {
         
         // Switch to the requested state
         switch (packet.nextState) {
-            case Network::ProtocolState::STATUS:
+            case static_cast<int32_t>(Network::NextStateWire::STATUS):
                 Log::Info("[HandshakePacketListener] Switching to STATUS state");
                 m_connection.setProtocolState(Network::ProtocolState::STATUS);
                 break;
                 
-            case Network::ProtocolState::LOGIN:
+            case static_cast<int32_t>(Network::NextStateWire::LOGIN):
                 Log::Info("[HandshakePacketListener] Switching to LOGIN state");
                 m_connection.setProtocolState(Network::ProtocolState::LOGIN);
                 break;
                 
             default:
-                Log::Error("[HandshakePacketListener] Invalid next state: %d", static_cast<int>(packet.nextState));
+                Log::Error("[HandshakePacketListener] Invalid next state: %d", packet.nextState);
                 m_connection.SendDisconnect("Invalid handshake state");
                 break;
         }

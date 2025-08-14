@@ -429,6 +429,12 @@ namespace Platform {
 
         // Get platform-specific default game directory
         static std::string GetDefaultGameDirectory();
+        
+        // Get default save world path (temporary solution for loading existing saves)
+        std::string GetDefaultSaveWorldPath() const;
+        
+        // Check if default save world exists
+        bool HasDefaultSaveWorld() const;
 
     private:
         std::string m_gameDirectory;

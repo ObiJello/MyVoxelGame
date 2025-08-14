@@ -28,7 +28,7 @@ namespace Game {
         static bool ChunkExistsInRegion(Math::ChunkPos pos, const std::string& worldPath);
 
         // Set world path for automatic chunk loading
-        static void SetWorldPath(const std::string& path) { s_worldPath = path; }
+        static void SetWorldPath(const std::string& path);
         static const std::string& GetWorldPath() { return s_worldPath; }
 
     private:

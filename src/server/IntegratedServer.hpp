@@ -36,6 +36,7 @@ namespace Server {
         bool enableAsyncChunkLoading = true;   // Use ServerWorkerPool for chunk loading
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
+        bool useLocalSaveDirectory = true;     // Automatically use local save directory if available (temporary feature)
     };
 
     // Player state tracking (for multiplayer extension)

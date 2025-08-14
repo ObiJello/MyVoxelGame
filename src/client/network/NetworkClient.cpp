@@ -121,6 +121,9 @@ namespace Client {
         Log::Info("NetworkClient: Disconnecting from %s:%u", 
             m_serverHost.c_str(), m_serverPort);
         
+        // Clear callbacks first to prevent crashes during shutdown
+        ClearCallbacks();
+        
         if (m_connection) {
             m_connection->Close();
             m_connection.reset();
@@ -128,6 +131,13 @@ namespace Client {
         
         m_state = ClientState::DISCONNECTED;
         m_stats.disconnectedTime = std::chrono::steady_clock::now();
+    }
+    
+    void NetworkClient::ClearCallbacks() {
+        m_onConnected = nullptr;
+        m_onDisconnected = nullptr;
+        m_onPacket = nullptr;
+        m_onError = nullptr;
     }
 
     bool NetworkClient::IsConnected() const {

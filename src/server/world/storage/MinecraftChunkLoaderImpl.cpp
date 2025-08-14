@@ -333,13 +333,24 @@ namespace Game {
     // === VALIDATION ===
 
     bool MinecraftChunkLoaderImpl::ValidateChunk(const Chunk& chunk) const {
+        // Debug logging for chunks with 0 coordinates
+        if (chunk.pos.x == 0 || chunk.pos.z == 0) {
+            Log::Debug("ValidateChunk called for chunk (%d, %d)", chunk.pos.x, chunk.pos.z);
+        }
+        
         // Use base validation plus Minecraft-specific checks
         if (!IChunkLoader::ValidateChunk(chunk)) {
+            if (chunk.pos.x == 0 || chunk.pos.z == 0) {
+                Log::Debug("Chunk (%d, %d) failed base validation", chunk.pos.x, chunk.pos.z);
+            }
             return false;
         }
 
         // Check that chunk has reasonable structure
         if (chunk.GetSectionCount() == 0) {
+            if (chunk.pos.x == 0 || chunk.pos.z == 0) {
+                Log::Debug("Chunk (%d, %d) has no sections (count=0)", chunk.pos.x, chunk.pos.z);
+            }
             return false;
         }
 
@@ -354,6 +365,11 @@ namespace Game {
                 }
             }
             if (hasBedrockLayer) break;
+        }
+        
+        if (chunk.pos.x == 0 || chunk.pos.z == 0) {
+            Log::Debug("Chunk (%d, %d) bedrock check: %s", 
+                      chunk.pos.x, chunk.pos.z, hasBedrockLayer ? "PASSED" : "FAILED");
         }
 
         return hasBedrockLayer;
@@ -591,23 +607,51 @@ namespace Game {
             // Load NBT data
             ::World::NBTTagPtr nbtData = LoadChunkNBT(position);
             if (!nbtData) {
+                if (position.x == 0 || position.z == 0) {
+                    Log::Debug("Chunk (%d, %d): Failed to load NBT data", position.x, position.z);
+                }
                 return ChunkLoadResult::Failure("Failed to load chunk NBT data");
+            }
+            
+            if (position.x == 0 || position.z == 0) {
+                Log::Debug("Chunk (%d, %d): NBT data loaded successfully", position.x, position.z);
             }
 
             // Validate NBT data
             if (!ValidateChunkNBT(nbtData)) {
+                if (position.x == 0 || position.z == 0) {
+                    Log::Debug("Chunk (%d, %d): NBT validation FAILED", position.x, position.z);
+                }
                 return ChunkLoadResult::Failure("Invalid chunk NBT data");
+            }
+            
+            if (position.x == 0 || position.z == 0) {
+                Log::Debug("Chunk (%d, %d): NBT validation passed", position.x, position.z);
             }
 
             // Convert NBT to chunk
             std::shared_ptr<Chunk> chunk = NBTToChunk(nbtData, position);
             if (!chunk) {
+                if (position.x == 0 || position.z == 0) {
+                    Log::Debug("Chunk (%d, %d): NBT to Chunk conversion FAILED", position.x, position.z);
+                }
                 return ChunkLoadResult::Failure("Failed to convert NBT to chunk");
+            }
+            
+            if (position.x == 0 || position.z == 0) {
+                Log::Debug("Chunk (%d, %d): NBT to Chunk conversion successful", position.x, position.z);
             }
 
             // Validate final chunk
             if (!ValidateChunk(*chunk)) {
+                if (position.x == 0 || position.z == 0) {
+                    Log::Debug("Chunk (%d, %d): Final chunk validation FAILED", position.x, position.z);
+                }
                 return ChunkLoadResult::Failure("Chunk validation failed");
+            }
+            
+            if (position.x == 0 || position.z == 0) {
+                Log::Debug("Chunk (%d, %d): All validations passed, chunk loaded successfully", position.x, position.z);
             }
 
             ChunkLoadResult result = ChunkLoadResult::Success(chunk);
@@ -644,10 +688,32 @@ namespace Game {
 
     void MinecraftChunkLoaderImpl::ChunkToRegion(Math::ChunkPos chunkPos, int& regionX, int& regionZ,
                                                 int& localX, int& localZ) const {
-        regionX = chunkPos.x >> 5; // Divide by 32
-        regionZ = chunkPos.z >> 5;
-        localX = chunkPos.x & 31;  // Modulo 32
-        localZ = chunkPos.z & 31;
+        // Calculate region coordinates using floor division
+        // Minecraft regions: chunk coords 0-31 -> region 0, 32-63 -> region 1, etc.
+        // For negative: -1 to -32 -> region -1, -33 to -64 -> region -2, etc.
+        
+        if (chunkPos.x >= 0) {
+            regionX = chunkPos.x / 32;
+        } else {
+            // For negative, need proper floor division
+            // Integer division truncates toward zero, but we need floor (toward -inf)
+            regionX = (chunkPos.x + 1) / 32 - 1;
+        }
+        
+        if (chunkPos.z >= 0) {
+            regionZ = chunkPos.z / 32;
+        } else {
+            // For negative, need proper floor division
+            regionZ = (chunkPos.z + 1) / 32 - 1;
+        }
+        
+        // Local coordinates within region (always 0-31)
+        localX = chunkPos.x - (regionX * 32);
+        localZ = chunkPos.z - (regionZ * 32);
+        
+        // Debug logging to verify the fix
+        Log::Debug("ChunkToRegion: chunk(%d,%d) -> region(%d,%d) local(%d,%d)", 
+                  chunkPos.x, chunkPos.z, regionX, regionZ, localX, localZ);
     }
 
     std::string MinecraftChunkLoaderImpl::GetRegionFilePath(int regionX, int regionZ) const {

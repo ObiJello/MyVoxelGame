@@ -5,12 +5,19 @@
 
 namespace Network {
 
-    // Protocol states (mirrors Minecraft's connection states)
-    enum class ProtocolState : uint8_t {
-        HANDSHAKING = 0,
+    // Wire values for nextState field in HandshakeC2S packet
+    // These match Minecraft protocol exactly
+    enum class NextStateWire : int32_t {
         STATUS = 1,
-        LOGIN = 2,
-        PLAY = 3
+        LOGIN = 2
+    };
+
+    // Internal connection phases (used for state machine)
+    enum class ProtocolState : uint8_t {
+        HANDSHAKING = 0,  // Initial phase, waiting for handshake
+        STATUS = 1,       // Status phase (server list ping)
+        LOGIN = 2,        // Login phase (authentication)
+        PLAY = 3          // Play phase (in-game)
     };
 
     // Packet direction

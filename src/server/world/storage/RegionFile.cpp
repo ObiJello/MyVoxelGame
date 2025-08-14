@@ -69,6 +69,20 @@ namespace World {
             entry |= (static_cast<uint32_t>(locationBuffer[i * 4 + 3]) << 0);
 
             locationTable[i] = ParseLocationEntry(entry);
+            
+            // Debug logging for chunks with 0 coordinates
+            int localX = i % 32;
+            int localZ = i / 32;
+            if (localX == 0 || localZ == 0) {
+                uint8_t b0 = locationBuffer[i * 4 + 0];
+                uint8_t b1 = locationBuffer[i * 4 + 1];
+                uint8_t b2 = locationBuffer[i * 4 + 2];
+                uint8_t b3 = locationBuffer[i * 4 + 3];
+                    Log::Debug("Region chunk (%d,%d) index=%d: raw bytes=[%02x %02x %02x %02x], offset=%u, count=%u, isEmpty=%s",
+                          localX, localZ, i, b0, b1, b2, b3,
+                          locationTable[i].sectorOffset, locationTable[i].sectorCount,
+                          locationTable[i].isEmpty() ? "true" : "false");
+            }
         }
 
         // Read timestamp table (second 4KB)
@@ -120,7 +134,16 @@ namespace World {
         }
 
         int index = CoordinatesToIndex(localX, localZ);
-        return locationTable[index];
+        ChunkLoc loc = locationTable[index];
+        
+        // Debug logging for chunks with 0 coordinates
+        if (localX == 0 || localZ == 0) {
+            Log::Debug("GetLocation(%d,%d): index=%d, offset=%u, count=%u, isEmpty=%s",
+                      localX, localZ, index, loc.sectorOffset, loc.sectorCount,
+                      loc.isEmpty() ? "true" : "false");
+        }
+        
+        return loc;
     }
 
     uint32_t RegionFile::GetTimestamp(int localX, int localZ) const {

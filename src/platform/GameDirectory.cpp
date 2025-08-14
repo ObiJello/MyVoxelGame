@@ -502,6 +502,35 @@ namespace Platform {
         return userDataDir + "/obeycraft";
     }
 
+    std::string GameDirectory::GetDefaultSaveWorldPath() const {
+        // Returns the path to the default world's region folder
+        // This is a temporary solution for loading existing saves
+        return m_savesDirectory + "/world/region";
+    }
+    
+    bool GameDirectory::HasDefaultSaveWorld() const {
+        // Check if the default save world exists and has region files
+        std::string regionPath = GetDefaultSaveWorldPath();
+        
+        try {
+            if (!std::filesystem::exists(regionPath)) {
+                return false;
+            }
+            
+            // Check if there are any .mca files in the region directory
+            for (const auto& entry : std::filesystem::directory_iterator(regionPath)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".mca") {
+                    Log::Info("Found Minecraft region files in: %s", regionPath.c_str());
+                    return true;
+                }
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            Log::Debug("Error checking for save world: %s", e.what());
+        }
+        
+        return false;
+    }
+
     std::string GameDirectory::GetUserDataDirectory() {
 #ifdef _WIN32
         // Windows: %APPDATA%

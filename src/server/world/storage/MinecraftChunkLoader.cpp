@@ -13,17 +13,28 @@ namespace Game {
 
     std::string MinecraftChunkLoader::s_worldPath = "";
 
+    void MinecraftChunkLoader::SetWorldPath(const std::string& path) {
+        s_worldPath = path;
+        // Clear region file cache when world path changes
+        // This ensures we don't have stale cache entries from previous attempts
+        World::RegionFileCache::Instance().Clear();
+        Log::Info("World path set to: %s (region cache cleared)", path.c_str());
+    }
+
     std::shared_ptr<Chunk> MinecraftChunkLoader::LoadOrGenerateChunk(Math::ChunkPos pos,
                                                                     const std::string& worldPath) {
         std::string effectiveWorldPath = worldPath.empty() ? s_worldPath : worldPath;
 
         // Try loading from Minecraft region files first
         if (!effectiveWorldPath.empty()) {
+            Log::Debug("Attempting to load chunk (%d, %d) from Minecraft world: %s", 
+                      pos.x, pos.z, effectiveWorldPath.c_str());
             auto minecraftChunk = LoadMinecraftChunk(pos, effectiveWorldPath);
             if (minecraftChunk) {
-                Log::Info("Loaded chunk (%d, %d) from Minecraft region files", pos.x, pos.z);
+                Log::Info("✓ Successfully loaded chunk (%d, %d) from Minecraft region files", pos.x, pos.z);
                 return minecraftChunk;
             }
+            Log::Debug("Chunk (%d, %d) not found in region files", pos.x, pos.z);
         }
 
         // Fall back to procedural generation
@@ -150,11 +161,15 @@ namespace Game {
 
             Log::Debug("Loading chunk (%d, %d) from region (%d, %d) local (%d, %d)",
                       pos.x, pos.z, regionX, regionZ, localX, localZ);
+            
+            // Log the exact file path being looked for (helps debug the cross pattern issue)
+            std::string regionPath = worldPath + "/region/r." + std::to_string(regionX) + "." + std::to_string(regionZ) + ".mca";
+            Log::Debug("Looking for region file: %s", regionPath.c_str());
 
             // Get region file from cache
             auto regionFile = World::RegionFileCache::Instance().GetRegionFile(regionX, regionZ, worldPath);
             if (!regionFile || !regionFile->IsValid()) {
-                Log::Debug("No valid region file found for region (%d, %d)", regionX, regionZ);
+                Log::Debug("No valid region file found for region (%d, %d) at path: %s", regionX, regionZ, regionPath.c_str());
                 return nullptr;
             }
 

@@ -593,11 +593,11 @@ namespace Server {
                     // CRITICAL: Switch protocol state NOW on I/O thread
                     // This ensures the next packet (LoginStart) is decoded with correct state
                     // This is exactly how Minecraft/Netty handles it
-                    if (packet->nextState == ProtocolState::LOGIN) {
+                    if (packet->nextState == static_cast<int32_t>(NextStateWire::LOGIN)) {
                         Log::Debug("[ServerConnection %u] I/O thread switching to LOGIN state", GetConnectionId());
                         m_phase = ConnectionPhase::LOGIN;
                         // Note: Listener will be created on server thread when packet is processed
-                    } else if (packet->nextState == ProtocolState::STATUS) {
+                    } else if (packet->nextState == static_cast<int32_t>(NextStateWire::STATUS)) {
                         Log::Debug("[ServerConnection %u] I/O thread switching to STATUS state", GetConnectionId());
                         m_phase = ConnectionPhase::STATUS;
                     }

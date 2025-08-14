@@ -63,8 +63,9 @@ namespace World {
         // Check if file exists
         if (!std::filesystem::exists(filePath)) {
             Log::Debug("Region file does not exist: %s", filePath.c_str());
-            // Cache nullptr to avoid repeated filesystem checks
-            cache[filePath] = nullptr;
+            // Don't cache nullptr - allow retry on next access
+            // This fixes the issue where chunks with x=0 or z=0 fail to load
+            // if they're requested before the world path is properly set
             return nullptr;
         }
 
@@ -73,8 +74,7 @@ namespace World {
 
         if (!regionFile->LoadHeader()) {
             Log::Warning("Failed to load region file header: %s", filePath.c_str());
-            // Cache nullptr to indicate load failure
-            cache[filePath] = nullptr;
+            // Don't cache nullptr - allow retry on next access
             return nullptr;
         }
 

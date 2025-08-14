@@ -150,7 +150,7 @@ namespace Game {
         // Validate that a loaded chunk is consistent and usable
         virtual bool ValidateChunk(const Chunk& chunk) const {
             // Default implementation does basic checks
-            return !chunk.IsEmpty() && chunk.pos.x != 0 && chunk.pos.z != 0; // Basic validation
+            return !chunk.IsEmpty(); // Only check if chunk has content
         }
 
         // === ERROR HANDLING ===

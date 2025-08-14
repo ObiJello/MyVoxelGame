@@ -68,6 +68,9 @@ namespace Client {
         void SetOnDisconnected(OnDisconnectedCallback callback) { m_onDisconnected = callback; }
         void SetOnPacket(OnPacketCallback callback) { m_onPacket = callback; }
         void SetOnError(OnErrorCallback callback) { m_onError = callback; }
+        
+        // Clear all callbacks (used during shutdown to prevent crashes)
+        void ClearCallbacks();
 
         // ========================================================================
         // CONNECTION INFO

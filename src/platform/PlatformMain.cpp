@@ -361,8 +361,16 @@ namespace PlatformMain {
         Server::IntegratedServerConfig serverConfig;
         serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
         serverConfig.enableAsyncChunkLoading = false;    // Use ServerWorkerPool
-        // Optionally set Minecraft world path here
-        // serverConfig.minecraftWorldPath = "/path/to/minecraft/world";
+        
+        // Automatically use local save directory if available (temporary feature)
+        if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
+            // Point to the saves/world folder (not /region, as MinecraftChunkLoader adds that)
+            serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
+            Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
+        } else {
+            Log::Info("No local Minecraft save found, will use procedural generation");
+        }
+        
         Server::InitializeIntegratedServer(serverConfig);
         Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
         
