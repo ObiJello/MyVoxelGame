@@ -127,6 +127,7 @@ namespace Game {
         s_nameToBlockId["minecraft:cherry_leaves"] = BlockID::CherryLeaves;
         s_nameToBlockId["minecraft:coal_ore"] = BlockID::CoalOre;
         s_nameToBlockId["minecraft:redstone_ore"] = BlockID::RedstoneOre;
+        s_nameToBlockId["minecraft:deepslate_redstone_ore"] = BlockID::DeepslateRedstoneOre;
         s_nameToBlockId["minecraft:lapis_ore"] = BlockID::LapisOre;
         s_nameToBlockId["minecraft:iron_ore"] = BlockID::IronOre;
         s_nameToBlockId["minecraft:gold_ore"] = BlockID::GoldOre;

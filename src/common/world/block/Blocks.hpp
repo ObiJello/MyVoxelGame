@@ -74,6 +74,7 @@ namespace Game {
         BeeNest        = 66,
         MossBlock      = 67,
         SpruceLeaves   = 68,
+        DeepslateRedstoneOre = 69,
 
 
         Count // Always keep this as the last entry.

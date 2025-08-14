@@ -73,6 +73,7 @@ namespace Game {
         RegisterModelBlock(BlockID::AcaciaLog, "Acacia Log", true, "acacia_log");
         RegisterModelBlock(BlockID::CoalOre, "Coal Ore", true, "coal_ore");
         RegisterModelBlock(BlockID::RedstoneOre, "Redstone Ore", true, "redstone_ore");
+        RegisterModelBlock(BlockID::DeepslateRedstoneOre, "Deepslate Redstone Ore", true, "deepslate_redstone_ore");
         RegisterModelBlock(BlockID::LapisOre, "Lapis Ore", true, "lapis_ore");
         RegisterModelBlock(BlockID::IronOre, "Iron Ore", true, "iron_ore");
         RegisterModelBlock(BlockID::GoldOre, "Gold Ore", true, "gold_ore");
