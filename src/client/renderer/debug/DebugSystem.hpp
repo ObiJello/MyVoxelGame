@@ -74,7 +74,7 @@ namespace Debug {
         static void RenderDebugUI(
             const Render::Camera& camera,
             const Frustum& frustum,
-            const Game::PlayerController& playerController,
+            Game::PlayerController& playerController,
             const PerformanceMetrics& metrics,
             bool cursorEnabled,
             int windowWidth, int windowHeight,
@@ -88,7 +88,7 @@ namespace Debug {
     private:
         static void DrawMainDebugWindow(
             const Render::Camera& camera,
-            const Game::PlayerController& playerController,
+            Game::PlayerController& playerController,
             const PerformanceMetrics& metrics,
             bool cursorEnabled,
             int windowWidth, int windowHeight,
@@ -99,6 +99,7 @@ namespace Debug {
         static void DrawTextureAtlasDebug();
         static void DrawAtlasBuilderDebug();
         static void DrawWorldDebug();
+        static void DrawPlayerFlightControls(Game::PlayerController& playerController);
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
     };

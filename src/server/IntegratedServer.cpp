@@ -15,6 +15,7 @@
 #include "common/world/level/World.hpp"
 #include "client/input/PlayerController.hpp"
 #include "world/ServerWorkerPool.hpp"
+#include "world/storage/SectionDataUnpacker.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
 #include <thread>
@@ -179,6 +180,13 @@ namespace Server {
         
         // Log final statistics
         LogStats();
+        
+        // Save unimplemented blocks report
+        auto& tracker = Game::UnimplementedBlockTracker::GetInstance();
+        if (tracker.GetUniqueBlockCount() > 0) {
+            Log::Info("Saving unimplemented blocks report...");
+            tracker.SaveToFile();
+        }
         
         // Clear state
         m_chunkSendStates.clear();

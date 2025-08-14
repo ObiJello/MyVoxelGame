@@ -158,8 +158,20 @@ namespace Game {
 
         // In noclip mode, allow free movement in all directions including vertical
         if (physics.noclip) {
-            // Use full 3D movement input (including Y from Space/Shift keys)
-            glm::vec3 totalMovement = movementInput * speed;
+            // Apply separate speeds for horizontal and vertical movement
+            glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
+            glm::vec3 verticalMovement = glm::vec3(0.0f, movementInput.y, 0.0f);
+            
+            // Apply horizontal speed
+            if (glm::length(horizontalMovement) > 0.0f) {
+                horizontalMovement = glm::normalize(horizontalMovement) * physics.noclipHorizontalSpeed;
+            }
+            
+            // Apply vertical speed
+            verticalMovement *= physics.noclipVerticalSpeed;
+            
+            // Combine movements
+            glm::vec3 totalMovement = horizontalMovement + verticalMovement;
             physics.position += totalMovement * deltaTime;
             physics.velocity = glm::vec3(0.0f); // No velocity in noclip
             physics.isOnGround = false;

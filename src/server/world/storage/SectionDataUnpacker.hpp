@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <cmath>
 #include <algorithm>
+#include <mutex>
+#include <chrono>
 
 namespace Game {
 
@@ -42,6 +44,38 @@ namespace Game {
             }
             return key;
         }
+    };
+
+    // Tracker for unimplemented blocks to help prioritize what to implement next
+    class UnimplementedBlockTracker {
+    public:
+        static UnimplementedBlockTracker& GetInstance();
+        
+        // Track an unimplemented block
+        void TrackUnimplementedBlock(const std::string& blockName);
+        
+        // Save statistics to file
+        void SaveToFile() const;
+        
+        // Get the output file path
+        std::string GetOutputPath() const;
+        
+        // Clear all statistics
+        void Clear();
+        
+        // Get total number of unique blocks tracked
+        size_t GetUniqueBlockCount() const { return m_blockCounts.size(); }
+        
+        // Get total number of conversions
+        size_t GetTotalConversions() const;
+        
+    private:
+        UnimplementedBlockTracker() = default;
+        ~UnimplementedBlockTracker() = default;
+        
+        // Block name -> count mapping
+        std::unordered_map<std::string, size_t> m_blockCounts;
+        mutable std::mutex m_mutex; // Thread safety for tracking
     };
 
     // Registry for converting Minecraft block names to our internal BlockID enum

@@ -64,6 +64,7 @@ namespace Game {
         RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");
         RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");
         RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");
+        RegisterModelBlock(BlockID::SpruceLog, "Spruce Log", true, "spruce_log");
         RegisterModelBlock(BlockID::Snow, "Snow", true, "snow_block");
         RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow");
         RegisterModelBlock(BlockID::Bedrock, "Bedrock", true, "bedrock");
@@ -98,11 +99,30 @@ namespace Game {
         RegisterModelBlock(BlockID::MossyCobblestone,              "Mossy Cobblestone",              true,  "mossy_cobblestone");
         RegisterModelBlock(BlockID::polished_tuff,                 "Polished Tuff",                  true,  "polished_tuff");
         RegisterModelBlock(BlockID::waxed_oxidized_chiseled_copper,"Waxed Oxidized Chiseled Copper", true,  "waxed_oxidized_chiseled_copper");
+        RegisterModelBlock(BlockID::deepslate_coal_ore,            "Deepslate Coal Ore",             true,  "deepslate_coal_ore");
+        RegisterModelBlock(BlockID::Clay,                          "Clay",                           true,  "clay");
+        RegisterModelBlock(BlockID::SmoothBasalt,                  "Smooth Basalt",                  true,  "smooth_basalt");
+        RegisterModelBlock(BlockID::AmethystBlock,                 "Amethyst Block",                 true,  "amethyst_block");
+        RegisterModelBlock(BlockID::MagmaBlock,                    "Magma Block",                    true,  "magma_block");
+        RegisterModelBlock(BlockID::RawIronBlock,                  "Raw Iron Block",                 true,  "raw_iron_block");
+        RegisterModelBlock(BlockID::Obsidian,                      "Obsidian",                       true,  "obsidian");
+        RegisterModelBlock(BlockID::OakPlanks,                     "Oak Planks",                     true,  "oak_planks");
+        RegisterModelBlock(BlockID::Pumpkin,                       "Pumpkin",                        true,  "pumpkin");
+        RegisterModelBlock(BlockID::WaxedCopperBulb,               "Waxed Copper Bulb",              true,  "waxed_copper_bulb");
+        RegisterModelBlock(BlockID::WaxedOxidizedCopper,           "Waxed Oxidized Copper",          true,  "waxed_oxidized_copper");
+        RegisterModelBlock(BlockID::WaxedOxidizedCutCopper,        "Waxed Oxidized Cut Copper",      true,  "waxed_oxidized_cut_copper");
+        RegisterModelBlock(BlockID::WaxedCopperBlock,              "Waxed Copper Block",             true,  "waxed_copper_block");
+        RegisterModelBlock(BlockID::WaxedExposedCopperBulb,        "Waxed Exposed Copper Bulb",      true,  "waxed_exposed_copper_bulb");
+        RegisterModelBlock(BlockID::WaxedWeatheredCopperBulb,      "Waxed Weathered Copper Bulb",    true,  "waxed_weathered_copper_bulb");
+        RegisterModelBlock(BlockID::WaxedOxidizedCopperBulb,       "Waxed Oxidized Copper Bulb",     true,  "waxed_oxidized_copper_bulb");
+        RegisterModelBlock(BlockID::BeeNest,                       "Bee Nest",                       true,  "bee_nest");
+        RegisterModelBlock(BlockID::MossBlock,                     "Moss Block",                     true,  "moss_block");
 
         // CUTOUT BLOCKS (Alpha-test layer)
         RegisterModelBlock(BlockID::OakLeaves, "Oak Leaves", false, "oak_leaves");
         RegisterModelBlock(BlockID::BirchLeaves, "Birch Leaves", false, "birch_leaves");
         RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves");
+        RegisterModelBlock(BlockID::SpruceLeaves, "Spruce Leaves", false, "spruce_leaves");
         RegisterModelBlock(BlockID::Spawner,                       "Spawner",                        false,  "spawner");
 
         // TRANSLUCENT BLOCKS (Blended layer)

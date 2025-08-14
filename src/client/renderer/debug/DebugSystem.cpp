@@ -73,7 +73,7 @@ namespace Debug {
     void DebugSystem::RenderDebugUI(
         const Render::Camera& camera,
         const Frustum& frustum,
-        const Game::PlayerController& playerController,
+        Game::PlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,
@@ -84,11 +84,12 @@ namespace Debug {
         DrawChunkVisualization(camera, frustum);
         DrawTextureAtlasDebug();
         DrawWorldDebug();
+        DrawPlayerFlightControls(playerController);
     }
 
     void DebugSystem::DrawMainDebugWindow(
         const Render::Camera& camera,
-        const Game::PlayerController& playerController,
+        Game::PlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,
@@ -688,6 +689,79 @@ namespace Debug {
         ImGui::End();
     }
 
+    void DebugSystem::DrawPlayerFlightControls(Game::PlayerController& playerController) {
+        if (!ImGui::Begin("Player Flight Speed")) {
+            ImGui::End();
+            return;
+        }
+
+        ImGui::Text("=== NOCLIP FLIGHT CONTROLS ===");
+        ImGui::Separator();
+
+        // Get a non-const reference to physics
+        auto& physics = playerController.GetPhysics();
+        
+        // Display current state
+        if (physics.noclip) {
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "✓ Noclip Mode Active");
+        } else {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "⚠ Noclip Mode Disabled");
+            ImGui::Text("Press 'N' to enable noclip mode");
+        }
+        
+        ImGui::Spacing();
+        
+        // Horizontal speed slider
+        ImGui::Text("Horizontal Speed (WASD):");
+        if (ImGui::SliderFloat("##HorizontalSpeed", &physics.noclipHorizontalSpeed, 1.0f, 50.0f, "%.1f blocks/s")) {
+            // Speed updated directly through the reference
+        }
+        
+        // Vertical speed slider  
+        ImGui::Text("Vertical Speed (Space/Shift):");
+        if (ImGui::SliderFloat("##VerticalSpeed", &physics.noclipVerticalSpeed, 1.0f, 50.0f, "%.1f blocks/s")) {
+            // Speed updated directly through the reference
+        }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        
+        // Reset buttons
+        if (ImGui::Button("Reset to Defaults")) {
+            physics.noclipHorizontalSpeed = Game::PlayerPhysics::NOCLIP_HORIZONTAL_SPEED;
+            physics.noclipVerticalSpeed = Game::PlayerPhysics::NOCLIP_VERTICAL_SPEED;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Fast Preset")) {
+            physics.noclipHorizontalSpeed = 25.0f;
+            physics.noclipVerticalSpeed = 25.0f;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Slow Preset")) {
+            physics.noclipHorizontalSpeed = 5.0f;
+            physics.noclipVerticalSpeed = 5.0f;
+        }
+        
+        // Display current values
+        ImGui::Spacing();
+        ImGui::Text("Current Settings:");
+        ImGui::Text("  Horizontal: %.1f blocks/s", physics.noclipHorizontalSpeed);
+        ImGui::Text("  Vertical: %.1f blocks/s", physics.noclipVerticalSpeed);
+        
+        // Instructions
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Controls:");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "  N - Toggle noclip mode");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "  WASD - Horizontal movement");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "  Space - Fly up");
+        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "  Shift - Fly down");
+        
+        ImGui::End();
+    }
+
 #else // NDEBUG - Release builds
     bool DebugSystem::Initialize(GLFWwindow* window) {
         return true; // No-op in release
@@ -708,7 +782,7 @@ namespace Debug {
     void DebugSystem::RenderDebugUI(
         const Render::Camera& camera,
         const Frustum& frustum,
-        const Game::PlayerController& playerController,
+        Game::PlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,

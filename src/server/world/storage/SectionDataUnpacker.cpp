@@ -4,10 +4,95 @@
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Config.hpp"
+#include "platform/GameDirectory.hpp"
 #include <algorithm>
 #include <unordered_set>
+#include <fstream>
+#include <iomanip>
+#include <ctime>
 
 namespace Game {
+
+    // UnimplementedBlockTracker implementation
+    UnimplementedBlockTracker& UnimplementedBlockTracker::GetInstance() {
+        static UnimplementedBlockTracker instance;
+        return instance;
+    }
+    
+    void UnimplementedBlockTracker::TrackUnimplementedBlock(const std::string& blockName) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_blockCounts[blockName]++;
+        // Just track, don't save - saving happens only on shutdown
+    }
+    
+    size_t UnimplementedBlockTracker::GetTotalConversions() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        size_t total = 0;
+        for (const auto& [name, count] : m_blockCounts) {
+            total += count;
+        }
+        return total;
+    }
+    
+    std::string UnimplementedBlockTracker::GetOutputPath() const {
+        // Use the game directory for storing the report
+        return Platform::g_gameDirectory.GetGameDirectory() + "/unimplemented_blocks.txt";
+    }
+    
+    void UnimplementedBlockTracker::Clear() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_blockCounts.clear();
+    }
+    
+    void UnimplementedBlockTracker::SaveToFile() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        if (m_blockCounts.empty()) {
+            return; // Nothing to save
+        }
+        
+        std::string outputPath = GetOutputPath();
+        std::ofstream file(outputPath);
+        if (!file.is_open()) {
+            Log::Warning("Failed to open unimplemented blocks report file: %s", outputPath.c_str());
+            return;
+        }
+        
+        // Get current time
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        
+        // Write header
+        file << "=== Unimplemented Blocks Report ===" << std::endl;
+        file << "Generated: " << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << std::endl;
+        file << "Total unique blocks: " << m_blockCounts.size() << std::endl;
+        
+        // Calculate total directly since we already hold the lock
+        size_t total = 0;
+        for (const auto& [name, count] : m_blockCounts) {
+            total += count;
+        }
+        file << "Total conversions: " << total << std::endl;
+        file << std::endl;
+        
+        // Sort blocks by count (descending)
+        std::vector<std::pair<std::string, size_t>> sortedBlocks(m_blockCounts.begin(), m_blockCounts.end());
+        std::sort(sortedBlocks.begin(), sortedBlocks.end(), 
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        // Write column headers
+        file << std::left << std::setw(10) << "Count" << "Block Name" << std::endl;
+        file << std::left << std::setw(10) << "-----" << "----------" << std::endl;
+        
+        // Write sorted block list
+        for (const auto& [blockName, count] : sortedBlocks) {
+            file << std::left << std::setw(10) << count << blockName << std::endl;
+        }
+        
+        file.close();
+        Log::Info("Saved unimplemented blocks report to: %s (%zu unique blocks)", 
+                  outputPath.c_str(), m_blockCounts.size());
+    }
 
     // BlockStateRegistry implementation
     std::unordered_map<std::string, BlockID> BlockStateRegistry::s_nameToBlockId;
@@ -28,6 +113,7 @@ namespace Game {
         s_nameToBlockId["minecraft:sand"] = BlockID::Sand;
         s_nameToBlockId["minecraft:sandstone"] = BlockID::Sandstone;
         s_nameToBlockId["minecraft:oak_log"] = BlockID::OakLog;
+        s_nameToBlockId["minecraft:spruce_log"] = BlockID::SpruceLog;
         s_nameToBlockId["minecraft:snow_block"] = BlockID::Snow;
         s_nameToBlockId["minecraft:ice"] = BlockID::Ice;
         s_nameToBlockId["minecraft:glass"] = BlockID::Glass;
@@ -69,6 +155,25 @@ namespace Game {
         s_nameToBlockId["minecraft:mossy_cobblestone"] = BlockID::MossyCobblestone;
         s_nameToBlockId["minecraft:polished_tuff"] = BlockID::polished_tuff;
         s_nameToBlockId["minecraft:waxed_oxidized_chiseled_copper"] = BlockID::waxed_oxidized_chiseled_copper;
+        s_nameToBlockId["minecraft:deepslate_coal_ore"] = BlockID::deepslate_coal_ore;
+        s_nameToBlockId["minecraft:clay"] = BlockID::Clay;
+        s_nameToBlockId["minecraft:smooth_basalt"] = BlockID::SmoothBasalt;
+        s_nameToBlockId["minecraft:amethyst_block"] = BlockID::AmethystBlock;
+        s_nameToBlockId["minecraft:magma_block"] = BlockID::MagmaBlock;
+        s_nameToBlockId["minecraft:raw_iron_block"] = BlockID::RawIronBlock;
+        s_nameToBlockId["minecraft:obsidian"] = BlockID::Obsidian;
+        s_nameToBlockId["minecraft:oak_planks"] = BlockID::OakPlanks;
+        s_nameToBlockId["minecraft:pumpkin"] = BlockID::Pumpkin;
+        s_nameToBlockId["minecraft:waxed_copper_bulb"] = BlockID::WaxedCopperBulb;
+        s_nameToBlockId["minecraft:waxed_oxidized_copper"] = BlockID::WaxedOxidizedCopper;
+        s_nameToBlockId["minecraft:waxed_oxidized_cut_copper"] = BlockID::WaxedOxidizedCutCopper;
+        s_nameToBlockId["minecraft:waxed_copper_block"] = BlockID::WaxedCopperBlock;
+        s_nameToBlockId["minecraft:waxed_exposed_copper_bulb"] = BlockID::WaxedExposedCopperBulb;
+        s_nameToBlockId["minecraft:waxed_weathered_copper_bulb"] = BlockID::WaxedWeatheredCopperBulb;
+        s_nameToBlockId["minecraft:waxed_oxidized_copper_bulb"] = BlockID::WaxedOxidizedCopperBulb;
+        s_nameToBlockId["minecraft:bee_nest"] = BlockID::BeeNest;
+        s_nameToBlockId["minecraft:moss_block"] = BlockID::MossBlock;
+        s_nameToBlockId["minecraft:spruce_leaves"] = BlockID::SpruceLeaves;
 
         // Add common block variants
         s_nameToBlockId["minecraft:grass"] = BlockID::Grass; // Legacy name
@@ -110,12 +215,15 @@ namespace Game {
             }
         }
 
-        // Unknown block - log warning and return air
+        // Unknown block - track it and return air
         static std::unordered_set<std::string> loggedUnknown;
         if (loggedUnknown.find(normalizedName) == loggedUnknown.end()) {
             Log::Warning("Unknown block state: %s", stateKey.c_str());
             loggedUnknown.insert(normalizedName);
         }
+        
+        // Track this unimplemented block
+        UnimplementedBlockTracker::GetInstance().TrackUnimplementedBlock(normalizedName);
 
         return BlockID::Air; // Default fallback
     }
