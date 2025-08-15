@@ -188,26 +188,19 @@ namespace Debug {
         ImGui::Separator();
         
         // Get frustum culling stats from ChunkRenderer
-        int sectionsAvailable = 0;
-        int sectionsCulled = 0;
+        int totalSectionsChecked = 0;
         if (auto* renderStats = Render::GetChunkRendererStats()) {
-            sectionsAvailable = renderStats->sectionsAvailable;
-            sectionsCulled = renderStats->sectionsSkipped;
+            totalSectionsChecked = renderStats->sectionsAvailable;
         }
         
-        // Show frustum culling effectiveness
-        ImGui::Text("Sections Available: %d", sectionsAvailable);
+        // Show rendering statistics
         ImGui::Text("Sections Rendered: %d", metrics.meshesRenderedThisFrame);
-        ImGui::Text("Sections Culled: %d", sectionsCulled);
-        if (sectionsAvailable > 0) {
-            float cullPercent = (float)sectionsCulled / sectionsAvailable * 100.0f;
-            if (cullPercent < 30.0f) {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), 
-                                  "Culling Effectiveness: %.1f%% (Low!)", cullPercent);
-            } else {
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), 
-                                  "Culling Effectiveness: %.1f%%", cullPercent);
-            }
+        if (totalSectionsChecked > 0) {
+            ImGui::Text("Total Sections in Range: %d", totalSectionsChecked);
+            // Show a simple ratio without claiming it's "culling effectiveness"
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), 
+                              "Rendering %d of %d sections", 
+                              metrics.meshesRenderedThisFrame, totalSectionsChecked);
         }
         
         ImGui::Text("By Layer - Opaque:%d, Cutout:%d, Translucent:%d", 

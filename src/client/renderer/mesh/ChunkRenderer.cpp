@@ -236,9 +236,8 @@ namespace Render {
         // Create a square of size (renderDistanceChunks * 2 + 1) x (renderDistanceChunks * 2 + 1)
         int halfSize = renderDistanceChunks;  // This creates the desired square size
 
-        int sectionsFound = 0;
-        int sectionsWithGeometry = 0;
-        int sectionsInRange = 0;
+        int totalSectionsChecked = 0;        // Total sections we looked at
+        int sectionsWithGeometry = 0;        // Sections that passed frustum AND have geometry
         int chunksChecked = 0;
 
         // **UPDATED**: Iterate in a square pattern instead of radius check
@@ -246,37 +245,41 @@ namespace Render {
             for (int dx = -halfSize; dx <= halfSize; ++dx) {
                 ::Game::Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
                 chunksChecked++;
-                sectionsInRange++;  // All chunks in the square are "in range"
 
                 // Check all sections in this chunk
                 for (int sectionY = 0; sectionY < ::Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                    totalSectionsChecked++;
+                    
+                    // OPTIMIZATION: Perform frustum culling BEFORE any expensive operations
+                    if (m_enableFrustumCulling) {
+                        AABB sectionAABB = GetSectionAABB(chunkPos, sectionY);
+                        if (!frustum.IsBoxVisible(sectionAABB)) {
+                            continue; // Skip this section entirely - no GPU data fetch, no distance calc
+                        }
+                    }
+
                     const auto* gpuData = g_clientMeshManager->GetSectionGPUData(chunkPos, sectionY);
 
-                    if (gpuData) {
-                        sectionsFound++;
-                        if (gpuData->HasGeometry()) {
-                            sectionsWithGeometry++;
-                            float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
+                    if (gpuData && gpuData->HasGeometry()) {
+                        sectionsWithGeometry++;
+                        float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
 
-                            SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
+                        SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
+                        renderData.inFrustum = true; // Already passed frustum test
 
-                            m_visibleSections.push_back(renderData);
-                        }
+                        m_visibleSections.push_back(renderData);
                     }
                 }
             }
         }
 
-        // Track total sections available before culling
-        m_stats.sectionsAvailable = static_cast<int>(m_visibleSections.size());
-
-        if (m_enableFrustumCulling) {
-            PerformFrustumCulling(frustum, m_visibleSections);
-        }
+        // Track simple statistics - don't try to calculate culling effectiveness
+        m_stats.sectionsAvailable = totalSectionsChecked;       // Total sections we checked
+        m_stats.sectionsSkipped = 0;                            // Not tracking this anymore
+        m_stats.sectionsRendered = sectionsWithGeometry;        // Sections actually being rendered
 
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
@@ -336,24 +339,8 @@ namespace Render {
     }
 
     void ChunkRenderer::PerformFrustumCulling(const Frustum& frustum, std::vector<SectionRenderData>& sections) {
-        int culled = 0;
-
-        for (auto& section : sections) {
-            section.inFrustum = IsSectionInFrustum(frustum, section.chunkPos, section.sectionY);
-            if (!section.inFrustum) {
-                culled++;
-            }
-        }
-
-        // Remove culled sections
-        sections.erase(
-            std::remove_if(sections.begin(), sections.end(),
-                          [](const SectionRenderData& section) { return !section.inFrustum; }),
-            sections.end()
-        );
-
-        m_stats.sectionsSkipped = culled;
-        //Log::Debug("Frustum culling: %d sections culled, %zu remaining", culled, sections.size());
+        // This function is now deprecated - frustum culling is performed earlier in PrepareVisibleSections
+        // Kept for compatibility but does nothing as sections are already culled
     }
 
     void ChunkRenderer::SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack) {
