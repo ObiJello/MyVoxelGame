@@ -5,19 +5,26 @@
 #include <mutex>
 
 namespace Log {
-    static Level currentLevel = Level::Debug;
-    static std::mutex logMutex;
+    static Level& getCurrentLevel() {
+        static Level currentLevel = Level::Debug;
+        return currentLevel;
+    }
+
+    static std::mutex& getLogMutex() {
+        static std::mutex logMutex;
+        return logMutex;
+    }
 
     void Init() {
         // No-op for now; future file setup could go here.
     }
 
     void SetLevel(Level level) {
-        currentLevel = level;
+        getCurrentLevel() = level;
     }
 
     static void vLog(Level level, const char* prefix, const char* fmt, va_list args) {
-        if (level < currentLevel) return;
+        if (level < getCurrentLevel()) return;
 
         // ANSI color codes
         const char* colorStart = "";
@@ -38,7 +45,7 @@ namespace Log {
                 break;
         }
 
-        std::lock_guard<std::mutex> lock(logMutex);
+        std::lock_guard<std::mutex> lock(getLogMutex());
         std::FILE* out = (level == Level::Error ? stderr : stdout);
         std::fprintf(out, "%s%s%s: ", colorStart, prefix, colorEnd);
         std::vfprintf(out, fmt, args);
