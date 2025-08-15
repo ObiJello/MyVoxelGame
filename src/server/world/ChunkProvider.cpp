@@ -3,6 +3,7 @@
 #include "common/core/Log.hpp"
 #include "storage/MinecraftChunkLoaderImpl.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "platform/GameDirectory.hpp"
 #include <algorithm>
 
 namespace Game {
@@ -50,9 +51,13 @@ namespace Game {
             // Create core components
             Log::Info("Creating ChunkCache...");
             ChunkCacheConfig cacheConfig;
-            // Use default cache size from ChunkCache (2048)
+            // Calculate cache size based on render distance
+            int renderDistance = Platform::g_gameSettings.GetRenderDistance();
+            // Formula: (diameter)² + 20% margin for smooth operation
+            size_t requiredChunks = (2 * renderDistance + 1) * (2 * renderDistance + 1);
+            cacheConfig.maxSize = static_cast<size_t>(requiredChunks * 1.2); // 20% margin
             m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
-            Log::Info("ChunkCache created with size %zu", cacheConfig.maxSize);
+            Log::Info("ChunkCache created with size %zu (for render distance %d)", cacheConfig.maxSize, renderDistance);
 
             // Create chunk generator
             Log::Info("Creating ProceduralChunkGenerator...");

@@ -4,6 +4,7 @@
 #include "common/world/level/World.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "server/IntegratedServer.hpp"
+#include "platform/GameDirectory.hpp"
 #include <algorithm>
 
 namespace Threading {
@@ -43,6 +44,13 @@ namespace Threading {
             Log::Error("Cannot initialize ServerWorkerPool: IntegratedServer has no world");
             return;
         }
+        
+        // Calculate queue size based on render distance
+        int renderDistance = Platform::g_gameSettings.GetRenderDistance();
+        size_t requiredQueueSize = (2 * renderDistance + 1) * (2 * renderDistance + 1);
+        m_maxQueueSize = static_cast<size_t>(requiredQueueSize * 1.2); // 20% margin
+        Log::Info("ServerWorkerPool queue size set to %zu (for render distance %d)", m_maxQueueSize, renderDistance);
+        
         m_running.store(true);
 
         Log::Info("Starting %zu server worker threads...", m_workerCount);

@@ -367,6 +367,9 @@ namespace Server {
             }
         }
         
+        // Process async chunk load results from ServerWorkerPool
+        ProcessAsyncChunkResults();
+        
         // Call World's unified tick loop with chunk send throttling
         if (m_world) {
             // Use time budget for chunk processing
@@ -484,6 +487,50 @@ namespace Server {
         
         m_stats.chunksSent.fetch_add(1, std::memory_order_relaxed);
         Log::Debug("Sent chunk (%d, %d) to client", chunkPos.x, chunkPos.z);
+    }
+    
+    void IntegratedServer::ProcessAsyncChunkResults() {
+        // Only process if async chunk loading is enabled
+        if (!m_config.enableAsyncChunkLoading) {
+            return;
+        }
+        
+        // Get the chunk generation result queue from ServerWorkerPool
+        auto& resultQueue = Threading::ServerWorkerPool::GetChunkGenResultQueue();
+        
+        // Process up to a limited number of results per tick to avoid stalling
+        const int maxResultsPerTick = 10;
+        int resultsProcessed = 0;
+        
+        Network::ChunkGenResult result;
+        while (resultsProcessed < maxResultsPerTick && resultQueue.TryDequeue(result)) {
+            // Check if chunk is still in pending list
+            if (m_pendingChunkLoads.find(result.position) != m_pendingChunkLoads.end()) {
+                if (result.success && result.chunk) {
+                    // Send the chunk to the client
+                    SendChunkToClient(result.position, result.chunk);
+                    
+                    // The chunk is already stored in the world by the worker thread
+                    // No need to store it again
+                    
+                    Log::Debug("Processed async chunk load for (%d, %d) - success", 
+                             result.position.x, result.position.z);
+                } else {
+                    Log::Warning("Async chunk load failed for (%d, %d): %s", 
+                               result.position.x, result.position.z, 
+                               result.errorMessage.c_str());
+                }
+                
+                // Remove from pending list
+                m_pendingChunkLoads.erase(result.position);
+            }
+            
+            resultsProcessed++;
+        }
+        
+        if (resultsProcessed > 0) {
+            Log::Debug("Processed %d async chunk results this tick", resultsProcessed);
+        }
     }
 
 
@@ -617,20 +664,21 @@ namespace Server {
             Log::Info("[IntegratedServer] Player spawn chunk: (%d, %d)", centerChunk.x, centerChunk.z);
             
             // Send chunks in a radius around the spawn position
-            int chunkRadius = 8; // Send 8 chunks in each direction (similar to Minecraft's initial view distance)
+            int chunkRadius = Platform::g_gameSettings.GetRenderDistance(); // Use actual render distance setting
             int chunksSent = 0;
         
             for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
                 for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
                     Game::Math::ChunkPos chunkPos(centerChunk.x + dx, centerChunk.z + dz);
                     
-                    // Check if chunk is within reasonable distance
-                    float distance = std::sqrt(static_cast<float>(dx * dx + dz * dz));
-                    if (distance <= static_cast<float>(chunkRadius)) {
-                        // Request chunk loading (will send to client once loaded)
-                        RequestChunkLoad(chunkPos, static_cast<int>(static_cast<float>(chunkRadius) - distance));
-                        chunksSent++;
-                    }
+                    // Calculate priority based on Chebyshev distance (square pattern like Minecraft)
+                    // Chebyshev distance = max(abs(dx), abs(dz))
+                    int chebyshevDistance = std::max(std::abs(dx), std::abs(dz));
+                    int priority = chunkRadius - chebyshevDistance;
+                    
+                    // Request chunk loading (will send to client once loaded)
+                    RequestChunkLoad(chunkPos, priority);
+                    chunksSent++;
                 }
             }
             
@@ -740,9 +788,19 @@ namespace Server {
     // ========================================================================
 
     float IntegratedServer::CalculateChunkDistance(Game::Math::ChunkPos chunkPos) const {
-        glm::vec2 chunkCenter(chunkPos.x * 16.0f + 8.0f, chunkPos.z * 16.0f + 8.0f);
-        glm::vec2 playerPos(m_playerState.position.x, m_playerState.position.z);
-        return glm::distance(chunkCenter, playerPos);
+        // Calculate Chebyshev distance (square pattern like Minecraft)
+        // This creates a square loading pattern instead of circular
+        auto playerChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
+            static_cast<int>(m_playerState.position.x),
+            static_cast<int>(m_playerState.position.z)
+        );
+        
+        int dx = std::abs(chunkPos.x - playerChunk.x);
+        int dz = std::abs(chunkPos.z - playerChunk.z);
+        
+        // Chebyshev distance = max(abs(dx), abs(dz))
+        // Convert to float for compatibility with existing code
+        return static_cast<float>(std::max(dx, dz));
     }
 
     std::vector<Game::Math::ChunkPos> IntegratedServer::GetRequiredChunks() const {

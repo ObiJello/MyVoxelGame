@@ -525,6 +525,7 @@ namespace PlatformMain {
             // Update camera and player
             camera.Update(dt);
             playerController.Update(dt, camera);
+            
             phaseEnd = std::chrono::high_resolution_clock::now();
             metrics.gameLogicTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
 
@@ -604,7 +605,7 @@ namespace PlatformMain {
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
-            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.01f, 500.0f);
+            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.01f, 800.0f);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);

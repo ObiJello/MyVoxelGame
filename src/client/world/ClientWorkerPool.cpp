@@ -78,25 +78,27 @@ namespace Threading {
     }
 
 
-    void ClientWorkerPool::SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot) {
+    bool ClientWorkerPool::SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit mesh job - ClientWorkerPool not running");
-            return;
+            return false;
         }
 
         if (!snapshot) {
             Log::Warning("Cannot submit mesh job with null snapshot");
-            return;
+            return false;
         }
 
         // Create job with snapshot
         MeshJob job(snapshot);
-        EnqueueJob(std::move(job));
-        m_stats.meshJobsSubmitted.fetch_add(1, std::memory_order_relaxed);
-        
-        // Log::Debug("Submitted snapshot mesh job for chunk (%d, %d) section %d, priority=%.1f, highPri=%s",
-        //           snapshot->chunkPos.x, snapshot->chunkPos.z, snapshot->sectionY, 
-        //           snapshot->distanceToPlayer, snapshot->isHighPriority ? "true" : "false");
+        if (EnqueueJob(std::move(job))) {
+            m_stats.meshJobsSubmitted.fetch_add(1, std::memory_order_relaxed);
+            // Log::Debug("Submitted snapshot mesh job for chunk (%d, %d) section %d, priority=%.1f, highPri=%s",
+            //           snapshot->chunkPos.x, snapshot->chunkPos.z, snapshot->sectionY, 
+            //           snapshot->distanceToPlayer, snapshot->isHighPriority ? "true" : "false");
+            return true;
+        }
+        return false;
     }
     
     void ClientWorkerPool::SubmitMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
@@ -421,7 +423,7 @@ namespace Threading {
         return result;
     }
 
-    void ClientWorkerPool::EnqueueJob(MeshJob&& job) {
+    bool ClientWorkerPool::EnqueueJob(MeshJob&& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
         
         // Check queue size limit
@@ -435,12 +437,13 @@ namespace Threading {
                 lastWarning = now;
             }
             m_stats.meshJobsCancelled.fetch_add(1, std::memory_order_relaxed);
-            return;
+            return false;
         }
 
         m_jobQueue.push(std::move(job));
         lock.unlock();
         m_jobCondition.notify_one();
+        return true;
     }
 
     // DequeueJob method removed - logic is now integrated directly into WorkerLoop

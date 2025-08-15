@@ -75,7 +75,8 @@ namespace Threading {
         // ========================================================================
 
         // Submit mesh building job using snapshot (THREAD-SAFE)
-        void SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot);
+        // Returns true if job was successfully queued, false if queue is full
+        bool SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot);
         
         // Legacy methods - DEPRECATED (not thread-safe)
         void SubmitMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
@@ -219,7 +220,7 @@ namespace Threading {
         Network::MeshBuildResult BuildSectionMesh(const MeshJob& job);
 
         // Job queue management
-        void EnqueueJob(MeshJob&& job);
+        bool EnqueueJob(MeshJob&& job);
 
         // Priority calculation
         float CalculatePriority(Game::Math::ChunkPos chunkPos, int sectionY, const glm::vec3& playerPos) const;

@@ -424,12 +424,23 @@ namespace Render {
 
     float ChunkRenderer::CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY) {
         // Calculate distance from camera to section center
+        // Use XZ distance primarily for chunk-based decisions, with Y as secondary factor for sorting
         float sectionCenterX = chunkPos.x * ::Game::Math::CHUNK_SIZE_X + ::Game::Math::CHUNK_SIZE_X * 0.5f;
         float sectionCenterY = sectionY * ::Game::Math::SECTION_HEIGHT + ::Game::Math::SECTION_HEIGHT * 0.5f + Config::MinY;
         float sectionCenterZ = chunkPos.z * ::Game::Math::CHUNK_SIZE_Z + ::Game::Math::CHUNK_SIZE_Z * 0.5f;
 
-        glm::vec3 sectionCenter(sectionCenterX, sectionCenterY, sectionCenterZ);
-        return glm::length(camera.position - sectionCenter);
+        // Calculate XZ distance (horizontal distance for chunk-based decisions)
+        float dx = sectionCenterX - camera.position.x;
+        float dz = sectionCenterZ - camera.position.z;
+        float xzDistance = std::sqrt(dx * dx + dz * dz);
+        
+        // Add Y distance as secondary factor (less weight for sorting within chunk)
+        float dy = sectionCenterY - camera.position.y;
+        float yDistance = std::abs(dy);
+        
+        // Combined distance: XZ is primary, Y is secondary with less weight
+        // This ensures proper square chunk pattern while still prioritizing closer sections
+        return xzDistance + yDistance * 0.1f;
     }
 
     bool ChunkRenderer::IsSectionInFrustum(const Frustum& frustum, ::Game::Math::ChunkPos chunkPos, int sectionY) {
@@ -465,7 +476,7 @@ namespace Render {
 
         // Calculate matrices
         glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspectRatio, 0.01f, 500.0f);
+        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspectRatio, 0.01f, 800.0f);
         glm::mat4 mvp = proj * view;
 
         // Set MVP matrix

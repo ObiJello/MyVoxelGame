@@ -232,6 +232,9 @@ namespace Server {
 
         // Send chunk data packet to client
         void SendChunkToClient(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
+        
+        // Process async chunk load results from ServerWorkerPool
+        void ProcessAsyncChunkResults();
 
         // ========================================================================
         // BLOCK CHANGE PROCESSING (Private implementation details)

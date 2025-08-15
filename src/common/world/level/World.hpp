@@ -116,7 +116,7 @@ namespace Game {
         std::string m_minecraftWorldPath;
 
         // Settings-based configuration
-        int m_renderDistance = 10; // Will be loaded from settings
+        int m_renderDistance;
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);

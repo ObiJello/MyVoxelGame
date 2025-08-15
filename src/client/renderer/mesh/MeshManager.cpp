@@ -320,13 +320,22 @@ namespace Render {
         std::lock_guard<std::mutex> lock(m_playerMutex);
 
         // Calculate distance from player to section center
+        // Use XZ distance for chunk-based priority, Y distance as secondary factor
         float sectionCenterX = chunkPos.x * Game::Math::CHUNK_SIZE_X + Game::Math::CHUNK_SIZE_X * 0.5f;
         float sectionCenterY = sectionY * Game::Math::SECTION_HEIGHT + Game::Math::SECTION_HEIGHT * 0.5f;
         float sectionCenterZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z + Game::Math::CHUNK_SIZE_Z * 0.5f;
 
-        return std::sqrt((sectionCenterX - m_playerPosition.x) * (sectionCenterX - m_playerPosition.x) +
-                        (sectionCenterY - m_playerPosition.y) * (sectionCenterY - m_playerPosition.y) +
-                        (sectionCenterZ - m_playerPosition.z) * (sectionCenterZ - m_playerPosition.z));
+        // XZ distance for chunk-based decisions
+        float dx = sectionCenterX - m_playerPosition.x;
+        float dz = sectionCenterZ - m_playerPosition.z;
+        float xzDistance = std::sqrt(dx * dx + dz * dz);
+        
+        // Y distance as secondary factor with less weight
+        float dy = sectionCenterY - m_playerPosition.y;
+        float yDistance = std::abs(dy);
+        
+        // Combined distance: prioritize XZ (chunk-based), Y is secondary
+        return xzDistance + yDistance * 0.1f;
     }
 
     void MeshManager::EnqueueJob(const MeshJob& job) {

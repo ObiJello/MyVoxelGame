@@ -290,49 +290,53 @@ namespace Render {
         std::vector<Vertex> vertices(4);
         glm::vec3 normal = GetFaceNormal(face);
 
+        // Small expansion to prevent gaps between blocks due to floating point precision
+        const float BLOCK_EXPANSION = 0.001f;
+        
         // **FIXED**: Corrected top face winding order to face upward instead of downward
         switch (face) {
             case BlockFace::PositiveY: // Top face (+Y)
                 // When viewed from above, vertices should go counter-clockwise
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint); // Front-left
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint); // Front-right
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint); // Back-right
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint); // Back-left
+                // Expand outward slightly to prevent gaps
+                vertices[0] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint); // Front-left
+                vertices[1] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint); // Front-right
+                vertices[2] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint); // Back-right
+                vertices[3] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint); // Back-left
                 break;
 
             case BlockFace::NegativeY: // Bottom face (-Y)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint);
                 break;
 
             case BlockFace::PositiveZ: // Front face (+Z)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
 
             case BlockFace::NegativeZ: // Back face (-Z)
-                vertices[0] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
 
             case BlockFace::PositiveX: // Right face (+X)
-                vertices[0] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
 
             case BlockFace::NegativeX: // Left face (-X)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, -BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, 1 + BLOCK_EXPANSION), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(-BLOCK_EXPANSION, 1 + BLOCK_EXPANSION, -BLOCK_EXPANSION), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
         }
 

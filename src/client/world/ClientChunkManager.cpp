@@ -192,8 +192,13 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->state == ChunkState::LOADED) {
-            it->second->dirtySections.insert(sectionY);
-            Log::Debug("Marked chunk (%d, %d) section %d as dirty", chunkPos.x, chunkPos.z, sectionY);
+            // Increment version to trigger rebuild (Minecraft-style)
+            auto& sectionInfo = it->second->sectionInfos[sectionY];
+            sectionInfo.version++;
+            sectionInfo.dirty = true;
+            it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
+            Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)", 
+                      chunkPos.x, chunkPos.z, sectionY, sectionInfo.version);
         }
     }
 
@@ -201,9 +206,12 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->state == ChunkState::LOADED) {
-            // Mark all 24 sections as dirty
+            // Mark all 24 sections as dirty and increment their versions (Minecraft-style)
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                it->second->dirtySections.insert(sectionY);
+                auto& sectionInfo = it->second->sectionInfos[sectionY];
+                sectionInfo.version++;
+                sectionInfo.dirty = true;
+                it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
             }
             Log::Debug("Marked all sections in chunk (%d, %d) as dirty", chunkPos.x, chunkPos.z);
         }
@@ -226,8 +234,8 @@ namespace Client {
         
         Log::Debug("=== MarkNeighborSectionsDirty for chunk (%d, %d) ===", chunkPos.x, chunkPos.z);
         
-        // Mark all sections of the 4 adjacent chunks as dirty (Minecraft-style)
-        // Don't change states - just increment version and set dirty flag
+        // Only mark non-empty sections of adjacent chunks as dirty
+        // This is much more efficient than marking all sections
         
         // North neighbor (-z)
         auto northPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z - 1};
@@ -236,57 +244,81 @@ namespace Client {
             int dirtyCount = 0;
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 auto& sectionInfo = northIt->second->sectionInfos[sectionY];
-                bool wasAlreadyDirty = sectionInfo.dirty;
-                sectionInfo.version++;  // Increment version (will cause in-flight meshes to be dropped)
-                sectionInfo.dirty = true;
-                northIt->second->dirtySections.insert(sectionY);  // Legacy support
-                if (!wasAlreadyDirty && !sectionInfo.isAllAir) {
+                // Only mark non-empty sections that aren't already dirty
+                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
+                    sectionInfo.version++;  // Increment version (will cause in-flight meshes to be dropped)
+                    sectionInfo.dirty = true;
+                    northIt->second->dirtySections.insert(sectionY);  // Legacy support
                     dirtyCount++;
                 }
             }
-            Log::Debug("  North neighbor (%d, %d): marked %d non-empty sections dirty", 
-                      northPos.x, northPos.z, dirtyCount);
-        } else {
-            Log::Debug("  North neighbor (%d, %d): NOT FOUND or NOT LOADED", northPos.x, northPos.z);
+            if (dirtyCount > 0) {
+                Log::Debug("  North neighbor (%d, %d): marked %d non-empty sections dirty", 
+                          northPos.x, northPos.z, dirtyCount);
+            }
         }
         
         // South neighbor (+z)
         auto southPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z + 1};
         auto southIt = m_chunks.find(southPos);
         if (southIt != m_chunks.end() && southIt->second->state == ChunkState::LOADED) {
+            int dirtyCount = 0;
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 auto& sectionInfo = southIt->second->sectionInfos[sectionY];
-                sectionInfo.version++;
-                sectionInfo.dirty = true;
-                southIt->second->dirtySections.insert(sectionY);
+                // Only mark non-empty sections that aren't already dirty
+                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
+                    sectionInfo.version++;
+                    sectionInfo.dirty = true;
+                    southIt->second->dirtySections.insert(sectionY);
+                    dirtyCount++;
+                }
             }
-            Log::Debug("Marked south neighbor chunk (%d, %d) sections dirty", southPos.x, southPos.z);
+            if (dirtyCount > 0) {
+                Log::Debug("  South neighbor (%d, %d): marked %d non-empty sections dirty",
+                          southPos.x, southPos.z, dirtyCount);
+            }
         }
         
         // East neighbor (+x)
         auto eastPos = Game::Math::ChunkPos{chunkPos.x + 1, chunkPos.z};
         auto eastIt = m_chunks.find(eastPos);
         if (eastIt != m_chunks.end() && eastIt->second->state == ChunkState::LOADED) {
+            int dirtyCount = 0;
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 auto& sectionInfo = eastIt->second->sectionInfos[sectionY];
-                sectionInfo.version++;
-                sectionInfo.dirty = true;
-                eastIt->second->dirtySections.insert(sectionY);
+                // Only mark non-empty sections that aren't already dirty
+                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
+                    sectionInfo.version++;
+                    sectionInfo.dirty = true;
+                    eastIt->second->dirtySections.insert(sectionY);
+                    dirtyCount++;
+                }
             }
-            Log::Debug("Marked east neighbor chunk (%d, %d) sections dirty", eastPos.x, eastPos.z);
+            if (dirtyCount > 0) {
+                Log::Debug("  East neighbor (%d, %d): marked %d non-empty sections dirty",
+                          eastPos.x, eastPos.z, dirtyCount);
+            }
         }
         
         // West neighbor (-x)
         auto westPos = Game::Math::ChunkPos{chunkPos.x - 1, chunkPos.z};
         auto westIt = m_chunks.find(westPos);
         if (westIt != m_chunks.end() && westIt->second->state == ChunkState::LOADED) {
+            int dirtyCount = 0;
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 auto& sectionInfo = westIt->second->sectionInfos[sectionY];
-                sectionInfo.version++;
-                sectionInfo.dirty = true;
-                westIt->second->dirtySections.insert(sectionY);
+                // Only mark non-empty sections that aren't already dirty
+                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
+                    sectionInfo.version++;
+                    sectionInfo.dirty = true;
+                    westIt->second->dirtySections.insert(sectionY);
+                    dirtyCount++;
+                }
             }
-            Log::Debug("Marked west neighbor chunk (%d, %d) sections dirty", westPos.x, westPos.z);
+            if (dirtyCount > 0) {
+                Log::Debug("  West neighbor (%d, %d): marked %d non-empty sections dirty",
+                          westPos.x, westPos.z, dirtyCount);
+            }
         }
     }
 
@@ -778,10 +810,7 @@ namespace Client {
             float priority;
         };
         std::vector<SectionCandidate> sectionCandidates;
-        
-        // View distance limit (in blocks)
-        const float MAX_VIEW_DISTANCE = 256.0f;  // 16 chunks
-        
+
         for (auto& [chunkPos, chunk] : m_chunks) {
             if (!chunk || !chunk->chunkData) {
                 continue;
@@ -795,8 +824,9 @@ namespace Client {
             for (int sectionY = 0; sectionY < 24; ++sectionY) {
                 auto& sectionInfo = chunk->sectionInfos[sectionY];
                 
-                // Minecraft-style: check dirty and not in-flight
-                bool isDirty = sectionInfo.dirty || chunk->dirtySections.count(sectionY) > 0;
+                // Minecraft-style: use per-section dirty flag as source of truth
+                // dirtySections set is just an index for iteration
+                bool isDirty = sectionInfo.dirty;
                 bool notInFlight = (sectionInfo.meshingVersion != sectionInfo.version);
                 
                 if (isDirty && notInFlight) {
@@ -819,15 +849,21 @@ namespace Client {
                         chunk->dirtySections.erase(sectionY);
                         continue;
                     }
-                    // Calculate section-specific priority
-                    float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
-                    glm::vec3 sectionCenter(centerX, sectionCenterY, centerZ);
-                    float distance = glm::distance(playerPosition, sectionCenter);
+                    // Calculate section-specific priority using XZ distance only
+                    // We don't filter by distance - if the chunk is loaded, all sections should be processed
+                    float xzDistance = std::sqrt((centerX - playerPosition.x) * (centerX - playerPosition.x) + 
+                                                 (centerZ - playerPosition.z) * (centerZ - playerPosition.z));
                     
-                    // Skip sections beyond view distance
-                    if (distance <= MAX_VIEW_DISTANCE) {
-                        sectionCandidates.push_back({chunkPos, sectionY, distance});
-                    }
+                    // Add Y distance as secondary priority factor (for sorting only, not filtering)
+                    float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
+                    float yDistance = std::abs(sectionCenterY - playerPosition.y);
+                    
+                    // Combined priority: XZ distance is primary, Y distance is secondary
+                    // This ensures chunks are processed in square pattern but sections within
+                    // a chunk are prioritized by proximity
+                    float priority = xzDistance + yDistance * 0.1f;  // Y has less weight
+                    
+                    sectionCandidates.push_back({chunkPos, sectionY, priority});
                 }
             }
         }
@@ -875,7 +911,7 @@ namespace Client {
             auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
             
             // Double-check section is still dirty and not in flight
-            if (!sectionInfo.dirty || sectionInfo.meshingVersion != 0) {
+            if (!sectionInfo.dirty || sectionInfo.meshingVersion == sectionInfo.version) {
                 continue; // Not dirty or already being processed
             }
             
@@ -888,10 +924,6 @@ namespace Client {
                 // Version changed or data missing, retry next frame
                 continue;
             }
-            
-            // Now claim the work after we have a valid snapshot
-            sectionInfo.meshingVersion = expectedVersion;
-            sectionInfo.state = SectionState::MESHING;
             
             // Set job type based on section content
             if (sectionInfo.isAllAir) {
@@ -911,8 +943,19 @@ namespace Client {
                       expectedVersion,
                       sectionInfo.isAllAir ? "BorderOnly" : "Full",
                       snapshot->neighborMask);
-            workerPool->SubmitMeshJobWithSnapshot(snapshot);
-            sectionsSubmitted++;
+            
+            // Only update state if submission succeeds (Minecraft-style)
+            if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
+                // Now claim the work after successful submission
+                sectionInfo.meshingVersion = expectedVersion;
+                sectionInfo.state = SectionState::MESHING;
+                sectionInfo.dirty = false;
+                chunk->dirtySections.erase(candidate.sectionY);
+                sectionsSubmitted++;
+            } else {
+                // Keep dirty, will retry next frame
+                Log::Debug("  Failed to submit mesh job - queue full, will retry");
+            }
         }
         
         if (sectionsSubmitted > 0) {
@@ -1244,7 +1287,9 @@ namespace Client {
             
             // Reset meshingVersion to allow rescheduling with new version
             sectionInfo.meshingVersion = 0;
-            // Keep dirty flag true so it gets rescheduled
+            // Explicitly set dirty flag to ensure reschedule (Minecraft-style)
+            sectionInfo.dirty = true;
+            chunk->dirtySections.insert(result.sectionY);
             
             return { MeshApplyAction::Drop_StaleVersion };
         }
@@ -1258,7 +1303,9 @@ namespace Client {
             
             // Reset meshingVersion to allow rescheduling with new version
             sectionInfo.meshingVersion = 0;
-            // Keep dirty flag true so it gets rescheduled
+            // Explicitly set dirty flag to ensure reschedule (Minecraft-style)
+            sectionInfo.dirty = true;
+            chunk->dirtySections.insert(result.sectionY);
             
             return { MeshApplyAction::Drop_StaleVersion };
         }
