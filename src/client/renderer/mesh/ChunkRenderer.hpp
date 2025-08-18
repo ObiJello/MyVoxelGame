@@ -61,16 +61,29 @@ namespace Render {
         size_t totalVerticesRendered = 0;
         size_t totalIndicesRendered = 0;
 
-        // Performance timing
-        float frustumCullTimeMs = 0.0f;
-        float sortTimeMs = 0.0f;
-        float renderTimeMs = 0.0f;
+        // NEW: Optimized build phase timings
+        float buildDrawListsTimeMs = 0.0f;     // Total time to build draw lists (lock-free!)
+        float chunkIterationTimeMs = 0.0f;     // Time iterating chunks
+        float gpuDataLoadTimeMs = 0.0f;        // Time loading atomic pointers
+        float frustumCullingTimeMs = 0.0f;     // Time for frustum tests
+        float sortingTimeMs = 0.0f;            // Time sorting draw items
+        
+        // Individual render pass timings (ONLY the actual drawing)
+        float opaquePassTimeMs = 0.0f;         // Time for opaque drawing only
+        float cutoutPassTimeMs = 0.0f;         // Time for cutout drawing only
+        float translucentPassTimeMs = 0.0f;    // Time for translucent drawing only
+        
+        // Total render time
+        float renderTimeMs = 0.0f;              // Total render time (build + all passes)
 
         void Reset() {
             sectionsRendered = sectionsSkipped = sectionsAvailable = totalDrawCalls = 0;
             opaqueSections = cutoutSections = translucentSections = 0;
             totalVerticesRendered = totalIndicesRendered = 0;
-            frustumCullTimeMs = sortTimeMs = renderTimeMs = 0.0f;
+            buildDrawListsTimeMs = chunkIterationTimeMs = gpuDataLoadTimeMs = 0.0f;
+            frustumCullingTimeMs = sortingTimeMs = 0.0f;
+            opaquePassTimeMs = cutoutPassTimeMs = translucentPassTimeMs = 0.0f;
+            renderTimeMs = 0.0f;
         }
     };
 
@@ -84,11 +97,6 @@ namespace Render {
         bool Initialize();
         void Shutdown();
 
-        // Three-layer rendering pipeline
-        void RenderOpaque(const Camera& camera, const Frustum& frustum);
-        void RenderCutout(const Camera& camera, const Frustum& frustum);
-        void RenderTranslucent(const Camera& camera, const Frustum& frustum);
-
         // Convenience method to render all layers
         void RenderAll(const Camera& camera, const Frustum& frustum);
 
@@ -101,6 +109,7 @@ namespace Render {
         // Statistics
         const RenderStats& GetStats() const { return m_stats; }
         void ResetStats() { m_stats.Reset(); }
+        
 
         // Debug rendering options
         void SetWireframeMode(bool enable);
@@ -120,6 +129,8 @@ namespace Render {
 
         // Render state
         RenderStats m_stats;
+        
+        // Visible sections cache
         std::vector<SectionRenderData> m_visibleSections;
 
         // Pass configurations
@@ -127,31 +138,13 @@ namespace Render {
         RenderPassConfig m_cutoutConfig;
         RenderPassConfig m_translucentConfig;
 
-        // Core rendering methods
-        void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
-        void RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections);
-        void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
-
-        // Culling and sorting
-        void PerformFrustumCulling(const Frustum& frustum, std::vector<SectionRenderData>& sections);
-        void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
-
         // OpenGL state management
         void SetupRenderPass(const RenderPassConfig& config);
         void RestoreRenderState();
 
-        // Utility methods
-        float CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY);
-        bool IsSectionInFrustum(const Frustum& frustum, ::Game::Math::ChunkPos chunkPos, int sectionY);
-        AABB GetSectionAABB(::Game::Math::ChunkPos chunkPos, int sectionY);
-
         // Shader uniform setup
         void SetupShaderUniforms(const Camera& camera);
         void BindTextureAtlas();
-
-        // Debug rendering
-        void RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections);
-        void RenderDebugInfo(const Camera& camera);
 
         // Error checking
         bool CheckShaderErrors(const std::string& pass);
@@ -159,6 +152,24 @@ namespace Render {
 
         // Initialize render pass configurations
         void SetupRenderConfigs();
+        
+        // Render methods for each pass
+        void RenderOpaque(const Camera& camera, const Frustum& frustum);
+        void RenderCutout(const Camera& camera, const Frustum& frustum);
+        void RenderTranslucent(const Camera& camera, const Frustum& frustum);
+        
+        // Section preparation and culling
+        void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
+        void PerformFrustumCulling(const Frustum& frustum, std::vector<SectionRenderData>& sections);
+        void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
+        
+        // Render helpers
+        void RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections);
+        void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
+        void RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections);
+        float CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY);
+        bool IsSectionInFrustum(const Frustum& frustum, ::Game::Math::ChunkPos chunkPos, int sectionY);
+        AABB GetSectionAABB(::Game::Math::ChunkPos chunkPos, int sectionY);
     };
 
     // Global chunk renderer instance

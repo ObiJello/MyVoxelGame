@@ -467,13 +467,13 @@ namespace Server {
             return;
         }
         
-        // Create and send ServerChunkDataPacket
-        Network::ServerChunkDataPacket packet;
-        packet.position = chunkPos;
-        packet.chunkData = std::make_unique<Network::SerializedChunkData>();
-        // TODO: Properly serialize chunk data
-        packet.dataSize = 0;
-        SendPacketToClient(std::move(packet));
+        // Create and send ChunkDataS2CPacket
+        Network::ChunkDataS2CPacket packet;
+        packet.chunkX = chunkPos.x;
+        packet.chunkZ = chunkPos.z;
+        packet.groundUpContinuous = true;
+        // TODO: Properly serialize chunk data into sections
+        SendChunkDataS2CPacket(std::move(packet));
         
         // Update send state
         ChunkSendState& sendState = m_chunkSendStates[chunkPos];
@@ -726,15 +726,6 @@ namespace Server {
     // ========================================================================
     // PACKET SENDING
     // ========================================================================
-
-    void IntegratedServer::SendPacketToClient(Network::ServerChunkDataPacket&& packet) {
-        // Check both that NetworkServer exists and we're not shutting down
-        if (m_networkServer && !m_shouldStop.load()) {
-            auto data = Network::Serialization::Serialize(packet);
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ServerChunkData), data);
-            m_stats.packetsSent.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
 
     void IntegratedServer::SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet) {
         // Check both that NetworkServer exists and we're not shutting down

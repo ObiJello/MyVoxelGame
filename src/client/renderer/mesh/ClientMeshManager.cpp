@@ -49,7 +49,7 @@ namespace Render {
         
         // Clean up all GPU data
         {
-            std::lock_guard<std::mutex> lock(m_gpuDataMutex);
+            std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
             for (auto& [key, gpuData] : m_gpuData) {
                 if (gpuData.IsUploaded()) {
                     // Delete opaque layer
@@ -69,6 +69,7 @@ namespace Render {
                 }
             }
             m_gpuData.clear();
+            m_activeSections.clear();
         }
         
         // Log final statistics
@@ -226,16 +227,6 @@ namespace Render {
     // ========================================================================
     // GPU UPLOAD COORDINATION
     // ========================================================================
-
-    void ClientMeshManager::UploadSectionMesh(::Game::Math::ChunkPos chunkPos, int sectionY,
-                                            const Network::MeshBuildResult::SectionMeshData& meshData) {
-        // NOTE: This method is deprecated and should not be used.
-        // Use UploadMeshResultToGPU instead which uses the new GPU data storage system.
-        Log::Warning("UploadSectionMesh is deprecated, use UploadMeshResultToGPU instead");
-        
-        // Forward to the new method for compatibility
-        UploadMeshResultToGPU(chunkPos, sectionY, meshData);
-    }
 
     // ========================================================================
     // STATISTICS
@@ -508,160 +499,27 @@ namespace Render {
     // ========================================================================
 
     const GPUSectionData* ClientMeshManager::GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const {
-        std::lock_guard<std::mutex> lock(m_gpuDataMutex);
-        
-        // Validate section index
-        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
-            return nullptr;
-        }
-        
-        // Find GPU data in map
-        SectionKey key{chunkPos, sectionY};
-        auto it = m_gpuData.find(key);
-        return it != m_gpuData.end() ? &it->second : nullptr;
-    }
-
-    void ClientMeshManager::UploadSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY, const SectionMesh& sectionMesh) {
-        std::lock_guard<std::mutex> lock(m_gpuDataMutex);
-        
-        // Validate section index
-        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
-            Log::Error("Invalid section Y %d for chunk (%d, %d)", sectionY, chunkPos.x, chunkPos.z);
-            return;
-        }
-
-        SectionKey key{chunkPos, sectionY};
-        GPUSectionData& gpuData = m_gpuData[key];
-        
-        // Initialize GPU data
-        gpuData.chunkPos = chunkPos;
-        gpuData.sectionY = sectionY;
-        
-        // Clean up existing GPU resources if allocated
-        if (gpuData.IsUploaded()) {
-            // Delete opaque layer
-            if (gpuData.opaqueVAO != 0) { glDeleteVertexArrays(1, &gpuData.opaqueVAO); gpuData.opaqueVAO = 0; }
-            if (gpuData.opaqueVBO != 0) { glDeleteBuffers(1, &gpuData.opaqueVBO); gpuData.opaqueVBO = 0; }
-            if (gpuData.opaqueIBO != 0) { glDeleteBuffers(1, &gpuData.opaqueIBO); gpuData.opaqueIBO = 0; }
-            
-            // Delete cutout layer
-            if (gpuData.cutoutVAO != 0) { glDeleteVertexArrays(1, &gpuData.cutoutVAO); gpuData.cutoutVAO = 0; }
-            if (gpuData.cutoutVBO != 0) { glDeleteBuffers(1, &gpuData.cutoutVBO); gpuData.cutoutVBO = 0; }
-            if (gpuData.cutoutIBO != 0) { glDeleteBuffers(1, &gpuData.cutoutIBO); gpuData.cutoutIBO = 0; }
-            
-            // Delete translucent layer
-            if (gpuData.translucentVAO != 0) { glDeleteVertexArrays(1, &gpuData.translucentVAO); gpuData.translucentVAO = 0; }
-            if (gpuData.translucentVBO != 0) { glDeleteBuffers(1, &gpuData.translucentVBO); gpuData.translucentVBO = 0; }
-            if (gpuData.translucentIBO != 0) { glDeleteBuffers(1, &gpuData.translucentIBO); gpuData.translucentIBO = 0; }
-            
-            // Reset index counts
-            gpuData.opaqueIndexCount = gpuData.cutoutIndexCount = gpuData.translucentIndexCount = 0;
-        }
-
-        // Helper lambda for vertex attributes setup
-        auto setupVertexAttributes = []() {
-            // Position (3 floats) 
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, pos)));
-            glEnableVertexAttribArray(0);
-            
-            // Normal (3 floats)
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, nrm)));
-            glEnableVertexAttribArray(1);
-            
-            // TexCoord (2 floats)
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, uv)));
-            glEnableVertexAttribArray(2);
-            
-            // Color (4 floats)  
-            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), reinterpret_cast<void*>(offsetof(Vertex, color)));
-            glEnableVertexAttribArray(3);
-        };
-
-        // Upload opaque layer
-        if (!sectionMesh.opaqueVerts.empty() && !sectionMesh.opaqueIdxs.empty()) {
-            glGenVertexArrays(1, &gpuData.opaqueVAO);
-            glGenBuffers(1, &gpuData.opaqueVBO);
-            glGenBuffers(1, &gpuData.opaqueIBO);
-            
-            glBindVertexArray(gpuData.opaqueVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.opaqueVBO);
-            glBufferData(GL_ARRAY_BUFFER, sectionMesh.opaqueVerts.size() * sizeof(Vertex), 
-                        sectionMesh.opaqueVerts.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.opaqueIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, sectionMesh.opaqueIdxs.size() * sizeof(uint32_t),
-                        sectionMesh.opaqueIdxs.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
-            gpuData.opaqueIndexCount = static_cast<uint32_t>(sectionMesh.opaqueIdxs.size());
-        }
-        
-        // Upload cutout layer
-        if (!sectionMesh.cutoutVerts.empty() && !sectionMesh.cutoutIdxs.empty()) {
-            glGenVertexArrays(1, &gpuData.cutoutVAO);
-            glGenBuffers(1, &gpuData.cutoutVBO);
-            glGenBuffers(1, &gpuData.cutoutIBO);
-            
-            glBindVertexArray(gpuData.cutoutVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.cutoutVBO);
-            glBufferData(GL_ARRAY_BUFFER, sectionMesh.cutoutVerts.size() * sizeof(Vertex),
-                        sectionMesh.cutoutVerts.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.cutoutIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, sectionMesh.cutoutIdxs.size() * sizeof(uint32_t),
-                        sectionMesh.cutoutIdxs.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
-            gpuData.cutoutIndexCount = static_cast<uint32_t>(sectionMesh.cutoutIdxs.size());
-        }
-        
-        // Upload translucent layer
-        if (!sectionMesh.translucentVerts.empty() && !sectionMesh.translucentIdxs.empty()) {
-            glGenVertexArrays(1, &gpuData.translucentVAO);
-            glGenBuffers(1, &gpuData.translucentVBO);
-            glGenBuffers(1, &gpuData.translucentIBO);
-            
-            glBindVertexArray(gpuData.translucentVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.translucentVBO);
-            glBufferData(GL_ARRAY_BUFFER, sectionMesh.translucentVerts.size() * sizeof(Vertex),
-                        sectionMesh.translucentVerts.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.translucentIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, sectionMesh.translucentIdxs.size() * sizeof(uint32_t),
-                        sectionMesh.translucentIdxs.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
-            gpuData.translucentIndexCount = static_cast<uint32_t>(sectionMesh.translucentIdxs.size());
-        }
-
-        // Update metadata
-        gpuData.lastUploadFrame = 0; // TODO: Add frame counter
-        gpuData.needsUpload = false;
-        
-        LogMeshActivity("Uploaded section GPU data", chunkPos, sectionY);
-    }
-
-    void ClientMeshManager::RemoveSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) {
-        std::lock_guard<std::mutex> lock(m_gpuDataMutex);
+        // Use shared_lock for concurrent reads - much faster than exclusive lock
+        std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
         
         SectionKey key{chunkPos, sectionY};
         auto it = m_gpuData.find(key);
         if (it != m_gpuData.end()) {
+            return &it->second;
+        }
+        
+        return nullptr;
+    }
+
+    void ClientMeshManager::RemoveSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) {
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+        
+        SectionKey key{chunkPos, sectionY};
+        auto it = m_gpuData.find(key);
+        if (it != m_gpuData.end()) {
+            // Tell the grid this section is gone BEFORE deleting buffers
+            m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
+            
             // Clean up GPU resources
             GPUSectionData& gpuData = it->second;
             if (gpuData.IsUploaded()) {
@@ -682,12 +540,13 @@ namespace Render {
             }
             
             m_gpuData.erase(it);
+            m_activeSections.erase(key);  // Remove from active sections
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
         }
     }
 
     void ClientMeshManager::RemoveChunkGPUData(::Game::Math::ChunkPos chunkPos) {
-        std::lock_guard<std::mutex> lock(m_gpuDataMutex);
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
         
         // Remove all sections for this chunk
         for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
@@ -713,7 +572,17 @@ namespace Render {
                     if (gpuData.translucentIBO != 0) glDeleteBuffers(1, &gpuData.translucentIBO);
                 }
                 
+                // NEW: Clear the atomic GPU data pointer in SectionInfo
+                auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
+                if (sectionInfo) {
+                    sectionInfo->gpuData.store(nullptr, std::memory_order_release);
+                }
+                
+                // Tell the grid this section is gone
+                m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
+                
                 m_gpuData.erase(it);
+                m_activeSections.erase(key);  // Remove from active sections
             }
         }
         
@@ -722,7 +591,7 @@ namespace Render {
 
     void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY, 
                                                  const Network::MeshBuildResult::SectionMeshData& meshData) {
-        std::lock_guard<std::mutex> lock(m_gpuDataMutex);
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
         
         // Validate section index
         if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
@@ -852,6 +721,37 @@ namespace Render {
         // Update metadata
         gpuData.lastUploadFrame = 0; // TODO: Add frame counter
         gpuData.needsUpload = false;
+        
+        // Add to active sections set if it has any geometry
+        if (gpuData.HasGeometry()) {
+            m_activeSections.insert(key);
+        } else {
+            // Remove from active sections if no geometry
+            m_activeSections.erase(key);
+        }
+        
+        // NEW: Store GPU data pointer in the atomic field for lock-free rendering
+        auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
+        if (sectionInfo) {
+            // Store the pointer to the GPU data in the hash map
+            GPUSectionData* gpuDataPtr = &m_gpuData[key];
+            
+            // Atomically update the GPU data pointer
+            GPUSectionData* oldPtr = sectionInfo->gpuData.exchange(gpuDataPtr, std::memory_order_release);
+            
+            // If there was old data, mark it for deferred deletion
+            if (oldPtr && oldPtr != gpuDataPtr) {
+                // For now, we're reusing the same hash map entry, so this shouldn't happen
+                Log::Warning("Replacing existing GPU data for chunk (%d, %d) section %d", 
+                           chunkPos.x, chunkPos.z, sectionY);
+            }
+            
+            // IMPORTANT: publish the pointer to the render grid so BuildDrawLists can see it
+            m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, gpuDataPtr);
+        } else {
+            Log::Warning("Could not find SectionInfo for chunk (%d, %d) section %d to store GPU data pointer",
+                       chunkPos.x, chunkPos.z, sectionY);
+        }
         
         // Update statistics
         m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);

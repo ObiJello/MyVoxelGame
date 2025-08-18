@@ -11,13 +11,36 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace Render {
 
     // Client-side mesh manager (mesh building only, no world access)
     // Coordinates with ClientChunkManager and ClientWorkerPool
     class ClientMeshManager {
+    public:
+        // Section key for identifying chunk sections
+        struct SectionKey {
+            ::Game::Math::ChunkPos chunkPos;
+            int sectionY;
+
+            bool operator==(const SectionKey& other) const {
+                return chunkPos.x == other.chunkPos.x &&
+                       chunkPos.z == other.chunkPos.z &&
+                       sectionY == other.sectionY;
+            }
+        };
+
+        struct SectionKeyHash {
+            std::size_t operator()(const SectionKey& key) const {
+                return std::hash<int32_t>{}(key.chunkPos.x) ^
+                       (std::hash<int32_t>{}(key.chunkPos.z) << 1) ^
+                       (std::hash<int>{}(key.sectionY) << 2);
+            }
+        };
+    
     public:
         explicit ClientMeshManager();
         ~ClientMeshManager();
@@ -73,11 +96,7 @@ namespace Render {
         // Check if mesh upload is ready for chunk section
         bool IsMeshUploadReady(::Game::Math::ChunkPos chunkPos, int sectionY) const;
 
-        // Upload specific section mesh to GPU
-        void UploadSectionMesh(::Game::Math::ChunkPos chunkPos, int sectionY,
-                              const Network::MeshBuildResult::SectionMeshData& meshData);
-
-        // Upload mesh build result directly to GPU data storage
+        // Upload mesh build result directly to GPU data storage (stores in atomic pointers for lock-free rendering)
         void UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
                                   const Network::MeshBuildResult::SectionMeshData& meshData);
 
@@ -87,10 +106,12 @@ namespace Render {
 
         // Get GPU data for rendering (used by ChunkRenderer)
         const GPUSectionData* GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const;
-
-        // Upload GPU data from section mesh
-        void UploadSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY, const SectionMesh& sectionMesh);
-
+        
+        // Get set of all active sections (sections with GPU data)
+        const std::unordered_set<SectionKey, SectionKeyHash>& GetActiveSections() const {
+            return m_activeSections;
+        }
+        
         // Remove GPU data for chunk section
         void RemoveSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY);
 
@@ -200,30 +221,15 @@ namespace Render {
         // GPU DATA STORAGE
         // ========================================================================
 
-        // Section key for GPU data mapping
-        struct SectionKey {
-            ::Game::Math::ChunkPos chunkPos;
-            int sectionY;
-
-            bool operator==(const SectionKey& other) const {
-                return chunkPos.x == other.chunkPos.x &&
-                       chunkPos.z == other.chunkPos.z &&
-                       sectionY == other.sectionY;
-            }
-        };
-
-        // Hash function for SectionKey
-        struct SectionKeyHash {
-            std::size_t operator()(const SectionKey& key) const {
-                return std::hash<int32_t>{}(key.chunkPos.x) ^
-                       (std::hash<int32_t>{}(key.chunkPos.z) << 1) ^
-                       (std::hash<int>{}(key.sectionY) << 2);
-            }
-        };
-
         // GPU data storage
-        mutable std::mutex m_gpuDataMutex;
+        // Use shared_mutex for reader-writer lock pattern
+        // Multiple threads can read concurrently, but writes are exclusive
+        mutable std::shared_mutex m_gpuDataMutex;
         std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash> m_gpuData;
+        
+        // Track active sections (sections that have GPU data)
+        // This allows ChunkRenderer to iterate only sections with geometry
+        std::unordered_set<SectionKey, SectionKeyHash> m_activeSections;
 
 
         // ========================================================================

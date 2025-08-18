@@ -21,6 +21,7 @@
 #include "client/renderer/debug/Crosshair.hpp"
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
+#include "common/core/Profiling.hpp"
 
 // Include world system headers
 #include "common/world/level/World.hpp"
@@ -477,24 +478,22 @@ namespace PlatformMain {
         // CLIENT RENDER LOOP (like Minecraft's GameRenderer.render)
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
-            auto phaseStart = frameStartTime;
             
             // 1. Drain incoming network packets on main thread (Minecraft-style)
+            PROFILE_TIMER_START(network);
             // Note: I/O is handled on dedicated thread, we just drain the queue here
             if (networkClient) {
                 networkClient->DrainIncomingPackets();
             }
-            auto phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.networkProcessingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(network, metrics.networkProcessingTime);
 
-            // 2. DISCIPLINED QUEUE DRAINING - Process mesh build results
-            phaseStart = std::chrono::high_resolution_clock::now();
+            // 2. Process completed mesh build results from worker threads
+            PROFILE_TIMER_START(meshresults);
             Render::ProcessClientMeshBuildResults();  // Drain MeshResultQueue
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.meshResultProcessingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(meshresults, metrics.meshResultProcessingTime);
 
             // 3. Poll events and handle input
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(input);
             glfwPollEvents();
             Input::UpdateKeyStates();
 
@@ -505,8 +504,7 @@ namespace PlatformMain {
 
             bool cursorEnabled = HandleCursorToggle(window, camera);
             HandlePlayerInput(playerController, camera);
-            auto phaseEnd2 = std::chrono::high_resolution_clock::now();
-            metrics.inputHandlingTime = std::chrono::duration<float, std::milli>(phaseEnd2 - phaseStart).count();
+            PROFILE_TIMER_END(input, metrics.inputHandlingTime);
 
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
@@ -516,7 +514,7 @@ namespace PlatformMain {
             }
             
             // 4. Update time and game logic
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(gamelogic);
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 1 - Update time and logic");
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
@@ -525,9 +523,7 @@ namespace PlatformMain {
             // Update camera and player
             camera.Update(dt);
             playerController.Update(dt, camera);
-            
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.gameLogicTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
 
             // 5. Set player position for mesh prioritization
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 2 - Set player position");
@@ -568,39 +564,39 @@ namespace PlatformMain {
             }
 
             // 6. Schedule mesh builds for LOADED chunks
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(meshsched);
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds");
             Render::ScheduleClientMeshBuilds(playerPos);
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds COMPLETE");
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.meshSchedulingTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
 
             // 7. Perform GPU uploads
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(gpuupload);
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads");
             Render::PerformClientGPUUploads();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads COMPLETE");
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.gpuUploadTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
             metrics.meshUploadTime = metrics.gpuUploadTime;  // Legacy compatibility
 
             // 8. Update texture animations
+            PROFILE_TIMER_START(texanim);
             if (Render::g_textureAnimator) {
                 Render::g_textureAnimator->UpdateAnimations(dt);
             }
+            PROFILE_TIMER_END(texanim, metrics.textureAnimationTime);
 
-            // 9. FRUSTUM CULLING AND RENDERING
-            phaseStart = std::chrono::high_resolution_clock::now();
+            // 9. Main rendering phase (frustum culling + GPU draw calls)
+            PROFILE_TIMER_START(render);
             Debug::DebugSystem::BeginFrame();
             
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
 
-            // Clear and setup rendering
+            // Clear framebuffer
             glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-            // Calculate matrices
+            // Calculate view-projection matrices
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
@@ -610,7 +606,7 @@ namespace PlatformMain {
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
 
-            // Render chunks using ChunkRenderer
+            // Main chunk rendering (includes frustum culling and all render passes)
             Render::RenderChunksAll(camera, frustum);
             
             // Get rendering statistics from ChunkRenderer
@@ -623,14 +619,13 @@ namespace PlatformMain {
                 metrics.translucentMeshesRendered = renderStats->translucentSections;
             }
 
-            // Render UI elements
+            // Render UI overlay elements
             RenderBlockHighlight(playerController, viewProj);
             RenderCrosshair(window);
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.renderTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(render, metrics.renderTime);
 
             // 10. Debug UI with new architecture statistics
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(debugui);
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
@@ -640,21 +635,27 @@ namespace PlatformMain {
             );
 
             Debug::DebugSystem::EndFrame();
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.debugUITime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(debugui, metrics.debugUITime);
 
             // 11. Swap buffers (includes VSync wait)
-            phaseStart = std::chrono::high_resolution_clock::now();
+            PROFILE_TIMER_START(vsync);
             glfwSwapBuffers(window);
-            phaseEnd = std::chrono::high_resolution_clock::now();
-            metrics.vsyncWaitTime = std::chrono::duration<float, std::milli>(phaseEnd - phaseStart).count();
+            PROFILE_TIMER_END(vsync, metrics.vsyncWaitTime);
             
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
-            // Calculate total frame time
+            // Calculate total frame time and unaccounted time
             auto frameEndTime = std::chrono::high_resolution_clock::now();
             metrics.frameTime = std::chrono::duration<float, std::milli>(frameEndTime - frameStartTime).count();
+            
+            // Calculate unaccounted time (operations we didn't explicitly measure)
+            float totalMeasured = metrics.networkProcessingTime + metrics.meshResultProcessingTime + 
+                                 metrics.inputHandlingTime + metrics.gameLogicTime + 
+                                 metrics.meshSchedulingTime + metrics.gpuUploadTime + 
+                                 metrics.textureAnimationTime + metrics.renderTime + 
+                                 metrics.debugUITime + metrics.vsyncWaitTime;
+            metrics.otherTime = metrics.frameTime - totalMeasured;
         }
 
         // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===

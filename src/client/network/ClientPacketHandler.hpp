@@ -24,8 +24,6 @@ namespace Client {
         // Visitor pattern packet handlers (called from packet apply())
         void onChunkDataS2C(const Network::ChunkDataS2CPacket& packet) override { handleChunkData(packet); }
         void onUnloadChunkS2C(const Network::UnloadChunkS2CPacket& packet) override { handleChunkUnload(packet); }
-        void onServerChunkData(const Network::ServerChunkDataPacket& packet) override { handleServerChunkData(packet); }
-        void onServerChunkUnload(const Network::ServerChunkUnloadPacket& packet) override { handleServerChunkUnload(packet); }
         void onBlockChangeS2C(const Network::BlockChangeS2CPacket& packet) override { handleBlockChange(packet); }
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
         void onPlayerUpdateS2C(const Network::PlayerUpdateS2CPacket& packet) override { handlePlayerUpdate(packet); }
@@ -39,8 +37,6 @@ namespace Client {
         // Chunk management
         void handleChunkData(const Network::ChunkDataS2CPacket& packet);
         void handleChunkUnload(const Network::UnloadChunkS2CPacket& packet);
-        void handleServerChunkData(const Network::ServerChunkDataPacket& packet);
-        void handleServerChunkUnload(const Network::ServerChunkUnloadPacket& packet);
         
         // Block updates
         void handleBlockChange(const Network::BlockChangeS2CPacket& packet);

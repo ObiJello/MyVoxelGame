@@ -20,26 +20,7 @@ namespace Network {
     // SERVER → CLIENT PACKETS
     // ========================================================================
 
-    // Chunk data sent from server to client (mirrors Minecraft's ChunkDataS2CPacket)
-    struct ServerChunkDataPacket {
-        Game::Math::ChunkPos position;
-        std::unique_ptr<SerializedChunkData> chunkData;
-        uint32_t dataSize = 0;
-        std::chrono::steady_clock::time_point timestamp;
-
-        ServerChunkDataPacket() = default;
-        ServerChunkDataPacket(Game::Math::ChunkPos pos, std::unique_ptr<SerializedChunkData> data, uint32_t size)
-            : position(pos), chunkData(std::move(data)), dataSize(size)
-            , timestamp(std::chrono::steady_clock::now()) {}
-
-        // Move-only semantics
-        ServerChunkDataPacket(const ServerChunkDataPacket&) = delete;
-        ServerChunkDataPacket& operator=(const ServerChunkDataPacket&) = delete;
-        ServerChunkDataPacket(ServerChunkDataPacket&&) = default;
-        ServerChunkDataPacket& operator=(ServerChunkDataPacket&&) = default;
-    };
-
-    // New Minecraft-compatible chunk data packet format (protocol 0x20)
+    // Minecraft-compatible chunk data packet format (protocol 0x20)
     struct ChunkDataS2CPacket {
         // Chunk coordinates
         int32_t chunkX;
@@ -88,7 +69,7 @@ namespace Network {
         }
     };
 
-    // New Minecraft-compatible chunk unload packet (protocol 0x21)
+    // Minecraft-compatible chunk unload packet (protocol 0x21)
     struct UnloadChunkS2CPacket {
         int32_t chunkX;
         int32_t chunkZ;
@@ -97,16 +78,6 @@ namespace Network {
         UnloadChunkS2CPacket() = default;
         UnloadChunkS2CPacket(int32_t x, int32_t z)
             : chunkX(x), chunkZ(z), timestamp(std::chrono::steady_clock::now()) {}
-    };
-
-    // Chunk unload packet sent from server to client (mirrors Minecraft's UnloadChunkS2CPacket)
-    struct ServerChunkUnloadPacket {
-        Game::Math::ChunkPos position;
-        std::chrono::steady_clock::time_point timestamp;
-
-        ServerChunkUnloadPacket() = default;
-        ServerChunkUnloadPacket(Game::Math::ChunkPos pos)
-            : position(pos), timestamp(std::chrono::steady_clock::now()) {}
     };
 
     // Individual block changes broadcast by server (mirrors Minecraft's BlockUpdateS2CPacket)
@@ -326,114 +297,6 @@ namespace Network {
     // ========================================================================
 
     namespace Serialization {
-
-        // ---- ServerChunkDataPacket Serialization ----
-        inline std::vector<uint8_t> Serialize(const ServerChunkDataPacket& packet) {
-            Network::PacketBuffer buffer;
-            
-            // Write chunk position
-            buffer.WriteInt(packet.position.x);
-            buffer.WriteInt(packet.position.z);
-            
-            // Write data size
-            buffer.WriteVarInt(packet.dataSize);
-            
-            // Write chunk data if present
-            if (packet.chunkData && packet.dataSize > 0) {
-                // Write block data
-                buffer.WriteVarInt(static_cast<uint32_t>(packet.chunkData->blockData.size()));
-                buffer.WriteBytes(packet.chunkData->blockData);
-                
-                // Write compression type
-                buffer.WriteByte(packet.chunkData->compressionType);
-                
-                // Write optional data flags
-                buffer.WriteByte(
-                    (packet.chunkData->hasLightData ? 0x01 : 0) |
-                    (packet.chunkData->hasBiomeData ? 0x02 : 0) |
-                    (packet.chunkData->hasHeightmapData ? 0x04 : 0)
-                );
-                
-                // Write optional data
-                if (packet.chunkData->hasLightData) {
-                    buffer.WriteVarInt(static_cast<uint32_t>(packet.chunkData->lightData.size()));
-                    buffer.WriteBytes(packet.chunkData->lightData);
-                }
-                if (packet.chunkData->hasBiomeData) {
-                    buffer.WriteVarInt(static_cast<uint32_t>(packet.chunkData->biomeData.size()));
-                    buffer.WriteBytes(packet.chunkData->biomeData);
-                }
-                if (packet.chunkData->hasHeightmapData) {
-                    buffer.WriteVarInt(static_cast<uint32_t>(packet.chunkData->heightmapData.size()));
-                    buffer.WriteBytes(packet.chunkData->heightmapData);
-                }
-            }
-            
-            return buffer.GetData();
-        }
-        
-        inline ServerChunkDataPacket DeserializeServerChunkData(const std::vector<uint8_t>& data) {
-            Network::PacketReader reader(data);
-            ServerChunkDataPacket packet;
-            
-            // Read chunk position
-            packet.position.x = reader.ReadInt();
-            packet.position.z = reader.ReadInt();
-            
-            // Read data size
-            packet.dataSize = reader.ReadVarInt();
-            
-            if (packet.dataSize > 0) {
-                packet.chunkData = std::make_unique<SerializedChunkData>();
-                
-                // Read block data
-                uint32_t blockDataSize = reader.ReadVarInt();
-                packet.chunkData->blockData = reader.ReadBytes(blockDataSize);
-                
-                // Read compression type
-                packet.chunkData->compressionType = reader.ReadByte();
-                
-                // Read optional data flags
-                uint8_t flags = reader.ReadByte();
-                packet.chunkData->hasLightData = (flags & 0x01) != 0;
-                packet.chunkData->hasBiomeData = (flags & 0x02) != 0;
-                packet.chunkData->hasHeightmapData = (flags & 0x04) != 0;
-                
-                // Read optional data
-                if (packet.chunkData->hasLightData) {
-                    uint32_t lightDataSize = reader.ReadVarInt();
-                    packet.chunkData->lightData = reader.ReadBytes(lightDataSize);
-                }
-                if (packet.chunkData->hasBiomeData) {
-                    uint32_t biomeDataSize = reader.ReadVarInt();
-                    packet.chunkData->biomeData = reader.ReadBytes(biomeDataSize);
-                }
-                if (packet.chunkData->hasHeightmapData) {
-                    uint32_t heightmapDataSize = reader.ReadVarInt();
-                    packet.chunkData->heightmapData = reader.ReadBytes(heightmapDataSize);
-                }
-            }
-            
-            packet.timestamp = std::chrono::steady_clock::now();
-            return packet;
-        }
-
-        // ---- ServerChunkUnloadPacket Serialization ----
-        inline std::vector<uint8_t> Serialize(const ServerChunkUnloadPacket& packet) {
-            Network::PacketBuffer buffer;
-            buffer.WriteInt(packet.position.x);
-            buffer.WriteInt(packet.position.z);
-            return buffer.GetData();
-        }
-        
-        inline ServerChunkUnloadPacket DeserializeServerChunkUnload(const std::vector<uint8_t>& data) {
-            Network::PacketReader reader(data);
-            ServerChunkUnloadPacket packet;
-            packet.position.x = reader.ReadInt();
-            packet.position.z = reader.ReadInt();
-            packet.timestamp = std::chrono::steady_clock::now();
-            return packet;
-        }
 
         // ---- BlockChangeS2CPacket Serialization ----
         inline std::vector<uint8_t> Serialize(const BlockChangeS2CPacket& packet) {

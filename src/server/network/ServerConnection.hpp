@@ -61,12 +61,6 @@ namespace Server {
         // PACKET SENDING (SERVER → CLIENT)
         // ========================================================================
         
-        // Send chunk data
-        void SendChunkData(const Network::ServerChunkDataPacket& packet);
-        
-        // Send chunk unload
-        void SendChunkUnload(const Network::ServerChunkUnloadPacket& packet);
-        
         // Send block change
         void SendBlockChange(const Network::BlockChangeS2CPacket& packet);
         

@@ -10,6 +10,7 @@
 
 // Include mesh job data types
 #include "../renderer/mesh/MeshJobData.hpp"
+#include "../renderer/mesh/SectionMesh.hpp"  // For GPUSectionData
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -34,7 +35,7 @@ namespace Client {
     // Simplified chunk state machine for client-side chunks
     enum class ChunkState {
         UNLOADED,   // Not present on client
-        LOADED,     // ServerChunkDataPacket received, chunk data available
+        LOADED,     // ChunkDataS2CPacket received, chunk data available
     };
     
     // Section state tracking for mesh building
@@ -74,6 +75,12 @@ namespace Client {
         bool isAllAir = true;         // True when section contains only air
         uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
         bool builtOnce = false;       // True after first successful build
+        
+        // NEW: Direct GPU data ownership (render thread only)
+        std::atomic<::Render::GPUSectionData*> gpuData{nullptr};
+        
+        // NEW: For deferred deletion (deleted after 2 frames to avoid use-after-free)
+        std::atomic<::Render::GPUSectionData*> pendingDelete{nullptr};
     };
 
     // Client-side chunk data
@@ -124,10 +131,7 @@ namespace Client {
         // CHUNK STATE MANAGEMENT
         // ========================================================================
 
-        // Process ServerChunkDataPacket (UNLOADED → LOADED)
-        void ProcessChunkLoadPacket(const Network::ServerChunkDataPacket& packet);
-        
-        // Process ChunkDataS2CPacket (new format)
+        // Process ChunkDataS2CPacket (UNLOADED → LOADED)
         void ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet);
         
         // Apply chunk data with generation tracking
@@ -135,9 +139,6 @@ namespace Client {
         
         // Load chunk from serialized data
         void LoadChunk(Game::Math::ChunkPos chunkPos, const Network::SerializedChunkData& serializedData);
-        
-        // Process ServerChunkUnloadPacket (any state → UNLOADING)
-        void ProcessChunkUnloadPacket(const Network::ServerChunkUnloadPacket& packet);
         
         // Process block change packet
         void ProcessBlockChange(const Network::BlockChangeS2CPacket& packet);
@@ -169,6 +170,10 @@ namespace Client {
         // Check chunk state
         ChunkState GetChunkState(Game::Math::ChunkPos chunkPos) const;
         bool IsChunkLoaded(Game::Math::ChunkPos chunkPos) const;
+        
+        // NEW: Direct section access for lock-free rendering
+        SectionInfo* GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY);
+        const SectionInfo* GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY) const;
 
 
         // ========================================================================
@@ -195,6 +200,18 @@ namespace Client {
                 totalChunks = loadedChunks = 0;
             }
         };
+        
+        // ========================================================================
+        // RENDER GRID SYNCHRONIZATION
+        // ========================================================================
+        
+        // Thread-safe snapshot of loaded chunks for initial RenderGrid sync
+        void SnapshotLoadedChunks(std::vector<std::pair<Game::Math::ChunkPos, ClientChunk*>>& out) const;
+        
+        // Notify RenderGrid when chunks/sections change
+        void NotifyRenderGridChunkLoaded(Game::Math::ChunkPos pos, ClientChunk* chunk);
+        void NotifyRenderGridChunkUnloaded(Game::Math::ChunkPos pos);
+        void NotifyRenderGridSectionUpdated(Game::Math::ChunkPos pos, int sectionY, ::Render::GPUSectionData* gpu);
 
     private:
         // Chunk storage - main thread only, no mutex needed

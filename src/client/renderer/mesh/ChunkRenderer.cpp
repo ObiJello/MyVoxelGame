@@ -4,6 +4,7 @@
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "platform/GameDirectory.hpp"
+#include "../../world/ClientChunkManager.hpp"
 #include <algorithm>
 #include <chrono>
 #include <glm/gtc/matrix_transform.hpp>
@@ -20,6 +21,35 @@ namespace Render {
 
     ChunkRenderer::~ChunkRenderer() {
         Shutdown();
+    }
+
+    void ChunkRenderer::SetupRenderConfigs() {
+        // Opaque pass configuration
+        m_opaqueConfig.enableDepthWrite = true;
+        m_opaqueConfig.enableDepthTest = true;
+        m_opaqueConfig.enableBlending = false;
+        m_opaqueConfig.enableAlphaTest = false;
+        m_opaqueConfig.enableBackFaceCulling = true;
+        m_opaqueConfig.frontToBack = true;
+
+        // Cutout pass configuration
+        m_cutoutConfig.enableDepthWrite = true;
+        m_cutoutConfig.enableDepthTest = true;
+        m_cutoutConfig.enableBlending = false;
+        m_cutoutConfig.enableAlphaTest = true;
+        m_cutoutConfig.enableBackFaceCulling = true;
+        m_cutoutConfig.alphaThreshold = 0.5f;
+        m_cutoutConfig.frontToBack = true;
+
+        // Translucent pass configuration (Minecraft-style)
+        m_translucentConfig.enableDepthWrite = false;  // Read depth but don't write
+        m_translucentConfig.enableDepthTest = true;
+        m_translucentConfig.enableBlending = true;
+        m_translucentConfig.enableAlphaTest = false;
+        m_translucentConfig.enableBackFaceCulling = false;  // Disable culling for translucent blocks like water
+        m_translucentConfig.blendSrc = GL_SRC_ALPHA;
+        m_translucentConfig.blendDst = GL_ONE_MINUS_SRC_ALPHA;
+        m_translucentConfig.frontToBack = false;  // Back-to-front for proper blending
     }
 
     bool ChunkRenderer::Initialize() {
@@ -59,16 +89,14 @@ namespace Render {
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 0)) {
             Log::Debug("RenderOpaque early exit: shaders=%d, clientMeshManager=%p, debugLayer=%d",
                       m_shadersLoaded, (void*)g_clientMeshManager.get(), m_debugLayer);
+            m_stats.opaquePassTimeMs = 0.0f;
             return;
         }
 
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // Prepare visible sections
-        PrepareVisibleSections(camera, frustum);
-
-
-        // Filter for sections with opaque geometry
+        // Don't call PrepareVisibleSections here - it should be called once in RenderAll
+        // Just filter the already-prepared sections for opaque geometry
         std::vector<SectionRenderData> opaqueSections;
         for (const auto& section : m_visibleSections) {
             if (section.gpuData && section.gpuData->opaqueIndexCount > 0) {
@@ -77,6 +105,7 @@ namespace Render {
         }
 
         if (opaqueSections.empty()) {
+            m_stats.opaquePassTimeMs = 0.0f;
             return;
         }
 
@@ -99,28 +128,28 @@ namespace Render {
         m_stats.opaqueSections = static_cast<int>(opaqueSections.size());
 
         auto endTime = std::chrono::high_resolution_clock::now();
-        float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.renderTimeMs += renderTime;
+        m_stats.opaquePassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     void ChunkRenderer::RenderCutout(const Camera& camera, const Frustum& frustum) {
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 1)) {
+            m_stats.cutoutPassTimeMs = 0.0f;
             return;
         }
 
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // Use cached visible sections from opaque pass if available, otherwise prepare
-        if (m_visibleSections.empty()) {
-            PrepareVisibleSections(camera, frustum);
-        }
-
-        // Filter for sections with cutout geometry
+        // Filter for sections with cutout geometry from already-prepared sections
         std::vector<SectionRenderData> cutoutSections;
         for (const auto& section : m_visibleSections) {
             if (section.gpuData && section.gpuData->cutoutIndexCount > 0) {
                 cutoutSections.push_back(section);
             }
+        }
+
+        if (cutoutSections.empty()) {
+            m_stats.cutoutPassTimeMs = 0.0f;
+            return;
         }
 
         // Sort front to back for depth buffer optimization
@@ -135,30 +164,30 @@ namespace Render {
         m_stats.cutoutSections = static_cast<int>(cutoutSections.size());
 
         auto endTime = std::chrono::high_resolution_clock::now();
-        float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.renderTimeMs += renderTime;
+        m_stats.cutoutPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
 
-        //Log::Debug("Rendered %zu cutout sections in %.2f ms", cutoutSections.size(), renderTime);
+        //Log::Debug("Rendered %zu cutout sections in %.2f ms", cutoutSections.size(), m_stats.cutoutPassTimeMs);
     }
 
     void ChunkRenderer::RenderTranslucent(const Camera& camera, const Frustum& frustum) {
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 2)) {
+            m_stats.translucentPassTimeMs = 0.0f;
             return;
         }
 
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // Use cached visible sections from previous passes if available
-        if (m_visibleSections.empty()) {
-            PrepareVisibleSections(camera, frustum);
-        }
-
-        // Filter for sections with translucent geometry
+        // Filter for sections with translucent geometry from already-prepared sections
         std::vector<SectionRenderData> translucentSections;
         for (const auto& section : m_visibleSections) {
             if (section.gpuData && section.gpuData->translucentIndexCount > 0) {
                 translucentSections.push_back(section);
             }
+        }
+
+        if (translucentSections.empty()) {
+            m_stats.translucentPassTimeMs = 0.0f;
+            return;
         }
 
         // Sort back to front for correct alpha blending
@@ -173,10 +202,9 @@ namespace Render {
         m_stats.translucentSections = static_cast<int>(translucentSections.size());
 
         auto endTime = std::chrono::high_resolution_clock::now();
-        float renderTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.renderTimeMs += renderTime;
+        m_stats.translucentPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
 
-        //Log::Debug("Rendered %zu translucent sections in %.2f ms", translucentSections.size(), renderTime);
+        //Log::Debug("Rendered %zu translucent sections in %.2f ms", translucentSections.size(), m_stats.translucentPassTimeMs);
     }
 
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum) {
@@ -185,10 +213,20 @@ namespace Render {
         // Clear visible sections cache for fresh frame
         m_visibleSections.clear();
 
+        // Prepare visible sections ONCE at the beginning of the frame
+        // This includes chunk iteration, GPU data loading, and frustum culling
+        PrepareVisibleSections(camera, frustum);
+
         // Render in correct order for proper blending
         RenderOpaque(camera, frustum);
         RenderCutout(camera, frustum);
         RenderTranslucent(camera, frustum);
+
+        // Calculate total render time as sum of all components
+        m_stats.renderTimeMs = m_stats.buildDrawListsTimeMs + 
+                               m_stats.opaquePassTimeMs + 
+                               m_stats.cutoutPassTimeMs + 
+                               m_stats.translucentPassTimeMs;
 
         // Render section bounds if enabled
         if (m_showSectionBounds) {
@@ -208,12 +246,13 @@ namespace Render {
     }
 
     void ChunkRenderer::PrepareVisibleSections(const Camera& camera, const Frustum& frustum) {
-        auto startTime = std::chrono::high_resolution_clock::now();
+        auto overallStartTime = std::chrono::high_resolution_clock::now();
 
         m_visibleSections.clear();
 
         if (!g_clientMeshManager) {
             Log::Debug("PrepareVisibleSections: No client mesh manager available");
+            m_stats.buildDrawListsTimeMs = 0.0f;
             return;
         }
 
@@ -221,6 +260,7 @@ namespace Render {
         auto* chunkManager = Client::g_clientChunkManager.get();
         if (!chunkManager) {
             Log::Debug("PrepareVisibleSections: No client chunk manager available");
+            m_stats.buildDrawListsTimeMs = 0.0f;
             return;
         }
 
@@ -229,57 +269,107 @@ namespace Render {
         int playerChunkX = static_cast<int>(std::floor(playerPos.x / ::Game::Math::CHUNK_SIZE_X));
         int playerChunkZ = static_cast<int>(std::floor(playerPos.z / ::Game::Math::CHUNK_SIZE_Z));
 
-        // **UPDATED**: Calculate square size based on render distance
         // Get render distance from settings (already in chunks)
         int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
-
-        // Create a square of size (renderDistanceChunks * 2 + 1) x (renderDistanceChunks * 2 + 1)
-        int halfSize = renderDistanceChunks;  // This creates the desired square size
+        int renderDistanceSquared = renderDistanceChunks * renderDistanceChunks;
 
         int totalSectionsChecked = 0;        // Total sections we looked at
         int sectionsWithGeometry = 0;        // Sections that passed frustum AND have geometry
-        int chunksChecked = 0;
+        int sectionsCulled = 0;              // Sections culled by frustum
+        int sectionsOutOfRange = 0;         // Sections outside render distance
 
-        // **UPDATED**: Iterate in a square pattern instead of radius check
-        for (int dz = -halfSize; dz <= halfSize; ++dz) {
-            for (int dx = -halfSize; dx <= halfSize; ++dx) {
-                ::Game::Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
-                chunksChecked++;
-
-                // Check all sections in this chunk
-                for (int sectionY = 0; sectionY < ::Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                    totalSectionsChecked++;
-                    
-                    // OPTIMIZATION: Perform frustum culling BEFORE any expensive operations
-                    if (m_enableFrustumCulling) {
-                        AABB sectionAABB = GetSectionAABB(chunkPos, sectionY);
-                        if (!frustum.IsBoxVisible(sectionAABB)) {
-                            continue; // Skip this section entirely - no GPU data fetch, no distance calc
-                        }
-                    }
-
-                    const auto* gpuData = g_clientMeshManager->GetSectionGPUData(chunkPos, sectionY);
-
-                    if (gpuData && gpuData->HasGeometry()) {
-                        sectionsWithGeometry++;
-                        float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
-
-                        SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
-                        renderData.inFrustum = true; // Already passed frustum test
-
-                        m_visibleSections.push_back(renderData);
-                    }
+        // Measure chunk iteration time
+        auto iterationStart = std::chrono::high_resolution_clock::now();
+        const auto& activeSections = g_clientMeshManager->GetActiveSections();
+        auto iterationEnd = std::chrono::high_resolution_clock::now();
+        m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
+        
+        // Measure frustum culling and GPU data access time
+        auto cullingStart = std::chrono::high_resolution_clock::now();
+        float gpuDataAccessTime = 0.0f;
+        
+        for (const auto& sectionKey : activeSections) {
+            ::Game::Math::ChunkPos chunkPos = sectionKey.chunkPos;
+            int sectionY = sectionKey.sectionY;
+            
+            totalSectionsChecked++;
+            
+            // Check if chunk is within render distance (square pattern)
+            int dx = chunkPos.x - playerChunkX;
+            int dz = chunkPos.z - playerChunkZ;
+            
+            // Use square distance check for square render area
+            if (std::abs(dx) > renderDistanceChunks || std::abs(dz) > renderDistanceChunks) {
+                sectionsOutOfRange++;
+                continue;  // Outside render distance
+            }
+            
+            // Perform frustum culling
+            if (m_enableFrustumCulling) {
+                // Calculate section bounds directly without creating AABB object
+                float sectionMinX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
+                float sectionMaxX = sectionMinX + ::Game::Math::CHUNK_SIZE_X;
+                float sectionMinY = static_cast<float>(sectionY * ::Game::Math::SECTION_HEIGHT + Config::MinY);
+                float sectionMaxY = sectionMinY + ::Game::Math::SECTION_HEIGHT;
+                float sectionMinZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
+                float sectionMaxZ = sectionMinZ + ::Game::Math::CHUNK_SIZE_Z;
+                
+                glm::vec3 sectionMin(sectionMinX, sectionMinY, sectionMinZ);
+                glm::vec3 sectionMax(sectionMaxX, sectionMaxY, sectionMaxZ);
+                
+                if (!frustum.IsBoxVisible(sectionMin, sectionMax)) {
+                    sectionsCulled++;
+                    continue; // Outside frustum
                 }
             }
+            
+            // Get GPU data - measure this access time
+            auto gpuAccessStart = std::chrono::high_resolution_clock::now();
+            const auto* gpuData = g_clientMeshManager->GetSectionGPUData(chunkPos, sectionY);
+            auto gpuAccessEnd = std::chrono::high_resolution_clock::now();
+            gpuDataAccessTime += std::chrono::duration<float, std::milli>(gpuAccessEnd - gpuAccessStart).count();
+            
+            if (gpuData && gpuData->HasGeometry()) {
+                sectionsWithGeometry++;
+                float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
+                
+                SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
+                renderData.inFrustum = true; // Already passed frustum test
+                
+                m_visibleSections.push_back(renderData);
+            }
         }
+        
+        auto cullingEnd = std::chrono::high_resolution_clock::now();
+        float totalCullingTime = std::chrono::duration<float, std::milli>(cullingEnd - cullingStart).count();
+        
+        // Frustum culling time is total loop time minus GPU data access time
+        m_stats.frustumCullingTimeMs = totalCullingTime - gpuDataAccessTime;
+        m_stats.gpuDataLoadTimeMs = gpuDataAccessTime;
 
-        // Track simple statistics - don't try to calculate culling effectiveness
+        // Track simple statistics
         m_stats.sectionsAvailable = totalSectionsChecked;       // Total sections we checked
-        m_stats.sectionsSkipped = 0;                            // Not tracking this anymore
+        m_stats.sectionsSkipped = sectionsCulled;               // Sections culled by frustum
         m_stats.sectionsRendered = sectionsWithGeometry;        // Sections actually being rendered
 
-        auto endTime = std::chrono::high_resolution_clock::now();
-        m_stats.frustumCullTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
+        // Measure sorting time if we have visible sections
+        auto sortingStart = std::chrono::high_resolution_clock::now();
+        if (!m_visibleSections.empty()) {
+            // Sort sections by distance for proper rendering order (if needed)
+            std::sort(m_visibleSections.begin(), m_visibleSections.end(),
+                     [](const SectionRenderData& a, const SectionRenderData& b) {
+                         return a.distanceToCamera < b.distanceToCamera;
+                     });
+        }
+        auto sortingEnd = std::chrono::high_resolution_clock::now();
+        m_stats.sortingTimeMs = std::chrono::duration<float, std::milli>(sortingEnd - sortingStart).count();
+
+        // Total build time for draw lists (entire PrepareVisibleSections time)
+        auto overallEndTime = std::chrono::high_resolution_clock::now();
+        m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
+        
+        // Note: The individual phase timings (chunkIterationTimeMs, gpuDataLoadTimeMs, frustumCullingTimeMs, sortingTimeMs)
+        // are now measured accurately and should sum to approximately buildDrawListsTimeMs
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
@@ -362,13 +452,15 @@ namespace Render {
 
         auto endTime = std::chrono::high_resolution_clock::now();
         float sortTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.sortTimeMs += sortTime;
+        m_stats.sortingTimeMs += sortTime;
     }
 
+    // Utility methods still needed by the new optimized rendering system
     void ChunkRenderer::SetupRenderPass(const RenderPassConfig& config) {
-        // Depth testing
+        // Depth testing - Minecraft uses GL_LEQUAL for all passes
         if (config.enableDepthTest) {
             glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);  // Minecraft standard
         } else {
             glDisable(GL_DEPTH_TEST);
         }
@@ -376,7 +468,7 @@ namespace Render {
         // Depth writing
         glDepthMask(config.enableDepthWrite ? GL_TRUE : GL_FALSE);
 
-        // Blending
+        // Blending - use config values for blend function
         if (config.enableBlending) {
             glEnable(GL_BLEND);
             glBlendFunc(config.blendSrc, config.blendDst);
@@ -387,10 +479,11 @@ namespace Render {
         // Alpha testing (handled in shader)
         // Set alpha threshold uniform if needed
 
-        // Face culling
+        // Face culling with proper winding order
         if (config.enableBackFaceCulling) {
             glEnable(GL_CULL_FACE);
             glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);  // Counter-clockwise front faces
         } else {
             glDisable(GL_CULL_FACE);
         }
@@ -449,6 +542,12 @@ namespace Render {
         return aabb;
     }
 
+    void ChunkRenderer::RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections) {
+        // TODO: Implement section bounds rendering for debugging
+        // This would draw wireframe boxes around each section
+    }
+
+    // Essential utility methods still needed by the optimized rendering system
     void ChunkRenderer::SetupShaderUniforms(const Camera& camera) {
         if (!m_blockShader) return;
 
@@ -497,15 +596,6 @@ namespace Render {
         }
     }
 
-    void ChunkRenderer::RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections) {
-        // Debug rendering - would implement wireframe section bounds here
-        // This is a placeholder for debug visualization
-    }
-
-    void ChunkRenderer::RenderDebugInfo(const Camera& camera) {
-        // Debug UI rendering - placeholder
-    }
-
     bool ChunkRenderer::CheckShaderErrors(const std::string& pass) {
         GLenum error = glGetError();
         if (error != GL_NO_ERROR) {
@@ -521,38 +611,10 @@ namespace Render {
             case GL_INVALID_ENUM: errorString = "GL_INVALID_ENUM"; break;
             case GL_INVALID_VALUE: errorString = "GL_INVALID_VALUE"; break;
             case GL_INVALID_OPERATION: errorString = "GL_INVALID_OPERATION"; break;
+            case GL_INVALID_FRAMEBUFFER_OPERATION: errorString = "GL_INVALID_FRAMEBUFFER_OPERATION"; break;
             case GL_OUT_OF_MEMORY: errorString = "GL_OUT_OF_MEMORY"; break;
         }
         Log::Error("OpenGL error in %s: %s (0x%x)", operation.c_str(), errorString, error);
-    }
-
-    void ChunkRenderer::SetupRenderConfigs() {
-        // Opaque pass configuration
-        m_opaqueConfig.enableDepthWrite = true;
-        m_opaqueConfig.enableDepthTest = true;
-        m_opaqueConfig.enableBlending = false;
-        m_opaqueConfig.enableAlphaTest = false;
-        m_opaqueConfig.enableBackFaceCulling = true;
-        m_opaqueConfig.frontToBack = true;
-
-        // Cutout pass configuration
-        m_cutoutConfig.enableDepthWrite = true;
-        m_cutoutConfig.enableDepthTest = true;
-        m_cutoutConfig.enableBlending = false;
-        m_cutoutConfig.enableAlphaTest = true;
-        m_cutoutConfig.enableBackFaceCulling = true;
-        m_cutoutConfig.alphaThreshold = 0.5f;
-        m_cutoutConfig.frontToBack = true;
-
-        // Translucent pass configuration
-        m_translucentConfig.enableDepthWrite = false; // No depth write for translucent
-        m_translucentConfig.enableDepthTest = true;
-        m_translucentConfig.enableBlending = true;
-        m_translucentConfig.enableAlphaTest = false;
-        m_translucentConfig.enableBackFaceCulling = false; // Disable for correct blending
-        m_translucentConfig.blendSrc = GL_SRC_ALPHA;
-        m_translucentConfig.blendDst = GL_ONE_MINUS_SRC_ALPHA;
-        m_translucentConfig.frontToBack = false; // Back to front sorting
     }
 
     // Global utility functions
@@ -570,24 +632,6 @@ namespace Render {
         if (g_chunkRenderer) {
             g_chunkRenderer->Shutdown();
             g_chunkRenderer.reset();
-        }
-    }
-
-    void RenderChunksOpaque(const Camera& camera, const Frustum& frustum) {
-        if (g_chunkRenderer) {
-            g_chunkRenderer->RenderOpaque(camera, frustum);
-        }
-    }
-
-    void RenderChunksCutout(const Camera& camera, const Frustum& frustum) {
-        if (g_chunkRenderer) {
-            g_chunkRenderer->RenderCutout(camera, frustum);
-        }
-    }
-
-    void RenderChunksTranslucent(const Camera& camera, const Frustum& frustum) {
-        if (g_chunkRenderer) {
-            g_chunkRenderer->RenderTranslucent(camera, frustum);
         }
     }
 

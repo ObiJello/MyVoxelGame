@@ -26,7 +26,7 @@ namespace Render {
         , foliageColormapID(0)
         , atlasWidth(DEFAULT_ATLAS_SIZE)
         , atlasHeight(DEFAULT_ATLAS_SIZE)
-        , mipmapEnabled(false)
+        , mipmapEnabled(false)  // Start with original settings (no mipmaps)
         , textureAnimator(nullptr) {
     }
 
@@ -497,8 +497,8 @@ namespace Render {
 
             const auto& source = sources[rect.textureIndex];
             CopyTextureToAtlas(source, rect.x, rect.y);
-
-            // Record UV coordinates
+            
+            // Record UV coordinates (padding prevents bleeding)
             AtlasUVRect uvRect;
             uvRect.uvMin.x = static_cast<float>(rect.x) / atlasWidth;
             uvRect.uvMin.y = static_cast<float>(rect.y) / atlasHeight;
@@ -507,12 +507,25 @@ namespace Render {
 
             textureKeyToUV[source.key] = uvRect;
         }
+        
+        // Save original atlas data before any modifications
+        originalAtlasData = atlasData;
+        
+        // Apply border extrusion if building in Minecraft mode (for initial build)
+        if (m_borderExtrusionEnabled) {
+            for (const auto& rect : packedRects) {
+                if (rect.textureIndex < 0 || rect.textureIndex >= sources.size()) {
+                    continue;
+                }
+                ExtrudeTextureBorders(rect.x, rect.y, rect.width, rect.height);
+            }
+        }
 
         // Create OpenGL texture
         glGenTextures(1, &atlasTextureID);
         glBindTexture(GL_TEXTURE_2D, atlasTextureID);
 
-        // Upload atlas data
+        // Upload atlas data - start with GL_RGBA (original format, no sRGB)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasWidth, atlasHeight, 0,
                     GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
 
@@ -570,6 +583,37 @@ namespace Render {
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
         }
     }
+    
+    void AtlasBuilder::SetMipmapLevel(int level) {
+        // Clamp level to valid range (0-4 as per Minecraft)
+        m_mipmapLevel = std::max(0, std::min(4, level));
+        
+        if (atlasTextureID != 0) {
+            glBindTexture(GL_TEXTURE_2D, atlasTextureID);
+            
+            if (m_mipmapLevel == 0) {
+                // No mipmaps - pure nearest filtering
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            } else {
+                // Calculate actual max mipmap level based on atlas size
+                int maxPossible = static_cast<int>(std::floor(std::log2(std::min(atlasWidth, atlasHeight))));
+                int desiredLevel = std::min(m_mipmapLevel, maxPossible);
+                
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, desiredLevel);
+                
+                if (mipmapEnabled) {
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+                } else {
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                }
+            }
+            
+            glBindTexture(GL_TEXTURE_2D, 0);
+            Log::Info("Set mipmap level to %d", m_mipmapLevel);
+        }
+    }
 
     // **NEW**: Update texture parameters
     void AtlasBuilder::UpdateTextureParameters() {
@@ -580,14 +624,22 @@ namespace Render {
         glBindTexture(GL_TEXTURE_2D, atlasTextureID);
 
         if (mipmapEnabled) {
-            // Mipmap enabled
+            // Minecraft-style filtering: crisp pixels with smooth mipmap transitions
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
             // Regenerate mipmaps with current data
             glGenerateMipmap(GL_TEXTURE_2D);
+            
+            // Enable anisotropic filtering if available
+            if (GLAD_GL_EXT_texture_filter_anisotropic) {
+                GLfloat maxAniso;
+                glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
+                Log::Info("✓ Enabled anisotropic filtering (max: %.0f)", maxAniso);
+            }
         } else {
-            // Mipmap disabled
+            // Mipmap disabled - use original nearest filtering
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         }
@@ -597,6 +649,87 @@ namespace Render {
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         glBindTexture(GL_TEXTURE_2D, 0);
+    }
+    
+    void AtlasBuilder::RebuildAtlas(bool useMinecraftStyle) {
+        if (atlasTextureID == 0) {
+            Log::Warning("Cannot rebuild atlas: no texture created yet");
+            return;
+        }
+        
+        if (originalAtlasData.empty()) {
+            Log::Warning("Cannot rebuild atlas: no original data saved");
+            return;
+        }
+        
+        // Delete existing texture
+        glDeleteTextures(1, &atlasTextureID);
+        
+        // Create new texture
+        glGenTextures(1, &atlasTextureID);
+        glBindTexture(GL_TEXTURE_2D, atlasTextureID);
+        
+        // Choose format and data based on mode
+        GLenum internalFormat = useMinecraftStyle ? GL_SRGB8_ALPHA8 : GL_RGBA;
+        
+        // If Minecraft style, we need to apply border extrusion to a copy of the data
+        if (useMinecraftStyle) {
+            // Copy original data to working buffer
+            atlasData = originalAtlasData;
+            
+            // Apply border extrusion
+            for (const auto& kvp : textureKeyToUV) {
+                const AtlasUVRect& uvRect = kvp.second;
+                int x = static_cast<int>(uvRect.uvMin.x * atlasWidth);
+                int y = static_cast<int>(uvRect.uvMin.y * atlasHeight);
+                int width = static_cast<int>((uvRect.uvMax.x - uvRect.uvMin.x) * atlasWidth);
+                int height = static_cast<int>((uvRect.uvMax.y - uvRect.uvMin.y) * atlasHeight);
+                ExtrudeTextureBorders(x, y, width, height);
+            }
+            
+            // Upload with sRGB format and extruded data
+            glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, atlasWidth, atlasHeight, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
+        } else {
+            // Use original data without modifications
+            glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, atlasWidth, atlasHeight, 0,
+                        GL_RGBA, GL_UNSIGNED_BYTE, originalAtlasData.data());
+        }
+        
+        // Set appropriate filtering based on mode
+        if (useMinecraftStyle) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            
+            // Generate mipmaps
+            glGenerateMipmap(GL_TEXTURE_2D);
+            
+            // Apply anisotropic filtering if available
+            if (GLAD_GL_EXT_texture_filter_anisotropic) {
+                GLfloat maxAniso;
+                glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
+                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
+            }
+            
+            mipmapEnabled = true;
+            m_borderExtrusionEnabled = true;
+        } else {
+            // Original settings - simple nearest filtering, no mipmaps
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            
+            mipmapEnabled = false;
+            m_borderExtrusionEnabled = false;
+        }
+        
+        glBindTexture(GL_TEXTURE_2D, 0);
+        
+        Log::Info("Atlas rebuilt with %s rendering mode", 
+                  useMinecraftStyle ? "Minecraft-style" : "Classic");
     }
 
     void AtlasBuilder::CopyTextureToAtlas(const TextureSource& source,
@@ -611,6 +744,93 @@ namespace Render {
                 atlasData[dstIdx + 1] = source.data[srcIdx + 1];
                 atlasData[dstIdx + 2] = source.data[srcIdx + 2];
                 atlasData[dstIdx + 3] = source.data[srcIdx + 3];
+            }
+        }
+    }
+    
+    void AtlasBuilder::ExtrudeTextureBorders(int textureX, int textureY, 
+                                            int textureWidth, int textureHeight) {
+        // Extrude edges by 1 pixel to prevent mipmap bleeding
+        // This copies the edge pixels into the padding area around the texture
+        
+        // Top edge - copy top row to padding above
+        if (textureY > 0) {
+            for (int x = 0; x < textureWidth; ++x) {
+                int srcIdx = ((textureY) * atlasWidth + (textureX + x)) * 4;
+                int dstIdx = ((textureY - 1) * atlasWidth + (textureX + x)) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+                }
+            }
+        }
+        
+        // Bottom edge - copy bottom row to padding below
+        if (textureY + textureHeight < atlasHeight - 1) {
+            for (int x = 0; x < textureWidth; ++x) {
+                int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + x)) * 4;
+                int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX + x)) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+                }
+            }
+        }
+        
+        // Left edge - copy left column to padding on left
+        if (textureX > 0) {
+            for (int y = 0; y < textureHeight; ++y) {
+                int srcIdx = ((textureY + y) * atlasWidth + textureX) * 4;
+                int dstIdx = ((textureY + y) * atlasWidth + (textureX - 1)) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+                }
+            }
+        }
+        
+        // Right edge - copy right column to padding on right
+        if (textureX + textureWidth < atlasWidth - 1) {
+            for (int y = 0; y < textureHeight; ++y) {
+                int srcIdx = ((textureY + y) * atlasWidth + (textureX + textureWidth - 1)) * 4;
+                int dstIdx = ((textureY + y) * atlasWidth + (textureX + textureWidth)) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+                }
+            }
+        }
+        
+        // Corners - copy corner pixels to diagonal padding
+        // Top-left corner
+        if (textureX > 0 && textureY > 0) {
+            int srcIdx = (textureY * atlasWidth + textureX) * 4;
+            int dstIdx = ((textureY - 1) * atlasWidth + (textureX - 1)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+        
+        // Top-right corner
+        if (textureX + textureWidth < atlasWidth - 1 && textureY > 0) {
+            int srcIdx = (textureY * atlasWidth + (textureX + textureWidth - 1)) * 4;
+            int dstIdx = ((textureY - 1) * atlasWidth + (textureX + textureWidth)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+        
+        // Bottom-left corner
+        if (textureX > 0 && textureY + textureHeight < atlasHeight - 1) {
+            int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + textureX) * 4;
+            int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX - 1)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+        
+        // Bottom-right corner
+        if (textureX + textureWidth < atlasWidth - 1 && textureY + textureHeight < atlasHeight - 1) {
+            int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + textureWidth - 1)) * 4;
+            int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX + textureWidth)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                atlasData[dstIdx + c] = atlasData[srcIdx + c];
             }
         }
     }

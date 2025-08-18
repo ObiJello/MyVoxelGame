@@ -4,8 +4,6 @@
 #include "../block/BlockRegistry.hpp"
 #include "../../physics/Physics.hpp"
 #include "platform/GameDirectory.hpp"
-#include "client/renderer/mesh/ClientMeshManager.hpp"
-#include "client/world/ClientChunkManager.hpp"
 #include "server/IntegratedServer.hpp"
 #include "../../physics/RayCast.hpp"
 #include <algorithm>
@@ -247,12 +245,8 @@ namespace Game {
             if (chunk) {
                 chunksLoaded++;
 
-                // Mark all sections in this chunk for meshing
-                if (Client::g_clientChunkManager) {
-                    for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                        Client::g_clientChunkManager->MarkSectionDirty(chunkPos, sectionY);
-                    }
-                }
+                // Server-side chunk loaded - client will handle its own dirty tracking
+                // when it receives the chunk data packet
 
                 // Log progress for nearest chunks
                 int distanceSq = (chunkPos.x - playerChunkX) * (chunkPos.x - playerChunkX) +
@@ -328,61 +322,17 @@ namespace Game {
     }
 
     void World::OnBlockChanged(int worldX, int worldY, int worldZ) {
-        // Mark section for remeshing
+        // Mark section for remeshing (server-side tracking)
         MarkSectionDirty(worldX, worldY, worldZ);
 
-        // Use the global client chunk manager for marking sections dirty
-        if (Client::g_clientChunkManager) {
-            Math::ChunkPos chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-            int sectionIndex = Math::WorldCoordinates::WorldYToSectionIndex(worldY);
-
-            // Mark the section dirty in the client chunk manager
-            Client::g_clientChunkManager->MarkSectionDirty(chunkPos, sectionIndex);
-
-            // Also mark neighboring sections if block is on boundary
-            MarkNeighboringSectionsIfNeeded(worldX, worldY, worldZ);
-        }
+        // The server will send block change packets to clients
+        // Clients will handle their own dirty tracking when they receive the packets
     }
 
     void World::MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ) {
-        if (!Client::g_clientChunkManager) {
-            return;
-        }
-
-        // Convert to chunk coordinates
-        Math::ChunkPos baseChunk = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
-        int baseSectionY = Math::WorldCoordinates::WorldYToSectionIndex(worldY);
-
-        // Get local coordinates within chunk
-        int localX = worldX - (baseChunk.x * Math::CHUNK_SIZE_X);
-        int localZ = worldZ - (baseChunk.z * Math::CHUNK_SIZE_Z);
-        int localY = (worldY - Math::WorldCoordinates::MIN_WORLD_Y) % Math::SECTION_HEIGHT;
-
-        // Mark neighboring chunks if on boundary
-        if (localX == 0) {
-            Math::ChunkPos westChunk{baseChunk.x - 1, baseChunk.z};
-            Client::g_clientChunkManager->MarkSectionDirty(westChunk, baseSectionY);
-        }
-        if (localX == Math::CHUNK_SIZE_X - 1) {
-            Math::ChunkPos eastChunk{baseChunk.x + 1, baseChunk.z};
-            Client::g_clientChunkManager->MarkSectionDirty(eastChunk, baseSectionY);
-        }
-        if (localZ == 0) {
-            Math::ChunkPos northChunk{baseChunk.x, baseChunk.z - 1};
-            Client::g_clientChunkManager->MarkSectionDirty(northChunk, baseSectionY);
-        }
-        if (localZ == Math::CHUNK_SIZE_Z - 1) {
-            Math::ChunkPos southChunk{baseChunk.x, baseChunk.z + 1};
-            Client::g_clientChunkManager->MarkSectionDirty(southChunk, baseSectionY);
-        }
-
-        // Mark neighboring sections if on section boundary
-        if (localY == 0 && baseSectionY > 0) {
-            Client::g_clientChunkManager->MarkSectionDirty(baseChunk, baseSectionY - 1);
-        }
-        if (localY == Math::SECTION_HEIGHT - 1 && baseSectionY < Math::SECTIONS_PER_CHUNK - 1) {
-            Client::g_clientChunkManager->MarkSectionDirty(baseChunk, baseSectionY + 1);
-        }
+        // This function is no longer needed - clients handle their own dirty tracking
+        // when they receive block change packets
+        // Keeping empty function for now to avoid breaking other code that might call it
     }
 
     std::shared_ptr<Chunk> World::GetChunk(int chunkX, int chunkZ) const {

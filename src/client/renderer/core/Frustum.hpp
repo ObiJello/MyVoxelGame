@@ -65,6 +65,11 @@ struct Frustum {
 
     // Test if an AABB is at least partially inside (or intersects) the frustum.
     bool IsBoxVisible(const AABB& box) const {
+        return IsBoxVisible(box.min, box.max);
+    }
+    
+    // Optimized overload that takes min/max directly to avoid AABB object creation
+    bool IsBoxVisible(const glm::vec3& boxMin, const glm::vec3& boxMax) const {
         // For each plane, find the "positive vertex" (furthest point in direction of plane normal)
         // If that vertex is behind the plane, the entire box is outside
         for (int i = 0; i < 6; ++i) {
@@ -73,9 +78,9 @@ struct Frustum {
 
             // Find the positive vertex (furthest point along plane normal)
             glm::vec3 positiveVertex;
-            positiveVertex.x = (normal.x >= 0.0f) ? box.max.x : box.min.x;
-            positiveVertex.y = (normal.y >= 0.0f) ? box.max.y : box.min.y;
-            positiveVertex.z = (normal.z >= 0.0f) ? box.max.z : box.min.z;
+            positiveVertex.x = (normal.x >= 0.0f) ? boxMax.x : boxMin.x;
+            positiveVertex.y = (normal.y >= 0.0f) ? boxMax.y : boxMin.y;
+            positiveVertex.z = (normal.z >= 0.0f) ? boxMax.z : boxMin.z;
 
             // Test if positive vertex is behind this plane
             float distance = glm::dot(normal, positiveVertex) + plane.w;

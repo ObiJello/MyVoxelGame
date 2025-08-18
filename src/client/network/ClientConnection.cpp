@@ -279,16 +279,6 @@ namespace Client {
         
         // Create typed packet on I/O thread based on packet ID
         switch (static_cast<PacketId>(packetId)) {
-            case PacketId::ServerChunkData: {
-                auto data = Serialization::DeserializeServerChunkData(payload);
-                return std::make_unique<ServerChunkDataPacketImpl>(std::move(data));
-            }
-            
-            case PacketId::ServerChunkUnload: {
-                auto data = Serialization::DeserializeServerChunkUnload(payload);
-                return std::make_unique<ServerChunkUnloadPacketImpl>(std::move(data));
-            }
-            
             case PacketId::ChunkDataS2C: {
                 auto data = Serialization::DeserializeChunkDataS2C(payload);
                 return std::make_unique<ChunkDataS2CPacketImpl>(std::move(data));

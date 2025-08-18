@@ -28,8 +28,7 @@
             // ========================================================================
             // SERVER → CLIENT PACKETS (0x10-0x7F)
             // ========================================================================
-            ServerChunkData     = 0x10,
-            ServerChunkUnload   = 0x11,
+            // 0x10 and 0x11 reserved (previously ServerChunkData/ServerChunkUnload)
             BlockChangeS2C      = 0x12,
             MultiBlockChangeS2C = 0x13,
             PlayerUpdateS2C     = 0x14,
@@ -82,8 +81,6 @@
                 case PacketId::SetCompression: return "SetCompression";
 
                 // Server → Client
-                case PacketId::ServerChunkData: return "ServerChunkData";
-                case PacketId::ServerChunkUnload: return "ServerChunkUnload";
                 case PacketId::BlockChangeS2C: return "BlockChangeS2C";
                 case PacketId::MultiBlockChangeS2C: return "MultiBlockChangeS2C";
                 case PacketId::PlayerUpdateS2C: return "PlayerUpdateS2C";

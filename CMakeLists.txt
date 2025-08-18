@@ -172,6 +172,7 @@ if(APPLE)
             src/client/renderer/mesh/ChunkMeshData.cpp
             src/client/renderer/mesh/FluidMeshBuilder.cpp
             src/client/renderer/mesh/Mesher.cpp
+            src/client/renderer/mesh/GPUDataPool.cpp
             src/client/renderer/debug/Crosshair.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
@@ -264,6 +265,8 @@ else()
             src/client/renderer/mesh/ChunkRenderer.hpp
             src/client/renderer/mesh/ClientMeshManager.cpp
             src/client/renderer/mesh/ClientMeshManager.hpp
+            src/client/renderer/mesh/GPUDataPool.cpp
+            src/client/renderer/mesh/GPUDataPool.hpp
             src/client/renderer/mesh/FluidMeshBuilder.cpp
             src/client/renderer/mesh/FluidMeshBuilder.hpp
             src/client/renderer/mesh/MeshManager.cpp

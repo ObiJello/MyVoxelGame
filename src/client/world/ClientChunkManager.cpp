@@ -7,6 +7,7 @@
 #include "../renderer/core/Frustum.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
+#include "../renderer/mesh/ChunkRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include <glad/glad.h>
 #include <algorithm>
@@ -66,23 +67,6 @@ namespace Client {
     // CHUNK STATE MANAGEMENT
     // ========================================================================
 
-    void ClientChunkManager::ProcessChunkLoadPacket(const Network::ServerChunkDataPacket& packet) {
-        ASSERT_MAIN_THREAD();
-        Log::Debug("PIPELINE: ProcessChunkLoadPacket START for chunk (%d, %d)", 
-                  packet.position.x, packet.position.z);
-        
-        if (!packet.chunkData) {
-            Log::Warning("PIPELINE: Received ServerChunkDataPacket with null chunk data for (%d, %d)", 
-                        packet.position.x, packet.position.z);
-            return;
-        }
-        
-        // Delegate to LoadChunk helper
-        LoadChunk(packet.position, *packet.chunkData);
-        
-        Log::Debug("PIPELINE: ProcessChunkLoadPacket COMPLETE for chunk (%d, %d)", 
-                  packet.position.x, packet.position.z);
-    }
     
     void ClientChunkManager::LoadChunk(Game::Math::ChunkPos chunkPos, const Network::SerializedChunkData& serializedData) {
         ASSERT_MAIN_THREAD();
@@ -155,17 +139,6 @@ namespace Client {
                   chunkPos.x, chunkPos.z, nonEmptyCount, chunk->dirtySections.size());
     }
 
-    // Unload chunk from packet
-    void ClientChunkManager::ProcessChunkUnloadPacket(const Network::ServerChunkUnloadPacket& packet) {
-        ASSERT_MAIN_THREAD();
-        Log::Debug("Processing chunk unload packet for chunk (%d, %d)", 
-                  packet.position.x, packet.position.z);
-
-        // Unload immediately
-        UnloadChunk(packet.position);
-        
-        Log::Debug("Chunk (%d, %d) unloaded", packet.position.x, packet.position.z);
-    }
 
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
         ASSERT_MAIN_THREAD();
@@ -341,6 +314,34 @@ namespace Client {
         auto it = m_chunks.find(chunkPos);
         return (it != m_chunks.end()) ? it->second.get() : nullptr;
     }
+    
+    SectionInfo* ClientChunkManager::GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY) {
+        // No mutex needed - called from render thread only
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
+            return nullptr;
+        }
+        
+        auto* chunk = GetChunk(chunkPos);
+        if (!chunk || chunk->state != ChunkState::LOADED) {
+            return nullptr;
+        }
+        
+        return &chunk->sectionInfos[sectionY];
+    }
+    
+    const SectionInfo* ClientChunkManager::GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY) const {
+        // No mutex needed - called from render thread only
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
+            return nullptr;
+        }
+        
+        auto* chunk = GetChunk(chunkPos);
+        if (!chunk || chunk->state != ChunkState::LOADED) {
+            return nullptr;
+        }
+        
+        return &chunk->sectionInfos[sectionY];
+    }
 
     ChunkState ClientChunkManager::GetChunkState(Game::Math::ChunkPos chunkPos) const {
         ASSERT_MAIN_THREAD();
@@ -482,7 +483,17 @@ namespace Client {
             return;
         }
         
+        ChunkState oldState = chunk->state;
         chunk->state = newState;
+        
+        // Notify RenderGrid when chunk becomes loaded
+        if (newState == ChunkState::LOADED && oldState != ChunkState::LOADED) {
+            NotifyRenderGridChunkLoaded(chunk->position, chunk);
+        }
+        // Notify RenderGrid when chunk becomes unloaded
+        else if (oldState == ChunkState::LOADED && newState != ChunkState::LOADED) {
+            NotifyRenderGridChunkUnloaded(chunk->position);
+        }
     }
 
 
@@ -1363,6 +1374,39 @@ namespace Client {
         ASSERT_MAIN_THREAD();
         m_chunks.clear();
         Log::Info("Cleared all chunks from ClientChunkManager");
+    }
+    
+    // ========================================================================
+    // RENDER GRID SYNCHRONIZATION
+    // ========================================================================
+    
+    void ClientChunkManager::SnapshotLoadedChunks(
+            std::vector<std::pair<Game::Math::ChunkPos, ClientChunk*>>& out) const {
+        ASSERT_MAIN_THREAD();
+        out.clear();
+        out.reserve(m_chunks.size());
+        
+        for (const auto& [pos, chunk] : m_chunks) {
+            if (chunk && chunk->IsLoaded()) {
+                out.emplace_back(pos, chunk.get());
+            }
+        }
+    }
+    
+    void ClientChunkManager::NotifyRenderGridChunkLoaded(Game::Math::ChunkPos pos, ClientChunk* chunk) {
+        ASSERT_MAIN_THREAD();
+        // No-op: RenderGrid has been removed
+    }
+    
+    void ClientChunkManager::NotifyRenderGridChunkUnloaded(Game::Math::ChunkPos pos) {
+        ASSERT_MAIN_THREAD();
+        // No-op: RenderGrid has been removed
+    }
+    
+    void ClientChunkManager::NotifyRenderGridSectionUpdated(Game::Math::ChunkPos pos, int sectionY, 
+                                                           ::Render::GPUSectionData* gpu) {
+        ASSERT_MAIN_THREAD();
+        // No-op: RenderGrid has been removed
     }
 
 } // namespace Client

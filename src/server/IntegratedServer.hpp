@@ -260,9 +260,6 @@ namespace Server {
         // PACKET SENDING
         // ========================================================================
 
-        // Send ServerChunkDataPacket to client
-        void SendPacketToClient(Network::ServerChunkDataPacket&& packet);
-
         // Send BlockChangeS2CPacket to client
         void SendPacketToClient(Network::BlockChangeS2CPacket&& packet);
 

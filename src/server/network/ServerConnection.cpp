@@ -303,16 +303,6 @@ namespace Server {
     // PACKET SENDING (SERVER → CLIENT)
     // ========================================================================
 
-    void ServerConnection::SendChunkData(const Network::ServerChunkDataPacket& packet) {
-        auto data = Network::Serialization::Serialize(packet);
-        SendPacket(static_cast<uint8_t>(Network::PacketId::ServerChunkData), data);
-    }
-
-    void ServerConnection::SendChunkUnload(const Network::ServerChunkUnloadPacket& packet) {
-        auto data = Network::Serialization::Serialize(packet);
-        SendPacket(static_cast<uint8_t>(Network::PacketId::ServerChunkUnload), data);
-    }
-
     void ServerConnection::SendBlockChange(const Network::BlockChangeS2CPacket& packet) {
         auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);

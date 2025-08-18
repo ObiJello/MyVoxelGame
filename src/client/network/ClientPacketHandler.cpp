@@ -54,29 +54,6 @@ namespace Client {
         Log::Debug("[ClientPacketHandler] Unloading chunk (%d, %d)", packet.chunkX, packet.chunkZ);
     }
 
-    void ClientPacketHandler::handleServerChunkData(const Network::ServerChunkDataPacket& packet) {
-        if (!m_chunkManager) {
-            Log::Warning("[ClientPacketHandler] ChunkManager not available for server chunk data");
-            return;
-        }
-        
-        // Process legacy chunk data format
-        m_chunkManager->ProcessChunkLoadPacket(packet);
-        m_stats.chunksReceived++;
-        m_stats.packetsProcessed++;
-    }
-
-    void ClientPacketHandler::handleServerChunkUnload(const Network::ServerChunkUnloadPacket& packet) {
-        if (!m_chunkManager) {
-            Log::Warning("[ClientPacketHandler] ChunkManager not available for server chunk unload");
-            return;
-        }
-        
-        // Process legacy unload packet
-        m_chunkManager->ProcessChunkUnloadPacket(packet);
-        m_stats.chunksUnloaded++;
-        m_stats.packetsProcessed++;
-    }
 
     // ========================================================================
     // BLOCK UPDATES

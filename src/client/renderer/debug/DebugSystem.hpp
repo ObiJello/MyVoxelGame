@@ -28,6 +28,8 @@ namespace Debug {
         float renderTime = 0.0f;
         float debugUITime = 0.0f;
         float vsyncWaitTime = 0.0f;  // Time spent in glfwSwapBuffers waiting for VSync
+        float textureAnimationTime = 0.0f;  // Time spent updating animated textures
+        float otherTime = 0.0f;  // Unaccounted time (gaps between measurements)
         
         // Legacy fields (kept for compatibility)
         float meshUploadTime = 0.0f;  // Same as gpuUploadTime
@@ -102,6 +104,9 @@ namespace Debug {
         static void DrawPlayerFlightControls(Game::PlayerController& playerController);
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
+        
+        // Rendering mode toggle support
+        static void ApplyRenderingMode(bool useMinecraftStyle);
     };
 
 } // namespace Debug

@@ -100,6 +100,15 @@ namespace Render {
         // **NEW**: Mipmap control
         void SetMipmapEnabled(bool enabled);
         bool IsMipmapEnabled() const { return mipmapEnabled; }
+        void SetMipmapLevel(int level); // Control mipmap level (0-4)
+        int GetMipmapLevel() const { return m_mipmapLevel; }
+        
+        // Border extrusion control (for toggling between rendering modes)
+        void SetBorderExtrusionEnabled(bool enabled) { m_borderExtrusionEnabled = enabled; }
+        bool IsBorderExtrusionEnabled() const { return m_borderExtrusionEnabled; }
+        
+        // Rebuild atlas with different rendering mode
+        void RebuildAtlas(bool useMinecraftStyle);
 
         // Debug: Save atlas to file
         bool SaveAtlasDebugImage(const std::string& outputPath) const;
@@ -120,6 +129,8 @@ namespace Render {
 
         // **NEW**: Mipmap state
         bool mipmapEnabled;
+        int m_mipmapLevel = 4; // Default to max mipmap level
+        bool m_borderExtrusionEnabled = false; // Start with original settings (no extrusion)
 
         // **NEW**: Animation support
         TextureAnimator* textureAnimator;
@@ -138,6 +149,7 @@ namespace Render {
 
         // Atlas pixel data (for debug saving)
         std::vector<unsigned char> atlasData;
+        std::vector<unsigned char> originalAtlasData; // Original data without border extrusion
 
         // Step 1: Parse the JSON atlas descriptor
         bool ParseAtlasJSON(const std::string& jsonPath,
@@ -190,6 +202,10 @@ namespace Render {
         // Helper: Copy texture to atlas at specified position
         void CopyTextureToAtlas(const TextureSource& source,
                                int destX, int destY);
+        
+        // Helper: Extrude texture borders to prevent mipmap bleeding
+        void ExtrudeTextureBorders(int textureX, int textureY, 
+                                  int textureWidth, int textureHeight);
 
         // **NEW**: Animation helper methods
         bool ParseMcMetaFile(const std::string& mcmetaPath, TextureAnimation& animation);

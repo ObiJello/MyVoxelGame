@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <GLFW/glfw3.h>
+#include <glad/glad.h>
 
 namespace Debug {
 
@@ -103,41 +104,167 @@ namespace Debug {
         ImGui::Text("FPS: %.1f (Avg: %.2f ms)", metrics.GetFPS(), metrics.GetAverageFrameTime() * 1000.0f);
         ImGui::Text("Frame Time: %.2f ms", metrics.frameTime);
         
-        // Show detailed timing breakdown
+        // CPU Operations
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "=== CPU Operations ===");
         ImGui::Indent();
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "Network Processing: %.2f ms", metrics.networkProcessingTime);
-        ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "Mesh Results: %.2f ms", metrics.meshResultProcessingTime);
-        ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.7f, 1.0f), "Input Handling: %.2f ms", metrics.inputHandlingTime);
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.7f, 1.0f), "Game Logic: %.2f ms", metrics.gameLogicTime);
-        ImGui::TextColored(ImVec4(0.7f, 1.0f, 1.0f, 1.0f), "Mesh Scheduling: %.2f ms", metrics.meshSchedulingTime);
-        ImGui::TextColored(ImVec4(1.0f, 0.7f, 1.0f, 1.0f), "GPU Upload: %.2f ms", metrics.gpuUploadTime);
-        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.9f, 1.0f), "Rendering: %.2f ms", metrics.renderTime);
-        ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Debug UI: %.2f ms", metrics.debugUITime);
         
-        // Highlight VSync wait time - this is often the bottleneck
-        if (metrics.vsyncWaitTime > 5.0f) {
-            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "VSync Wait: %.2f ms ⚠", metrics.vsyncWaitTime);
-        } else {
-            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "VSync Wait: %.2f ms", metrics.vsyncWaitTime);
-        }
+        // Calculate percentages for better context
+        auto pct = [&metrics](float time) { 
+            return metrics.frameTime > 0 ? (time / metrics.frameTime * 100.0f) : 0.0f; 
+        };
         
-        // Show total accounted time vs actual frame time
-        float totalAccounted = metrics.networkProcessingTime + metrics.meshResultProcessingTime + 
-                              metrics.inputHandlingTime + metrics.gameLogicTime + 
-                              metrics.meshSchedulingTime + metrics.gpuUploadTime + 
-                              metrics.renderTime + metrics.debugUITime + metrics.vsyncWaitTime;
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Total Accounted: %.2f ms", totalAccounted);
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Unaccounted: %.2f ms", metrics.frameTime - totalAccounted);
+        ImGui::Text("Network Processing: %.2f ms (%.1f%%)", metrics.networkProcessingTime, pct(metrics.networkProcessingTime));
+        ImGui::Text("Input Handling: %.2f ms (%.1f%%)", metrics.inputHandlingTime, pct(metrics.inputHandlingTime));
+        ImGui::Text("Game Logic: %.2f ms (%.1f%%)", metrics.gameLogicTime, pct(metrics.gameLogicTime));
+        ImGui::Text("Mesh Results Processing: %.2f ms (%.1f%%)", metrics.meshResultProcessingTime, pct(metrics.meshResultProcessingTime));
+        ImGui::Text("Mesh Scheduling: %.2f ms (%.1f%%)", metrics.meshSchedulingTime, pct(metrics.meshSchedulingTime));
+        ImGui::Text("Texture Animation: %.2f ms (%.1f%%)", metrics.textureAnimationTime, pct(metrics.textureAnimationTime));
         ImGui::Unindent();
         
-        // Identify bottleneck
-        float maxTime = std::max({metrics.networkProcessingTime, metrics.meshResultProcessingTime, 
-                                  metrics.inputHandlingTime, metrics.gameLogicTime,
-                                  metrics.meshSchedulingTime, metrics.gpuUploadTime, 
-                                  metrics.renderTime, metrics.debugUITime});
-        if (maxTime > 5.0f) {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "⚠ Performance Bottleneck Detected!");
+        // GPU Operations
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.5f, 1.0f), "=== GPU Operations ===");
+        ImGui::Indent();
+        ImGui::Text("GPU Upload: %.2f ms (%.1f%%)", metrics.gpuUploadTime, pct(metrics.gpuUploadTime));
+        ImGui::Text("Rendering: %.2f ms (%.1f%%)", metrics.renderTime, pct(metrics.renderTime));
+        
+        // Collapsible render timing breakdown
+        if (ImGui::TreeNode("Render Breakdown")) {
+            // Get detailed render stats from ChunkRenderer
+            if (auto* renderStats = Render::GetChunkRendererStats()) {
+                ImGui::Indent();
+                
+                // === LOCK-FREE RENDERING STATUS ===
+                ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "🚀 Lock-free Rendering: ENABLED");
+                ImGui::Separator();
+                
+                // === BUILD PHASE (NEW SYSTEM) ===
+                ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.5f, 1.0f), "Build Draw Lists: %.2f ms", renderStats->buildDrawListsTimeMs);
+                if (ImGui::TreeNode("Build Phase Details")) {
+                    ImGui::Indent();
+                    ImGui::TextColored(ImVec4(0.7f, 0.7f, 1.0f, 1.0f), "Chunk Iteration: %.2f ms", 
+                                      renderStats->chunkIterationTimeMs);
+                    ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "GPU Data Load (atomic): %.2f ms", 
+                                      renderStats->gpuDataLoadTimeMs);
+                    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Frustum Culling: %.2f ms", 
+                                      renderStats->frustumCullingTimeMs);
+                    ImGui::TextColored(ImVec4(0.8f, 0.6f, 1.0f, 1.0f), "Sorting: %.2f ms", 
+                                      renderStats->sortingTimeMs);
+                    
+                    // Show sections info
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Sections Checked: %d", renderStats->sectionsAvailable);
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Sections Culled: %d", renderStats->sectionsSkipped);
+                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "Sections Rendered: %d", renderStats->sectionsRendered);
+                    ImGui::Unindent();
+                    ImGui::TreePop();
+                }
+                
+                ImGui::Spacing();
+                
+                // === RENDER PASSES ===
+                ImGui::TextColored(ImVec4(0.8f, 1.0f, 0.8f, 1.0f), "Opaque Pass: %.2f ms (%d sections)", 
+                                  renderStats->opaquePassTimeMs, renderStats->opaqueSections);
+                ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.8f, 1.0f), "Cutout Pass: %.2f ms (%d sections)", 
+                                  renderStats->cutoutPassTimeMs, renderStats->cutoutSections);
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 1.0f, 1.0f), "Translucent Pass: %.2f ms (%d sections)", 
+                                  renderStats->translucentPassTimeMs, renderStats->translucentSections);
+                
+                // Total draw calls are still tracked
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.8f, 1.0f), "Total Draw Calls: %d", 
+                                  renderStats->totalDrawCalls);
+                
+                ImGui::Spacing();
+                
+                // === SUMMARY ===
+                float renderPassesTotal = renderStats->opaquePassTimeMs + renderStats->cutoutPassTimeMs + 
+                                         renderStats->translucentPassTimeMs;
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Build + Render Passes: %.2f ms", 
+                                  renderStats->buildDrawListsTimeMs + renderPassesTotal);
+                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Total Render Time: %.2f ms", 
+                                  renderStats->renderTimeMs);
+                
+                // Highlight potential issues with NEW system
+                if (renderStats->gpuDataLoadTimeMs > 1.0f) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), 
+                                      "⚠ Atomic loads taking longer than expected!");
+                }
+                if (renderStats->buildDrawListsTimeMs > 10.0f) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), 
+                                      "⚠ Draw list building taking too long!");
+                }
+                
+                ImGui::Unindent();
+            } else {
+                ImGui::TextDisabled("Render stats not available");
+            }
+            ImGui::TreePop();
         }
+        ImGui::Unindent();
+        
+        // System Operations
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.7f, 1.0f, 0.7f, 1.0f), "=== System Operations ===");
+        ImGui::Indent();
+        ImGui::Text("Debug UI: %.2f ms (%.1f%%)", metrics.debugUITime, pct(metrics.debugUITime));
+        
+        // VSync with color coding
+        if (metrics.vsyncWaitTime > 10.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "VSync Wait: %.2f ms (%.1f%%) ⚠", 
+                              metrics.vsyncWaitTime, pct(metrics.vsyncWaitTime));
+        } else if (metrics.vsyncWaitTime > 5.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), "VSync Wait: %.2f ms (%.1f%%)", 
+                              metrics.vsyncWaitTime, pct(metrics.vsyncWaitTime));
+        } else {
+            ImGui::Text("VSync Wait: %.2f ms (%.1f%%)", metrics.vsyncWaitTime, pct(metrics.vsyncWaitTime));
+        }
+        
+        // Other/Unaccounted time
+        if (std::abs(metrics.otherTime) > 1.0f) {
+            ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.3f, 1.0f), "Other/Unaccounted: %.2f ms (%.1f%%)", 
+                              metrics.otherTime, pct(metrics.otherTime));
+        } else {
+            ImGui::Text("Other/Unaccounted: %.2f ms (%.1f%%)", metrics.otherTime, pct(metrics.otherTime));
+        }
+        ImGui::Unindent();
+        
+        // Performance Analysis
+        ImGui::Spacing();
+        ImGui::Separator();
+        
+        // Find the biggest time consumer
+        struct TimerInfo {
+            const char* name;
+            float time;
+            ImVec4 color;
+        };
+        
+        std::vector<TimerInfo> timers = {
+            {"Network", metrics.networkProcessingTime, ImVec4(0.5f, 0.8f, 1.0f, 1.0f)},
+            {"Input", metrics.inputHandlingTime, ImVec4(0.5f, 0.8f, 1.0f, 1.0f)},
+            {"Game Logic", metrics.gameLogicTime, ImVec4(0.5f, 0.8f, 1.0f, 1.0f)},
+            {"Mesh Results", metrics.meshResultProcessingTime, ImVec4(0.5f, 0.8f, 1.0f, 1.0f)},
+            {"Mesh Scheduling", metrics.meshSchedulingTime, ImVec4(0.5f, 0.8f, 1.0f, 1.0f)},
+            {"GPU Upload", metrics.gpuUploadTime, ImVec4(1.0f, 0.8f, 0.5f, 1.0f)},
+            {"Rendering", metrics.renderTime, ImVec4(1.0f, 0.8f, 0.5f, 1.0f)},
+            {"Debug UI", metrics.debugUITime, ImVec4(0.7f, 1.0f, 0.7f, 1.0f)},
+            {"VSync", metrics.vsyncWaitTime, ImVec4(0.7f, 1.0f, 0.7f, 1.0f)}
+        };
+        
+        // Find bottleneck
+        auto bottleneck = std::max_element(timers.begin(), timers.end(), 
+            [](const TimerInfo& a, const TimerInfo& b) { return a.time < b.time; });
+        
+        if (bottleneck != timers.end() && bottleneck->time > 10.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), 
+                              "⚠ BOTTLENECK: %s (%.2f ms / %.1f%%)", 
+                              bottleneck->name, bottleneck->time, pct(bottleneck->time));
+        } else if (bottleneck != timers.end() && bottleneck->time > 5.0f) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.3f, 1.0f), 
+                              "⚡ Slowest: %s (%.2f ms / %.1f%%)", 
+                              bottleneck->name, bottleneck->time, pct(bottleneck->time));
+        }
+        
         ImGui::Spacing();
 
         // Client-Server Architecture Stats
@@ -263,6 +390,47 @@ namespace Debug {
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Mipmaps improve texture quality at distance\nbut may cause slight blurring.\n\nEnabled: GL_NEAREST_MIPMAP_LINEAR\nDisabled: GL_NEAREST");
+        }
+
+        ImGui::Spacing();
+        
+        // Rendering Mode Toggle
+        ImGui::Separator();
+        ImGui::Text("Rendering Mode:");
+        static bool useMinecraftRendering = false;  // Start with classic (original) mode
+        if (ImGui::Checkbox("Minecraft-Style Rendering", &useMinecraftRendering)) {
+            ApplyRenderingMode(useMinecraftRendering);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(
+                "Toggle between rendering modes:\n\n"
+                "Minecraft-Style (NEW):\n"
+                "- GL_NEAREST_MIPMAP_LINEAR filtering\n"
+                "- Border extrusion to prevent bleeding\n"
+                "- GL_LEQUAL depth function\n"
+                "- Separate blend functions\n"
+                "- sRGB texture format (GL_SRGB8_ALPHA8)\n\n"
+                "Classic (OLD):\n"
+                "- GL_LINEAR_MIPMAP_LINEAR filtering\n"
+                "- Standard GL_LESS depth function\n"
+                "- Simple blend function\n"
+                "- Regular RGBA format"
+            );
+        }
+        
+        // Mipmap Level Slider (only active in Minecraft mode)
+        if (useMinecraftRendering && Render::g_atlasBuilder) {
+            int mipmapLevel = Render::g_atlasBuilder->GetMipmapLevel();
+            if (ImGui::SliderInt("Mipmap Level", &mipmapLevel, 0, 4)) {
+                Render::g_atlasBuilder->SetMipmapLevel(mipmapLevel);
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("0 = No mipmaps (crisp pixels)\n1-4 = Increasing mipmap levels (smoother at distance)");
+            }
         }
 
         ImGui::Spacing();
@@ -753,6 +921,22 @@ namespace Debug {
         ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "  Shift - Fly down");
         
         ImGui::End();
+    }
+    
+    void DebugSystem::ApplyRenderingMode(bool useMinecraftStyle) {
+        if (!Render::g_atlasBuilder) {
+            Log::Warning("Cannot apply rendering mode: AtlasBuilder not available");
+            return;
+        }
+        
+        GLuint atlasID = Render::g_atlasBuilder->GetAtlasTextureID();
+        if (atlasID == 0) {
+            Log::Warning("Cannot apply rendering mode: Atlas texture not created");
+            return;
+        }
+        
+        // Rebuild the atlas with the appropriate settings
+        Render::g_atlasBuilder->RebuildAtlas(useMinecraftStyle);
     }
 
 #else // NDEBUG - Release builds

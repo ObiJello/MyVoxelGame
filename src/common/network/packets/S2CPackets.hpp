@@ -57,54 +57,6 @@ namespace Packets {
     };
 
     // ========================================================================
-    // LEGACY SERVER CHUNK DATA PACKET
-    // ========================================================================
-    
-    class ServerChunkDataPacketImpl : public IS2CPacket {
-    private:
-        ServerChunkDataPacket m_data;
-        std::chrono::steady_clock::time_point m_timestamp;
-        
-    public:
-        explicit ServerChunkDataPacketImpl(ServerChunkDataPacket data)
-            : m_data(std::move(data))
-            , m_timestamp(std::chrono::steady_clock::now()) {}
-        
-        void apply(IPacketListener& listener) override {
-            listener.onServerChunkData(m_data);
-        }
-        
-        const ServerChunkDataPacket& getData() const { return m_data; }
-        
-        PacketId getId() const override { return PacketId::ServerChunkData; }
-        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
-    };
-
-    // ========================================================================
-    // LEGACY SERVER CHUNK UNLOAD PACKET
-    // ========================================================================
-    
-    class ServerChunkUnloadPacketImpl : public IS2CPacket {
-    private:
-        ServerChunkUnloadPacket m_data;
-        std::chrono::steady_clock::time_point m_timestamp;
-        
-    public:
-        explicit ServerChunkUnloadPacketImpl(ServerChunkUnloadPacket data)
-            : m_data(std::move(data))
-            , m_timestamp(std::chrono::steady_clock::now()) {}
-        
-        void apply(IPacketListener& listener) override {
-            listener.onServerChunkUnload(m_data);
-        }
-        
-        const ServerChunkUnloadPacket& getData() const { return m_data; }
-        
-        PacketId getId() const override { return PacketId::ServerChunkUnload; }
-        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
-    };
-
-    // ========================================================================
     // BLOCK CHANGE PACKET
     // ========================================================================
     
