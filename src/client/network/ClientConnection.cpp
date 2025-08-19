@@ -17,12 +17,6 @@ namespace Client {
             [this](const std::vector<uint8_t>& p) { HandleLoginSuccess(p); });
         m_packetRegistry.RegisterHandler(PacketId::Disconnect,
             [this](const std::vector<uint8_t>& p) { HandleDisconnect(p); });
-        // Legacy chunk handlers - disabled in favor of new typed packet system
-        // Keep for reference in case we need to revert
-        // m_packetRegistry.RegisterHandler(PacketId::ServerChunkData,
-        //     [this](const std::vector<uint8_t>& p) { HandleChunkData(p); });
-        // m_packetRegistry.RegisterHandler(PacketId::ServerChunkUnload,
-        //     [this](const std::vector<uint8_t>& p) { HandleChunkUnload(p); });
         m_packetRegistry.RegisterHandler(PacketId::BlockChangeS2C,
             [this](const std::vector<uint8_t>& p) { HandleBlockChange(p); });
         m_packetRegistry.RegisterHandler(PacketId::ChatMessageS2C,
@@ -176,37 +170,6 @@ namespace Client {
         }
     }
 
-    void ClientConnection::HandleChunkData(const std::vector<uint8_t>& payload) {
-        // LEGACY: Disabled in favor of new typed packet system (ChunkDataS2C)
-        // This handler was for the old ServerChunkData packets
-        // Keep for reference in case we need to revert
-        /*
-        auto packet = Network::Serialization::DeserializeServerChunkData(payload);
-        
-        // Forward directly to ClientChunkManager
-        if (Client::g_clientChunkManager) {
-            Client::g_clientChunkManager->ProcessChunkLoadPacket(packet);
-        }
-        */
-    }
-
-    void ClientConnection::HandleChunkUnload(const std::vector<uint8_t>& payload) {
-        // LEGACY: Disabled in favor of new typed packet system (UnloadChunkS2C)
-        // This handler was for the old ServerChunkUnload packets
-        // Keep for reference in case we need to revert
-        /*
-        auto packet = Network::Serialization::DeserializeServerChunkUnload(payload);
-        
-        Log::Debug("[ClientConnection] Chunk unload at (%d, %d)", 
-            packet.position.x, packet.position.z);
-        
-        // Forward directly to ClientChunkManager
-        if (Client::g_clientChunkManager) {
-            Client::g_clientChunkManager->ProcessChunkUnloadPacket(packet);
-        }
-        */
-    }
-
     void ClientConnection::HandleBlockChange(const std::vector<uint8_t>& payload) {
         auto packet = Network::Serialization::DeserializeBlockChangeS2C(payload);
         
@@ -239,15 +202,6 @@ namespace Client {
         Log::Debug("[ClientConnection] Time update: age=%lu, time=%lu", 
             m_worldAge, m_timeOfDay);
     }
-
-    // LEGACY: Now handled through typed packet system (KeepAliveS2CPacketImpl)
-    // void ClientConnection::HandleKeepAlive(const std::vector<uint8_t>& payload) {
-    //     Network::PacketReader reader(payload);
-    //     uint64_t id = reader.ReadLong();
-    //     
-    //     // Send response immediately
-    //     SendKeepAliveResponse(id);
-    // }
 
     void ClientConnection::HandlePlayerAbilities(const std::vector<uint8_t>& payload) {
         Network::PacketReader reader(payload);

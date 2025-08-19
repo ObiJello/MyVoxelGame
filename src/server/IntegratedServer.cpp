@@ -503,7 +503,7 @@ namespace Server {
         int resultsProcessed = 0;
         
         Network::ChunkGenResult result;
-        while (resultsProcessed < maxResultsPerTick && resultQueue.TryDequeue(result)) {
+        while (resultsProcessed < maxResultsPerTick && resultQueue.try_pop(result)) {
             // Check if chunk is still in pending list
             if (m_pendingChunkLoads.find(result.position) != m_pendingChunkLoads.end()) {
                 if (result.success && result.chunk) {

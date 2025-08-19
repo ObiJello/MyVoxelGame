@@ -211,13 +211,6 @@ namespace Network {
             size_t translucentVertexCount = 0;
             size_t translucentIndexCount = 0;
             
-            // Legacy fields for backward compatibility - TODO: Remove these
-            std::vector<float> vertices; // Deprecated - use layer-specific vertices
-            std::vector<uint32_t> indices; // Deprecated - use layer-specific indices
-            size_t vertexCount = 0; // Deprecated
-            size_t indexCount = 0; // Deprecated
-            bool hasTransparentGeometry = false; // Deprecated
-            
             // Check if any layer has geometry
             bool IsEmpty() const {
                 return opaqueVertices.empty() && cutoutVertices.empty() && translucentVertices.empty();

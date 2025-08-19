@@ -576,7 +576,6 @@ namespace PlatformMain {
             Render::PerformClientGPUUploads();
             if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads COMPLETE");
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
-            metrics.meshUploadTime = metrics.gpuUploadTime;  // Legacy compatibility
 
             // 8. Update texture animations
             PROFILE_TIMER_START(texanim);

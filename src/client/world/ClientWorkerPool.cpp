@@ -337,8 +337,8 @@ namespace Threading {
             
             if (result.success) {
                 m_stats.sectionsBuilt.fetch_add(1, std::memory_order_relaxed);
-                m_stats.verticesGenerated.fetch_add(result.meshData.vertexCount, std::memory_order_relaxed);
-                m_stats.indicesGenerated.fetch_add(result.meshData.indexCount, std::memory_order_relaxed);
+                m_stats.verticesGenerated.fetch_add(result.meshData.GetTotalVertexCount(), std::memory_order_relaxed);
+                m_stats.indicesGenerated.fetch_add(result.meshData.GetTotalIndexCount(), std::memory_order_relaxed);
             }
         }
         catch (const std::exception& e) {
@@ -482,7 +482,7 @@ namespace Threading {
 
     void ClientWorkerPool::SendMeshResult(Network::MeshBuildResult&& result) {
         // Send to MeshResultQueue for client render thread consumption
-        Render::ClientMeshManager::GetMeshResultQueue().Enqueue(std::move(result));
+        Render::ClientMeshManager::GetMeshResultQueue().try_push(std::move(result));
         Render::ClientMeshManager::GetMeshResultQueue().IncrementProcessed();
     }
 
@@ -568,24 +568,6 @@ namespace Threading {
             result.meshData.translucentIndices = sectionMesh.translucentIdxs;
             result.meshData.translucentVertexCount = sectionMesh.translucentVerts.size();
             result.meshData.translucentIndexCount = sectionMesh.translucentIdxs.size();
-        }
-        
-        // Legacy compatibility - use opaque data as default
-        if (!result.meshData.opaqueVertices.empty()) {
-            result.meshData.vertices = result.meshData.opaqueVertices;
-            result.meshData.indices = result.meshData.opaqueIndices;
-            result.meshData.vertexCount = result.meshData.opaqueVertexCount;
-            result.meshData.indexCount = result.meshData.opaqueIndexCount;
-        } else if (!result.meshData.cutoutVertices.empty()) {
-            result.meshData.vertices = result.meshData.cutoutVertices;
-            result.meshData.indices = result.meshData.cutoutIndices;
-            result.meshData.vertexCount = result.meshData.cutoutVertexCount;
-            result.meshData.indexCount = result.meshData.cutoutIndexCount;
-        } else if (!result.meshData.translucentVertices.empty()) {
-            result.meshData.vertices = result.meshData.translucentVertices;
-            result.meshData.indices = result.meshData.translucentIndices;
-            result.meshData.vertexCount = result.meshData.translucentVertexCount;
-            result.meshData.indexCount = result.meshData.translucentIndexCount;
         }
         
         return result;

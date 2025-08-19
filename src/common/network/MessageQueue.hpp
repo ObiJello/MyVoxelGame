@@ -75,19 +75,6 @@ namespace Network {
             return true;
         }
 
-        // Legacy methods for backward compatibility
-        void Enqueue(T&& message) {
-            try_push(std::move(message));
-        }
-
-        void Enqueue(const T& message) {
-            try_push(message);
-        }
-
-        bool TryDequeue(T& message) {
-            return try_pop(message);
-        }
-
         // Dequeue a message (blocking with timeout)
         bool DequeueWait(T& message, std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
             std::unique_lock<std::mutex> lock(m_mutex);

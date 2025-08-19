@@ -80,12 +80,6 @@ namespace Render {
         // MESH SCHEDULING
         // ========================================================================
 
-        // Schedule mesh build for specific chunk section
-        void ScheduleSectionMeshBuild(::Game::Math::ChunkPos chunkPos, int sectionY, float priority);
-
-        // Schedule mesh builds for entire chunk
-        void ScheduleChunkMeshBuilds(::Game::Math::ChunkPos chunkPos);
-
         // Cancel mesh jobs for chunk (when unloading)
         void CancelMeshJobs(::Game::Math::ChunkPos chunkPos);
 
@@ -282,7 +276,6 @@ namespace Render {
     void SetClientMeshPlayerPosition(const glm::vec3& position);
 
     // Mesh scheduling
-    void ScheduleClientChunkMeshBuilds(::Game::Math::ChunkPos chunkPos);
     void CancelClientMeshJobs(::Game::Math::ChunkPos chunkPos);
 
 

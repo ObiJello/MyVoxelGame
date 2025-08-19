@@ -428,11 +428,6 @@ namespace Render {
         m_stats.totalIndicesRendered += indexCount;
     }
 
-    void ChunkRenderer::PerformFrustumCulling(const Frustum& frustum, std::vector<SectionRenderData>& sections) {
-        // This function is now deprecated - frustum culling is performed earlier in PrepareVisibleSections
-        // Kept for compatibility but does nothing as sections are already culled
-    }
-
     void ChunkRenderer::SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack) {
         auto startTime = std::chrono::high_resolution_clock::now();
 

@@ -160,7 +160,6 @@ namespace Render {
         
         // Section preparation and culling
         void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
-        void PerformFrustumCulling(const Frustum& frustum, std::vector<SectionRenderData>& sections);
         void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
         
         // Render helpers

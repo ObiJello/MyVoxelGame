@@ -398,7 +398,7 @@ namespace Threading {
         }
 
         // Send to ChunkGenResultQueue for server thread consumption
-        s_chunkGenResultQueue.Enqueue(std::move(result));
+        s_chunkGenResultQueue.try_push(std::move(result));
     }
     
     Network::ResultQueue<Network::ChunkGenResult>& ServerWorkerPool::GetChunkGenResultQueue() {

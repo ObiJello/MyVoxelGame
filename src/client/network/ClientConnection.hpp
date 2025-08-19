@@ -82,12 +82,6 @@ namespace Client {
         // Handle disconnect
         void HandleDisconnect(const std::vector<uint8_t>& payload);
         
-        // Handle chunk data
-        void HandleChunkData(const std::vector<uint8_t>& payload);
-        
-        // Handle chunk unload
-        void HandleChunkUnload(const std::vector<uint8_t>& payload);
-        
         // Handle block change
         void HandleBlockChange(const std::vector<uint8_t>& payload);
         
@@ -96,9 +90,6 @@ namespace Client {
         
         // Handle time update
         void HandleTimeUpdate(const std::vector<uint8_t>& payload);
-        
-        // Handle keep-alive
-        void HandleKeepAlive(const std::vector<uint8_t>& payload);
         
         // Handle player abilities
         void HandlePlayerAbilities(const std::vector<uint8_t>& payload);

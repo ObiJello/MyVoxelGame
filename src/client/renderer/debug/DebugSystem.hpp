@@ -31,8 +31,6 @@ namespace Debug {
         float textureAnimationTime = 0.0f;  // Time spent updating animated textures
         float otherTime = 0.0f;  // Unaccounted time (gaps between measurements)
         
-        // Legacy fields (kept for compatibility)
-        float meshUploadTime = 0.0f;  // Same as gpuUploadTime
         int meshesUploadedThisFrame = 0;
         int meshesRenderedThisFrame = 0;
         size_t totalVerticesRendered = 0;

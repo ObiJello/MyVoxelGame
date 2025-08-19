@@ -184,40 +184,6 @@ namespace Render {
     // MESH SCHEDULING
     // ========================================================================
 
-    void ClientMeshManager::ScheduleSectionMeshBuild(::Game::Math::ChunkPos chunkPos, int sectionY, float priority) {
-        // DEPRECATED: This function uses the unsafe legacy path without snapshots
-        // Instead, mark the section as dirty and let the main scheduling loop handle it
-        if (!m_chunkManager) return;
-        
-        auto* chunk = m_chunkManager->GetChunk(chunkPos);
-        if (!chunk || !chunk->chunkData) {
-            return;
-        }
-        
-        // Mark section as dirty instead of direct submission
-        m_chunkManager->MarkSectionDirty(chunkPos, sectionY);
-        
-        Log::Debug("Marked section %d of chunk (%d, %d) as dirty for mesh rebuild",
-                  sectionY, chunkPos.x, chunkPos.z);
-    }
-
-    void ClientMeshManager::ScheduleChunkMeshBuilds(::Game::Math::ChunkPos chunkPos) {
-        // DEPRECATED: This function uses the unsafe legacy path without snapshots
-        // Instead, mark all sections as dirty and let the main scheduling loop handle it
-        if (!m_chunkManager) return;
-        
-        auto* chunk = m_chunkManager->GetChunk(chunkPos);
-        if (!chunk || chunk->state != Client::ChunkState::LOADED) {
-            return;
-        }
-        
-        // Mark all sections as dirty instead of direct submission
-        m_chunkManager->MarkChunkDirty(chunkPos);
-        
-        Log::Debug("Marked all sections of chunk (%d, %d) as dirty for mesh rebuild",
-                  chunkPos.x, chunkPos.z);
-    }
-
     void ClientMeshManager::CancelMeshJobs(::Game::Math::ChunkPos chunkPos) {
         Threading::CancelClientMeshJob(chunkPos);
         m_stats.meshBuildsCancelled.fetch_add(1, std::memory_order_relaxed);
@@ -280,7 +246,10 @@ namespace Render {
 
     void ClientMeshManager::ForceMeshRebuild(::Game::Math::ChunkPos chunkPos) {
         CancelMeshJobs(chunkPos);
-        ScheduleChunkMeshBuilds(chunkPos);
+        // Mark all sections as dirty instead of direct scheduling
+        if (m_chunkManager) {
+            m_chunkManager->MarkChunkDirty(chunkPos);
+        }
         LogMeshActivity("Forced mesh rebuild", chunkPos);
     }
 
@@ -805,11 +774,6 @@ namespace Render {
         }
     }
 
-    void ScheduleClientChunkMeshBuilds(::Game::Math::ChunkPos chunkPos) {
-        if (g_clientMeshManager) {
-            g_clientMeshManager->ScheduleChunkMeshBuilds(chunkPos);
-        }
-    }
 
     void CancelClientMeshJobs(::Game::Math::ChunkPos chunkPos) {
         if (g_clientMeshManager) {
