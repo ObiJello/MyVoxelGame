@@ -1,0 +1,11 @@
+{
+  "name": "protocol-gen",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "minecraft-data": "^3.66.0"
+  },
+  "scripts": {
+    "gen:states": "node generate_block_states.js"
+  }
+}
