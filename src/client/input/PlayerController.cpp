@@ -2,6 +2,9 @@
 #include "PlayerController.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
+#include "common/network/PacketTypes.hpp"
+#include "../network/NetworkClient.hpp"
+#include "../network/ClientConnection.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "common/core/Log.hpp"
@@ -10,54 +13,42 @@
 
 namespace Game {
 
-    PlayerController::PlayerController()
-        : isBreaking(false)
+    ClientPlayerController::ClientPlayerController()
+        : player(nullptr)
+        , world(nullptr)
+        , networkClient(nullptr)
+        , isBreaking(false)
         , breakButtonHeld(false)
         , breakProgress(0.0f)
         , breakingBlockPos(0)
         , placeButtonHeld(false)
         , placeCooldownTimer(0.0f)
-        , world(nullptr) // Will be set later
+        , rightClickDelayTimer(0.0f)
+        , lastMoveSend(std::chrono::steady_clock::now())
     {
-        // Initialize inventory with default blocks
-        inventory.InitializeDefaults();
-
-        // Initialize physics at a safe spawn position
-        physics.position = glm::vec3(0.0f, 67.0f, 0.0f);
-        physics.velocity = glm::vec3(0.0f);
-        physics.isOnGround = false;
-        physics.isSneaking = false;
-        physics.isSprinting = false;
-        physics.noclip = false;
-
-        lastPosition = physics.position;
-
-        Log::Info("PlayerController initialized with physics system");
+        Log::Info("ClientPlayerController initialized");
     }
 
-    void PlayerController::SetWorld(World* worldPtr) {
+    void ClientPlayerController::SetPlayer(ClientPlayer* playerPtr) {
+        player = playerPtr;
+        Log::Debug("ClientPlayerController player reference set");
+    }
+
+    void ClientPlayerController::SetWorld(World* worldPtr) {
         world = worldPtr;
-        Log::Debug("PlayerController world reference set");
+        Log::Debug("ClientPlayerController world reference set");
+    }
+    
+    void ClientPlayerController::SetNetworkClient(Client::NetworkClient* netClient) {
+        networkClient = netClient;
+        Log::Debug("ClientPlayerController network client reference set");
     }
 
-    void PlayerController::Update(float deltaTime, Render::Camera& camera) {
-        // Update physics state based on input
-        physics.isSneaking = sneakPressed;
-        physics.isSprinting = sprintPressed && !sneakPressed;
-
-        // Update physics simulation
-        UpdatePhysics(deltaTime);
-
-        // Update camera position to follow player
-        UpdateCamera(camera);
-
-        // Update mesh system with player position
-        if (Render::g_clientMeshManager) {
-            Render::g_clientMeshManager->SetPlayerPosition(physics.position);
+    void ClientPlayerController::Tick(float deltaTime) {
+        if (!player) {
+            Log::Warning("ClientPlayerController::Tick called without player reference");
+            return;
         }
-
-        // Update raycast from camera position
-        UpdateRaycast(camera);
 
         // Update breaking progress
         UpdateBreaking(deltaTime);
@@ -66,67 +57,149 @@ namespace Game {
         if (placeCooldownTimer > 0.0f) {
             placeCooldownTimer -= deltaTime;
         }
-
-        // Try to place block if button is held and cooldown expired
-        if (placeButtonHeld && placeCooldownTimer <= 0.0f) {
-            TryPlaceBlock();
+        
+        // Update right click delay timer (Minecraft-style rate limiting)
+        if (rightClickDelayTimer > 0.0f) {
+            rightClickDelayTimer -= deltaTime;
         }
 
-        // Update statistics
-        stats.totalPlayTime += deltaTime;
+        // NOTE: Block placement now only happens via network packets
+        // The server will send back block changes that update the world
 
-        // Calculate distance
-        float distanceThisFrame = glm::length(physics.position - lastPosition);
-        stats.totalDistanceTraveled += distanceThisFrame;
-        lastPosition = physics.position;
+        // Send movement packets if due (TODO: Implement for networking)
+        SendMovementIfDue();
     }
 
-    void PlayerController::UpdatePhysics(float deltaTime) {
-        // Create physics context with world block access
-        PhysicsContext context;
-        context.blockAccess = world; // World implements IBlockAccess
-
-        // Apply physics simulation with context
-        UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime, context);
-
-        // Reset single-frame inputs
-        jumpPressed = false;
+    void ClientPlayerController::SendMovementIfDue() {
+        // TODO: Implement network movement sending at 20Hz (50ms intervals)
+        // This would check if 50ms have passed since lastMoveSend
+        // and send a movement packet with player->predictedPos, yaw, pitch
+        
+        // auto now = std::chrono::steady_clock::now();
+        // auto timeSinceLastSend = std::chrono::duration_cast<std::chrono::milliseconds>
+        //                          (now - lastMoveSend);
+        // if (timeSinceLastSend.count() >= 50) {
+        //     // Send movement packet
+        //     // net->SendPlayerMove(player->predictedPos, player->yaw, player->pitch, 
+        //     //                     player->physics.isOnGround, ++moveSeq);
+        //     lastMoveSend = now;
+        // }
     }
 
-    void PlayerController::UpdateCamera(Render::Camera& camera) {
-        // Set camera position to player's eye position
-        camera.position = physics.GetEyePosition();
-
-        // If noclip is enabled, allow free camera movement
-        if (physics.noclip) {
-            // In noclip mode, camera position might be set independently
-            // Store camera position back to physics for consistency
-            physics.position = camera.position - glm::vec3(0.0f, physics.EYE_HEIGHT_STANDING, 0.0f);
-        }
+    void ClientPlayerController::StartDig(const glm::ivec3& pos, int face) {
+        // TODO: Send start dig packet to server
+        // For now, just start the local breaking animation
+        isBreaking = true;
+        breakProgress = 0.0f;
+        breakingBlockPos = pos;
+        
+        Log::Debug("Started breaking block at (%d, %d, %d)",
+                  breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+        
+        // TODO: Send packet
+        // net->SendBlockDig(START_DESTROY_BLOCK, pos, face, ++interactSeq);
     }
 
-    void PlayerController::UpdateRaycast(const Render::Camera& camera) {
-        // Calculate ray direction from camera
-        glm::vec3 front;
-        front.x = cos(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
-        front.y = sin(glm::radians(camera.pitch));
-        front.z = sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
-        front = glm::normalize(front);
-
-        // Cast ray from camera position (player's eyes)
-        currentHit = Raycast::CastRay(camera.position, front, INTERACTION_RANGE);
-
-        // If we're breaking a block but lost sight of it, cancel breaking
-        if (isBreaking && (!currentHit.has_value() ||
-            currentHit->blockPos != breakingBlockPos)) {
+    void ClientPlayerController::AbortDig() {
+        if (isBreaking) {
+            // TODO: Send abort dig packet to server
+            // net->SendBlockDig(ABORT_DESTROY_BLOCK, breakingBlockPos, 0, ++interactSeq);
+            
             isBreaking = false;
             breakProgress = 0.0f;
-            Log::Debug("Breaking cancelled - block out of sight");
+            Log::Debug("Breaking cancelled");
         }
     }
 
-    void PlayerController::UpdateBreaking(float deltaTime) {
-        if (!isBreaking || !breakButtonHeld) {
+    void ClientPlayerController::FinishDig() {
+        // TODO: Send finish dig packet to server
+        // net->SendBlockDig(STOP_DESTROY_BLOCK, breakingBlockPos, 0, ++interactSeq);
+        
+        // For now, handle locally (single-player)
+        FinishBreaking();
+    }
+
+    void ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand) {
+        // Build and send BlockPlaceC2S packet (Minecraft-compatible)
+        Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d", 
+                  hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand);
+        
+        if (!networkClient) {
+            Log::Debug("SendUseItemOn: networkClient is null - not set on controller");
+            return;
+        }
+        
+        if (!networkClient->IsConnected()) {
+            Log::Debug("SendUseItemOn: networkClient not connected to server");
+            return;
+        }
+        
+        Log::Debug("SendUseItemOn: Building BlockPlaceC2S packet...");
+        
+        // Convert hit face to Minecraft direction format
+        // Our format: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+        // MC format: 0=bottom(-Y), 1=top(+Y), 2=north(-Z), 3=south(+Z), 4=west(-X), 5=east(+X)
+        uint32_t direction = 0;
+        switch (hit.hitFace) {
+            case 0: direction = 5; break;  // +X -> east
+            case 1: direction = 4; break;  // -X -> west
+            case 2: direction = 1; break;  // +Y -> top
+            case 3: direction = 0; break;  // -Y -> bottom
+            case 4: direction = 3; break;  // +Z -> south
+            case 5: direction = 2; break;  // -Z -> north
+        }
+        
+        // Build the packet
+        Network::UseItemOnC2SPacket packet(
+            hand,                    // Hand (0=main, 1=off)
+            hit.blockPos.x,         // Block X
+            hit.blockPos.y,         // Block Y
+            hit.blockPos.z,         // Block Z
+            direction,              // Face direction
+            hit.cursorPos.x,        // Cursor X [0,1)
+            hit.cursorPos.y,        // Cursor Y [0,1)
+            hit.cursorPos.z,        // Cursor Z [0,1)
+            hit.insideBlock,        // Inside block flag
+            ++interactSeq           // Sequence number
+        );
+        
+        // Serialize and send
+        auto data = Network::Serialization::Serialize(packet);
+        auto connection = networkClient->GetConnection();
+        if (connection) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UseItemOnC2S), data);
+            Log::Debug("Sent UseItemOnC2S: pos(%d,%d,%d) face=%d cursor=(%.2f,%.2f,%.2f) seq=%d",
+                      hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, direction,
+                      hit.cursorPos.x, hit.cursorPos.y, hit.cursorPos.z, interactSeq);
+        }
+    }
+
+    void ClientPlayerController::SendUseItem(int hand) {
+        // TODO: Implement UseItem packet for using items in air
+        // This would send a packet for eating food, using bow, shield, etc.
+        // When entity system exists, also check for entity interactions
+        
+        if (!networkClient || !networkClient->IsConnected()) {
+            return;
+        }
+        
+        // Future implementation:
+        // Network::UseItemC2SPacket packet(hand, ++interactSeq);
+        // auto data = Network::Serialization::Serialize(packet);
+        // networkClient->GetConnection()->SendPacket(PacketId::UseItemC2S, data);
+        
+        Log::Debug("TODO: SendUseItem not yet implemented (hand=%d)", hand);
+    }
+
+    void ClientPlayerController::UpdateBreaking(float deltaTime) {
+        if (!isBreaking || !breakButtonHeld || !player) {
+            return;
+        }
+
+        // Check if we still have sight of the breaking block
+        const auto& currentHit = player->lastBlockHit;
+        if (!currentHit.has_value() || currentHit->blockPos != breakingBlockPos) {
+            AbortDig();
             return;
         }
 
@@ -135,74 +208,90 @@ namespace Game {
 
         // Check if block is broken
         if (breakProgress >= 1.0f) {
-            FinishBreaking();
+            FinishDig();
         }
     }
 
-    void PlayerController::SetMovementInput(const glm::vec3& movement) {
-        movementInput = movement;
+    void ClientPlayerController::OnHotbarChanged(int slot) {
+        if (!player) return;
+        
+        player->SelectSlot(slot);
+        
+        // TODO: Send held item change packet
+        // net->SendHeldItemSlot(slot);
     }
 
-    void PlayerController::SetJumpPressed(bool pressed) {
-        if (pressed && !jumpPressed) {
-            jumpPressed = true; // Only register the press edge
+    void ClientPlayerController::OnRespawnRequest() {
+        // TODO: Implement respawn request for multiplayer
+        // This would send a client command packet to respawn
+        // net->SendClientCommand(RESPAWN);
+        
+        Log::Debug("Respawn request (TODO: Implement for multiplayer)");
+    }
+
+    void ClientPlayerController::OnLMB(bool pressed) {
+        if (!player) return;
+        
+        if (pressed) {
+            breakButtonHeld = true;
+            
+            const auto& currentHit = player->lastBlockHit;
+            if (currentHit.has_value() && !isBreaking) {
+                StartDig(currentHit->blockPos, currentHit->hitFace);
+            }
+        } else {
+            breakButtonHeld = false;
+            
+            if (isBreaking) {
+                AbortDig();
+            }
         }
     }
 
-    void PlayerController::SetSprintPressed(bool pressed) {
-        sprintPressed = pressed;
-    }
-
-    void PlayerController::SetSneakPressed(bool pressed) {
-        sneakPressed = pressed;
-    }
-
-    void PlayerController::OnBreakPressed() {
-        breakButtonHeld = true;
-
-        if (currentHit.has_value() && !isBreaking) {
-            isBreaking = true;
-            breakProgress = 0.0f;
-            breakingBlockPos = currentHit->blockPos;
-
-            Log::Debug("Started breaking block at (%d, %d, %d)",
-                      breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+    void ClientPlayerController::OnRMB(bool pressed) {
+        if (!player) return;
+        
+        if (pressed) {
+            Log::Debug("OnRMB pressed, rightClickDelayTimer=%.3f", rightClickDelayTimer);
+            
+            // Check if we should process this click (rate limiting)
+            if (rightClickDelayTimer <= 0.0f) {
+                const auto& currentHit = player->lastBlockHit;
+                
+                // TODO: Check for entity hit first when entity system exists
+                // if (player->lastEntityHit.has_value()) {
+                //     SendUseEntity(*player->lastEntityHit, 0);  // Interact with entity
+                //     rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                // } else
+                if (currentHit.has_value()) {
+                    // Hit a block - send UseItemOn packet ONLY
+                    SendUseItemOn(*currentHit, 0);  // 0 = main hand
+                    // DO NOT place blocks locally - wait for server response
+                    rightClickDelayTimer = RIGHT_CLICK_DELAY;  // Set delay to prevent spam
+                } else {
+                    // No hit - use item in air
+                    SendUseItem(0);  // 0 = main hand
+                    rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                }
+            }
+            placeButtonHeld = true;
+        } else {
+            placeButtonHeld = false;
         }
     }
 
-    void PlayerController::OnBreakReleased() {
-        breakButtonHeld = false;
-
-        if (isBreaking) {
-            isBreaking = false;
-            breakProgress = 0.0f;
-            Log::Debug("Breaking cancelled - button released");
-        }
-    }
-
-    void PlayerController::OnPlacePressed() {
-        placeButtonHeld = true;
-
-        if (placeCooldownTimer <= 0.0f) {
-            TryPlaceBlock();
-        }
-    }
-
-    void PlayerController::OnPlaceReleased() {
-        placeButtonHeld = false;
-    }
-
-    void PlayerController::TryPlaceBlock() {
-        if (!world) {
-            Log::Warning("Cannot place block - no world reference");
+    void ClientPlayerController::TryPlaceBlock() {
+        if (!world || !player) {
+            Log::Warning("Cannot place block - missing references");
             return;
         }
 
+        const auto& currentHit = player->lastBlockHit;
         if (!currentHit.has_value()) {
             return;
         }
 
-        BlockID selectedBlock = inventory.GetSelectedBlock();
+        BlockID selectedBlock = player->GetSelectedBlock();
         if (selectedBlock == BlockID::Air) {
             return;
         }
@@ -218,12 +307,12 @@ namespace Game {
             glm::vec3(1.0f)
         );
 
-        if (physics.GetAABB().Intersects(blockAABB)) {
+        if (player->physics.GetAABB().Intersects(blockAABB)) {
             Log::Debug("Cannot place block - would intersect with player");
             return;
         }
 
-        if (!inventory.ConsumeSelectedBlock()) {
+        if (!player->inventory.ConsumeSelectedBlock()) {
             Log::Debug("Cannot place block - none left in inventory");
             return;
         }
@@ -237,8 +326,8 @@ namespace Game {
         }
 
         if (placementSuccessful) {
-            stats.blocksPlaced++;
-            stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
+            player->stats.blocksPlaced++;
+            player->stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
             placeCooldownTimer = PLACE_COOLDOWN;
 
             // **NEW**: Mark surrounding sections for remeshing
@@ -248,18 +337,19 @@ namespace Game {
             Log::Info("Placed %s at (%d, %d, %d)",
                      block.name.c_str(), placePos.x, placePos.y, placePos.z);
         } else {
-            inventory.AddBlocks(selectedBlock, 1);
+            player->inventory.AddBlocks(selectedBlock, 1);
             Log::Warning("Failed to place block at (%d, %d, %d)",
                         placePos.x, placePos.y, placePos.z);
         }
     }
 
-    void PlayerController::FinishBreaking() {
-        if (!world) {
-            Log::Warning("Cannot break block - no world reference");
+    void ClientPlayerController::FinishBreaking() {
+        if (!world || !player) {
+            Log::Warning("Cannot break block - missing references");
             return;
         }
 
+        const auto& currentHit = player->lastBlockHit;
         if (!currentHit.has_value()) {
             return;
         }
@@ -297,15 +387,15 @@ namespace Game {
         }
 
         if (breakingSuccessful) {
-            int remaining = inventory.AddBlocks(brokenBlock, 1);
+            int remaining = player->inventory.AddBlocks(brokenBlock, 1);
 
             if (remaining > 0) {
                 Log::Warning("Inventory full - dropped %d %s",
                            remaining, BlockRegistry::Get(brokenBlock).name.c_str());
             }
 
-            stats.blocksBroken++;
-            stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
+            player->stats.blocksBroken++;
+            player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
 
             // **NEW**: Mark surrounding sections for remeshing
             MarkSurroundingSectionsForRemesh(breakingBlockPos);
@@ -323,7 +413,7 @@ namespace Game {
         breakProgress = 0.0f;
     }
 
-    bool PlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
+    bool ClientPlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {
         if (!world) {
             return false;
         }
@@ -347,39 +437,8 @@ namespace Game {
         return true;
     }
 
-    void PlayerController::SelectSlot(int slot) {
-        inventory.SetSelectedSlot(slot);
-    }
 
-    void PlayerController::SelectNextSlot() {
-        inventory.SelectNextSlot();
-    }
-
-    void PlayerController::SelectPreviousSlot() {
-        inventory.SelectPreviousSlot();
-    }
-
-    void PlayerController::ToggleNoclip() {
-        physics.noclip = !physics.noclip;
-        Log::Info("Noclip %s", physics.noclip ? "enabled" : "disabled");
-
-        if (physics.noclip) {
-            physics.velocity = glm::vec3(0.0f);
-            physics.isOnGround = false;
-        }
-    }
-
-    void PlayerController::SetNoclip(bool enabled) {
-        physics.noclip = enabled;
-        Log::Info("Noclip %s", physics.noclip ? "enabled" : "disabled");
-
-        if (physics.noclip) {
-            physics.velocity = glm::vec3(0.0f);
-            physics.isOnGround = false;
-        }
-    }
-
-    BlockID PlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
+    BlockID ClientPlayerController::GetBreakingBlockType(const glm::ivec3& pos) {
         if (!world) {
             return BlockID::Air;
         }
@@ -392,7 +451,7 @@ namespace Game {
         }
     }
 
-    void PlayerController::MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos) {
+    void ClientPlayerController::MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos) {
         if (!Client::g_clientChunkManager) {
             return;
         }

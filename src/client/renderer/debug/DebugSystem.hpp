@@ -4,6 +4,7 @@
 #include "../core/Camera.hpp"
 #include "../core/Frustum.hpp"
 #include "../../input/PlayerController.hpp"
+#include "../../entity/Player.hpp"
 #include "../core/Vertex.hpp"
 
 #ifndef NDEBUG
@@ -74,7 +75,8 @@ namespace Debug {
         static void RenderDebugUI(
             const Render::Camera& camera,
             const Frustum& frustum,
-            Game::PlayerController& playerController,
+            Game::ClientPlayer& player,
+            Game::ClientPlayerController& playerController,
             const PerformanceMetrics& metrics,
             bool cursorEnabled,
             int windowWidth, int windowHeight,
@@ -88,7 +90,8 @@ namespace Debug {
     private:
         static void DrawMainDebugWindow(
             const Render::Camera& camera,
-            Game::PlayerController& playerController,
+            Game::ClientPlayer& player,
+            Game::ClientPlayerController& playerController,
             const PerformanceMetrics& metrics,
             bool cursorEnabled,
             int windowWidth, int windowHeight,
@@ -99,7 +102,7 @@ namespace Debug {
         static void DrawTextureAtlasDebug();
         static void DrawAtlasBuilderDebug();
         static void DrawWorldDebug();
-        static void DrawPlayerFlightControls(Game::PlayerController& playerController);
+        static void DrawPlayerFlightControls(Game::ClientPlayer& player);
 
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
         

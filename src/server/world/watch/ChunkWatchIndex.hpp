@@ -96,6 +96,20 @@ namespace Server {
         // Get chunks watched by multiple players (for optimization)
         std::vector<Game::Math::ChunkPos> GetSharedChunks(size_t minWatchers = 2) const;
 
+        // === SECTION-LEVEL WATCHING ===
+        
+        // Get all players watching a specific section
+        // A player watches a section if they watch the chunk containing it
+        PlayerSet GetSectionWatchers(const Game::Math::SectionPos& sp) const;
+        
+        // Check if a section has any watchers
+        bool HasSectionWatchers(const Game::Math::SectionPos& sp) const;
+        
+        // Get all players watching any section in a chunk
+        PlayerSet GetChunkWatchers(Game::Math::ChunkPos chunk) const {
+            return GetWatchers(chunk);  // Alias for clarity
+        }
+        
         // === DIMENSION SUPPORT ===
 
         // Clear all watchers for a dimension (for dimension changes)

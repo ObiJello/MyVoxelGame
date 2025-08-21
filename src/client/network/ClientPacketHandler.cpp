@@ -74,6 +74,43 @@ namespace Client {
                   packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
     }
 
+    void ClientPacketHandler::handleSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
+        if (!m_chunkManager) {
+            Log::Warning("[ClientPacketHandler] ChunkManager not available for section block update");
+            return;
+        }
+        
+        // Process each packed record
+        for (uint32_t packedRecord : packet.packedRecords) {
+            uint8_t localX, localY, localZ;
+            uint16_t blockId;
+            Network::ClientboundSectionBlocksUpdateS2CPacket::UnpackRecord(
+                packedRecord, localX, localY, localZ, blockId);
+            
+            // Convert section-local to world coordinates
+            int worldX = packet.chunkPos.x * 16 + localX;
+            int worldY = packet.sectionY * 16 + localY - 64;  // Adjust for world height
+            int worldZ = packet.chunkPos.z * 16 + localZ;
+            
+            // Process as regular block change
+            Network::BlockChangeS2CPacket singleChange;
+            singleChange.worldX = worldX;
+            singleChange.worldY = worldY;
+            singleChange.worldZ = worldZ;
+            singleChange.newBlockId = static_cast<Game::BlockID>(blockId);
+            singleChange.playSound = false; // Don't play sound for bulk changes
+            singleChange.updateNeighbors = false;
+            
+            m_chunkManager->ProcessBlockChange(singleChange);
+        }
+        
+        m_stats.blockChanges += packet.packedRecords.size();
+        m_stats.packetsProcessed++;
+        
+        Log::Debug("[ClientPacketHandler] Section block update for chunk (%d, %d) section %d: %zu changes",
+                  packet.chunkPos.x, packet.chunkPos.z, packet.sectionY, packet.packedRecords.size());
+    }
+
     void ClientPacketHandler::handleMultiBlockChange(const Network::MultiBlockChangeS2CPacket& packet) {
         if (!m_chunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for multi block change");

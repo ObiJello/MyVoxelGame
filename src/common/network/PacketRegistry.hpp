@@ -42,12 +42,15 @@
             PlayerListUpdate    = 0x1C,
             PlayerAbilities     = 0x1D,
             WorldSpawn          = 0x1E,
+            ClientboundBlockUpdate = 0x1F,  // Minecraft-style block update packet
             ChunkDataS2C        = 0x20,  // New Minecraft-compatible chunk data packet
             UnloadChunkS2C      = 0x21,  // New Minecraft-compatible chunk unload packet
+            ClientboundSectionBlocksUpdate = 0x22,  // Minecraft-style section block updates packet
 
             // ========================================================================
-            // CLIENT → SERVER PACKETS (0x80-0xFF)
+            // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
             // ========================================================================
+            UseItemOnC2S        = 0x3E,  // Use item on block packet (try use, then place)
             BlockActionC2S      = 0x80,
             PlayerMoveC2S       = 0x81,
             ChatMessageC2S      = 0x82,
@@ -82,6 +85,7 @@
 
                 // Server → Client
                 case PacketId::BlockChangeS2C: return "BlockChangeS2C";
+                case PacketId::ClientboundBlockUpdate: return "ClientboundBlockUpdate";
                 case PacketId::MultiBlockChangeS2C: return "MultiBlockChangeS2C";
                 case PacketId::PlayerUpdateS2C: return "PlayerUpdateS2C";
                 case PacketId::EntitySpawn: return "EntitySpawn";
@@ -96,8 +100,10 @@
                 case PacketId::WorldSpawn: return "WorldSpawn";
                 case PacketId::ChunkDataS2C: return "ChunkDataS2C";
                 case PacketId::UnloadChunkS2C: return "UnloadChunkS2C";
+                case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
 
                 // Client → Server
+                case PacketId::UseItemOnC2S: return "UseItemOnC2S";
                 case PacketId::BlockActionC2S: return "BlockActionC2S";
                 case PacketId::PlayerMoveC2S: return "PlayerMoveC2S";
                 case PacketId::ChatMessageC2S: return "ChatMessageC2S";

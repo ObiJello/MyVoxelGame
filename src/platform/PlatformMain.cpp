@@ -10,6 +10,7 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockModel.hpp"
 #include "client/input/PlayerController.hpp"
+#include "client/entity/Player.hpp"
 #include "common/physics/RayCast.hpp"
 #include "common/physics/Physics.hpp"
 
@@ -102,8 +103,8 @@ namespace PlatformMain {
 #endif
     }
 
-    void RenderBlockHighlight(const Game::PlayerController& playerController, const glm::mat4& viewProj) {
-        const auto& hit = playerController.GetCurrentHit();
+    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& viewProj) {
+        const auto& hit = player.lastBlockHit;
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
             Render::g_blockHighlight.Render(hit->blockPos, viewProj);
         }
@@ -160,51 +161,53 @@ namespace PlatformMain {
         return true;
     }
 
-    void HandlePlayerInput(Game::PlayerController& playerController, Render::Camera& camera) {
+    void HandlePlayerInput(Game::ClientPlayer& player, Game::ClientPlayerController& controller, Render::Camera& camera) {
         // Movement input
         glm::vec3 movementInput = camera.CalculateMovementInput();
-        playerController.SetMovementInput(movementInput);
+        player.SetMovementInput(movementInput);
 
         // Action inputs
-        playerController.SetJumpPressed(camera.IsJumpPressed());
-        playerController.SetSprintPressed(camera.IsSprintPressed());
-        playerController.SetSneakPressed(camera.IsSneakPressed());
+        player.SetJumpPressed(camera.IsJumpPressed());
+        player.SetSprintPressed(camera.IsSprintPressed());
+        player.SetSneakPressed(camera.IsSneakPressed());
 
         // Block interaction
-        if (Input::IsMouseButtonDown(Input::Key::LeftMouse)) {
-            playerController.OnBreakPressed();
-        } else {
-            playerController.OnBreakReleased();
+        static bool leftMouseWasDown = false;
+        bool leftMouseDown = Input::IsMouseButtonDown(Input::Key::LeftMouse);
+        if (leftMouseDown != leftMouseWasDown) {
+            controller.OnLMB(leftMouseDown);
+            leftMouseWasDown = leftMouseDown;
         }
 
-        if (Input::IsMouseButtonDown(Input::Key::RightMouse)) {
-            playerController.OnPlacePressed();
-        } else {
-            playerController.OnPlaceReleased();
+        static bool rightMouseWasDown = false;
+        bool rightMouseDown = Input::IsMouseButtonDown(Input::Key::RightMouse);
+        if (rightMouseDown != rightMouseWasDown) {
+            controller.OnRMB(rightMouseDown);
+            rightMouseWasDown = rightMouseDown;
         }
 
         // Inventory selection
-        if (Input::IsKeyPressed(Input::Key::Alpha1)) playerController.SelectSlot(0);
-        if (Input::IsKeyPressed(Input::Key::Alpha2)) playerController.SelectSlot(1);
-        if (Input::IsKeyPressed(Input::Key::Alpha3)) playerController.SelectSlot(2);
-        if (Input::IsKeyPressed(Input::Key::Alpha4)) playerController.SelectSlot(3);
-        if (Input::IsKeyPressed(Input::Key::Alpha5)) playerController.SelectSlot(4);
-        if (Input::IsKeyPressed(Input::Key::Alpha6)) playerController.SelectSlot(5);
-        if (Input::IsKeyPressed(Input::Key::Alpha7)) playerController.SelectSlot(6);
-        if (Input::IsKeyPressed(Input::Key::Alpha8)) playerController.SelectSlot(7);
-        if (Input::IsKeyPressed(Input::Key::Alpha9)) playerController.SelectSlot(8);
+        if (Input::IsKeyPressed(Input::Key::Alpha1)) controller.OnHotbarChanged(0);
+        if (Input::IsKeyPressed(Input::Key::Alpha2)) controller.OnHotbarChanged(1);
+        if (Input::IsKeyPressed(Input::Key::Alpha3)) controller.OnHotbarChanged(2);
+        if (Input::IsKeyPressed(Input::Key::Alpha4)) controller.OnHotbarChanged(3);
+        if (Input::IsKeyPressed(Input::Key::Alpha5)) controller.OnHotbarChanged(4);
+        if (Input::IsKeyPressed(Input::Key::Alpha6)) controller.OnHotbarChanged(5);
+        if (Input::IsKeyPressed(Input::Key::Alpha7)) controller.OnHotbarChanged(6);
+        if (Input::IsKeyPressed(Input::Key::Alpha8)) controller.OnHotbarChanged(7);
+        if (Input::IsKeyPressed(Input::Key::Alpha9)) controller.OnHotbarChanged(8);
 
         // Mouse wheel for inventory scrolling
         auto [scrollX, scrollY] = Input::GetScrollOffset();
         if (scrollY > 0) {
-            playerController.SelectPreviousSlot();
+            player.SelectPreviousSlot();
         } else if (scrollY < 0) {
-            playerController.SelectNextSlot();
+            player.SelectNextSlot();
         }
 
         // Debug noclip toggle
         if (Input::IsKeyPressed(Input::Key::N)) {
-            playerController.ToggleNoclip();
+            player.ToggleNoclip();
         }
     }
 
@@ -390,12 +393,14 @@ namespace PlatformMain {
         Render::InitializeClientMeshManager(Client::g_clientChunkManager.get());
         Log::Info("✓ Client systems initialized (chunk manager, mesh manager)");
         
-        // 5. Initialize player controller (no longer needs world directly)
-        Game::PlayerController playerController;
-        playerController.SetWorld(world);  // Temporary until we fully remove world dependency
+        // 5. Initialize player and controller
+        Game::ClientPlayer player;
+        Game::ClientPlayerController playerController;
+        playerController.SetPlayer(&player);
+        playerController.SetWorld(world);
         
-        // 6. Configure IntegratedServer with player controller
-        Server::g_integratedServer->SetPlayerController(&playerController);
+        // 6. Configure IntegratedServer with player
+        Server::g_integratedServer->SetPlayer(&player);
         
         // 7. Initialize rendering systems (keeping existing ones that still work)
         if (!Render::InitializeChunkRenderer()) {
@@ -456,6 +461,10 @@ namespace PlatformMain {
         Log::Info("✓ NetworkClient connected to localhost:25565");
         Log::Info("✓ Handshake automatically sent to server");
         
+        // Wire up NetworkClient to PlayerController for packet sending
+        playerController.SetNetworkClient(networkClient.get());
+        Log::Info("✓ PlayerController connected to NetworkClient");
+        
         Log::Info("🎮 Minecraft Java Edition Architecture fully initialized!");
         Log::Info("   Server Thread: 20 TPS | Client Thread: Unlocked FPS | I/O Thread: Async | Workers: 6 threads");
         Log::Info("   Client connected via TCP to localhost:25565");
@@ -503,31 +512,39 @@ namespace PlatformMain {
             }
 
             bool cursorEnabled = HandleCursorToggle(window, camera);
-            HandlePlayerInput(playerController, camera);
+            HandlePlayerInput(player, playerController, camera);
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
 
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
             frameCounter++;
-            if (frameCounter % 60 == 0) {
-                Log::Debug("MAIN LOOP: Frame %llu at time %.2f", frameCounter, Time::Now());
-            }
             
             // 4. Update time and game logic
             PROFILE_TIMER_START(gamelogic);
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 1 - Update time and logic");
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt);
 
-            // Update camera and player
+            // Update player physics and camera
+            player.UpdatePhysics(dt, world);
+            camera.position = player.GetEyePosition();
             camera.Update(dt);
-            playerController.Update(dt, camera);
+            
+            // Update raycast cache
+            player.UpdateRaycast(camera);
+            
+            // Update player controller (handles interactions)
+            playerController.Tick(dt);
+            
+            // Update visual smoothing
+            player.UpdateVisual(dt);
+            
+            // Update statistics
+            player.UpdateStatistics(dt);
             PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
 
             // 5. Set player position for mesh prioritization
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 2 - Set player position");
-            glm::vec3 playerPos = playerController.GetPhysics().position;
+            glm::vec3 playerPos = player.physics.position;
             Render::SetClientMeshPlayerPosition(playerPos);
             
             // Send player position to server via TCP (throttled to 50ms / 20Hz)
@@ -552,7 +569,7 @@ namespace PlatformMain {
                     Network::PlayerMoveC2SPacket movePacket;
                     movePacket.position = playerPos;
                     movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
-                    movePacket.onGround = playerController.GetPhysics().isOnGround;
+                    movePacket.onGround = player.physics.isOnGround;
                     movePacket.sequenceNumber = ++playerMoveSequence;
                     movePacket.timestamp = std::chrono::steady_clock::now();
                     
@@ -565,16 +582,12 @@ namespace PlatformMain {
 
             // 6. Schedule mesh builds for LOADED chunks
             PROFILE_TIMER_START(meshsched);
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds");
             Render::ScheduleClientMeshBuilds(playerPos);
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 3 - Schedule mesh builds COMPLETE");
             PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
 
             // 7. Perform GPU uploads
             PROFILE_TIMER_START(gpuupload);
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads");
             Render::PerformClientGPUUploads();
-            if (frameCounter % 60 == 0) Log::Debug("MAIN LOOP: Step 4 - GPU uploads COMPLETE");
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
 
             // 8. Update texture animations
@@ -619,7 +632,7 @@ namespace PlatformMain {
             }
 
             // Render UI overlay elements
-            RenderBlockHighlight(playerController, viewProj);
+            RenderBlockHighlight(player, viewProj);
             RenderCrosshair(window);
             PROFILE_TIMER_END(render, metrics.renderTime);
 
@@ -629,7 +642,7 @@ namespace PlatformMain {
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
             Debug::DebugSystem::RenderDebugUI(
-                camera, frustum, playerController, metrics, cursorEnabled,
+                camera, frustum, player, playerController, metrics, cursorEnabled,
                 windowWidth, windowHeight, width, height
             );
 

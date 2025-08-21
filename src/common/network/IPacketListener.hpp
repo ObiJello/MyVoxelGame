@@ -10,10 +10,16 @@ namespace Network {
     struct ChunkDataS2CPacket;
     struct UnloadChunkS2CPacket;
     struct BlockChangeS2CPacket;
+    struct ClientboundBlockUpdateS2CPacket;
+    struct ClientboundSectionBlocksUpdateS2CPacket;
     struct MultiBlockChangeS2CPacket;
     struct PlayerUpdateS2CPacket;
     
     // C2S packet types
+    struct UseItemOnC2SPacket;
+    struct BlockActionC2SPacket;
+    struct PlayerMoveC2SPacket;
+    struct ChatMessageC2SPacket;
     class LoginStartC2SPacket;
     class HandshakeC2SPacket;
     class KeepAliveC2SPacket;
@@ -37,6 +43,8 @@ namespace Network {
         
         // Block updates
         virtual void onBlockChangeS2C(const BlockChangeS2CPacket& packet) {}
+        virtual void onClientboundBlockUpdate(const ClientboundBlockUpdateS2CPacket& packet) {}
+        virtual void onClientboundSectionBlocksUpdate(const ClientboundSectionBlocksUpdateS2CPacket& packet) {}
         virtual void onMultiBlockChangeS2C(const MultiBlockChangeS2CPacket& packet) {}
         
         // Player updates
@@ -54,7 +62,17 @@ namespace Network {
         virtual void onHandshake(const HandshakeC2SPacket& packet) {}
         virtual void onLoginStart(const LoginStartC2SPacket& packet) {}
         
-        // Play phase
+        // Play phase - Block interactions
+        virtual void onUseItemOnC2S(const UseItemOnC2SPacket& packet) {}
+        virtual void onBlockActionC2S(const BlockActionC2SPacket& packet) {}
+        
+        // Play phase - Player updates
+        virtual void onPlayerMoveC2S(const PlayerMoveC2SPacket& packet) {}
+        
+        // Play phase - Chat
+        virtual void onChatMessageC2S(const ChatMessageC2SPacket& packet) {}
+        
+        // Play phase - Keep alive
         virtual void onKeepAliveResponse(const KeepAliveC2SPacket& packet) {}
     };
 

@@ -81,6 +81,54 @@ namespace Packets {
     };
 
     // ========================================================================
+    // CLIENTBOUND BLOCK UPDATE PACKET
+    // ========================================================================
+    
+    class ClientboundBlockUpdateS2CPacketImpl : public IS2CPacket {
+    private:
+        ClientboundBlockUpdateS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+        
+    public:
+        explicit ClientboundBlockUpdateS2CPacketImpl(ClientboundBlockUpdateS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        
+        void apply(IPacketListener& listener) override {
+            listener.onClientboundBlockUpdate(m_data);
+        }
+        
+        const ClientboundBlockUpdateS2CPacket& getData() const { return m_data; }
+        
+        PacketId getId() const override { return PacketId::ClientboundBlockUpdate; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+    
+    // ========================================================================
+    // CLIENTBOUND SECTION BLOCKS UPDATE PACKET
+    // ========================================================================
+    
+    class ClientboundSectionBlocksUpdateS2CPacketImpl : public IS2CPacket {
+    private:
+        ClientboundSectionBlocksUpdateS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+        
+    public:
+        explicit ClientboundSectionBlocksUpdateS2CPacketImpl(ClientboundSectionBlocksUpdateS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        
+        void apply(IPacketListener& listener) override {
+            listener.onClientboundSectionBlocksUpdate(m_data);
+        }
+        
+        const ClientboundSectionBlocksUpdateS2CPacket& getData() const { return m_data; }
+        
+        PacketId getId() const override { return PacketId::ClientboundSectionBlocksUpdate; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // MULTI BLOCK CHANGE PACKET
     // ========================================================================
     

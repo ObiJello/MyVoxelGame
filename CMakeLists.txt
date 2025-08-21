@@ -159,6 +159,7 @@ if(APPLE)
             src/common/core/ThreadAllocator.cpp
             src/client/renderer/shader/Shader.cpp
             src/common/world/block/BlockModel.cpp
+            src/common/world/block/Block.cpp
             src/server/world/storage/RegionFile.cpp
             src/server/world/storage/RegionFileCache.cpp
             src/server/world/storage/NBTParser.cpp
@@ -167,6 +168,7 @@ if(APPLE)
             src/common/physics/Physics.cpp
             src/common/entity/Inventory.cpp
             src/client/input/PlayerController.cpp
+            src/client/entity/Player.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/ChunkRenderer.cpp
             src/client/renderer/mesh/ChunkMeshData.cpp
@@ -177,6 +179,7 @@ if(APPLE)
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/common/world/block/BlockRegistry.cpp
+            src/server/player/ServerPlayer.cpp
             src/server/world/storage/SectionDataUnpacker.cpp
             src/server/world/storage/MinecraftChunkLoader.cpp
             src/common/world/level/World.cpp
@@ -211,6 +214,8 @@ if(APPLE)
             src/server/world/ticketing/ChunkTicketManager.cpp
             src/server/world/watch/ChunkWatchIndex.cpp
             src/server/world/status/ChunkStatusManager.cpp
+            src/server/world/tracking/SectionChangeAccumulator.cpp
+            src/server/world/tracking/ChunkDeltaBroadcaster.cpp
             src/server/network/SendScheduler.cpp
             src/server/session/PlayerSession.cpp
             src/server/session/PlayerSessionManager.cpp
@@ -251,6 +256,10 @@ else()
             src/client/input/Input.hpp
             src/client/input/PlayerController.cpp
             src/client/input/PlayerController.hpp
+            
+            # Client entity
+            src/client/entity/Player.cpp
+            src/client/entity/Player.hpp
 
             # Client rendering - Shader
             src/client/renderer/shader/Shader.cpp
@@ -315,6 +324,9 @@ else()
             # Common world - Block
             src/common/world/block/BlockModel.cpp
             src/common/world/block/BlockModel.hpp
+            src/common/world/block/Block.cpp
+            src/common/world/block/Block.hpp
+            src/common/world/block/BlockInteraction.hpp
             src/common/world/block/BlockRegistry.cpp
             src/common/world/block/BlockRegistry.hpp
             src/common/world/block/Blocks.hpp
@@ -368,6 +380,9 @@ else()
             src/server/world/ServerWorkerPool.hpp
             src/server/world/ignore.cpp
             src/server/world/ignore.hpp
+
+            src/server/player/ServerPlayer.cpp
+            src/server/player/ServerPlayer.hpp
 
             # Server world - Cache
             src/server/world/cache/ChunkCache.cpp
@@ -423,6 +438,10 @@ else()
             src/server/world/watch/ChunkWatchIndex.hpp
             src/server/world/status/ChunkStatusManager.cpp
             src/server/world/status/ChunkStatusManager.hpp
+            src/server/world/tracking/SectionChangeAccumulator.cpp
+            src/server/world/tracking/SectionChangeAccumulator.hpp
+            src/server/world/tracking/ChunkDeltaBroadcaster.cpp
+            src/server/world/tracking/ChunkDeltaBroadcaster.hpp
             src/server/network/SendScheduler.cpp
             src/server/network/SendScheduler.hpp
             src/server/session/PlayerSession.cpp

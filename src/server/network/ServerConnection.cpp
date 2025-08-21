@@ -4,10 +4,12 @@
 #include "listeners/HandshakePacketListener.hpp"
 #include "listeners/LoginPacketListener.hpp"
 #include "listeners/ServerPlayPacketListener.hpp"
+#include "../session/PlayerSession.hpp"
 #include "common/core/Log.hpp"
 #include "common/network/packets/HandshakeC2S.hpp"
 #include "common/network/packets/LoginStartC2S.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
+#include "common/network/packets/C2SPackets.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "../IntegratedServer.hpp"
 
@@ -21,6 +23,9 @@ namespace Server {
         , m_server(server)
         , m_connectionId(s_nextConnectionId.fetch_add(1))
     {
+        // Set connection name to "Server#id" for clearer logging
+        SetName("Server#" + std::to_string(m_connectionId));
+        
         m_lastActivity = std::chrono::steady_clock::now();
         m_lastKeepAliveSent = m_lastActivity;
         m_lastKeepAliveReceived = m_lastActivity;
@@ -256,12 +261,40 @@ namespace Server {
                 break;
                 
             case Network::ProtocolState::PLAY:
-                m_phase = ConnectionPhase::PLAY;
-                m_listener = std::make_unique<ServerPlayPacketListener>(*this);
-                Log::Info("[ServerConnection %u] Switched to PLAY state with ServerPlayPacketListener", 
-                         GetConnectionId());
+                // PLAY state requires a session to be passed via the overload
+                Log::Error("[ServerConnection %u] Cannot switch to PLAY state without session", GetConnectionId());
+                SendDisconnect("Server error: No session available for PLAY state");
                 break;
         }
+    }
+    
+    void ServerConnection::setProtocolState(Network::ProtocolState state, PlayerSession* session) {
+        Log::Info("[ServerConnection %u] Switching protocol state to %d with session %u", 
+                  GetConnectionId(), static_cast<int>(state), session ? session->GetPlayerId() : 0);
+        
+        // This overload is only for PLAY state with a session
+        if (state != Network::ProtocolState::PLAY) {
+            Log::Warning("[ServerConnection %u] Session-aware protocol switch only supports PLAY state", 
+                        GetConnectionId());
+            setProtocolState(state);  // Fall back to regular version
+            return;
+        }
+        
+        if (!session) {
+            Log::Error("[ServerConnection %u] No session provided for PLAY state", 
+                      GetConnectionId());
+            SendDisconnect("Server error: No session available");
+            return;
+        }
+        
+        // Update phase
+        m_phase = ConnectionPhase::PLAY;
+        
+        // Create listener with session reference
+        m_listener = std::make_unique<ServerPlayPacketListener>(*this, *session);
+        
+        Log::Info("[ServerConnection %u] Switched to PLAY state with session-aware ServerPlayPacketListener", 
+                 GetConnectionId());
     }
     
     void ServerConnection::sendInitialGameData() {
@@ -434,9 +467,9 @@ namespace Server {
         
         auto packet = Network::Serialization::DeserializeBlockActionC2S(payload);
         
-        Log::Debug("[ServerConnection %u] Block action at (%d,%d,%d): %d",
-            GetConnectionId(), packet.worldX, packet.worldY, packet.worldZ,
-            static_cast<int>(packet.action));
+        Log::Info("[Server#%u] RECEIVED BlockActionC2S (ID: 0x%02X) - Action: %d, Pos: (%d, %d, %d)",
+                  GetConnectionId(), static_cast<uint8_t>(Network::PacketId::BlockActionC2S),
+                  static_cast<int>(packet.action), packet.worldX, packet.worldY, packet.worldZ);
         
         // Forward to IntegratedServer for processing
         if (Server::g_integratedServer) {
@@ -451,9 +484,16 @@ namespace Server {
         
         auto packet = Network::Serialization::DeserializePlayerMoveC2S(payload);
         
+        // Log every 20th move to reduce spam
+        if (packet.sequenceNumber % 20 == 0) {
+            /*Log::Debug("[Server#%u] RECEIVED PlayerMoveC2S (ID: 0x%02X) - Pos: (%.2f, %.2f, %.2f)",
+                       GetConnectionId(), static_cast<uint8_t>(Network::PacketId::PlayerMoveC2S),
+                       packet.position.x, packet.position.y, packet.position.z);*/
+        }
+        
         // Forward to IntegratedServer for processing
-        if (Server::g_integratedServer) {
-            Server::g_integratedServer->ProcessPlayerMove(packet);
+        if (g_integratedServer) {
+            g_integratedServer->ProcessPlayerMove(packet);
         }
     }
 
@@ -463,6 +503,10 @@ namespace Server {
         }
         
         auto packet = Network::Serialization::DeserializeChatMessageC2S(payload);
+        
+        Log::Info("[Server#%u] RECEIVED ChatMessageC2S (ID: 0x%02X) - Message: %s",
+                  GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ChatMessageC2S),
+                  packet.message.c_str());
         
         // Forward to IntegratedServer for processing
         if (Server::g_integratedServer) {
@@ -505,8 +549,8 @@ namespace Server {
             // Calculate RTT if needed
             auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
                 m_lastKeepAliveReceived - m_lastKeepAliveSent).count();
-            Log::Debug("[ServerConnection %u] Keep-alive response received (ID: %llu, RTT: %ldms)", 
-                      GetConnectionId(), id, rtt);
+            Log::Debug("[Server#%u] RECEIVED KeepAliveC2S (ID: 0x%02X) - ID: %llu, RTT: %ldms", 
+                      GetConnectionId(), static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), id, rtt);
         } else {
             Log::Warning("[ServerConnection %u] Unexpected keep-alive response (ID: %llu, expected: %llu)", 
                         GetConnectionId(), id, m_lastKeepAliveId);
@@ -514,6 +558,9 @@ namespace Server {
     }
 
     void ServerConnection::HandleClientSettings(const std::vector<uint8_t>& payload) {
+        Log::Info("[Server#%u] RECEIVED ClientConfigC2S (ID: 0x%02X)",
+                  GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ClientConfigC2S));
+        
         // Parse client settings (render distance, etc.)
         // This would update per-player settings
     }
@@ -605,6 +652,13 @@ namespace Server {
             case PacketId::KeepAliveC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
                     return std::make_unique<KeepAliveC2SPacket>(reader);
+                }
+                break;
+            
+            case PacketId::UseItemOnC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeUseItemOnC2S(payload);
+                    return std::make_unique<Network::Packets::UseItemOnC2SPacketImpl>(std::move(data));
                 }
                 break;
             

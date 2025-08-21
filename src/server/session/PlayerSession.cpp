@@ -1,8 +1,15 @@
 // File: src/server/session/PlayerSession.cpp
 #include "PlayerSession.hpp"
+#include "../player/ServerPlayer.hpp"
+#include "../network/ServerConnection.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Assert.hpp"
+#include "common/world/block/BlockInteraction.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/level/World.hpp"
+#include "../IntegratedServer.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -11,7 +18,6 @@ namespace Server {
     PlayerSession::PlayerSession(uint32_t playerId, uint32_t connectionId)
         : m_playerId(playerId)
         , m_connectionId(connectionId)
-        , m_dimensionId(0)
         , m_pendingAdd(32)  // 32 distance rings
     {
         m_lastTickTime = std::chrono::steady_clock::now();
@@ -27,8 +33,6 @@ namespace Server {
 
     void PlayerSession::Initialize(const Config& config, int dimensionId, const glm::vec3& spawnPos) {
         m_config = config;
-        m_dimensionId = dimensionId;
-        m_position = spawnPos;
         m_simulationDistance = config.simulationDistance;
         m_viewDistance = std::min(config.viewDistance, m_simulationDistance);
         
@@ -58,8 +62,26 @@ namespace Server {
         m_state = State::JOINING;
         m_needsWatchUpdate = true;
         
-        Log::Info("PlayerSession: Initialized player %u at (%.1f, %.1f, %.1f) in dimension %d",
-                 m_playerId, spawnPos.x, spawnPos.y, spawnPos.z, dimensionId);
+        Log::Info("PlayerSession: Initialized session for player %u in dimension %d",
+                 m_playerId, dimensionId);
+    }
+    
+    void PlayerSession::AttachPlayer(ServerPlayer* player) {
+        m_player = player;
+        if (m_player) {
+            // Sync chunk position from player
+            m_currentChunk = m_player->getChunkPosition();
+            m_anchorChunk = m_currentChunk;
+            Log::Info("PlayerSession: Attached player %u '%s' to session",
+                     m_player->getPlayerId(), m_player->getName().c_str());
+        }
+    }
+    
+    void PlayerSession::DetachPlayer() {
+        if (m_player) {
+            Log::Info("PlayerSession: Detached player %u from session", m_player->getPlayerId());
+            m_player = nullptr;
+        }
     }
 
     void PlayerSession::Tick(int64_t serverTick) {
@@ -117,18 +139,18 @@ namespace Server {
     // === PLAYER STATE ===
 
     void PlayerSession::UpdatePosition(const glm::vec3& position, const glm::vec2& rotation) {
-        m_position = position;
-        m_rotation = rotation;
-        
-        // Calculate new chunk position
-        Game::Math::ChunkPos newChunk(
-            static_cast<int>(std::floor(position.x / 16.0f)),
-            static_cast<int>(std::floor(position.z / 16.0f))
-        );
-        
-        // Update chunk position if changed
-        if (newChunk != m_currentChunk) {
-            UpdateChunkPosition(newChunk);
+        // Delegate to ServerPlayer if attached
+        if (m_player) {
+            m_player->setPosition(glm::dvec3(position));
+            m_player->setRotation(rotation.x, rotation.y);
+            
+            // Calculate new chunk position from player
+            Game::Math::ChunkPos newChunk = m_player->getChunkPosition();
+            
+            // Update chunk position if changed
+            if (newChunk != m_currentChunk) {
+                UpdateChunkPosition(newChunk);
+            }
         }
     }
 
@@ -147,12 +169,14 @@ namespace Server {
     }
 
     void PlayerSession::ChangeDimension(int newDimensionId, const glm::vec3& targetPos) {
-        if (m_dimensionId == newDimensionId) {
+        if (!m_player) return;
+        
+        if (m_player->getDimensionId() == newDimensionId) {
             return;
         }
         
         Log::Info("PlayerSession: Player %u changing dimension from %d to %d", 
-                 m_playerId, m_dimensionId, newDimensionId);
+                 m_playerId, m_player->getDimensionId(), newDimensionId);
         
         m_isChangingDimension = true;
         
@@ -166,13 +190,11 @@ namespace Server {
         ClearQueues();
         ClearDiffs();
         
-        // Update dimension and position
-        m_dimensionId = newDimensionId;
-        m_position = targetPos;
-        m_currentChunk = Game::Math::ChunkPos(
-            static_cast<int>(std::floor(targetPos.x / 16.0f)),
-            static_cast<int>(std::floor(targetPos.z / 16.0f))
-        );
+        // Update player dimension and position
+        m_player->setDimensionId(newDimensionId);
+        m_player->teleport(glm::dvec3(targetPos));
+        
+        m_currentChunk = m_player->getChunkPosition();
         m_anchorChunk = m_currentChunk;
         
         // Recompute watch set for new dimension
@@ -187,13 +209,12 @@ namespace Server {
         m_isRespawning = true;
         m_state = State::RESPAWNING;
         
-        // Update position
-        m_position = spawnPos;
-        m_currentChunk = Game::Math::ChunkPos(
-            static_cast<int>(std::floor(spawnPos.x / 16.0f)),
-            static_cast<int>(std::floor(spawnPos.z / 16.0f))
-        );
-        m_anchorChunk = m_currentChunk;
+        // Respawn player entity
+        if (m_player) {
+            m_player->respawn(spawnPos);
+            m_currentChunk = m_player->getChunkPosition();
+            m_anchorChunk = m_currentChunk;
+        }
         
         // Recompute watch set
         m_needsWatchUpdate = true;
@@ -354,19 +375,9 @@ namespace Server {
             return;
         }
         
-        // Calculate section and local position
-        int sectionY = (worldY + 64) >> 4;  // Assuming minY = -64
-        uint8_t localX = worldX & 0xF;
-        uint8_t localY = worldY & 0xF;
-        uint8_t localZ = worldZ & 0xF;
-        
-        // Coalesce the change
-        CoalesceBlockChange(chunk, sectionY, localX, localY, localZ, newBlock);
-        
-        // Add to diff queue if chunk has been sent
-        if (HasSentChunk(chunk)) {
-            m_diffQueue.push({chunk, sectionY});
-        }
+        // NOTE: Block change accumulation is now handled centrally by SectionChangeAccumulator
+        // This method is kept for compatibility but doesn't queue for per-player processing
+        // The change will be accumulated in World::SetBlock and broadcast by ChunkDeltaBroadcaster
     }
 
     void PlayerSession::QueueSectionChanges(Game::Math::ChunkPos chunk, int section,
@@ -384,7 +395,11 @@ namespace Server {
         }
     }
 
+    // NOTE: ProcessDiffs is deprecated - block changes are now handled by ChunkDeltaBroadcaster
+    // This method is kept for compatibility but does nothing
     void PlayerSession::ProcessDiffs(SendScheduler* scheduler) {
+        // Block change broadcasting is now centralized in ChunkDeltaBroadcaster::flush()
+        return;
         size_t maxDiffBytes = m_config.maxDiffBytesPerTick;
         size_t diffBytesThisTick = 0;
         
@@ -408,10 +423,42 @@ namespace Server {
                 continue;
             }
             
-            // TODO: Build and send MultiBlockChangeS2CPacket via scheduler
-            // Estimate diff packet size (each block change is roughly 12 bytes)
-            size_t estimatedPacketSize = diffs.changes.size() * 12 + 16; // +16 for packet header
-            diffBytesThisTick += estimatedPacketSize;
+            // Build and send packet based on number of changes
+            if (diffs.changes.size() == 1) {
+                // Single block change - use simple packet
+                auto& [packedPos, blockId] = *diffs.changes.begin();
+                int localX = (packedPos >> 8) & 0xF;
+                int localY = (packedPos >> 4) & 0xF;
+                int localZ = packedPos & 0xF;
+                
+                // Convert to world coordinates
+                int worldX = chunk.x * 16 + localX;
+                int worldY = section * 16 + localY - 64;  // Adjust for world height
+                int worldZ = chunk.z * 16 + localZ;
+                
+                Network::BlockChangeS2CPacket packet(worldX, worldY, worldZ, blockId);
+                SendSingleBlockChange(packet);
+                
+                // Estimate packet size
+                size_t estimatedPacketSize = 20; // Single block change is small
+                diffBytesThisTick += estimatedPacketSize;
+            } else {
+                // Multiple changes in same section - use section update packet
+                Network::ClientboundSectionBlocksUpdateS2CPacket packet(chunk, section);
+                
+                for (const auto& [packedPos, blockId] : diffs.changes) {
+                    uint8_t localX = (packedPos >> 8) & 0xF;
+                    uint8_t localY = (packedPos >> 4) & 0xF;
+                    uint8_t localZ = packedPos & 0xF;
+                    packet.AddChange(localX, localY, localZ, static_cast<uint16_t>(blockId));
+                }
+                
+                SendSectionBlocksUpdate(packet);
+                
+                // Estimate packet size (each block change is roughly 4 bytes as VarInt)
+                size_t estimatedPacketSize = diffs.changes.size() * 4 + 16; // +16 for packet header
+                diffBytesThisTick += estimatedPacketSize;
+            }
             
             // Clear processed diffs
             chunkIt->second.erase(sectionIt);
@@ -433,9 +480,275 @@ namespace Server {
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
-        // TODO: Validate block action
-        // TODO: Apply block change to world
-        // TODO: Queue diff for other watching players
+        if (!m_player) return;
+        
+        // Delegate to player for block breaking
+        switch (packet.action) {
+            case Network::BlockActionType::BREAK:
+                m_player->startDestroyBlock(
+                    glm::ivec3(packet.worldX, packet.worldY, packet.worldZ),
+                    packet.face
+                );
+                break;
+            case Network::BlockActionType::PLACE:
+                // Now handled by HandleUseItemOn
+                break;
+            case Network::BlockActionType::INTERACT:
+                // TODO: Implement block interaction (chests, doors, etc.)
+                break;
+        }
+    }
+    
+    void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
+        // === 1. Thread safety & basic validation ===
+        ASSERT_SERVER_THREAD();
+        
+        if (!m_player) {
+            Log::Warning("HandleUseItemOn: No player attached to session");
+            return;
+        }
+        
+        // Get world instance
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server) {
+            Log::Warning("HandleUseItemOn: No integrated server");
+            return;
+        }
+        
+        Game::World* world = server->GetWorld();
+        if (!world) {
+            Log::Warning("HandleUseItemOn: No world available");
+            return;
+        }
+        
+        // === 2. Fast guards (reject early, no world touch) ===
+        
+        // Validate sequence number
+        if (packet.sequence <= m_lastInteractionSequence) {
+            // Stale packet, ignore
+            Log::Debug("HandleUseItemOn: Stale sequence %u <= %u", packet.sequence, m_lastInteractionSequence);
+            return;
+        }
+        
+        // Check if connection is in PLAY phase
+        if (m_state != State::PLAYING) {
+            Log::Warning("HandleUseItemOn: Not in PLAYING state");
+            AckInteraction(packet.sequence, false);
+            return;
+        }
+        
+        glm::ivec3 clicked(packet.blockX, packet.blockY, packet.blockZ);
+        
+        // Check if chunk is loaded
+        if (!world->IsPositionLoaded(clicked.x, clicked.y, clicked.z)) {
+            Log::Warning("HandleUseItemOn: Chunk not loaded at (%d,%d,%d)", clicked.x, clicked.y, clicked.z);
+            ResyncAndAck(clicked, clicked, packet.sequence);
+            return;
+        }
+        
+        // Build height checks
+        if (!world->IsValidPosition(clicked.x, clicked.y, clicked.z)) {
+            Log::Warning("HandleUseItemOn: Invalid position (%d,%d,%d)", clicked.x, clicked.y, clicked.z);
+            ResyncAndAck(clicked, clicked, packet.sequence);
+            return;
+        }
+        
+        // === 3. Rebuild the authoritative hit context ===
+        
+        // Convert packet data to block hit result
+        glm::vec3 hitPoint = Game::faceLocalUVToWorld(
+            packet.direction,
+            packet.cursorX,
+            packet.cursorY,
+            packet.cursorZ,
+            clicked
+        );
+        
+        Game::BlockHitResult hit(clicked, packet.direction, hitPoint, packet.insideBlock);
+        Game::UseOnContext context(world, m_player, packet.hand, hit);
+        context.playerYaw = m_player->getYaw();
+        context.playerPitch = m_player->getPitch();
+        
+        // === 4. Reach validation ===
+        
+        // Reconstruct ray from player eye to hit point
+        glm::dvec3 playerPos = m_player->getPosition();
+        glm::vec3 eyePos = glm::vec3(playerPos.x, playerPos.y + 1.62, playerPos.z); // Eye height
+        float distance = glm::length(hitPoint - eyePos);
+        float maxReach = m_player->getGameMode() == GameMode::CREATIVE ? 5.0f : 4.5f;
+        
+        if (distance > maxReach) {
+            Log::Warning("HandleUseItemOn: Out of reach %.2f > %.2f", distance, maxReach);
+            ResyncAndAck(clicked, clicked, packet.sequence);
+            return;
+        }
+        
+        // === 5. "Use then place" semantics (Minecraft rule) ===
+        
+        // TODO: Implement block use logic when BlockRegistry is fully implemented
+        // If player is not sneaking, try to use the block first
+        // if (!m_player->IsSneaking()) {
+        //     Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        //     Game::Block* clickedBlock = Game::BlockRegistry::getInstance().getBlock(clickedBlockId);
+        //     
+        //     if (clickedBlock) {
+        //         Game::UseResult useResult = clickedBlock->use(world, clicked, m_player, packet.hand, hit);
+        //         
+        //         if (useResult == Game::UseResult::Success || useResult == Game::UseResult::Consume) {
+        //             // Block was used (chest opened, lever flipped, etc.)
+        //             // TODO: Play use effects
+        //             // TODO: Open container if needed
+        //             AckInteraction(packet.sequence, true);
+        //             m_lastInteractionSequence = packet.sequence;
+        //             return;
+        //         }
+        //     }
+        // }
+        
+        // === 6. Build the candidate block state (from the held item) ===
+        
+        // Get block to place from player's hand
+        Game::BlockID blockToPlace = m_player->getHeldBlock();
+        
+        // If holding air or no block, can't place
+        if (blockToPlace == Game::BlockID::Air) {
+            AckInteraction(packet.sequence, false);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+        
+        // Calculate target position (where to place the block)
+        glm::ivec3 targetPos = clicked;
+        
+        // Check if clicked block is replaceable
+        Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        // TODO: Check if block is replaceable when BlockRegistry is fully implemented
+        // For now, only air is replaceable
+        bool isReplaceable = (clickedBlockId == Game::BlockID::Air);
+        
+        if (!isReplaceable) {
+            // Place at offset position
+            targetPos = context.getPlacementPos();
+        }
+        // If replaceable (snow, tall grass, etc.), place at clicked position
+        
+        // Validate target position
+        if (!world->IsValidPosition(targetPos.x, targetPos.y, targetPos.z)) {
+            Log::Warning("HandleUseItemOn: Target position invalid (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
+            ResyncAndAck(clicked, targetPos, packet.sequence);
+            return;
+        }
+        
+        // === 7. Validate placement ===
+        
+        // TODO: Check if block can survive at target position when BlockRegistry is fully implemented
+        // For now, assume all blocks can be placed anywhere
+        // Game::Block* blockToPl = Game::BlockRegistry::getInstance().getBlock(blockToPlace);
+        // if (blockToPl && !blockToPl->canSurvive(world, targetPos)) {
+        //     Log::Debug("HandleUseItemOn: Block cannot survive at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
+        //     ResyncAndAck(clicked, targetPos, packet.sequence);
+        //     return;
+        // }
+        
+        // === 8. Collision check with entities ===
+        
+        // Check if any players are in the target block space
+        // TODO: Get all players from PlayerSessionManager
+        glm::dvec3 playerPosDouble = m_player->getPosition();
+        glm::vec3 playerCollisionPos = glm::vec3(playerPosDouble.x, playerPosDouble.y, playerPosDouble.z);
+        glm::vec3 blockCenter = glm::vec3(targetPos) + glm::vec3(0.5f, 0.5f, 0.5f);
+        
+        // Simple AABB check - player is 0.6x1.8x0.6, block is 1x1x1
+        bool playerCollides = false;
+        if (std::abs(playerCollisionPos.x - blockCenter.x) < 0.8f &&
+            std::abs(playerCollisionPos.z - blockCenter.z) < 0.8f &&
+            playerCollisionPos.y < targetPos.y + 1.0f &&
+            playerCollisionPos.y + 1.8f > targetPos.y) {
+            playerCollides = true;
+        }
+        
+        if (playerCollides) {
+            Log::Debug("HandleUseItemOn: Player collides with placement at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
+            ResyncAndAck(clicked, targetPos, packet.sequence);
+            return;
+        }
+        
+        // TODO: Check collision with other entities
+        
+        // === 9. Mutate the world ===
+        
+        bool changed = world->SetBlock(
+            targetPos.x, targetPos.y, targetPos.z,
+            blockToPlace,
+            Game::World::UpdateFlags::All
+        );
+        
+        if (!changed) {
+            Log::Warning("HandleUseItemOn: SetBlock failed at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
+            ResyncAndAck(clicked, targetPos, packet.sequence);
+            return;
+        }
+        
+        // === 10. Run block hooks ===
+        
+        // TODO: Run block hooks when BlockRegistry is fully implemented
+        // if (blockToPl) {
+        //     // Call onPlace hook
+        //     blockToPl->onPlace(world, targetPos, m_player);
+        //     
+        //     // TODO: Call setPlacedBy for orientation
+        //     // TODO: Create Block Entity if required
+        //     // TODO: Merge NBT from item (BlockEntityTag)
+        // }
+        
+        // TODO: Schedule systems
+        // - Redstone neighbor updates
+        // - Fluid ticks (water/lava) for flow and waterlogging
+        // - Gravity blocks (sand) if implemented
+        
+        // === 11. Inventory update ===
+        
+        if (m_player->getGameMode() != GameMode::CREATIVE) {
+            // TODO: Decrement held stack
+            // TODO: Send inventory slot echo back to player
+        }
+        
+        // === 12. Accumulate outbound notifications ===
+
+        // TODO: Play sound effects
+        // TODO: Send particle effects
+        
+        // === 13. Success acknowledgment ===
+        
+        AckInteraction(packet.sequence, true);
+        m_lastInteractionSequence = packet.sequence;
+        
+        Log::Debug("HandleUseItemOn: Successfully placed %d at (%d,%d,%d)",
+                  static_cast<int>(blockToPlace), targetPos.x, targetPos.y, targetPos.z);
+    }
+    
+    void PlayerSession::ResyncAndAck(const glm::ivec3& clicked, const glm::ivec3& target, uint32_t sequence) {
+        // Send authoritative block states back to client to resync
+        if (m_connection) {
+            // Get world
+            Server::IntegratedServer* server = Server::g_integratedServer.get();
+            if (server && server->GetWorld()) {
+                Game::World* world = server->GetWorld();
+                
+                // Send clicked block
+                Game::BlockID clickedBlock = world->GetBlock(clicked.x, clicked.y, clicked.z);
+                SendBlockUpdate(clicked, clickedBlock);
+                
+                // Send target block if different
+                if (clicked != target) {
+                    Game::BlockID targetBlock = world->GetBlock(target.x, target.y, target.z);
+                    SendBlockUpdate(target, targetBlock);
+                }
+            }
+        }
+        
+        // Send failure acknowledgment
+        AckInteraction(sequence, false);
     }
 
     void PlayerSession::HandleKeepAlive(const Network::KeepAliveC2SPacket& packet) {
@@ -452,6 +765,66 @@ namespace Server {
         }
     }
 
+    // === SEND METHODS ===
+    
+    void PlayerSession::SendPositionSync() {
+        if (!m_player || !m_connection) return;
+        
+        // TODO: Send player position packet to client
+        // This would send the authoritative position from the server
+        // Network::PlayerUpdateS2CPacket packet;
+        // packet.playerId = m_player->getPlayerId();
+        // packet.position = m_player->getPosition();
+        // packet.rotation = m_player->getRotation();
+        // m_connection->SendPacket(packet);
+    }
+    
+    void PlayerSession::SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block) {
+        if (!m_connection) return;
+        
+        Network::BlockChangeS2CPacket packet(pos.x, pos.y, pos.z, block);
+        SendSingleBlockChange(packet);
+    }
+    
+    void PlayerSession::SendSingleBlockChange(const Network::BlockChangeS2CPacket& packet) {
+        // Send via integrated server (no connection check needed for integrated server)
+        if (g_integratedServer) {
+            g_integratedServer->SendBlockChangeS2CPacket(packet);
+        }
+        // TODO: Add network connection support for multiplayer
+    }
+    
+    void PlayerSession::SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
+        // Send via integrated server (no connection check needed for integrated server)
+        if (g_integratedServer) {
+            g_integratedServer->SendSectionBlocksUpdateS2CPacket(packet);
+        }
+        // TODO: Add network connection support for multiplayer
+    }
+    
+    void PlayerSession::SendInventoryUpdate(int slot) {
+        // TODO: Implement when inventory system exists
+        // if (!m_player || !m_connection) return;
+        // Network::SetSlotS2CPacket packet;
+        // packet.windowId = 0; // Player inventory
+        // packet.slot = slot;
+        // packet.item = m_player->getInventory().getSlot(slot);
+        // m_connection->SendPacket(packet);
+    }
+    
+    void PlayerSession::AckInteraction(uint32_t sequence, bool success) {
+        m_lastInteractionSequence = sequence;
+        
+        // TODO: Send acknowledgment packet to client
+        // Network::AckInteractionS2CPacket packet;
+        // packet.sequence = sequence;
+        // packet.success = success;
+        // m_connection->SendPacket(packet);
+        
+        Log::Debug("PlayerSession: Acknowledged interaction seq=%u success=%s",
+                  sequence, success ? "true" : "false");
+    }
+    
     void PlayerSession::OnChunkSendComplete(Game::Math::ChunkPos chunk) {
         // Move from inflight to sent
         m_inflightChunks.erase(chunk);
@@ -488,6 +861,29 @@ namespace Server {
         return m_stats;
     }
 
+    // === GETTERS ===
+    
+    glm::vec3 PlayerSession::GetPosition() const {
+        if (m_player) {
+            return glm::vec3(m_player->getPosition());
+        }
+        return glm::vec3(0.0f);
+    }
+    
+    glm::vec2 PlayerSession::GetRotation() const {
+        if (m_player) {
+            return m_player->getRotation();
+        }
+        return glm::vec2(0.0f);
+    }
+    
+    int PlayerSession::GetDimensionId() const {
+        if (m_player) {
+            return m_player->getDimensionId();
+        }
+        return 0;
+    }
+    
     void PlayerSession::ResetStats() {
         std::lock_guard<std::mutex> lock(m_statsMutex);
         m_stats = Stats{};

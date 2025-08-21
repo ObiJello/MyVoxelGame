@@ -15,7 +15,7 @@
 #include <unordered_map>
 
 namespace Game {
-    class PlayerController;
+    class ClientPlayer;
 }
 
 namespace Server {
@@ -26,6 +26,13 @@ namespace Server {
     class ChunkStatusManager;
     class SendScheduler;
     class PlayerSessionManager;
+    class ServerPlayer;
+    class PlayerSession;
+    class SectionChangeAccumulator;
+    class ChunkDeltaBroadcaster;
+    
+    // Server thread tracking
+    extern std::thread::id g_serverThreadId;
 
     // Server configuration
     struct IntegratedServerConfig {
@@ -39,7 +46,16 @@ namespace Server {
         bool useLocalSaveDirectory = true;     // Automatically use local save directory if available (temporary feature)
     };
 
-    // Player state tracking (for multiplayer extension)
+
+    // Chunk send tracking
+    struct ChunkSendState {
+        Game::Math::ChunkPos chunkPos{0, 0};  // Initialize to (0,0)
+        bool sent = false;
+        bool needsResend = false;
+        std::chrono::steady_clock::time_point sendTime;
+    };
+
+    // Player state tracking (legacy, being phased out)
     struct ServerPlayerState {
         uint32_t playerId = 0;
         glm::vec3 position{0.0f};
@@ -48,14 +64,6 @@ namespace Server {
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> loadedChunks;
         uint32_t lastMoveSequenceNumber = 0;
         std::chrono::steady_clock::time_point lastUpdateTime;
-    };
-
-    // Chunk send tracking
-    struct ChunkSendState {
-        Game::Math::ChunkPos chunkPos{0, 0};  // Initialize to (0,0)
-        bool sent = false;
-        bool needsResend = false;
-        std::chrono::steady_clock::time_point sendTime;
     };
 
     // Integrated server class (mirrors MinecraftServer + IntegratedServer from Minecraft)
@@ -93,22 +101,32 @@ namespace Server {
 
         // Get the server-owned world instance
         Game::World* GetWorld() const { return m_world.get(); }
+        
+        // Get the change accumulator for block updates
+        SectionChangeAccumulator* GetChangeAccumulator() const { return m_changeAccumulator.get(); }
 
         // ========================================================================
         // PLAYER MANAGEMENT
         // ========================================================================
 
-        // Set player controller (for integrated server)
-        void SetPlayerController(Game::PlayerController* playerController);
+        // Set player (for integrated server)
+        void SetPlayer(Game::ClientPlayer* player);
         
         // Update player state from client packets
         void UpdatePlayerState(const Network::PlayerMoveC2SPacket& packet);
 
-        // Get current player state
+        // Get current player state (legacy, being phased out)
         const ServerPlayerState& GetPlayerState() const { return m_playerState; }
+        
+        // Get player session for network/view management
+        PlayerSession* GetPlayerSession() const { return m_playerSession.get(); }
         
         // Send ChunkDataS2CPacket to client (new Minecraft-compatible format)
         void SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet);
+        
+        // Send block change packets to client
+        void SendBlockChangeS2CPacket(const Network::BlockChangeS2CPacket& packet);
+        void SendSectionBlocksUpdateS2CPacket(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
 
         // ========================================================================
         // PACKET PROCESSING (Called by NetworkServer)
@@ -172,17 +190,25 @@ namespace Server {
         std::unique_ptr<ChunkStatusManager> m_statusManager;
         std::unique_ptr<SendScheduler> m_sendScheduler;
         std::unique_ptr<PlayerSessionManager> m_sessionManager;
+        
+        // Block change accumulation and broadcasting
+        std::unique_ptr<SectionChangeAccumulator> m_changeAccumulator;
+        std::unique_ptr<ChunkDeltaBroadcaster> m_deltaBroadcaster;
 
-        // Player controller reference (for integrated server)
-        Game::PlayerController* m_playerController = nullptr;
+        // Player reference (for integrated server)
+        Game::ClientPlayer* m_player = nullptr;
 
         // Thread management
         std::unique_ptr<std::thread> m_serverThread;
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_shouldStop{false};
 
-        // Player state
+        // Player state (legacy, being replaced)
         ServerPlayerState m_playerState;
+        
+        // New player architecture
+        std::unique_ptr<ServerPlayer> m_serverPlayer;     // Authoritative gameplay entity
+        std::unique_ptr<PlayerSession> m_playerSession;   // Network/view management
 
         // Chunk management
         std::unordered_map<Game::Math::ChunkPos, ChunkSendState, Game::Math::ChunkPosHash> m_chunkSendStates;
@@ -255,6 +281,9 @@ namespace Server {
 
         // Update player chunk position
         void UpdatePlayerChunkPosition(const glm::vec3& newPosition);
+        
+        // Update view distance watchers
+        void UpdateViewDistanceWatchers();
 
         // ========================================================================
         // PACKET SENDING

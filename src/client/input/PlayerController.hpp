@@ -1,118 +1,102 @@
 // File: src/client/input/PlayerController.hpp
 #pragma once
 
-#include "common/entity/Inventory.hpp"
+#include "../entity/Player.hpp"
 #include "common/physics/RayCast.hpp"
-#include "common/physics//Physics.hpp"
-#include "../renderer/core/Camera.hpp"
-#include <optional>
+#include <chrono>
+#include <glm/glm.hpp>
+
+// Forward declarations
+namespace Client {
+    class NetworkClient;
+}
 
 namespace Game {
 
     // Forward declaration
     class World;
 
-    class PlayerController {
+    // Client-side player controller that handles interaction and (future) networking
+    class ClientPlayerController {
     public:
         // Configuration
         static constexpr float INTERACTION_RANGE = 5.0f;
         static constexpr float BREAK_TIME = 0.25f; // Time to break a block in seconds
         static constexpr float PLACE_COOLDOWN = 0.1f; // Cooldown between block placements
+        static constexpr float RIGHT_CLICK_DELAY = 0.2f; // 200ms delay between right clicks (Minecraft-style)
 
-        PlayerController();
+        ClientPlayerController();
 
-        // Set the world reference (must be called after world is created)
+        // Set references (must be called after creation)
+        void SetPlayer(ClientPlayer* player);
         void SetWorld(World* world);
+        void SetNetworkClient(Client::NetworkClient* networkClient);
 
-        // Update the player controller (call once per frame)
-        void Update(float deltaTime, Render::Camera& camera);
+        // Main update tick (call once per frame)
+        void Tick(float deltaTime);
 
-        // Get the player's inventory
-        Inventory& GetInventory() { return inventory; }
-        const Inventory& GetInventory() const { return inventory; }
-
-        // Get the player's physics state
-        PlayerPhysics& GetPhysics() { return physics; }
-        const PlayerPhysics& GetPhysics() const { return physics; }
-
-        // Get current raycast hit (if any)
-        const std::optional<RaycastHit>& GetCurrentHit() const { return currentHit; }
-
+        // Input handlers (to be called from main loop based on input)
+        void OnLMB(bool pressed);  // Left mouse button (break)
+        void OnRMB(bool pressed);  // Right mouse button (place)
+        
+        // Hotbar selection
+        void OnHotbarChanged(int slot);
+        
+        // Player commands
+        void OnRespawnRequest();  // TODO: Implement for multiplayer
+        
         // Check if currently breaking a block
         bool IsBreaking() const { return isBreaking; }
 
         // Get breaking progress (0.0 to 1.0)
         float GetBreakProgress() const { return breakProgress; }
 
-        // Input handlers (to be called from main loop based on input)
-        void OnBreakPressed();
-        void OnBreakReleased();
-        void OnPlacePressed();
-        void OnPlaceReleased();
-
-        // Movement input handlers
-        void SetMovementInput(const glm::vec3& movement);
-        void SetJumpPressed(bool pressed);
-        void SetSprintPressed(bool pressed);
-        void SetSneakPressed(bool pressed);
-
-        // Inventory slot selection
-        void SelectSlot(int slot);
-        void SelectNextSlot();
-        void SelectPreviousSlot();
-
-        // Debug/cheat functions
-        void ToggleNoclip();
-        void SetNoclip(bool enabled);
-
-        // Statistics
-        struct Stats {
-            int blocksPlaced = 0;
-            int blocksBroken = 0;
-            int lastPlacedBlockId = -1;
-            int lastBrokenBlockId = -1;
-            float totalDistanceTraveled = 0.0f;
-            float totalPlayTime = 0.0f;
-        };
-
-        const Stats& GetStats() const { return stats; }
+        // Get player reference (for compatibility during refactor)
+        ClientPlayer* GetPlayer() { return player; }
+        const ClientPlayer* GetPlayer() const { return player; }
 
     private:
-        Inventory inventory;
-        PlayerPhysics physics;  // Player physics state
-        std::optional<RaycastHit> currentHit;
-        World* world; // Reference to the world for block access
+        // References
+        ClientPlayer* player;
+        World* world;
+        Client::NetworkClient* networkClient;  // Network client for sending packets
 
-        // Movement input state
-        glm::vec3 movementInput{0.0f};
-        bool jumpPressed = false;
-        bool sprintPressed = false;
-        bool sneakPressed = false;
-
-        // Breaking state
+        // Mining state
         bool isBreaking;
         bool breakButtonHeld;
         float breakProgress;
         glm::ivec3 breakingBlockPos;
+        float mineSpeed = 1.0f;  // TODO: Calculate from tool/effects
 
         // Placing state
         bool placeButtonHeld;
         float placeCooldownTimer;
+        float rightClickDelayTimer;  // Timer to prevent RMB spam (Minecraft-style)
 
-        // Statistics
-        Stats stats;
-        glm::vec3 lastPosition{0.0f}; // For distance tracking
+        // Network state (placeholders for future implementation)
+        std::chrono::steady_clock::time_point lastMoveSend;
+        int moveSeq = 0;         // Movement sequence number
+        int interactSeq = 0;     // Interaction sequence number
+        bool sentPlayerLoaded = false;  // Track if we've sent initial spawn
 
-        // Helper methods
-        void UpdatePhysics(float deltaTime);
-        void UpdateCamera(Render::Camera& camera);
-        void UpdateRaycast(const Render::Camera& camera);
+        // Internal methods
+        void SendMovementIfDue();  // TODO: Implement for networking
+        void StartDig(const glm::ivec3& pos, int face);
+        void AbortDig();
+        void FinishDig();
+        void SendUseItemOn(const RaycastHit& hit, int hand);  // TODO: Implement for networking
+        void SendUseItem(int hand);  // TODO: Implement for networking
+
+        // Helper methods (existing functionality)
         void UpdateBreaking(float deltaTime);
         void TryPlaceBlock();
-        void FinishBreaking();
+        void FinishBreaking();  // Local block breaking implementation
         bool CanPlaceBlockAt(const glm::ivec3& pos);
         void MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos);
         BlockID GetBreakingBlockType(const glm::ivec3& pos);
     };
+
+    // Typedef for compatibility during transition
+    using PlayerController = ClientPlayerController;
 
 } // namespace Game

@@ -13,6 +13,21 @@ namespace Game {
 
     class World : public IBlockAccess {
     public:
+        // Update flags for SetBlock operations (bitfield)
+        enum UpdateFlags : uint32_t {
+            None              = 0,
+            NotifyNeighbors   = 1 << 0,  // Notify neighboring blocks of change
+            UpdateShapes      = 1 << 1,  // Update block shapes (for fences, walls, etc.) - TODO
+            RecomputeLight    = 1 << 2,  // Recalculate lighting - TODO
+            UpdateHeightmap   = 1 << 3,  // Update chunk heightmap - TODO
+            MarkDirty         = 1 << 4,  // Mark section dirty for mesh rebuild
+            NoDrops           = 1 << 6,  // Don't drop items when breaking - TODO
+            
+            // Common flag combinations
+            All = NotifyNeighbors | UpdateShapes | RecomputeLight | UpdateHeightmap | MarkDirty,
+            AllNoDrops = All | NoDrops
+        };
+        
         World();
         ~World();
 
@@ -33,6 +48,7 @@ namespace Game {
 
         // World modification
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
+        bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags);
 
         // Simplified chunk management - loads ALL chunks in square pattern
         void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance = 0);
@@ -120,6 +136,7 @@ namespace Game {
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
+        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ);
         Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
         void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
 

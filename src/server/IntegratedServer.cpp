@@ -5,15 +5,18 @@
 #include "network/SendScheduler.hpp"
 #include "session/PlayerSessionManager.hpp"
 #include "session/PlayerSession.hpp"
+#include "player/ServerPlayer.hpp"
 #include "world/ticketing/ChunkTicketManager.hpp"
 #include "world/watch/ChunkWatchIndex.hpp"
 #include "world/status/ChunkStatusManager.hpp"
+#include "world/tracking/SectionChangeAccumulator.hpp"
+#include "world/tracking/ChunkDeltaBroadcaster.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/PacketTypes.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/world/level/World.hpp"
-#include "client/input/PlayerController.hpp"
+#include "client/entity/Player.hpp"
 #include "world/ServerWorkerPool.hpp"
 #include "world/storage/SectionDataUnpacker.hpp"
 #include "platform/GameDirectory.hpp"
@@ -24,6 +27,9 @@ namespace Server {
 
     // Global instance
     std::unique_ptr<IntegratedServer> g_integratedServer = nullptr;
+    
+    // Server thread ID for assertions
+    std::thread::id g_serverThreadId;
 
     IntegratedServer::IntegratedServer(const IntegratedServerConfig& config)
         : m_config(config) {
@@ -62,6 +68,21 @@ namespace Server {
         m_playerState.position = glm::vec3(0.0f, 67.0f, 0.0f);
         m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(0, 0);
         m_playerState.lastUpdateTime = std::chrono::steady_clock::now();
+        
+        // Create ServerPlayer and PlayerSession instances
+        glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
+        m_serverPlayer = std::make_unique<ServerPlayer>(1, "Player");
+        m_serverPlayer->setPosition(glm::dvec3(spawnPos));
+        
+        // Create and configure player session for view/network management
+        m_playerSession = std::make_unique<PlayerSession>(1, 0); // playerId=1, connectionId=0
+        m_playerSession->AttachPlayer(m_serverPlayer.get());
+        
+        // Initialize session with spawn position and config
+        PlayerSession::Config sessionConfig;
+        sessionConfig.viewDistance = m_config.defaultViewDistance;
+        sessionConfig.simulationDistance = m_config.defaultViewDistance;
+        m_playerSession->Initialize(sessionConfig, 0, spawnPos); // dimension=0 (overworld)
 
         // Reset statistics
         m_stats.Reset();
@@ -206,12 +227,12 @@ namespace Server {
         Log::Info("IntegratedServer shutdown complete");
     }
 
-    void IntegratedServer::SetPlayerController(Game::PlayerController* playerController) {
-        m_playerController = playerController;
+    void IntegratedServer::SetPlayer(Game::ClientPlayer* player) {
+        m_player = player;
         
-        if (playerController) {
-            // Update player state from controller
-            const auto& physics = playerController->GetPhysics();
+        if (player) {
+            // Update player state from player
+            const auto& physics = player->physics;
             m_playerState.position = physics.position;
             m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
                 static_cast<int>(physics.position.x), 
@@ -260,7 +281,11 @@ namespace Server {
         static constexpr auto TICK_DURATION = 50ms;  // 20 TPS
         static constexpr auto SPIN_CUSHION = 2ms;    // Start spinning 2ms before target
         
-        Log::Info("IntegratedServer main loop started (Target: %d TPS)", m_config.tickRate);
+        // Store server thread ID for assertions
+        g_serverThreadId = std::this_thread::get_id();
+        
+        Log::Info("IntegratedServer main loop started (Target: %d TPS, ThreadId: %zu)", 
+                  m_config.tickRate, std::hash<std::thread::id>{}(g_serverThreadId));
         
         m_lastTickTime = clock::now();
         m_lastTickStartTime = m_lastTickTime;
@@ -319,6 +344,7 @@ namespace Server {
         // Network I/O is now handled by dedicated thread (no need to poll)
         // The I/O thread runs continuously and processes all async operations
         
+        // === 1. DRAIN C2S QUEUES ===
         // CRITICAL: Tick all connections to drain their packet queues
         // This is the Minecraft way - process packets on the server thread
         if (m_networkServer) {
@@ -351,6 +377,13 @@ namespace Server {
             // activeConnections will be destroyed here, releasing any disconnected connections
         }
         
+        // === 3. FLUSH ACCUMULATED BLOCK CHANGES ===
+        // This MUST happen after world simulation but before chunk streaming
+        // All block changes from this tick are broadcast to watchers now
+        if (m_deltaBroadcaster) {
+            m_deltaBroadcaster->flush();
+        }
+        
         // Process the new session management system
         if (m_sessionManager) {
             // Tick all player sessions
@@ -367,9 +400,20 @@ namespace Server {
             }
         }
         
+        // Tick the server player entity (authoritative gameplay)
+        if (m_serverPlayer) {
+            m_serverPlayer->tick(m_world.get(), static_cast<int>(serverTick));
+        }
+        
+        // Tick the player session (view/network management)
+        if (m_playerSession) {
+            m_playerSession->Tick(serverTick);
+        }
+        
         // Process async chunk load results from ServerWorkerPool
         ProcessAsyncChunkResults();
         
+        // === 2. RUN WORLD SIMULATION ===
         // Call World's unified tick loop with chunk send throttling
         if (m_world) {
             // Use time budget for chunk processing
@@ -420,12 +464,6 @@ namespace Server {
         // This function is now obsolete - packets are processed via NetworkServer callbacks
         // Keeping empty for compatibility during transition
     }
-
-
-
-
-
-
 
     void IntegratedServer::RequestChunkLoad(Game::Math::ChunkPos chunkPos, int priority) {
         // Check if chunk is already loaded
@@ -484,6 +522,15 @@ namespace Server {
         
         // Mark chunk as loaded by the client
         m_playerState.loadedChunks.insert(chunkPos);
+        
+        // Register player as watcher for this chunk
+        // This is critical for block change tracking to work!
+        if (m_watchIndex) {
+            m_watchIndex->AddWatcher(1, chunkPos);  // playerId=1 for integrated server
+            Log::Info("[IntegratedServer] Registered player 1 as watcher for chunk (%d, %d)", chunkPos.x, chunkPos.z);
+        } else {
+            Log::Error("[IntegratedServer] m_watchIndex is null when trying to register watcher!");
+        }
         
         m_stats.chunksSent.fetch_add(1, std::memory_order_relaxed);
         Log::Debug("Sent chunk (%d, %d) to client", chunkPos.x, chunkPos.z);
@@ -635,8 +682,25 @@ namespace Server {
             m_sendScheduler->RegisterConnection(connection->GetConnectionId(), connection);
         }
         
-        // Create player session
-        if (m_sessionManager) {
+        // For integrated server, we already have m_serverPlayer and m_playerSession created in Initialize()
+        // We just need to wire them to the connection
+        if (m_playerSession && m_serverPlayer) {
+            // Update the session with the connection ID
+            m_playerSession->SetConnectionId(connection->GetConnectionId());
+            
+            // Register with session manager if available
+            if (m_sessionManager) {
+                uint32_t playerId = 1;  // Single player ID for integrated server
+                m_sessionManager->OnPlayerJoin(
+                    playerId,
+                    connection->GetConnectionId(),
+                    "Player"  // Default player name
+                );
+            }
+            
+            Log::Info("[IntegratedServer] Player session wired to connection %u", connection->GetConnectionId());
+        } else if (m_sessionManager) {
+            // Fallback: Create session through manager
             uint32_t playerId = 1;  // Single player ID for integrated server
             m_sessionManager->OnPlayerJoin(
                 playerId,
@@ -644,7 +708,7 @@ namespace Server {
                 "Player"  // Default player name
             );
             
-            Log::Info("[IntegratedServer] Player session created and initialized");
+            Log::Info("[IntegratedServer] Player session created through manager");
         } else {
             // Fallback to old system if session manager not available
             Log::Warning("[IntegratedServer] Session manager not available, using legacy chunk sending");
@@ -718,6 +782,9 @@ namespace Server {
         if (newChunk.x != m_playerState.currentChunk.x || newChunk.z != m_playerState.currentChunk.z) {
             m_playerState.currentChunk = newChunk;
             Log::Debug("Player moved to chunk (%d, %d)", newChunk.x, newChunk.z);
+            
+            // Update view distance watchers when player moves to new chunk
+            UpdateViewDistanceWatchers();
             
             // Chunk loading is now handled by World::WorldLoop()
         }
@@ -814,6 +881,36 @@ namespace Server {
         });
         
         return chunks;
+    }
+    
+    void IntegratedServer::UpdateViewDistanceWatchers() {
+        if (!m_watchIndex) {
+            return;
+        }
+        
+        // Get current required chunks based on view distance
+        auto requiredChunks = GetRequiredChunks();
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> requiredSet(
+            requiredChunks.begin(), requiredChunks.end()
+        );
+        
+        // Find chunks to remove (in loaded but not in required)
+        std::vector<Game::Math::ChunkPos> toRemove;
+        for (const auto& chunk : m_playerState.loadedChunks) {
+            if (requiredSet.find(chunk) == requiredSet.end()) {
+                toRemove.push_back(chunk);
+            }
+        }
+        
+        // Remove watchers for chunks going out of view
+        for (const auto& chunk : toRemove) {
+            m_watchIndex->RemoveWatcher(1, chunk);  // playerId=1 for integrated server
+            m_playerState.loadedChunks.erase(chunk);
+            m_chunkSendStates.erase(chunk);
+            Log::Debug("Removed watcher for chunk (%d, %d) - out of view distance", chunk.x, chunk.z);
+        }
+        
+        // Note: Adding watchers is handled in SendChunkToClient when chunks are sent
     }
 
     void IntegratedServer::UpdateStatistics(float tickExecutionTime, float timeBetweenTicks) {
@@ -923,11 +1020,28 @@ namespace Server {
         Game::Math::ChunkPos spawnChunk(0, 0);
         m_ticketManager->AddSpawnTickets(spawnChunk, 2);
         
+        // Initialize block change accumulation and broadcasting
+        m_changeAccumulator = std::make_unique<SectionChangeAccumulator>();
+        m_deltaBroadcaster = std::make_unique<ChunkDeltaBroadcaster>(
+            this, 
+            m_changeAccumulator.get(), 
+            m_watchIndex.get()
+        );
+        
         Log::Info("Session management system initialized successfully");
     }
 
     void IntegratedServer::CleanupSessionSystem() {
         Log::Info("Cleaning up session management system...");
+        
+        // Clean up broadcaster and accumulator first
+        if (m_deltaBroadcaster) {
+            m_deltaBroadcaster.reset();
+        }
+        
+        if (m_changeAccumulator) {
+            m_changeAccumulator.reset();
+        }
         
         if (m_sessionManager) {
             m_sessionManager->Shutdown();
@@ -945,6 +1059,8 @@ namespace Server {
         }
         
         if (m_watchIndex) {
+            // Remove all watchers for the integrated server player
+            m_watchIndex->RemoveAllWatchersForPlayer(1);  // playerId=1 for integrated server
             m_watchIndex->Clear();
             m_watchIndex.reset();
         }
@@ -955,6 +1071,59 @@ namespace Server {
         }
         
         Log::Info("Session management system cleaned up");
+    }
+    
+    void IntegratedServer::SendBlockChangeS2CPacket(const Network::BlockChangeS2CPacket& packet) {
+        // Check both that NetworkServer exists and we're not shutting down
+        if (m_networkServer && !m_shouldStop.load()) {
+            auto data = Network::Serialization::Serialize(packet);
+            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
+            
+            Log::Debug("[IntegratedServer] Sent block change at (%d, %d, %d) to block %d",
+                      packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
+        }
+    }
+    
+    void IntegratedServer::SendSectionBlocksUpdateS2CPacket(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
+        // Check both that NetworkServer exists and we're not shutting down
+        if (m_networkServer && !m_shouldStop.load()) {
+            // TODO: Serialize the packet properly when serialization is implemented
+            // For now, create a simple serialized format
+            std::vector<uint8_t> data;
+            
+            // Write chunk coordinates
+            data.push_back((packet.chunkPos.x >> 8) & 0xFF);
+            data.push_back(packet.chunkPos.x & 0xFF);
+            data.push_back((packet.chunkPos.z >> 8) & 0xFF);
+            data.push_back(packet.chunkPos.z & 0xFF);
+            
+            // Write section Y
+            data.push_back(packet.sectionY & 0xFF);
+            
+            // Write number of records as VarInt
+            uint32_t recordCount = packet.packedRecords.size();
+            while (recordCount > 127) {
+                data.push_back((recordCount & 0x7F) | 0x80);
+                recordCount >>= 7;
+            }
+            data.push_back(recordCount & 0x7F);
+            
+            // Write packed records
+            for (uint32_t record : packet.packedRecords) {
+                // Write as VarInt
+                uint32_t val = record;
+                while (val > 127) {
+                    data.push_back((val & 0x7F) | 0x80);
+                    val >>= 7;
+                }
+                data.push_back(val & 0x7F);
+            }
+            
+            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ClientboundSectionBlocksUpdate), data);
+            
+            Log::Debug("[IntegratedServer] Sent section block updates for chunk (%d, %d) section %d with %zu changes",
+                      packet.chunkPos.x, packet.chunkPos.z, packet.sectionY, packet.packedRecords.size());
+        }
     }
 
 } // namespace Server

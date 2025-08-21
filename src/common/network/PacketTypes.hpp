@@ -94,6 +94,16 @@ namespace Network {
             , timestamp(static_cast<uint32_t>(std::chrono::steady_clock::now().time_since_epoch().count())) {}
     };
 
+    // Minecraft-style clientbound block update packet (modern naming convention)
+    struct ClientboundBlockUpdateS2CPacket {
+        int32_t x, y, z;        // Block position
+        int32_t blockId;        // Block ID as int (not BlockID enum for flexibility)
+        
+        ClientboundBlockUpdateS2CPacket() = default;
+        ClientboundBlockUpdateS2CPacket(int32_t x, int32_t y, int32_t z, int32_t blockId)
+            : x(x), y(y), z(z), blockId(blockId) {}
+    };
+
     // Multiple block changes in one packet for efficiency
     struct MultiBlockChangeS2CPacket {
         Game::Math::ChunkPos chunkPos;
@@ -103,6 +113,42 @@ namespace Network {
         };
         std::vector<BlockChange> changes;
         uint32_t timestamp;
+    };
+    
+    // Minecraft-compatible section block updates packet (1.16.2+ format)
+    // All changes MUST be within the same chunk section (16x16x16)
+    struct ClientboundSectionBlocksUpdateS2CPacket {
+        Game::Math::ChunkPos chunkPos;  // Chunk coordinates
+        int32_t sectionY;                // Section index (0-23 for -64 to 319 world height)
+        
+        // Packed block changes following Minecraft wire format:
+        // Each VarInt encodes: (localX << 12) | (localZ << 8) | (localY << 4) | blockStateId
+        // localX, localY, localZ are 0-15 within the section
+        // blockStateId uses remaining bits (can extend beyond 4 bits if needed)
+        std::vector<uint32_t> packedRecords;
+        
+        ClientboundSectionBlocksUpdateS2CPacket() = default;
+        ClientboundSectionBlocksUpdateS2CPacket(Game::Math::ChunkPos pos, int32_t section)
+            : chunkPos(pos), sectionY(section) {}
+        
+        // Helper to add a block change
+        void AddChange(uint8_t localX, uint8_t localY, uint8_t localZ, uint16_t blockStateId) {
+            // Pack according to Minecraft protocol
+            uint32_t packed = (static_cast<uint32_t>(localX & 0xF) << 12) |
+                            (static_cast<uint32_t>(localZ & 0xF) << 8) |
+                            (static_cast<uint32_t>(localY & 0xF) << 4) |
+                            (blockStateId & 0xFFF);  // Support up to 12 bits for block ID
+            packedRecords.push_back(packed);
+        }
+        
+        // Helper to unpack a record
+        static void UnpackRecord(uint32_t packed, uint8_t& localX, uint8_t& localY, 
+                                uint8_t& localZ, uint16_t& blockStateId) {
+            localX = (packed >> 12) & 0xF;
+            localZ = (packed >> 8) & 0xF;
+            localY = (packed >> 4) & 0xF;
+            blockStateId = packed & 0xFFF;
+        }
     };
 
     // Player position updates from server (for multiplayer support later)
@@ -137,6 +183,27 @@ namespace Network {
             : worldX(x), worldY(y), worldZ(z), action(act) {}
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act, Game::BlockID block)
             : worldX(x), worldY(y), worldZ(z), action(act), blockId(block) {}
+    };
+
+    // Use item on block packet sent from client to server (Minecraft 1.14+ style)
+    // This packet first tries block.use(), then item placement
+    struct UseItemOnC2SPacket {
+        uint32_t hand = 0;           // VarInt: 0=main hand, 1=off hand
+        int32_t blockX = 0;          // Block coordinates of the block clicked on
+        int32_t blockY = 0;
+        int32_t blockZ = 0;
+        uint32_t direction = 0;      // VarInt: Face clicked (0=bottom, 1=top, 2=north, 3=south, 4=west, 5=east)
+        float cursorX = 0.0f;        // Hit position X in block-local coordinates [0,1)
+        float cursorY = 0.0f;        // Hit position Y in block-local coordinates [0,1)
+        float cursorZ = 0.0f;        // Hit position Z in block-local coordinates [0,1)
+        bool insideBlock = false;    // True if raycast started inside the block volume
+        uint32_t sequence = 0;       // VarInt: Monotonic client interaction ID for acknowledgment
+
+        UseItemOnC2SPacket() = default;
+        UseItemOnC2SPacket(uint32_t h, int32_t x, int32_t y, int32_t z, uint32_t dir,
+                           float cx, float cy, float cz, bool inside, uint32_t seq)
+            : hand(h), blockX(x), blockY(y), blockZ(z), direction(dir),
+              cursorX(cx), cursorY(cy), cursorZ(cz), insideBlock(inside), sequence(seq) {}
     };
 
     // Player movement sent from client to server (mirrors Minecraft's PlayerMoveC2SPacket)
@@ -316,6 +383,26 @@ namespace Network {
             return packet;
         }
 
+        // ---- ClientboundBlockUpdateS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const ClientboundBlockUpdateS2CPacket& packet) {
+            Network::PacketBuffer buffer;
+            buffer.WriteInt(packet.x);
+            buffer.WriteInt(packet.y);
+            buffer.WriteInt(packet.z);
+            buffer.WriteInt(packet.blockId);
+            return buffer.GetData();
+        }
+        
+        inline ClientboundBlockUpdateS2CPacket DeserializeClientboundBlockUpdate(const std::vector<uint8_t>& data) {
+            Network::PacketReader reader(data);
+            ClientboundBlockUpdateS2CPacket packet;
+            packet.x = reader.ReadInt();
+            packet.y = reader.ReadInt();
+            packet.z = reader.ReadInt();
+            packet.blockId = reader.ReadInt();
+            return packet;
+        }
+
         // ---- MultiBlockChangeS2CPacket Serialization ----
         inline std::vector<uint8_t> Serialize(const MultiBlockChangeS2CPacket& packet) {
             Network::PacketBuffer buffer;
@@ -451,6 +538,38 @@ namespace Network {
             packet.message = reader.ReadString();
             packet.isCommand = reader.ReadByte() != 0;
             packet.timestamp = reader.ReadInt();
+            return packet;
+        }
+
+        // ---- UseItemOnC2SPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const UseItemOnC2SPacket& packet) {
+            Network::PacketBuffer buffer;
+            buffer.WriteVarInt(packet.hand);                // Hand (VarInt)
+            buffer.WriteInt(packet.blockX);                 // Block X
+            buffer.WriteInt(packet.blockY);                 // Block Y
+            buffer.WriteInt(packet.blockZ);                 // Block Z
+            buffer.WriteVarInt(packet.direction);           // Direction/Face (VarInt)
+            buffer.WriteFloat(packet.cursorX);              // Cursor X [0,1)
+            buffer.WriteFloat(packet.cursorY);              // Cursor Y [0,1)
+            buffer.WriteFloat(packet.cursorZ);              // Cursor Z [0,1)
+            buffer.WriteByte(packet.insideBlock ? 0x01 : 0x00); // Inside block flag
+            buffer.WriteVarInt(packet.sequence);            // Sequence number (VarInt)
+            return buffer.GetData();
+        }
+        
+        inline UseItemOnC2SPacket DeserializeUseItemOnC2S(const std::vector<uint8_t>& data) {
+            Network::PacketReader reader(data);
+            UseItemOnC2SPacket packet;
+            packet.hand = reader.ReadVarInt();              // Hand (VarInt)
+            packet.blockX = reader.ReadInt();               // Block X
+            packet.blockY = reader.ReadInt();               // Block Y
+            packet.blockZ = reader.ReadInt();               // Block Z
+            packet.direction = reader.ReadVarInt();         // Direction/Face (VarInt)
+            packet.cursorX = reader.ReadFloat();            // Cursor X
+            packet.cursorY = reader.ReadFloat();            // Cursor Y
+            packet.cursorZ = reader.ReadFloat();            // Cursor Z
+            packet.insideBlock = reader.ReadByte() != 0;    // Inside block flag
+            packet.sequence = reader.ReadVarInt();          // Sequence number (VarInt)
             return packet;
         }
 

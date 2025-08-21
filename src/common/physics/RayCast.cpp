@@ -96,6 +96,13 @@ namespace Game {
         int lastStepAxis = -1; // 0=X, 1=Y, 2=Z
 
         float totalDistance = 0.0f;
+        
+        // Check if we start inside a block
+        bool startedInsideBlock = false;
+        BlockID startBlockId = GetBlockAtWorldPos(origin);
+        if (IsBlockSolid(startBlockId)) {
+            startedInsideBlock = true;
+        }
 
         // Ray marching loop
         while (totalDistance < maxDistance) {
@@ -113,6 +120,15 @@ namespace Game {
                 // Calculate exact hit point
                 float t = totalDistance;
                 hit.hitPoint = origin + dir * t;
+                
+                // Calculate cursor position (fractional part within block)
+                glm::vec3 blockOrigin = glm::vec3(currentBlock);
+                hit.cursorPos = hit.hitPoint - blockOrigin;
+                // Clamp to [0, 1) range for safety
+                hit.cursorPos = glm::clamp(hit.cursorPos, glm::vec3(0.0f), glm::vec3(0.999f));
+                
+                // Set inside block flag (true if this is the first block and we started inside)
+                hit.insideBlock = (totalDistance == 0.0f && startedInsideBlock);
 
                 // Determine which face was hit based on the last step
                 if (lastStepAxis == 0) { // X axis

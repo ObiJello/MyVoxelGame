@@ -11,6 +11,9 @@ namespace Client {
         : NetworkConnection(std::move(socket))
         , m_client(client)
     {
+        // Set connection name to "Client" for clearer logging
+        SetName("Client");
+        
         // Register packet handlers for server → client packets
         using namespace Network;
         m_packetRegistry.RegisterHandler(PacketId::LoginSuccess,
@@ -104,11 +107,20 @@ namespace Client {
     // ========================================================================
 
     void ClientConnection::SendBlockAction(const Network::BlockActionC2SPacket& packet) {
+        Log::Info("[Client] SENDING BlockActionC2S (ID: 0x%02X) - Action: %d, Pos: (%d, %d, %d)",
+                  static_cast<uint8_t>(Network::PacketId::BlockActionC2S), 
+                  packet.action, packet.worldX, packet.worldY, packet.worldZ);
         auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
     }
 
     void ClientConnection::SendPlayerMove(const Network::PlayerMoveC2SPacket& packet) {
+        // Only log non-keep-alive player moves to reduce spam
+        if (packet.sequenceNumber % 20 == 0) {  // Log every 20th move
+            /*Log::Debug("[Client] SENDING PlayerMoveC2S (ID: 0x%02X) - Pos: (%.2f, %.2f, %.2f)",
+                      static_cast<uint8_t>(Network::PacketId::PlayerMoveC2S),
+                      packet.position.x, packet.position.y, packet.position.z);*/
+        }
         auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerMoveC2S), data);
     }
@@ -119,11 +131,18 @@ namespace Client {
         packet.timestamp = static_cast<uint32_t>(std::time(nullptr));
         packet.isCommand = !message.empty() && message[0] == '/';
         
+        Log::Info("[Client] SENDING ChatMessageC2S (ID: 0x%02X) - Message: %s",
+                  static_cast<uint8_t>(Network::PacketId::ChatMessageC2S), message.c_str());
+        
         auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageC2S), data);
     }
 
     void ClientConnection::SendClientSettings(int renderDistance, bool vsync, float mouseSensitivity) {
+        Log::Info("[Client] SENDING ClientConfigC2S (ID: 0x%02X) - RenderDist: %d, VSync: %s",
+                  static_cast<uint8_t>(Network::PacketId::ClientConfigC2S), 
+                  renderDistance, vsync ? "true" : "false");
+        
         Network::PacketBuffer buffer;
         buffer.WriteVarInt(renderDistance);
         buffer.WriteByte(vsync ? 1 : 0);
@@ -132,6 +151,9 @@ namespace Client {
     }
 
     void ClientConnection::SendKeepAliveResponse(uint64_t id) {
+        Log::Debug("[Client] SENDING KeepAliveC2S (ID: 0x%02X) - ID: %llu",
+                   static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), id);
+        
         Network::PacketBuffer buffer;
         buffer.WriteLong(id);
         SendPacket(static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), buffer.GetData());

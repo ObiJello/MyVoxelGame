@@ -1,5 +1,6 @@
 // File: src/server/world/watch/ChunkWatchIndex.cpp
 #include "ChunkWatchIndex.hpp"
+#include "common/core/Log.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -26,6 +27,9 @@ namespace Server {
         
         // Add chunk to player's watched set
         dim.watchedChunksByPlayer[playerId].insert(chunk);
+        
+        Log::Info("[ChunkWatchIndex] Added player %u as watcher for chunk (%d, %d). Total watchers for this chunk: %zu",
+                  playerId, chunk.x, chunk.z, dim.watchersByChunk[chunk].size());
     }
 
     void ChunkWatchIndex::RemoveWatcher(uint32_t playerId, Game::Math::ChunkPos chunk) {
@@ -128,13 +132,20 @@ namespace Server {
         std::lock_guard<std::mutex> lock(m_mutex);
         
         auto* dim = GetDimension(DEFAULT_DIMENSION);
-        if (!dim) return {};
+        if (!dim) {
+            Log::Warning("[ChunkWatchIndex] GetWatchers: No dimension found for DEFAULT_DIMENSION");
+            return {};
+        }
         
         auto it = dim->watchersByChunk.find(chunk);
         if (it != dim->watchersByChunk.end()) {
+            Log::Debug("[ChunkWatchIndex] GetWatchers for chunk (%d,%d) found %zu watchers",
+                      chunk.x, chunk.z, it->second.size());
             return it->second;
         }
         
+        Log::Debug("[ChunkWatchIndex] GetWatchers for chunk (%d,%d) found no watchers (chunk not in map)",
+                  chunk.x, chunk.z);
         return {};
     }
 
@@ -294,6 +305,23 @@ namespace Server {
         return result;
     }
 
+    // === SECTION-LEVEL WATCHING ===
+    
+    ChunkWatchIndex::PlayerSet ChunkWatchIndex::GetSectionWatchers(const Game::Math::SectionPos& sp) const {
+        // A section is watched if its containing chunk is watched
+        Game::Math::ChunkPos chunkPos = sp.getChunkPos();
+        auto watchers = GetWatchers(chunkPos);
+        Log::Info("[ChunkWatchIndex] GetSectionWatchers for section (%d,%d,%d) -> chunk (%d,%d) has %zu watchers",
+                  sp.chunkX, sp.sectionY, sp.chunkZ, chunkPos.x, chunkPos.z, watchers.size());
+        return watchers;
+    }
+    
+    bool ChunkWatchIndex::HasSectionWatchers(const Game::Math::SectionPos& sp) const {
+        // A section has watchers if its containing chunk has watchers
+        Game::Math::ChunkPos chunkPos = sp.getChunkPos();
+        return HasWatchers(chunkPos);
+    }
+    
     // === BULK OPERATIONS ===
 
     std::vector<Game::Math::ChunkPos> ChunkWatchIndex::GetAllWatchedChunks() const {

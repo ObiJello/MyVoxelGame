@@ -3,27 +3,41 @@
 
 #include "common/network/IPacketListener.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
+#include "common/network/PacketTypes.hpp"
 
 namespace Server {
     
     class ServerConnection;
+    class PlayerSession;
     
     class ServerPlayPacketListener : public Network::IPacketListener {
     private:
         ServerConnection& m_connection;
+        PlayerSession& m_session;  // Required session reference
         
     public:
-        explicit ServerPlayPacketListener(ServerConnection& connection);
+        // Constructor requires session (no longer optional)
+        ServerPlayPacketListener(ServerConnection& connection, PlayerSession& session);
+        
         ~ServerPlayPacketListener() override = default;
         
         // Override from IPacketListener  
         void onKeepAliveResponse(const Network::KeepAliveC2SPacket& packet) override;
         const char* getName() const override { return "ServerPlayPacketListener"; }
         
-        // TODO: Add these when we have the packet types defined
-        // void onBlockAction(const Network::BlockActionC2SPacket& packet) override;
-        // void onPlayerMove(const Network::PlayerMoveC2SPacket& packet) override;
-        // void onChatMessage(const Network::ChatMessageC2SPacket& packet) override;
+        // Block interactions
+        void handleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
+        void onUseItemOnC2S(const Network::UseItemOnC2SPacket& packet) override {
+            // Forward to handler method
+            handleUseItemOn(packet);
+        }
+        void onBlockActionC2S(const Network::BlockActionC2SPacket& packet) override;
+        
+        // Player updates
+        void onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) override;
+        
+        // Chat
+        void onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) override;
     };
     
 } // namespace Server

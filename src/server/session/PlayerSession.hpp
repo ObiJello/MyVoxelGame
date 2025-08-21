@@ -17,6 +17,7 @@
 namespace Server {
 
     // Forward declarations
+    class ServerPlayer;
     class ServerConnection;
     class ChunkTicketManager;
     class ChunkWatchIndex;
@@ -112,18 +113,30 @@ namespace Server {
         // Initialize session after successful login
         void Initialize(const Config& config, int dimensionId, const glm::vec3& spawnPos);
         
+        // Attach player entity to this session
+        void AttachPlayer(ServerPlayer* player);
+        
+        // Update connection ID (for integrated server late binding)
+        void SetConnectionId(uint32_t connectionId) { m_connectionId = connectionId; }
+        
+        // Detach player entity (on disconnect)
+        void DetachPlayer();
+        
+        // Set connection reference
+        void SetConnection(ServerConnection* connection) { m_connection = connection; }
+        
         // Process one server tick
         void Tick(int64_t serverTick);
         
         // Cleanup on disconnect
         void Cleanup();
 
-        // === PLAYER STATE ===
+        // === PLAYER STATE (delegated to ServerPlayer) ===
 
-        // Update player position (from client packets)
+        // Update player position (from client packets) - delegates to ServerPlayer
         void UpdatePosition(const glm::vec3& position, const glm::vec2& rotation);
         
-        // Update player's chunk position
+        // Update player's chunk position for view management
         void UpdateChunkPosition(Game::Math::ChunkPos newChunk);
         
         // Change dimension
@@ -176,10 +189,22 @@ namespace Server {
 
         // === PACKET HANDLING ===
 
-        // Handle incoming packets
+        // Handle incoming packets (delegates gameplay to ServerPlayer)
         void HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet);
         void HandleBlockAction(const Network::BlockActionC2SPacket& packet);
+        void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
         void HandleKeepAlive(const Network::KeepAliveC2SPacket& packet);
+        
+        // Helper for resyncing on placement failure
+        void ResyncAndAck(const glm::ivec3& clicked, const glm::ivec3& target, uint32_t sequence);
+        
+        // Send packets to client
+        void SendPositionSync(); // Send authoritative position
+        void SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block);
+        void SendSingleBlockChange(const Network::BlockChangeS2CPacket& packet);
+        void SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
+        void SendInventoryUpdate(int slot); // TODO: Implement with inventory system
+        void AckInteraction(uint32_t sequence, bool success);
         
         // Track packet acknowledgments
         void OnChunkSendComplete(Game::Math::ChunkPos chunk);
@@ -220,11 +245,16 @@ namespace Server {
 
         uint32_t GetPlayerId() const { return m_playerId; }
         uint32_t GetConnectionId() const { return m_connectionId; }
-        int GetDimensionId() const { return m_dimensionId; }
+        ServerPlayer* GetPlayer() const { return m_player; }
+        ServerConnection* GetConnection() const { return m_connection; }
         State GetState() const { return m_state; }
         
-        glm::vec3 GetPosition() const { return m_position; }
-        glm::vec2 GetRotation() const { return m_rotation; }
+        // Position getters (delegate to ServerPlayer if attached)
+        glm::vec3 GetPosition() const;
+        glm::vec2 GetRotation() const;
+        int GetDimensionId() const;
+        
+        // View management getters
         Game::Math::ChunkPos GetChunkPosition() const { return m_currentChunk; }
         Game::Math::ChunkPos GetAnchorChunk() const { return m_anchorChunk; }
         
@@ -235,15 +265,17 @@ namespace Server {
         // === IDENTIFIERS ===
         uint32_t m_playerId;
         uint32_t m_connectionId;
-        int m_dimensionId;
+        
+        // === REFERENCES ===
+        ServerPlayer* m_player = nullptr;        // Non-owning pointer to player entity
+        ServerConnection* m_connection = nullptr; // Non-owning pointer to network connection
         
         // === STATE ===
         std::atomic<State> m_state{State::CONNECTING};
         Config m_config;
         
-        // === POSITION ===
-        glm::vec3 m_position{0.0f};
-        glm::vec2 m_rotation{0.0f};
+        // === VIEW POSITION ===
+        // Note: Authoritative position is in ServerPlayer, these are for view management
         Game::Math::ChunkPos m_currentChunk{0, 0};
         Game::Math::ChunkPos m_anchorChunk{0, 0}; // Center for watch calculations
         Game::Math::ChunkPos m_lastKnownChunk{0, 0};
@@ -281,6 +313,9 @@ namespace Server {
         std::chrono::steady_clock::time_point m_lastKeepAliveRx;
         std::chrono::steady_clock::time_point m_lastKeepAliveTx;
         int64_t m_lastServerTick = 0;
+        
+        // === INTERACTION TRACKING ===
+        uint32_t m_lastInteractionSequence = 0;  // For acknowledging client predictions
         
         // === FLAGS ===
         bool m_isChangingDimension = false;

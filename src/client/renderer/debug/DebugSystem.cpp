@@ -74,23 +74,25 @@ namespace Debug {
     void DebugSystem::RenderDebugUI(
         const Render::Camera& camera,
         const Frustum& frustum,
-        Game::PlayerController& playerController,
+        Game::ClientPlayer& player,
+        Game::ClientPlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,
         int framebufferWidth, int framebufferHeight) {
 
-        DrawMainDebugWindow(camera, playerController, metrics, cursorEnabled,
+        DrawMainDebugWindow(camera, player, playerController, metrics, cursorEnabled,
                            windowWidth, windowHeight, framebufferWidth, framebufferHeight);
         DrawChunkVisualization(camera, frustum);
         DrawTextureAtlasDebug();
         DrawWorldDebug();
-        DrawPlayerFlightControls(playerController);
+        DrawPlayerFlightControls(player);
     }
 
     void DebugSystem::DrawMainDebugWindow(
         const Render::Camera& camera,
-        Game::PlayerController& playerController,
+        Game::ClientPlayer& player,
+        Game::ClientPlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,
@@ -452,7 +454,7 @@ namespace Debug {
         // Physics information
         ImGui::Text("Player Physics");
         ImGui::Separator();
-        const auto& playerPhysics = playerController.GetPhysics();
+        const auto& playerPhysics = player.physics;
         ImGui::Text("Position: (%.2f, %.2f, %.2f)",
                    playerPhysics.position.x, playerPhysics.position.y, playerPhysics.position.z);
         ImGui::Text("Velocity: (%.2f, %.2f, %.2f)",
@@ -468,14 +470,14 @@ namespace Debug {
         ImGui::Spacing();
         ImGui::Text("Player Interaction");
         ImGui::Separator();
-        const auto& inventory = playerController.GetInventory();
+        const auto& inventory = player.inventory;
         Game::BlockID selectedBlock = inventory.GetSelectedBlock();
         ImGui::Text("Selected Block: %s (Slot %d)",
                    selectedBlock == Game::BlockID::Air ? "None" :
                    Game::BlockRegistry::Get(selectedBlock).name.c_str(),
                    inventory.GetSelectedSlot());
 
-        const auto& hit = playerController.GetCurrentHit();
+        const auto& hit = player.lastBlockHit;
         if (hit.has_value()) {
             ImGui::Text("Looking at: %s at (%d, %d, %d)",
                        Game::BlockRegistry::Get(hit->blockId).name.c_str(),
@@ -850,7 +852,7 @@ namespace Debug {
         ImGui::End();
     }
 
-    void DebugSystem::DrawPlayerFlightControls(Game::PlayerController& playerController) {
+    void DebugSystem::DrawPlayerFlightControls(Game::ClientPlayer& player) {
         if (!ImGui::Begin("Player Flight Speed")) {
             ImGui::End();
             return;
@@ -860,7 +862,7 @@ namespace Debug {
         ImGui::Separator();
 
         // Get a non-const reference to physics
-        auto& physics = playerController.GetPhysics();
+        auto& physics = player.physics;
         
         // Display current state
         if (physics.noclip) {

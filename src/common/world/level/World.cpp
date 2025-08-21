@@ -5,6 +5,7 @@
 #include "../../physics/Physics.hpp"
 #include "platform/GameDirectory.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/world/tracking/SectionChangeAccumulator.hpp"
 #include "../../physics/RayCast.hpp"
 #include <algorithm>
 #include <cmath>
@@ -172,6 +173,11 @@ namespace Game {
 
     // World modification
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId) {
+        // Default to all updates for backwards compatibility
+        return SetBlock(worldX, worldY, worldZ, blockId, UpdateFlags::All);
+    }
+    
+    bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags) {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d)",
                         worldX, worldY, worldZ);
@@ -183,13 +189,96 @@ namespace Game {
             return false;
         }
 
+        // Get the old block for comparison
+        BlockID oldBlockId = GetBlock(worldX, worldY, worldZ);
+        
+        // No change needed
+        if (oldBlockId == blockId) {
+            return true;
+        }
+
         // Set the block using the chunk provider
         m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId);
 
-        // Notify about block change
-        OnBlockChanged(worldX, worldY, worldZ);
+        // Process update flags
+        if (updateFlags & UpdateFlags::NotifyNeighbors) {
+            // Notify all 6 neighboring blocks
+            NotifyNeighborBlocks(worldX, worldY, worldZ);
+        }
+        
+        if (updateFlags & UpdateFlags::UpdateShapes) {
+            // TODO: Update connected block shapes (fences, walls, etc.)
+        }
+        
+        if (updateFlags & UpdateFlags::RecomputeLight) {
+            // TODO: Trigger light recalculation
+        }
+        
+        if (updateFlags & UpdateFlags::UpdateHeightmap) {
+            // TODO: Update chunk heightmap
+        }
+        
+        if (updateFlags & UpdateFlags::MarkDirty) {
+            // Mark section for remeshing
+            OnBlockChanged(worldX, worldY, worldZ);
+        }
+        
+        if (updateFlags) {
+            // Queue block change for centralized broadcast
+            // This happens on server thread during world simulation
+            if (Server::g_integratedServer) {
+                auto* accumulator = Server::g_integratedServer->GetChangeAccumulator();
+                if (accumulator) {
+                    // Calculate section position
+                    Game::Math::SectionPos sp = Game::Math::SectionPos::fromWorldPos(worldX, worldY, worldZ);
+                    
+                    // Calculate local coordinates within section
+                    uint8_t localX = worldX & 0xF;
+                    uint8_t localY = (worldY + 64) & 0xF;  // Adjust for min Y of -64
+                    uint8_t localZ = worldZ & 0xF;
+                    
+                    // Accumulate the change (will be broadcast at end of tick)
+                    accumulator->accumulate(sp, localX, localY, localZ, blockId);
+                }
+            }
+        }
 
         return true;
+    }
+    
+    void World::NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
+        // TODO: Implement block neighbor notification when BlockRegistry is fully implemented
+        // For now, this is a placeholder that will be expanded later
+        
+        // Get block registry
+        // auto& registry = BlockRegistry::getInstance();
+        
+        // Notify all 6 neighbors
+        const glm::ivec3 offsets[6] = {
+            {1, 0, 0}, {-1, 0, 0},  // +X, -X
+            {0, 1, 0}, {0, -1, 0},  // +Y, -Y
+            {0, 0, 1}, {0, 0, -1}   // +Z, -Z
+        };
+        
+        glm::ivec3 blockPos(worldX, worldY, worldZ);
+        
+        for (const auto& offset : offsets) {
+            glm::ivec3 neighborPos = blockPos + offset;
+            
+            // Skip invalid positions
+            if (!IsValidPosition(neighborPos.x, neighborPos.y, neighborPos.z)) {
+                continue;
+            }
+            
+            // TODO: Get the neighbor block and notify it
+            // BlockID neighborId = GetBlock(neighborPos.x, neighborPos.y, neighborPos.z);
+            // auto* neighborBlock = registry.getBlock(neighborId);
+            // 
+            // if (neighborBlock) {
+            //     // Notify the neighbor that this block changed
+            //     neighborBlock->onNeighborChanged(this, neighborPos, blockPos);
+            // }
+        }
     }
 
     void World::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {

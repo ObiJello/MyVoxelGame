@@ -40,6 +40,53 @@ namespace Game::Math {
             return std::hash<int32_t>{}(pos.x) ^ (std::hash<int32_t>{}(pos.z) << 1);
         }
     };
+    
+    // Section position for tracking block changes at section granularity
+    struct SectionPos {
+        int32_t chunkX;
+        int32_t sectionY;  // 0-23 for -64 to 319 world height
+        int32_t chunkZ;
+        
+        SectionPos() : chunkX(0), sectionY(0), chunkZ(0) {}
+        SectionPos(int32_t cx, int32_t sy, int32_t cz) 
+            : chunkX(cx), sectionY(sy), chunkZ(cz) {}
+        
+        bool operator==(const SectionPos& other) const {
+            return chunkX == other.chunkX && 
+                   sectionY == other.sectionY && 
+                   chunkZ == other.chunkZ;
+        }
+        
+        bool operator!=(const SectionPos& other) const {
+            return !(*this == other);
+        }
+        
+        // Create from world coordinates
+        static SectionPos fromWorldPos(int worldX, int worldY, int worldZ) {
+            // Calculate chunk coordinates
+            int32_t cx = worldX >= 0 ? worldX / CHUNK_SIZE_X : (worldX - CHUNK_SIZE_X + 1) / CHUNK_SIZE_X;
+            int32_t cz = worldZ >= 0 ? worldZ / CHUNK_SIZE_Z : (worldZ - CHUNK_SIZE_Z + 1) / CHUNK_SIZE_Z;
+            
+            // Calculate section Y (adjust for min world height of -64)
+            int32_t sy = (worldY + 64) / SECTION_HEIGHT;
+            
+            return SectionPos(cx, sy, cz);
+        }
+        
+        // Get the chunk position
+        ChunkPos getChunkPos() const {
+            return ChunkPos{chunkX, chunkZ};
+        }
+    };
+    
+    struct SectionPosHash {
+        std::size_t operator()(const SectionPos& pos) const {
+            // Combine all three coordinates with prime multipliers
+            return std::hash<int32_t>()(pos.chunkX) * 73856093 ^ 
+                   std::hash<int32_t>()(pos.sectionY) * 83492791 ^
+                   std::hash<int32_t>()(pos.chunkZ) * 19349663;
+        }
+    };
 
 } // namespace Game::Math
 

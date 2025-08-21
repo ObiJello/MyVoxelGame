@@ -2,6 +2,7 @@
 #include "LoginPacketListener.hpp"
 #include "../ServerConnection.hpp"
 #include "../NetworkServer.hpp"
+#include "../../IntegratedServer.hpp"
 #include "common/core/Log.hpp"
 #include "common/network/PacketRegistry.hpp"
 
@@ -56,16 +57,30 @@ namespace Server {
         m_connection.sendInitialGameData();
         
         // Notify server that player has joined
+        // This will create the PlayerSession and ServerPlayer
         if (m_server) {
             // Get shared_ptr from ServerConnection (which inherits enable_shared_from_this)
             auto connPtr = std::static_pointer_cast<ServerConnection>(m_connection.shared_from_this());
             m_server->OnPlayerJoined(connPtr);
         }
         
-        // Switch to PLAY protocol state LAST
+        // Get the PlayerSession that was just created
+        PlayerSession* session = nullptr;
+        if (Server::g_integratedServer) {
+            session = Server::g_integratedServer->GetPlayerSession();
+        }
+        
+        // Session is REQUIRED for PLAY state
+        if (!session) {
+            Log::Error("[LoginPacketListener] Failed to get PlayerSession for player %s", username.c_str());
+            m_connection.SendDisconnect("Server error: Failed to create player session");
+            return;
+        }
+        
+        // Switch to PLAY protocol state with session reference
         // This replaces the current listener, so it must be done after all operations
         // that might use this LoginPacketListener instance
-        m_connection.setProtocolState(Network::ProtocolState::PLAY);
+        m_connection.setProtocolState(Network::ProtocolState::PLAY, session);
         
         Log::Info("[LoginPacketListener] Player %s successfully logged in and switched to PLAY state", 
                   username.c_str());

@@ -17,9 +17,11 @@ namespace Game {
         glm::ivec3 adjacentPos;     // Position where a new block could be placed
         glm::vec3 hitPoint;         // Exact world-space hit point
         glm::vec3 normal;           // Face normal at hit point
+        glm::vec3 cursorPos;        // Hit position within block, in block-local coordinates [0,1)
         BlockID blockId;            // ID of the hit block
         float distance;             // Distance from ray origin to hit point
         int hitFace;                // Which face was hit (0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z)
+        bool insideBlock;           // True if raycast started inside this block volume
     };
 
     class Raycast {

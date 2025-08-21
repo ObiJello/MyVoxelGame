@@ -25,6 +25,7 @@ namespace Client {
         void onChunkDataS2C(const Network::ChunkDataS2CPacket& packet) override { handleChunkData(packet); }
         void onUnloadChunkS2C(const Network::UnloadChunkS2CPacket& packet) override { handleChunkUnload(packet); }
         void onBlockChangeS2C(const Network::BlockChangeS2CPacket& packet) override { handleBlockChange(packet); }
+        void onClientboundSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) override { handleSectionBlocksUpdate(packet); }
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
         void onPlayerUpdateS2C(const Network::PlayerUpdateS2CPacket& packet) override { handlePlayerUpdate(packet); }
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
@@ -40,6 +41,7 @@ namespace Client {
         
         // Block updates
         void handleBlockChange(const Network::BlockChangeS2CPacket& packet);
+        void handleSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
         void handleMultiBlockChange(const Network::MultiBlockChangeS2CPacket& packet);
         
         // Player updates

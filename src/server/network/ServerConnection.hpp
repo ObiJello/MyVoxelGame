@@ -18,6 +18,14 @@ namespace Server {
     // Mirrors Minecraft's ServerPlayNetworkHandler
     class ServerConnection : public Network::NetworkConnection {
     public:
+        // Connection state/phase
+        enum class ConnectionPhase {
+            HANDSHAKING,
+            STATUS,
+            LOGIN,
+            PLAY
+        };
+        
         // Constructor
         ServerConnection(tcp::socket socket, NetworkServer* server);
         ~ServerConnection() override;
@@ -48,11 +56,17 @@ namespace Server {
         // Get server reference
         NetworkServer* GetServer() const { return m_server; }
         
+        // Get current protocol phase
+        ConnectionPhase getPhase() const { return m_phase; }
+        
         // Tick connection (drain packets on server thread)
         void tick();
         
         // Set protocol state and swap listener
         void setProtocolState(Network::ProtocolState state);
+        
+        // Set protocol state with PlayerSession (for PLAY state)
+        void setProtocolState(Network::ProtocolState state, class PlayerSession* session);
         
         // Send initial game data after login
         void sendInitialGameData();
@@ -145,12 +159,6 @@ namespace Server {
         bool m_authenticated = false;
         
         // Connection state
-        enum class ConnectionPhase {
-            HANDSHAKING,
-            STATUS,
-            LOGIN,
-            PLAY
-        };
         ConnectionPhase m_phase = ConnectionPhase::HANDSHAKING;
         
         // Current packet listener (based on protocol state)

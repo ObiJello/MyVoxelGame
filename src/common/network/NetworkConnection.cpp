@@ -1,5 +1,6 @@
 // File: src/common/network/NetworkConnection.cpp
 #include "NetworkConnection.hpp"
+#include "PacketTypes.hpp"
 #include "../core/Log.hpp"
 #include <algorithm>
 
@@ -88,10 +89,12 @@ namespace Network {
         // Add payload
         packet.insert(packet.end(), data.begin(), data.end());
         
-        // Debug logging
-        if (packetId == 0x20 || packetId == 0x81) {  // ChunkDataS2C or suspicious 0x81
-            Log::Info("[%s] SENDING packet ID 0x%02X, packetIdBytes size: %zu, payload size: %zu, total size: %zu", 
-                      m_name.c_str(), packetId, packetIdBytes.size(), data.size(), packet.size());
+        // Debug logging - only log in base class if not a known packet type
+        // Client and Server connections will log their own specific packets
+        if (packetId != 0x81 && packetId != static_cast<uint8_t>(PacketId::PlayerMoveC2S) && 
+            packetId != static_cast<uint8_t>(PacketId::KeepAliveC2S)) {
+            Log::Debug("[%s] Sending packet ID 0x%02X, size: %zu bytes", 
+                      m_name.c_str(), packetId, packet.size());
             
             // Log first few bytes of packet for debugging
             std::string hexDump;
@@ -261,11 +264,14 @@ namespace Network {
             m_readBuffer.begin() + bytesTransferred
         );
         
-        // Debug log for received packets
-        if (m_currentPacket.header.packetId == 0x20 || m_currentPacket.header.packetId == 0x81) {
-            Log::Info("[%s] RECEIVED packet ID 0x%02X, packetIdBytes: %zu, payload size: %zu, raw: %s", 
-                      m_name.c_str(), m_currentPacket.header.packetId, packetIdBytes, 
-                      m_currentPacket.payload.size(), hexDump.c_str());
+        // Debug log for received packets - only log in base class if not a known packet type
+        // Client and Server connections will log their own specific packets  
+        if (m_currentPacket.header.packetId != 0x81 && 
+            m_currentPacket.header.packetId != static_cast<uint8_t>(PacketId::PlayerMoveC2S) &&
+            m_currentPacket.header.packetId != static_cast<uint8_t>(PacketId::KeepAliveS2C)) {
+            Log::Debug("[%s] Received packet ID 0x%02X, size: %zu bytes", 
+                      m_name.c_str(), m_currentPacket.header.packetId, 
+                      m_currentPacket.payload.size());
         }
         
         m_stats.packetsReceived.fetch_add(1);
