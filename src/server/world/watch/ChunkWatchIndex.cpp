@@ -60,13 +60,16 @@ namespace Server {
 
     void ChunkWatchIndex::AddWatchers(uint32_t playerId, const std::vector<Game::Math::ChunkPos>& chunks) {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
+
         auto& dim = GetOrCreateDimension(DEFAULT_DIMENSION);
-        
+
         for (const auto& chunk : chunks) {
             dim.watchersByChunk[chunk].insert(playerId);
             dim.watchedChunksByPlayer[playerId].insert(chunk);
         }
+
+        Log::Info("[ChunkWatchIndex] AddWatchers: Added player %u as watcher for %zu chunks (total chunks in index: %zu)",
+                 playerId, chunks.size(), dim.watchersByChunk.size());
     }
 
     void ChunkWatchIndex::RemoveWatchers(uint32_t playerId, const std::vector<Game::Math::ChunkPos>& chunks) {

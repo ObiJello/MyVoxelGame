@@ -69,20 +69,13 @@ namespace Server {
         m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(0, 0);
         m_playerState.lastUpdateTime = std::chrono::steady_clock::now();
         
-        // Create ServerPlayer and PlayerSession instances
+        // Create ServerPlayer instance (PlayerSession will be created when player joins)
         glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
         m_serverPlayer = std::make_unique<ServerPlayer>(1, "Player");
         m_serverPlayer->setPosition(glm::dvec3(spawnPos));
-        
-        // Create and configure player session for view/network management
-        m_playerSession = std::make_unique<PlayerSession>(1, 0); // playerId=1, connectionId=0
-        m_playerSession->AttachPlayer(m_serverPlayer.get());
-        
-        // Initialize session with spawn position and config
-        PlayerSession::Config sessionConfig;
-        sessionConfig.viewDistance = m_config.defaultViewDistance;
-        sessionConfig.simulationDistance = m_config.defaultViewDistance;
-        m_playerSession->Initialize(sessionConfig, 0, spawnPos); // dimension=0 (overworld)
+
+        // NOTE: PlayerSession is now created by PlayerSessionManager when player joins
+        // See OnPlayerJoined() where OnPlayerJoin() is called
 
         // Reset statistics
         m_stats.Reset();
@@ -229,16 +222,25 @@ namespace Server {
 
     void IntegratedServer::SetPlayer(Game::ClientPlayer* player) {
         m_player = player;
-        
+
         if (player) {
             // Update player state from player
             const auto& physics = player->physics;
             m_playerState.position = physics.position;
             m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-                static_cast<int>(physics.position.x), 
+                static_cast<int>(physics.position.x),
                 static_cast<int>(physics.position.z)
             );
         }
+    }
+
+    PlayerSession* IntegratedServer::GetPlayerSession() const {
+        // Delegate to SessionManager (migrated from direct m_playerSession member)
+        if (m_sessionManager) {
+            auto session = m_sessionManager->GetSession(1); // playerId=1 for integrated server
+            return session.get();
+        }
+        return nullptr;
     }
 
     void IntegratedServer::UpdatePlayerState(const Network::PlayerMoveC2SPacket& packet) {
@@ -377,39 +379,38 @@ namespace Server {
             // activeConnections will be destroyed here, releasing any disconnected connections
         }
         
-        // === 3. FLUSH ACCUMULATED BLOCK CHANGES ===
-        // This MUST happen after world simulation but before chunk streaming
-        // All block changes from this tick are broadcast to watchers now
-        if (m_deltaBroadcaster) {
-            m_deltaBroadcaster->flush();
-        }
-        
-        // Process the new session management system
+        // Process the new session management system FIRST
+        // This updates watch sets before broadcasting block changes
         if (m_sessionManager) {
-            // Tick all player sessions
+            // Tick all player sessions (updates watch sets)
             m_sessionManager->Tick(serverTick);
-            
+
             // Process expired tickets
             if (m_ticketManager) {
                 m_ticketManager->ProcessExpiredTickets(serverTick);
             }
-            
+
             // Process send queues
             if (m_sendScheduler) {
                 m_sendScheduler->ProcessSendQueues();
             }
+        }
+
+        // === 3. FLUSH ACCUMULATED BLOCK CHANGES ===
+        // This MUST happen AFTER session tick (so watch sets are updated)
+        // All block changes from this tick are broadcast to watchers now
+        if (m_deltaBroadcaster) {
+            m_deltaBroadcaster->flush();
         }
         
         // Tick the server player entity (authoritative gameplay)
         if (m_serverPlayer) {
             m_serverPlayer->tick(m_world.get(), static_cast<int>(serverTick));
         }
-        
-        // Tick the player session (view/network management)
-        if (m_playerSession) {
-            m_playerSession->Tick(serverTick);
-        }
-        
+
+        // NOTE: PlayerSession is now ticked via m_sessionManager->Tick() at line 384
+        // No need to tick it directly here anymore
+
         // Process async chunk load results from ServerWorkerPool
         ProcessAsyncChunkResults();
         
@@ -682,23 +683,26 @@ namespace Server {
             m_sendScheduler->RegisterConnection(connection->GetConnectionId(), connection);
         }
         
-        // For integrated server, we already have m_serverPlayer and m_playerSession created in Initialize()
-        // We just need to wire them to the connection
-        if (m_playerSession && m_serverPlayer) {
-            // Update the session with the connection ID
-            m_playerSession->SetConnectionId(connection->GetConnectionId());
-            
-            // Register with session manager if available
-            if (m_sessionManager) {
-                uint32_t playerId = 1;  // Single player ID for integrated server
-                m_sessionManager->OnPlayerJoin(
-                    playerId,
-                    connection->GetConnectionId(),
-                    "Player"  // Default player name
-                );
+        // Create session via SessionManager (new architecture)
+        if (m_serverPlayer && m_sessionManager) {
+            uint32_t playerId = 1;  // Single player ID for integrated server
+
+            // Create session via SessionManager
+            m_sessionManager->OnPlayerJoin(
+                playerId,
+                connection->GetConnectionId(),
+                "Player"  // Default player name
+            );
+
+            // Attach ServerPlayer to the session created by manager
+            auto session = m_sessionManager->GetSession(playerId);
+            if (session) {
+                session->AttachPlayer(m_serverPlayer.get());
+                Log::Info("[IntegratedServer] Player session created and wired to connection %u",
+                          connection->GetConnectionId());
+            } else {
+                Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin");
             }
-            
-            Log::Info("[IntegratedServer] Player session wired to connection %u", connection->GetConnectionId());
         } else if (m_sessionManager) {
             // Fallback: Create session through manager
             uint32_t playerId = 1;  // Single player ID for integrated server
@@ -707,7 +711,18 @@ namespace Server {
                 connection->GetConnectionId(),
                 "Player"  // Default player name
             );
-            
+
+            // Attach ServerPlayer to the session created by manager
+            if (m_serverPlayer) {
+                auto session = m_sessionManager->GetSession(playerId);
+                if (session) {
+                    session->AttachPlayer(m_serverPlayer.get());
+                    Log::Info("[IntegratedServer] Attached ServerPlayer to session (fallback path)");
+                } else {
+                    Log::Error("[IntegratedServer] Failed to retrieve session in fallback path");
+                }
+            }
+
             Log::Info("[IntegratedServer] Player session created through manager");
         } else {
             // Fallback to old system if session manager not available

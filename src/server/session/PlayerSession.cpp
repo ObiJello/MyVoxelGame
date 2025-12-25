@@ -23,6 +23,9 @@ namespace Server {
         m_lastTickTime = std::chrono::steady_clock::now();
         m_lastKeepAliveRx = m_lastTickTime;
         m_lastKeepAliveTx = m_lastTickTime;
+
+        // Initialize stats to prevent immediate timeout
+        m_stats.lastKeepAlive = m_lastTickTime;
     }
 
     PlayerSession::~PlayerSession() {
@@ -261,24 +264,28 @@ namespace Server {
     void PlayerSession::UpdateWatchSet() {
         // Compute new watch set
         auto newWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
-        
+
         // Compute deltas
         std::vector<Game::Math::ChunkPos> toAdd, toRemove;
         ComputeWatchDeltas(newWatch, toAdd, toRemove);
-        
+
         // Apply removals first
         for (const auto& chunk : toRemove) {
             m_pendingRemove.push_back(chunk);
             m_watchSet.erase(chunk);
         }
-        
+
         // Queue additions with priority
         for (const auto& chunk : toAdd) {
             int priority = CalculateChunkPriority(chunk);
             m_pendingAdd.Push(chunk, priority);
             m_watchSet.insert(chunk);
         }
-        
+
+        // Store deltas for ChunkWatchIndex synchronization (consumed by PlayerSessionManager)
+        m_pendingWatchAdds = toAdd;
+        m_pendingWatchRemoves = toRemove;
+
         // Update stats
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);

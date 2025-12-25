@@ -119,8 +119,12 @@ namespace Server {
         const ServerPlayerState& GetPlayerState() const { return m_playerState; }
         
         // Get player session for network/view management
-        PlayerSession* GetPlayerSession() const { return m_playerSession.get(); }
-        
+        // NOTE: Delegates to SessionManager now instead of using m_playerSession
+        PlayerSession* GetPlayerSession() const;
+
+        // Get session manager for accessing player sessions
+        PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
+
         // Send ChunkDataS2CPacket to client (new Minecraft-compatible format)
         void SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet);
         
@@ -205,10 +209,10 @@ namespace Server {
 
         // Player state (legacy, being replaced)
         ServerPlayerState m_playerState;
-        
+
         // New player architecture
         std::unique_ptr<ServerPlayer> m_serverPlayer;     // Authoritative gameplay entity
-        std::unique_ptr<PlayerSession> m_playerSession;   // Network/view management
+        // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
         // Chunk management
         std::unordered_map<Game::Math::ChunkPos, ChunkSendState, Game::Math::ChunkPosHash> m_chunkSendStates;

@@ -3,6 +3,7 @@
 #include "../ServerConnection.hpp"
 #include "../NetworkServer.hpp"
 #include "../../IntegratedServer.hpp"
+#include "../../session/PlayerSessionManager.hpp"  // For GetSession() call
 #include "common/core/Log.hpp"
 #include "common/network/PacketRegistry.hpp"
 
@@ -64,10 +65,18 @@ namespace Server {
             m_server->OnPlayerJoined(connPtr);
         }
         
-        // Get the PlayerSession that was just created
+        // Get the PlayerSession that was just created by PlayerSessionManager
         PlayerSession* session = nullptr;
         if (Server::g_integratedServer) {
-            session = Server::g_integratedServer->GetPlayerSession();
+            auto sessionManager = Server::g_integratedServer->GetSessionManager();
+            if (sessionManager) {
+                auto sessionPtr = sessionManager->GetSession(playerId);
+                session = sessionPtr.get();
+                Log::Debug("[LoginPacketListener] Retrieved session %u from PlayerSessionManager",
+                           playerId);
+            } else {
+                Log::Error("[LoginPacketListener] SessionManager not available");
+            }
         }
         
         // Session is REQUIRED for PLAY state

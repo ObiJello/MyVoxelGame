@@ -211,13 +211,13 @@ namespace Server {
             auto now = std::chrono::steady_clock::now();
             
             if (!m_awaitingKeepAlive) {
-                // Send new keep-alive if interval has passed since last packet received
-                if (now - m_lastPacketReceived >= KEEP_ALIVE_INTERVAL) {
+                // Send new keep-alive if interval has passed since last keep-alive sent
+                if (now - m_lastKeepAliveSent >= KEEP_ALIVE_INTERVAL) {
                     // Generate a new keep-alive ID
                     m_lastKeepAliveId = ++m_keepAliveSequence;
                     SendKeepAlive(m_lastKeepAliveId);
                     m_awaitingKeepAlive = true;
-                    Log::Debug("[ServerConnection %u] Sent keep-alive with ID %llu", 
+                    Log::Info("[ServerConnection %u] Sent keep-alive with ID %llu",
                               GetConnectionId(), m_lastKeepAliveId);
                 }
             } else {
@@ -549,7 +549,7 @@ namespace Server {
             // Calculate RTT if needed
             auto rtt = std::chrono::duration_cast<std::chrono::milliseconds>(
                 m_lastKeepAliveReceived - m_lastKeepAliveSent).count();
-            Log::Debug("[Server#%u] RECEIVED KeepAliveC2S (ID: 0x%02X) - ID: %llu, RTT: %ldms", 
+            Log::Info("[Server#%u] RECEIVED KeepAliveC2S (ID: 0x%02X) - ID: %llu, RTT: %ldms",
                       GetConnectionId(), static_cast<uint8_t>(Network::PacketId::KeepAliveC2S), id, rtt);
         } else {
             Log::Warning("[ServerConnection %u] Unexpected keep-alive response (ID: %llu, expected: %llu)", 

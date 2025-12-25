@@ -582,10 +582,10 @@ namespace Server {
     void PlayerSessionManager::ProcessSessionTick(std::shared_ptr<PlayerSession> session) {
         // Get old position for ticket updates
         Game::Math::ChunkPos oldAnchor = session->GetAnchorChunk();
-        
+
         // Process the session tick
         session->Tick(m_currentTick);
-        
+
         // Check if anchor changed for ticket updates
         Game::Math::ChunkPos newAnchor = session->GetAnchorChunk();
         if (oldAnchor != newAnchor) {
@@ -596,9 +596,19 @@ namespace Server {
                 session->GetSimulationDistance()
             );
         }
-        
-        // Update watch index based on session's watch set changes
-        // This would be done through the session's watch delta processing
+
+        // Apply watch index changes from session's watch delta processing
+        const auto& toAdd = session->GetPendingWatchAdds();
+        const auto& toRemove = session->GetPendingWatchRemoves();
+
+        if (!toAdd.empty() || !toRemove.empty()) {
+            Log::Debug("[PlayerSessionManager] Processing watch deltas for player %u: +%zu -%zu chunks",
+                      session->GetPlayerId(), toAdd.size(), toRemove.size());
+            UpdatePlayerWatchers(session->GetPlayerId(), toAdd, toRemove);
+
+            // Clear the consumed deltas
+            session->ClearPendingWatchDeltas();
+        }
     }
 
     bool PlayerSessionManager::IsSessionTimedOut(std::shared_ptr<PlayerSession> session) const {

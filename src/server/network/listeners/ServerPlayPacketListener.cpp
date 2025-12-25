@@ -20,9 +20,12 @@ namespace Server {
         // This is a temporary solution until we fully migrate to typed packets
         Network::PacketBuffer buffer;
         buffer.WriteLong(packet.keepAliveId);
-        
+
         // Call the existing handler
         m_connection.HandleKeepAliveResponse(buffer.GetData());
+
+        // Also update the session's keep-alive time to prevent timeout
+        m_session.HandleKeepAlive(packet);
     }
     
     void ServerPlayPacketListener::handleUseItemOn(const Network::UseItemOnC2SPacket& packet) {

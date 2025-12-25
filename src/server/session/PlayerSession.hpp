@@ -261,6 +261,11 @@ namespace Server {
         int GetViewDistance() const { return m_viewDistance; }
         int GetSimulationDistance() const { return m_simulationDistance; }
 
+        // Watch delta getters (consumed by PlayerSessionManager to update ChunkWatchIndex)
+        const std::vector<Game::Math::ChunkPos>& GetPendingWatchAdds() const { return m_pendingWatchAdds; }
+        const std::vector<Game::Math::ChunkPos>& GetPendingWatchRemoves() const { return m_pendingWatchRemoves; }
+        void ClearPendingWatchDeltas() { m_pendingWatchAdds.clear(); m_pendingWatchRemoves.clear(); }
+
     private:
         // === IDENTIFIERS ===
         uint32_t m_playerId;
@@ -288,10 +293,15 @@ namespace Server {
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_watchSet;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_sentChunks;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_inflightChunks;
-        
+
         // === STREAMING QUEUES ===
         RingPriorityQueue<Game::Math::ChunkPos> m_pendingAdd;
         std::vector<Game::Math::ChunkPos> m_pendingRemove;
+
+        // === WATCH INDEX SYNCHRONIZATION ===
+        // Deltas to apply to ChunkWatchIndex (consumed by PlayerSessionManager)
+        std::vector<Game::Math::ChunkPos> m_pendingWatchAdds;
+        std::vector<Game::Math::ChunkPos> m_pendingWatchRemoves;
         
         // === DIFF MANAGEMENT ===
         std::unordered_map<Game::Math::ChunkPos, 
