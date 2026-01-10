@@ -6,6 +6,14 @@
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
 
+// ========================================================================
+// TERRAIN GENERATION: Using custom terrain library
+// ========================================================================
+#include "MyTerrainGenerator.hpp"
+
+// OLD TERRAIN SYSTEM (commented out - replaced by MyTerrainGenerator)
+// #include "common/world/gen/ProceduralChunkGenerator.hpp"
+
 namespace Game {
 
     // === CONSTRUCTION ===
@@ -59,10 +67,17 @@ namespace Game {
             m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
             Log::Info("ChunkCache created with size %zu (for render distance %d)", cacheConfig.maxSize, renderDistance);
 
-            // Create chunk generator
-            Log::Info("Creating ProceduralChunkGenerator...");
-            m_chunkGenerator = std::make_unique<ProceduralChunkGenerator>(m_config.generationConfig);
-            Log::Info("ProceduralChunkGenerator created");
+            // ========================================================================
+            // TERRAIN GENERATION: Using MyTerrainGenerator (custom library)
+            // ========================================================================
+            Log::Info("Creating MyTerrainGenerator (custom terrain library)...");
+            m_chunkGenerator = std::make_unique<MyTerrainGenerator>(m_config.generationConfig);
+            Log::Info("MyTerrainGenerator created");
+
+            // OLD TERRAIN SYSTEM (commented out - replaced by MyTerrainGenerator)
+            // Log::Info("Creating ProceduralChunkGenerator...");
+            // m_chunkGenerator = std::make_unique<ProceduralChunkGenerator>(m_config.generationConfig);
+            // Log::Info("ProceduralChunkGenerator created");
 
             // Create Minecraft loader if world path specified
             if (!m_config.minecraftWorldPath.empty()) {
@@ -852,7 +867,8 @@ namespace Game {
         // ChunkCache now defaults to 2048
 
         // Set up generation config
-        config.generationConfig.seed = 12345;
+        // NOTE: Seed uses default from GenerationConfig struct (IChunkGenerator.hpp)
+        // Change the seed there for a single source of truth
         config.generationConfig.worldType = "default";
         config.generationConfig.generateOres = true;
         config.generationConfig.generateCaves = true;

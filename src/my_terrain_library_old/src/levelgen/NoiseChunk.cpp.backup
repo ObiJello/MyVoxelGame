@@ -1,0 +1,544 @@
+#include "levelgen/NoiseChunk.h"
+#include "world/MinecraftBlockType.h"
+#include "math/Mth.h"
+#include <algorithm>
+#include <cmath>
+#include <iostream>
+#include <iomanip>
+
+namespace minecraft {
+namespace levelgen {
+
+//==============================================================================
+// NOISE INTERPOLATOR - Trilinear Interpolation Engine
+//==============================================================================
+
+/**
+ * NoiseInterpolator performs trilinear interpolation between 8 corner values.
+ *
+ * It maintains two vertical slices (4x4 grids) of values:
+ * - slice0: Current X slice
+ * - slice1: Next X slice (X + cellWidth)
+ *
+ * Each slice has 4 corners at each of 2 Y levels:
+ *   Y+cellHeight: [NW, NE, SW, SE]
+ *   Y:            [NW, NE, SW, SE]
+ *
+ * Interpolation happens in 3 stages:
+ * 1. Y-axis: Interpolate between bottom and top of each slice
+ * 2. Z-axis: Interpolate between north and south edges
+ * 3. X-axis: Interpolate between two slices
+ */
+class NoiseChunk::NoiseInterpolator {
+private:
+    // Two 2D slices - each holds density values for a Y-Z plane at a specific X position
+    // slice[z][y] - indexed by cellZ and cellY
+    std::vector<std::vector<double>> m_slice0;
+    std::vector<std::vector<double>> m_slice1;
+
+    int m_cellCountY;
+    int m_cellCountZ;
+
+    // 8 corner values for current cell (loaded by selectCellYZ)
+    double m_noise000, m_noise001, m_noise100, m_noise101;
+    double m_noise010, m_noise011, m_noise110, m_noise111;
+
+    // Intermediate interpolation results (matching Java naming)
+    double m_valueXZ00, m_valueXZ10, m_valueXZ01, m_valueXZ11;
+    double m_valueZ0, m_valueZ1;
+    double m_value;
+
+public:
+    NoiseInterpolator(int cellCountY, int cellCountZ)
+        : m_cellCountY(cellCountY), m_cellCountZ(cellCountZ)
+    {
+        // Allocate slices - size is (cellCountZ+1) x (cellCountY+1) to include boundaries
+        m_slice0.resize(cellCountZ + 1, std::vector<double>(cellCountY + 1, 0.0));
+        m_slice1.resize(cellCountZ + 1, std::vector<double>(cellCountY + 1, 0.0));
+
+        m_noise000 = m_noise001 = m_noise100 = m_noise101 = 0.0;
+        m_noise010 = m_noise011 = m_noise110 = m_noise111 = 0.0;
+        m_valueXZ00 = m_valueXZ10 = m_valueXZ01 = m_valueXZ11 = 0.0;
+        m_valueZ0 = m_valueZ1 = 0.0;
+        m_value = 0.0;
+    }
+
+    /**
+     * Set a value in a slice at given cellY and cellZ position
+     * @param sliceIndex - 0 or 1
+     * @param cellY - Y index in the grid
+     * @param cellZ - Z index in the grid
+     * @param value - Density value at this position
+     */
+    void setSlice(int sliceIndex, int cellY, int cellZ, double value) {
+        if (sliceIndex == 0) {
+            m_slice0[cellZ][cellY] = value;
+        } else {
+            m_slice1[cellZ][cellY] = value;
+        }
+    }
+
+    /**
+     * Swap slices (optimization: next X slice becomes current)
+     */
+    void swapSlices() {
+        m_slice0.swap(m_slice1);
+    }
+
+    /**
+     * Select a cell at given Y and Z indices and load its 8 corner values
+     * This matches Java's NoiseChunk.NoiseInterpolator.selectCellYZ exactly
+     */
+    void selectCellYZ(int cellYIndex, int cellZIndex) {
+        // Load 8 corners from the slices (matching Java exactly)
+        m_noise000 = m_slice0[cellZIndex][cellYIndex];
+        m_noise001 = m_slice0[cellZIndex + 1][cellYIndex];
+        m_noise100 = m_slice1[cellZIndex][cellYIndex];
+        m_noise101 = m_slice1[cellZIndex + 1][cellYIndex];
+        m_noise010 = m_slice0[cellZIndex][cellYIndex + 1];
+        m_noise011 = m_slice0[cellZIndex + 1][cellYIndex + 1];
+        m_noise110 = m_slice1[cellZIndex][cellYIndex + 1];
+        m_noise111 = m_slice1[cellZIndex + 1][cellYIndex + 1];
+
+    }
+
+    /**
+     * Stage 1: Interpolate along Y axis
+     * Matches Java's updateForY exactly
+     */
+    void updateForY(double factorY) {
+        m_valueXZ00 = Mth::lerp(factorY, m_noise000, m_noise010);
+        m_valueXZ10 = Mth::lerp(factorY, m_noise100, m_noise110);
+        m_valueXZ01 = Mth::lerp(factorY, m_noise001, m_noise011);
+        m_valueXZ11 = Mth::lerp(factorY, m_noise101, m_noise111);
+    }
+
+    /**
+     * Stage 2: Interpolate along Z axis
+     * Matches Java's updateForZ (called updateForX in Java but actually does Z)
+     */
+    void updateForZ(double factorZ) {
+        m_valueZ0 = Mth::lerp(factorZ, m_valueXZ00, m_valueXZ01);
+        m_valueZ1 = Mth::lerp(factorZ, m_valueXZ10, m_valueXZ11);
+    }
+
+    /**
+     * Stage 3: Interpolate along X axis
+     * Matches Java's updateForZ (second call)
+     */
+    void updateForX(double factorX) {
+        m_value = Mth::lerp(factorX, m_valueZ0, m_valueZ1);
+    }
+
+    /**
+     * Get the final interpolated value at current position
+     */
+    double getValue() const {
+        return m_value;
+    }
+
+    /**
+     * Stop interpolation (cleanup)
+     */
+    void stop() {
+        // Nothing to do for now
+    }
+};
+
+//==============================================================================
+// CACHE STRATEGIES
+//==============================================================================
+
+/**
+ * CacheAllInCell - Caches all 512 values (4x8x4) within a cell
+ * Used for functions that are expensive to compute multiple times
+ */
+class NoiseChunk::CacheAllInCell {
+private:
+    density::DensityFunction* m_function;
+    double m_values[512];  // 4 * 8 * 4 = 512
+    bool m_isFilled;
+
+    int getIndex(int x, int y, int z) const {
+        return (y * 4 + z) * 4 + x;
+    }
+
+public:
+    CacheAllInCell(density::DensityFunction* function)
+        : m_function(function), m_isFilled(false)
+    {
+        std::fill(m_values, m_values + 512, 0.0);
+    }
+
+    double getValue(int x, int y, int z) {
+        if (!m_isFilled) {
+            // This should be filled before first access
+            return 0.0;
+        }
+        return m_values[getIndex(x, y, z)];
+    }
+
+    void fillCell(NoiseChunk* noiseChunk) {
+        // Fill all 512 values by calling the function at each position
+        // The NoiseChunk will provide context for each position
+        noiseChunk->fillAllDirectly(m_values, 512, m_function);
+        m_isFilled = true;
+    }
+
+    void reset() {
+        m_isFilled = false;
+    }
+};
+
+/**
+ * Cache2D - Caches values based on 2D position (X, Z)
+ * Used for functions that don't vary with Y
+ */
+class NoiseChunk::Cache2D {
+private:
+    density::DensityFunction* m_function;
+    std::vector<double> m_cache;
+    int m_lastCellX;
+    int m_lastCellZ;
+
+public:
+    Cache2D(density::DensityFunction* function)
+        : m_function(function), m_lastCellX(-1), m_lastCellZ(-1)
+    {
+        m_cache.resize(16, 0.0);  // Cache for 4x4 positions in cell
+    }
+
+    double getValue(int cellX, int cellZ, int offsetX, int offsetZ) {
+        if (cellX != m_lastCellX || cellZ != m_lastCellZ) {
+            // Cache miss - need to recompute
+            m_lastCellX = cellX;
+            m_lastCellZ = cellZ;
+        }
+
+        int index = offsetZ * 4 + offsetX;
+        return m_cache[index];
+    }
+};
+
+/**
+ * CacheOnce - Simple single-value cache
+ * Stores last computed value and position
+ */
+class NoiseChunk::CacheOnce {
+private:
+    density::DensityFunction* m_function;
+    int m_lastX, m_lastY, m_lastZ;
+    double m_lastValue;
+
+public:
+    CacheOnce(density::DensityFunction* function)
+        : m_function(function), m_lastX(INT32_MIN), m_lastY(INT32_MIN),
+          m_lastZ(INT32_MIN), m_lastValue(0.0) {}
+
+    double getValue(int x, int y, int z, density::DensityFunction::FunctionContext* context) {
+        if (x != m_lastX || y != m_lastY || z != m_lastZ) {
+            m_lastX = x;
+            m_lastY = y;
+            m_lastZ = z;
+            m_lastValue = m_function->compute(*context);
+        }
+        return m_lastValue;
+    }
+};
+
+/**
+ * FlatCache - Flat array cache for 2D surfaces
+ * Used for preliminary surface level
+ */
+class NoiseChunk::FlatCache {
+private:
+    std::vector<double> m_values;  // 16x16 for chunk
+    bool m_isFilled;
+
+public:
+    FlatCache() : m_isFilled(false) {
+        m_values.resize(256, 0.0);  // 16x16
+    }
+
+    double getValue(int localX, int localZ) {
+        if (!m_isFilled) {
+            return 0.0;
+        }
+        return m_values[localZ * 16 + localX];
+    }
+
+    void setValue(int localX, int localZ, double value) {
+        m_values[localZ * 16 + localX] = value;
+        m_isFilled = true;
+    }
+};
+
+//==============================================================================
+// NOISECHUNK IMPLEMENTATION
+//==============================================================================
+
+NoiseChunk::NoiseChunk(int cellCountXZ,
+                       int cellCountY,
+                       int minCellY,
+                       world::ChunkPos chunkPos,
+                       const ::levelgen::NoiseSettings& noiseSettings,
+                       const ::levelgen::NoiseRouter& router,
+                       Blender* blender)
+    : m_cellCountXZ(cellCountXZ),
+      m_cellCountY(cellCountY),
+      m_minCellY(minCellY),
+      m_cellWidth(noiseSettings.getCellWidth()),
+      m_cellHeight(noiseSettings.getCellHeight()),
+      m_chunkPos(chunkPos),
+      m_blender(blender),
+      m_preliminarySurfaceCacheInitialized(false)
+{
+    // Store key density functions
+    m_finalDensity = router.finalDensity();
+    m_preliminarySurfaceLevel = router.preliminarySurfaceLevel();
+
+    // Initialize first cell position
+    m_firstCellX = chunkPos.getMinBlockX() / m_cellWidth;
+    m_firstCellZ = chunkPos.getMinBlockZ() / m_cellWidth;
+
+    // Current position
+    m_cellStartBlockX = 0;
+    m_cellStartBlockY = 0;
+    m_cellStartBlockZ = 0;
+    m_inCellX = 0;
+    m_inCellY = 0;
+    m_inCellZ = 0;
+    m_currentCellY = 0;
+    m_currentCellZ = 0;
+
+    // Create interpolator for final density
+    // In full implementation, we'd create interpolators for all functions
+    // that are marked for interpolation
+    NoiseInterpolator* densityInterpolator = new NoiseInterpolator(m_cellCountY, m_cellCountXZ);
+    m_interpolators.push_back(densityInterpolator);
+
+    // Initialize preliminary surface cache
+    m_preliminarySurfaceCache.resize(256, 0);  // 16x16
+}
+
+NoiseChunk::~NoiseChunk() {
+    for (NoiseInterpolator* interp : m_interpolators) {
+        delete interp;
+    }
+    for (CacheAllInCell* cache : m_cellCaches) {
+        delete cache;
+    }
+}
+
+void NoiseChunk::initializeForFirstCellX() {
+    // Initialize for the first vertical column (cellX = firstCellX)
+    // Reset cell start block X to first cell position
+    m_cellStartBlockX = m_firstCellX * m_cellWidth;
+
+    // Fill both slices since we're starting fresh
+    fillSlice(true, m_firstCellX);     // slice 0
+    fillSlice(false, m_firstCellX + 1); // slice 1
+}
+
+void NoiseChunk::advanceCellX() {
+    // Move to next X column
+    // Swap slices so slice 1 becomes slice 0
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->swapSlices();
+    }
+
+    // Calculate new cell X
+    int currentCellX = m_cellStartBlockX / m_cellWidth;
+    int nextCellX = currentCellX + 1;
+
+    // Update cell start block X for next column
+    m_cellStartBlockX += m_cellWidth;
+
+    // Fill new slice 1
+    fillSlice(false, nextCellX + 1);
+}
+
+void NoiseChunk::selectCellYZ(int cellY, int cellZ) {
+    m_currentCellY = cellY;
+    m_currentCellZ = cellZ;
+
+    // Update cell start positions
+    m_cellStartBlockY = (m_minCellY + cellY) * m_cellHeight;
+    m_cellStartBlockZ = (m_firstCellZ + cellZ) * m_cellWidth;
+
+    // Tell interpolators to select this cell (load 8 corners)
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->selectCellYZ(cellY, cellZ);
+    }
+
+    // Reset cell caches
+    for (CacheAllInCell* cache : m_cellCaches) {
+        cache->reset();
+    }
+}
+
+void NoiseChunk::swapSlices() {
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->swapSlices();
+    }
+}
+
+void NoiseChunk::updateForY(double factorY) {
+    // Update in-cell Y position
+    m_inCellY = (int)(factorY * m_cellHeight);
+
+    // Stage 1: Y-axis interpolation
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->updateForY(factorY);
+    }
+}
+
+void NoiseChunk::updateForX(double factorX) {
+    // Update in-cell X position
+    m_inCellX = (int)(factorX * m_cellWidth);
+
+    // Stage 3: X-axis interpolation
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->updateForX(factorX);
+    }
+}
+
+void NoiseChunk::updateForZ(double factorZ) {
+    // Update in-cell Z position
+    m_inCellZ = (int)(factorZ * m_cellWidth);
+
+    // Stage 2: Z-axis interpolation
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->updateForZ(factorZ);
+    }
+}
+
+world::IBlockType* NoiseChunk::getInterpolatedState() {
+    // Get final density from first interpolator
+    double density = m_interpolators[0]->getValue();
+
+    // Use epsilon comparison to handle floating-point precision issues
+    // Minecraft's rule: density > 0 → solid, density <= 0 → air
+    // We use a small epsilon (1e-10) to account for numerical errors
+    const double EPSILON = 1.0e-10;
+
+    if (density > EPSILON) {
+        return nullptr;  // solid terrain - use default block
+    }
+
+    // Density <= epsilon means air or fluid
+    // For now, just return air
+    // TODO: Integrate aquifer system here
+    // TODO: Integrate ore vein system here
+
+    return world::MinecraftBlocks::AIR();
+}
+
+void NoiseChunk::stopInterpolation() {
+    for (NoiseInterpolator* interp : m_interpolators) {
+        interp->stop();
+    }
+}
+
+density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int index) {
+    // For batch operations, provide context for each position
+    // Index maps to position within cell
+    m_inCellX = index % m_cellWidth;
+    m_inCellZ = (index / m_cellWidth) % m_cellWidth;
+    m_inCellY = index / (m_cellWidth * m_cellWidth);
+    return this;
+}
+
+void NoiseChunk::fillAllDirectly(double* output, int count,
+                                 density::DensityFunction* function) {
+    // Fill array by calling function at each position
+    for (int i = 0; i < count; i++) {
+        density::DensityFunction::FunctionContext* ctx = forIndex(i);
+        output[i] = function->compute(*ctx);
+    }
+}
+
+int NoiseChunk::preliminarySurfaceLevel(int localX, int localZ) {
+    if (!m_preliminarySurfaceCacheInitialized) {
+        // Initialize cache on first access
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                int level = computePreliminarySurfaceLevel(x, z);
+                m_preliminarySurfaceCache[z * 16 + x] = level;
+            }
+        }
+        m_preliminarySurfaceCacheInitialized = true;
+    }
+
+    return m_preliminarySurfaceCache[localZ * 16 + localX];
+}
+
+int NoiseChunk::computePreliminarySurfaceLevel(int localX, int localZ) {
+    // Sample preliminary surface density function at this X-Z position
+    int blockX = m_chunkPos.getBlockX(localX);
+    int blockZ = m_chunkPos.getBlockZ(localZ);
+
+    // Binary search for surface (where density crosses 0)
+    int minY = m_minCellY * m_cellHeight;
+    int maxY = minY + m_cellCountY * m_cellHeight;
+
+    // Start with rough estimate
+    int estimateY = (minY + maxY) / 2;
+
+    density::DensityFunction::SinglePointContext ctx(blockX, estimateY, blockZ);
+    double density = m_preliminarySurfaceLevel->compute(ctx);
+
+    // TODO: Implement proper binary search
+    // For now, just return estimate
+    return estimateY;
+}
+
+void NoiseChunk::fillSlice(bool xIsEven, int cellX) {
+    // Fill a vertical slice of cell corners
+    // This samples density functions at all 8 corners of cells in this X slice
+
+    int sliceIndex = xIsEven ? 0 : 1;
+
+    // For each Y-Z cell in this slice
+    for (int cellZ = 0; cellZ < m_cellCountXZ; cellZ++) {
+        for (int cellY = 0; cellY < m_cellCountY; cellY++) {
+            // Sample all 8 corners of this cell
+            // Bottom 4 corners (Y offset = 0)
+            sampleCellCorner(cellX, cellY, cellZ, 0, 0, 0);  // [0,0,0] - Bottom NW
+            sampleCellCorner(cellX, cellY, cellZ, 1, 0, 0);  // [1,0,0] - Bottom NE
+            sampleCellCorner(cellX, cellY, cellZ, 0, 0, 1);  // [0,0,1] - Bottom SW
+            sampleCellCorner(cellX, cellY, cellZ, 1, 0, 1);  // [1,0,1] - Bottom SE
+
+            // Top 4 corners (Y offset = 1)
+            sampleCellCorner(cellX, cellY, cellZ, 0, 1, 0);  // [0,1,0] - Top NW
+            sampleCellCorner(cellX, cellY, cellZ, 1, 1, 0);  // [1,1,0] - Top NE
+            sampleCellCorner(cellX, cellY, cellZ, 0, 1, 1);  // [0,1,1] - Top SW
+            sampleCellCorner(cellX, cellY, cellZ, 1, 1, 1);  // [1,1,1] - Top SE
+        }
+    }
+}
+
+void NoiseChunk::sampleCellCorner(int cellX, int cellY, int cellZ,
+                                  int offsetX, int offsetY, int offsetZ) {
+    // Calculate block position for this corner
+    int blockX = (m_firstCellX + cellX + offsetX) * m_cellWidth;
+    int blockY = (m_minCellY + cellY + offsetY) * m_cellHeight;
+    int blockZ = (m_firstCellZ + cellZ + offsetZ) * m_cellWidth;
+
+    // Sample final density at this position
+    density::DensityFunction::SinglePointContext ctx(blockX, blockY, blockZ);
+    double density = m_finalDensity->compute(ctx);
+
+    // Determine which slice (0 for even cellX, 1 for odd)
+    int sliceIndex = (cellX % 2 == 0) ? 0 : 1;
+
+    // Sampling complete
+
+    // Store in interpolator at (cellY + offsetY, cellZ + offsetZ)
+    if (!m_interpolators.empty()) {
+        m_interpolators[0]->setSlice(sliceIndex, cellY + offsetY, cellZ + offsetZ, density);
+    }
+}
+
+} // namespace levelgen
+} // namespace minecraft

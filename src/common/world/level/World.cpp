@@ -43,7 +43,8 @@ namespace Game {
                   config.enableFallbackGeneration ? "enabled" : "disabled");
 
         // Set up generation config
-        config.generationConfig.seed = 123764;
+        // NOTE: Seed comes from GenerationConfig default (IChunkGenerator.hpp)
+        // Change the seed there for a single source of truth
         config.generationConfig.worldType = "default";
         config.generationConfig.generateOres = true;
         config.generationConfig.generateCaves = true;

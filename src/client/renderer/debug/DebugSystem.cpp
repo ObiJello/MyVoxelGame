@@ -961,7 +961,8 @@ namespace Debug {
     void DebugSystem::RenderDebugUI(
         const Render::Camera& camera,
         const Frustum& frustum,
-        Game::PlayerController& playerController,
+        Game::ClientPlayer& player,
+        Game::ClientPlayerController& playerController,
         const PerformanceMetrics& metrics,
         bool cursorEnabled,
         int windowWidth, int windowHeight,

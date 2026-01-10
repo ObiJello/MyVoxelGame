@@ -147,6 +147,29 @@ else()
     target_link_libraries(imgui PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
+# 5a) Terrain library - static library from your custom terrain generation system
+# For MD5 hashing: Use CommonCrypto on macOS (built-in, universal), OpenSSL elsewhere
+file(GLOB_RECURSE TERRAIN_LIBRARY_SOURCES
+        "src/my_terrain_library_old/src/*.cpp"
+)
+
+add_library(terrain_library STATIC ${TERRAIN_LIBRARY_SOURCES})
+target_include_directories(terrain_library PUBLIC
+        src/my_terrain_library_old/include
+        ${PROJECT_SOURCE_DIR}/ext/md5  # MD5 wrapper (uses CommonCrypto on macOS, OpenSSL elsewhere)
+)
+target_compile_features(terrain_library PUBLIC cxx_std_20)
+
+# Link crypto library based on platform
+if(APPLE)
+    # macOS: Use built-in CommonCrypto (universal binary support)
+    # No linking needed - CommonCrypto is part of libSystem
+else()
+    # Other platforms: Use OpenSSL
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(terrain_library PUBLIC OpenSSL::Crypto)
+endif()
+
 # 6) The game executable (on macOS, it's a bundle)
 if(APPLE)
     add_executable(MyVoxelGame MACOSX_BUNDLE
@@ -191,6 +214,7 @@ if(APPLE)
             src/server/world/storage/AnvilChunkSaver.cpp
             src/server/world/storage/MinecraftChunkLoaderImpl.cpp
             src/common/world/gen/ProceduralChunkGenerator.cpp
+            src/server/world/MyTerrainGenerator.cpp
             src/server/world/cache/ChunkCache.cpp
             src/platform/GameDirectory.cpp
             src/common/world/math/WorldCoordinates.cpp
@@ -381,6 +405,12 @@ else()
             src/server/world/ignore.cpp
             src/server/world/ignore.hpp
 
+            # ========================================================================
+            # CUSTOM TERRAIN GENERATION (MyTerrainGenerator wrapper)
+            # ========================================================================
+            src/server/world/MyTerrainGenerator.cpp
+            src/server/world/MyTerrainGenerator.hpp
+
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
 
@@ -474,6 +504,10 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
         ${Boost_INCLUDE_DIRS}
+        # ========================================================================
+        # CUSTOM TERRAIN LIBRARY
+        # ========================================================================
+        src/my_terrain_library_old/include
 )
 
 # Add Asio or Boost includes
@@ -490,6 +524,7 @@ target_link_libraries(MyVoxelGame PRIVATE
         OpenAL::OpenAL       # static OpenAL
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
+        terrain_library  # Custom terrain generation library
 )
 
 # Link with Asio if using standalone

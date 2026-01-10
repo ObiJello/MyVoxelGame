@@ -166,7 +166,7 @@ namespace Game {
         // Core components
         std::unique_ptr<ChunkCache> m_chunkCache;
         std::unique_ptr<MinecraftChunkLoaderImpl> m_chunkLoader;
-        std::unique_ptr<ProceduralChunkGenerator> m_chunkGenerator;
+        std::unique_ptr<IChunkGenerator> m_chunkGenerator;  // Changed to interface type to support different generators
         std::unique_ptr<IChunkSaver> m_chunkSaver;
         std::unique_ptr<DirtyTracker> m_dirtyTracker;
 
