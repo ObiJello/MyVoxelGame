@@ -7,6 +7,7 @@
 #include "../core/Frustum.hpp"
 #include "../shader/Shader.hpp"
 #include "../texture/TextureAnimator.hpp"
+#include "../backend/RenderTypes.hpp"
 #include <vector>
 #include <memory>
 
@@ -21,8 +22,8 @@ namespace Render {
         bool enableBackFaceCulling = true;
 
         // Blending settings (for translucent pass)
-        GLenum blendSrc = GL_SRC_ALPHA;
-        GLenum blendDst = GL_ONE_MINUS_SRC_ALPHA;
+        BlendFactor blendSrc = BlendFactor::SrcAlpha;
+        BlendFactor blendDst = BlendFactor::OneMinusSrcAlpha;
 
         // Alpha test threshold (for cutout pass)
         float alphaThreshold = 0.5f;
@@ -121,6 +122,10 @@ namespace Render {
         std::unique_ptr<Shader> m_blockShader;
         bool m_shadersLoaded = false;
 
+        // Backend handles for Vulkan rendering
+        ShaderHandle m_backendShader = INVALID_SHADER;
+        TextureHandle m_backendAtlasTexture = INVALID_TEXTURE;
+
         // Render configuration
         bool m_enableFrustumCulling = true;
         bool m_wireframeMode = false;
@@ -146,9 +151,8 @@ namespace Render {
         void SetupShaderUniforms(const Camera& camera);
         void BindTextureAtlas();
 
-        // Error checking
+        // Error checking (no-op in Vulkan mode, checks glGetError in GL mode via backend)
         bool CheckShaderErrors(const std::string& pass);
-        void LogRenderError(const std::string& operation, GLenum error);
 
         // Initialize render pass configurations
         void SetupRenderConfigs();

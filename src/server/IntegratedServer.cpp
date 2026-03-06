@@ -99,15 +99,15 @@ namespace Server {
 
         // Create io_context and NetworkServer
         m_ioContext = std::make_unique<net::io_context>();
-        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 25565);
-        
-        // Start NetworkServer on localhost
+        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 0);
+
+        // Start NetworkServer on localhost (port 0 = OS picks a random available port)
         if (!m_networkServer->Start("127.0.0.1")) {
-            Log::Error("Failed to start NetworkServer on 127.0.0.1:25565");
+            Log::Error("Failed to start NetworkServer on 127.0.0.1");
             return false;
         }
-        
-        Log::Info("NetworkServer listening on 127.0.0.1:25565");
+
+        Log::Info("NetworkServer listening on 127.0.0.1:%d", m_networkServer->GetPort());
         
         // Create work guard to keep io_context alive
         m_ioWorkGuard = std::make_unique<WorkGuard>(net::make_work_guard(*m_ioContext));
@@ -145,6 +145,11 @@ namespace Server {
         
         // Signal the server thread to stop
         m_shouldStop.store(true);
+
+        // Tell the world to abort any long-running chunk loading loops
+        if (m_world) {
+            m_world->RequestStop();
+        }
 
         // IMPORTANT: Wait for server thread to finish BEFORE destroying resources
         // This prevents the server thread from accessing destroyed objects
@@ -286,9 +291,16 @@ namespace Server {
         // Store server thread ID for assertions
         g_serverThreadId = std::this_thread::get_id();
         
-        Log::Info("IntegratedServer main loop started (Target: %d TPS, ThreadId: %zu)", 
+        Log::Info("IntegratedServer main loop started (Target: %d TPS, ThreadId: %zu)",
                   m_config.tickRate, std::hash<std::thread::id>{}(g_serverThreadId));
-        
+
+        // Initialize chunk provider on server thread so ServerChunkCache
+        // captures the correct main thread ID (matching Minecraft's architecture
+        // where the server thread owns all chunk data structures)
+        if (m_world) {
+            m_world->InitializeChunkProvider();
+        }
+
         m_lastTickTime = clock::now();
         m_lastTickStartTime = m_lastTickTime;
         

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <string>
+#include <functional>
 
 namespace Log {
     enum class Level { Debug, Info, Warning, Error };
@@ -23,4 +24,9 @@ namespace Log {
 
     // (Optional) Set the minimum log level (Debug/Info/Warning/Error).
     void SetLevel(Level level);
+
+    // Callback for capturing log output (used by debug console)
+    using LogCallback = std::function<void(Level level, const std::string& message)>;
+    void RegisterCallback(LogCallback callback);
+    void UnregisterCallback();
 }

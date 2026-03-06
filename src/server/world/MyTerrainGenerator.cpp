@@ -3,28 +3,19 @@
 #include <chrono>
 #include <future>
 
-// Terrain library namespace imports
-using world::MinecraftBlocks;
-using world::IBlockType;
-using world::ProtoChunk;
-using world::ChunkPos;
+// Terrain library includes
+#include "levelgen/NoiseRegistry.h"
+#include "levelgen/DensityFunctionRegistry.h"
+#include "levelgen/NoiseSettings.h"
+#include "levelgen/SurfaceRuleData.h"
+
+using minecraft::world::level::block::Blocks;
 using minecraft::world::BlockRegistry;
-using minecraft::levelgen::NoiseRegistry;
-using minecraft::levelgen::DensityFunctionRegistry;
-using minecraft::levelgen::NoiseRouter;
-using minecraft::levelgen::NoiseRouterData;
-using minecraft::levelgen::NoiseSettings;
-using minecraft::levelgen::NoiseGeneratorSettings;
-using minecraft::levelgen::RandomState;
-using minecraft::levelgen::OverworldFluidPicker;
-using minecraft::levelgen::Beardifier;
-using minecraft::levelgen::NoiseBasedChunkGenerator;
-using minecraft::levelgen::SurfaceSystem;
-using minecraft::levelgen::SurfaceRuleData;
-using minecraft::levelgen::RuleSource;
-using minecraft::levelgen::ChunkGenerationRunner;
-using minecraft::world::biome::MultiNoiseBiomeSource;
-using minecraft::Blender;
+using minecraft::BlockState;
+
+static constexpr int MIN_Y = -64;
+static constexpr int HEIGHT = 384;
+static constexpr int MAX_Y = MIN_Y + HEIGHT;
 
 namespace Game {
 
@@ -44,143 +35,118 @@ namespace Game {
         }
 
         try {
-            Log::Info("[MyTerrainGenerator] Initializing with seed: %lld", (int64_t)m_config.seed);
+            int64_t seed = static_cast<int64_t>(m_config.seed);
+            Log::Info("[MyTerrainGenerator] Initializing with seed: %lld", seed);
 
-            // ========================================================================
-            // ONE-TIME SETUP (Bootstrap your terrain library)
-            // ========================================================================
-
+            // ================================================================
             // Step 1: Bootstrap registries (once per program)
-            NoiseRegistry::bootstrap();
-            DensityFunctionRegistry::bootstrap(m_config.seed);
+            // ================================================================
+            Blocks::bootstrap();
+            minecraft::levelgen::NoiseRegistry::bootstrap();
+            minecraft::levelgen::DensityFunctionRegistry::bootstrap(seed);
+            minecraft::levelgen::SurfaceRuleData::initialize();
             Log::Info("[MyTerrainGenerator] Registries bootstrapped");
 
-            // Step 2: Create noise router
-            NoiseRouter* router = NoiseRouterData::overworld(false, false);
-            NoiseSettings noiseSettings = NoiseSettings::OVERWORLD_NOISE_SETTINGS;
+            // ================================================================
+            // Step 2: Cache block states
+            // ================================================================
+            m_airBlock = Blocks::AIR->defaultBlockState();
+            m_stoneBlock = Blocks::STONE->defaultBlockState();
 
-            // Step 3: Create noise generator settings
-            m_settings = new NoiseGeneratorSettings(
-                noiseSettings,
-                MinecraftBlocks::STONE(),  // defaultBlock
-                MinecraftBlocks::WATER(),  // defaultFluid
-                *router,
-                nullptr,  // surfaceRule (will use defaults)
-                {},       // spawnTarget
-                63,       // seaLevel
-                false,    // disableMobGeneration
-                true,     // aquifersEnabled
-                true,     // oreVeinsEnabled
-                false     // useLegacyRandomSource
-            );
-            Log::Info("[MyTerrainGenerator] Settings created (sea level: 63)");
-
-            // Step 4: Create random state
-            m_randomState = RandomState::create(m_settings, m_config.seed);
-            Log::Info("[MyTerrainGenerator] RandomState created");
-
-            // Step 5: Create fluid picker (controls water/lava placement)
-            m_fluidPicker = new OverworldFluidPicker(
-                63,   // seaLevel
-                -54,  // lavaLevel
-                MinecraftBlocks::WATER(),
-                MinecraftBlocks::LAVA()
-            );
-            Log::Info("[MyTerrainGenerator] FluidPicker created");
-
-            // Step 6: Create beardifier (for structure blending)
-            m_beardifier = new Beardifier();
-
-            // Step 7: Initialize surface rules
-            SurfaceRuleData::initialize();
-            m_surfaceRules = SurfaceRuleData::overworld();
-            Log::Info("[MyTerrainGenerator] Surface rules initialized");
-
-            // Step 8: Create surface system
-            m_surfaceSystem = new SurfaceSystem(
-                m_randomState,
-                MinecraftBlocks::STONE(),
-                63,  // seaLevel
-                m_randomState->random()
-            );
-            Log::Info("[MyTerrainGenerator] SurfaceSystem created");
-
-            // Step 9: Create the main chunk generator with surface rules
-            m_generator = new NoiseBasedChunkGenerator(
-                m_settings,
-                m_surfaceSystem,
-                m_surfaceRules,
-                MinecraftBlocks::STONE(),  // Default block
-                MinecraftBlocks::WATER(),  // Default fluid (was AIR - bug fix)
-                m_fluidPicker,
-                m_beardifier
-            );
-            Log::Info("[MyTerrainGenerator] NoiseBasedChunkGenerator created with surface rules");
-
-            // Step 10: Create and set BiomeSource (needed for surface rules to know biome)
-            m_biomeSource = MultiNoiseBiomeSource::createOverworld().release();
-            m_generator->setBiomeSource(m_biomeSource);
-            Log::Info("[MyTerrainGenerator] BiomeSource created and set");
-
-            // Step 11: Create ChunkGenerationRunner (handles full pipeline including carvers)
-            ChunkGenerationRunner::Config runnerConfig = ChunkGenerationRunner::Config::terrainWithCaves();
-            runnerConfig.runFeatures = true;  // Enable ore generation
-            m_runner = new ChunkGenerationRunner(m_generator, m_randomState, m_config.seed, runnerConfig);
-            Log::Info("[MyTerrainGenerator] ChunkGenerationRunner created (terrain + caves + features)");
-
-            // Step 12: Create block registry and register all possible block types
+            // ================================================================
+            // Step 3: Create block registry
+            // ================================================================
             m_blockRegistry = new BlockRegistry();
+            m_blockRegistry->registerBlock(m_airBlock);
+            m_blockRegistry->registerBlock(m_stoneBlock);
+            m_blockRegistry->registerBlock(Blocks::WATER->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::LAVA->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::DEEPSLATE->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::BEDROCK->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::GRASS_BLOCK->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::DIRT->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::SAND->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::GRAVEL->defaultBlockState());
+            m_blockRegistry->registerBlock(Blocks::TUFF->defaultBlockState());
+            Log::Info("[MyTerrainGenerator] BlockRegistry initialized");
 
-            // Register all block types that the terrain generator might use
-            m_blockRegistry->registerBlock(MinecraftBlocks::AIR());
-            m_blockRegistry->registerBlock(MinecraftBlocks::CAVE_AIR());
-            m_blockRegistry->registerBlock(MinecraftBlocks::STONE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::WATER());
-            m_blockRegistry->registerBlock(MinecraftBlocks::LAVA());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::BEDROCK());
-            m_blockRegistry->registerBlock(MinecraftBlocks::GRASS_BLOCK());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DIRT());
-            m_blockRegistry->registerBlock(MinecraftBlocks::SAND());
-            m_blockRegistry->registerBlock(MinecraftBlocks::GRAVEL());
-            m_blockRegistry->registerBlock(MinecraftBlocks::COPPER_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_IRON_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::RAW_COPPER_BLOCK());
-            m_blockRegistry->registerBlock(MinecraftBlocks::RAW_IRON_BLOCK());
-            m_blockRegistry->registerBlock(MinecraftBlocks::GRANITE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::TUFF());
-            m_blockRegistry->registerBlock(MinecraftBlocks::SNOW_BLOCK());
-            m_blockRegistry->registerBlock(MinecraftBlocks::PACKED_ICE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::ICE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::SANDSTONE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::POWDER_SNOW());
-            m_blockRegistry->registerBlock(MinecraftBlocks::OAK_LEAVES());
-            m_blockRegistry->registerBlock(MinecraftBlocks::SPRUCE_LEAVES());
-            m_blockRegistry->registerBlock(MinecraftBlocks::BIRCH_LEAVES());
+            // ================================================================
+            // Step 4: Create world generation components
+            // ================================================================
+            auto* router = minecraft::levelgen::NoiseRouterData::overworld(false, false);
+            auto noiseSettings = minecraft::levelgen::NoiseSettings::OVERWORLD_NOISE_SETTINGS;
 
-            // Ore blocks for features phase
-            m_blockRegistry->registerBlock(MinecraftBlocks::COAL_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_COAL_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::IRON_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::GOLD_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_GOLD_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::REDSTONE_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_REDSTONE_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DIAMOND_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_DIAMOND_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::LAPIS_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_LAPIS_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::EMERALD_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_EMERALD_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DEEPSLATE_COPPER_ORE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::DIORITE());
-            m_blockRegistry->registerBlock(MinecraftBlocks::ANDESITE());
+            m_settings = new minecraft::levelgen::NoiseGeneratorSettings(
+                noiseSettings,
+                Blocks::STONE->defaultBlockState(),
+                Blocks::WATER->defaultBlockState(),
+                *router, nullptr, {}, 63, false, true, true, false
+            );
 
-            Log::Info("[MyTerrainGenerator] BlockRegistry initialized with %d block types",
-                     static_cast<int>(42)); // Updated count
+            m_randomState = minecraft::levelgen::RandomState::create(m_settings, seed);
+
+            auto* surfaceRules = minecraft::levelgen::SurfaceRuleData::overworld();
+
+            m_fluidPicker = new minecraft::levelgen::OverworldFluidPicker(
+                63, -54,
+                Blocks::WATER->defaultBlockState(),
+                Blocks::LAVA->defaultBlockState()
+            );
+
+            m_biomeSource = minecraft::world::biome::MultiNoiseBiomeSource::createOverworld();
+
+            m_generator = new minecraft::levelgen::NoiseBasedChunkGenerator(
+                m_settings, m_randomState->surfaceSystem(), surfaceRules,
+                m_stoneBlock, m_airBlock, m_fluidPicker, nullptr
+            );
+            m_generator->setBiomeSource(m_biomeSource.get());
+            Log::Info("[MyTerrainGenerator] World generation components created");
+
+            // ================================================================
+            // Step 5: Create executors (thread pool + main thread queue)
+            // ================================================================
+            m_backgroundExecutor = std::make_unique<BackgroundExecutor>();
+            m_mainThreadExecutor = std::make_unique<MainThreadExecutor>();
+            Log::Info("[MyTerrainGenerator] Executors created (%zu background threads)",
+                     static_cast<size_t>(std::thread::hardware_concurrency()));
+
+            // ================================================================
+            // Step 6: Create ServerChunkCache (the full async pipeline)
+            //
+            // This is the SAME pipeline as async_chunk_test and Minecraft's
+            // DedicatedServer. Chunks flow through:
+            //   ServerChunkCache -> ChunkMap -> DistanceManager ->
+            //   ChunkGenerationTask -> Worker Threads
+            // ================================================================
+            m_chunkCache = std::make_unique<minecraft::server::level::ServerChunkCache>(
+                m_generator,
+                m_randomState,
+                seed,
+                m_backgroundExecutor->getExecutor(),
+                m_mainThreadExecutor->getExecutor(),
+                m_blockRegistry,
+                m_airBlock,
+                m_stoneBlock,
+                MIN_Y,
+                HEIGHT
+            );
+
+            m_chunkCache->setTaskPoller([this]() {
+                if (m_mainThreadExecutor->hasPendingTasks()) {
+                    m_mainThreadExecutor->runPendingTasks();
+                }
+            });
+            Log::Info("[MyTerrainGenerator] ServerChunkCache created");
+
+            // ================================================================
+            // Step 7: Set target chunk status
+            // Full generation: EMPTY -> FULL (phases 0-11)
+            // ================================================================
+            m_targetStatus = &minecraft::world::chunk::status::ChunkStatus::FULL;
+            Log::Info("[MyTerrainGenerator] Target status: %s", m_targetStatus->getName().c_str());
 
             m_initialized = true;
-            Log::Info("[MyTerrainGenerator] ✓ Initialization complete!");
+            Log::Info("[MyTerrainGenerator] Initialization complete!");
             return true;
 
         } catch (const std::exception& e) {
@@ -191,44 +157,24 @@ namespace Game {
     }
 
     void MyTerrainGenerator::Shutdown() {
-        if (!m_initialized) {
-            return;
-        }
+        if (!m_initialized) return;
 
         Log::Info("[MyTerrainGenerator] Shutting down...");
 
-        // Clean up in reverse order of creation
-        delete m_blockRegistry;
-        m_blockRegistry = nullptr;
+        // Destroy in reverse order
+        m_chunkCache.reset();
+        m_backgroundExecutor.reset();
+        m_mainThreadExecutor.reset();
 
-        delete m_runner;
-        m_runner = nullptr;
-
-        delete m_biomeSource;
-        m_biomeSource = nullptr;
-
-        delete m_generator;
-        m_generator = nullptr;
-
-        delete m_surfaceSystem;
-        m_surfaceSystem = nullptr;
-        // Note: m_surfaceRules is not owned by us (static singleton from SurfaceRuleData)
-        m_surfaceRules = nullptr;
-
-        delete m_beardifier;
-        m_beardifier = nullptr;
-
-        delete m_fluidPicker;
-        m_fluidPicker = nullptr;
-
-        delete m_randomState;
-        m_randomState = nullptr;
-
-        delete m_settings;
-        m_settings = nullptr;
+        delete m_generator;   m_generator = nullptr;
+        m_biomeSource.reset();
+        delete m_fluidPicker;  m_fluidPicker = nullptr;
+        delete m_randomState;  m_randomState = nullptr;
+        delete m_settings;     m_settings = nullptr;
+        delete m_blockRegistry; m_blockRegistry = nullptr;
 
         m_initialized = false;
-        Log::Info("[MyTerrainGenerator] ✓ Shutdown complete");
+        Log::Info("[MyTerrainGenerator] Shutdown complete");
     }
 
     ChunkGenerationResult MyTerrainGenerator::GenerateChunk(Math::ChunkPos position) {
@@ -237,82 +183,57 @@ namespace Game {
 
         if (!m_initialized) {
             result.errorMessage = "Generator not initialized";
-            Log::Error("[MyTerrainGenerator] Cannot generate - not initialized");
             return result;
         }
 
         auto startTime = std::chrono::high_resolution_clock::now();
 
         try {
-            // ========================================================================
-            // PER-CHUNK GENERATION
-            // ========================================================================
-
-            // Step 1: Create ChunkPos for your library
-            ChunkPos chunkPos(position.x, position.z);
-
-            // Step 2: Create empty ProtoChunk (your library's chunk format)
-            ProtoChunk* protoChunk = new ProtoChunk(
-                chunkPos,
-                -64,                       // minY (matches Minecraft 1.18+)
-                384,                       // height (from -64 to 319)
-                MinecraftBlocks::AIR(),    // defaultBlock
-                MinecraftBlocks::AIR(),    // defaultFluid
-                m_blockRegistry
+            // ================================================================
+            // Generate chunk through the FULL ServerChunkCache pipeline
+            //
+            // ServerChunkCache.getChunk() goes through:
+            //   1. Cache check
+            //   2. getChunkFutureMainThread() -> adds ticket
+            //   3. runDistanceManagerUpdates()
+            //   4. ChunkHolder.scheduleChunkGenerationTask()
+            //   5. ChunkMap.scheduleGenerationTask()
+            //   6. ChunkTaskDispatcher.submit() -> ConsecutiveExecutor
+            //   7. ChunkGenerationTask runs through all statuses
+            //      (BIOMES -> NOISE -> SURFACE -> CARVERS -> FEATURES -> ...)
+            //   8. managedBlock() pumps tasks until complete
+            //
+            // This provides multi-chunk neighbor access via WorldGenRegion,
+            // so features like trees can span chunk boundaries correctly.
+            // ================================================================
+            world::IChunk* chunk = m_chunkCache->getChunk(
+                position.x, position.z, *m_targetStatus, true
             );
 
-            // Step 3: GENERATE TERRAIN using ChunkGenerationRunner (full pipeline)
-            // This handles: biomes -> noise -> surface -> carvers
-            Log::Info("[MyTerrainGenerator] Generating chunk (%d, %d) with seed %lld",
-                      position.x, position.z, (int64_t)m_config.seed);
-            m_runner->generateChunk(protoChunk);
-
-            Log::Debug("[MyTerrainGenerator] Generated ProtoChunk for (%d, %d)", position.x, position.z);
-
-            // Debug: For chunk (0,0), log block counts to verify terrain generation
-            if (position.x == 0 && position.z == 0) {
-                int stoneCount = 0, waterCount = 0, grassCount = 0, dirtCount = 0, airCount = 0;
-                for (int y = -64; y < 320; y++) {
-                    for (int lx = 0; lx < 16; lx++) {
-                        for (int lz = 0; lz < 16; lz++) {
-                            IBlockType* bt = protoChunk->getBlockState(lx, y, lz);
-                            if (bt == MinecraftBlocks::STONE()) stoneCount++;
-                            else if (bt == MinecraftBlocks::WATER()) waterCount++;
-                            else if (bt == MinecraftBlocks::GRASS_BLOCK()) grassCount++;
-                            else if (bt == MinecraftBlocks::DIRT()) dirtCount++;
-                            else if (bt == MinecraftBlocks::AIR() || bt == MinecraftBlocks::CAVE_AIR()) airCount++;
-                        }
-                    }
-                }
-                Log::Info("[MyTerrainGenerator] Chunk (0,0) block counts: stone=%d, water=%d, grass=%d, dirt=%d, air=%d",
-                         stoneCount, waterCount, grassCount, dirtCount, airCount);
+            if (!chunk) {
+                result.errorMessage = "ServerChunkCache returned null chunk";
+                return result;
             }
 
-            // ========================================================================
-            // CONVERT TO GAME CHUNK FORMAT
-            // ========================================================================
-
-            // Step 4: Create game's chunk
+            // ================================================================
+            // Convert from terrain library chunk to game chunk format
+            // ================================================================
             auto gameChunk = std::make_shared<Chunk>();
             gameChunk->pos = position;
 
-            // Step 5: Copy blocks from ProtoChunk to Game::Chunk
+            minecraft::world::ChunkPos chunkPos = chunk->getPos();
+            int worldMinX = chunkPos.getMinBlockX();
+            int worldMinZ = chunkPos.getMinBlockZ();
             int blocksSet = 0;
-            int worldMinX = chunkPos.getMinBlockX();  // position.x * 16
-            int worldMinZ = chunkPos.getMinBlockZ();  // position.z * 16
 
-            for (int y = -64; y < 320; y++) {
+            for (int y = MIN_Y; y < MAX_Y; y++) {
                 for (int localX = 0; localX < 16; localX++) {
                     for (int localZ = 0; localZ < 16; localZ++) {
-                        // Get block from your library's chunk
-                        int worldX = worldMinX + localX;
-                        int worldZ = worldMinZ + localZ;
-                        IBlockType* blockType = protoChunk->getBlockState(worldX, y, worldZ);
-
-                        // Map to game's BlockID
-                        BlockID gameBlockId = MapBlockType(blockType);
-
-                        // Set in game chunk
+                        minecraft::core::BlockPos blockPos(
+                            worldMinX + localX, y, worldMinZ + localZ
+                        );
+                        BlockState* blockState = chunk->getBlockState(blockPos);
+                        BlockID gameBlockId = MapBlockType(blockState);
                         gameChunk->SetBlock(localX, y, localZ, gameBlockId);
 
                         if (gameBlockId != BlockID::Air) {
@@ -322,28 +243,20 @@ namespace Game {
                 }
             }
 
-            // Step 6: Cleanup ProtoChunk
-            delete protoChunk;
-
-            // ========================================================================
-            // RETURN SUCCESS
-            // ========================================================================
-
             auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
 
             result.success = true;
             result.chunk = gameChunk;
 
-            // Update stats
             m_stats.chunksGenerated++;
             m_stats.totalGenerationTimeMs += duration.count();
 
-            Log::Debug("[MyTerrainGenerator] ✓ Chunk (%d, %d) generated in %lldms (%d non-air blocks)",
+            Log::Debug("[MyTerrainGenerator] Chunk (%d, %d) generated in %lldms (%d non-air blocks)",
                       position.x, position.z, duration.count(), blocksSet);
 
         } catch (const std::exception& e) {
-            result.errorMessage = std::string("Exception during generation: ") + e.what();
+            result.errorMessage = std::string("Exception: ") + e.what();
             Log::Error("[MyTerrainGenerator] Generation failed for chunk (%d, %d): %s",
                       position.x, position.z, e.what());
         }
@@ -351,258 +264,133 @@ namespace Game {
         return result;
     }
 
-    BlockID MyTerrainGenerator::MapBlockType(IBlockType* blockType) const {
-        // Map your library's block types to game's BlockIDs
-        if (blockType == MinecraftBlocks::AIR() || blockType == MinecraftBlocks::CAVE_AIR()) {
+    BlockID MyTerrainGenerator::MapBlockType(BlockState* blockState) const {
+        if (!blockState) return BlockID::Stone;
+
+        if (blockState->is(Blocks::AIR) || blockState->is(Blocks::CAVE_AIR))
             return BlockID::Air;
-        }
-        else if (blockType == MinecraftBlocks::STONE()) {
-            return BlockID::Stone;
-        }
-        else if (blockType == MinecraftBlocks::WATER()) {
-            return BlockID::Water;
-        }
-        else if (blockType == MinecraftBlocks::LAVA()) {
-            return BlockID::Lava;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE()) {
-            return BlockID::Deepslate;
-        }
-        else if (blockType == MinecraftBlocks::BEDROCK()) {
-            return BlockID::Bedrock;
-        }
-        else if (blockType == MinecraftBlocks::GRASS_BLOCK()) {
-            return BlockID::Grass;
-        }
-        else if (blockType == MinecraftBlocks::DIRT()) {
-            return BlockID::Dirt;
-        }
-        else if (blockType == MinecraftBlocks::SAND()) {
-            return BlockID::Sand;
-        }
-        else if (blockType == MinecraftBlocks::GRAVEL()) {
-            return BlockID::Gravel;
-        }
-        else if (blockType == MinecraftBlocks::COPPER_ORE()) {
-            return BlockID::CopperOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_IRON_ORE()) {
-            return BlockID::DeepslateIronOre;
-        }
-        else if (blockType == MinecraftBlocks::RAW_IRON_BLOCK()) {
-            return BlockID::RawIronBlock;
-        }
-        else if (blockType == MinecraftBlocks::GRANITE()) {
-            return BlockID::Granite;
-        }
-        else if (blockType == MinecraftBlocks::TUFF()) {
-            return BlockID::Tuff;
-        }
-        else if (blockType == MinecraftBlocks::SNOW_BLOCK()) {
-            return BlockID::Snow;
-        }
-        else if (blockType == MinecraftBlocks::ICE() || blockType == MinecraftBlocks::PACKED_ICE()) {
+        if (blockState->is(Blocks::STONE))        return BlockID::Stone;
+        if (blockState->is(Blocks::WATER))         return BlockID::Water;
+        if (blockState->is(Blocks::LAVA))          return BlockID::Lava;
+        if (blockState->is(Blocks::DEEPSLATE))     return BlockID::Deepslate;
+        if (blockState->is(Blocks::BEDROCK))       return BlockID::Bedrock;
+        if (blockState->is(Blocks::GRASS_BLOCK))   return BlockID::Grass;
+        if (blockState->is(Blocks::DIRT))           return BlockID::Dirt;
+        if (blockState->is(Blocks::SAND))           return BlockID::Sand;
+        if (blockState->is(Blocks::GRAVEL))         return BlockID::Gravel;
+        if (blockState->is(Blocks::GRANITE))        return BlockID::Granite;
+        if (blockState->is(Blocks::TUFF))           return BlockID::Tuff;
+        if (blockState->is(Blocks::DIORITE))        return BlockID::Diorite;
+        if (blockState->is(Blocks::ANDESITE))       return BlockID::Andesite;
+        if (blockState->is(Blocks::SNOW_BLOCK))     return BlockID::Snow;
+        if (blockState->is(Blocks::ICE) || blockState->is(Blocks::PACKED_ICE))
             return BlockID::Ice;
-        }
-        else if (blockType == MinecraftBlocks::SANDSTONE()) {
-            return BlockID::Sandstone;
-        }
-        else if (blockType == MinecraftBlocks::OAK_LEAVES()) {
-            return BlockID::OakLeaves;
-        }
-        else if (blockType == MinecraftBlocks::BIRCH_LEAVES()) {
-            return BlockID::BirchLeaves;
-        }
-        else if (blockType == MinecraftBlocks::SPRUCE_LEAVES()) {
-            return BlockID::SpruceLeaves;
-        }
-        else if (blockType == MinecraftBlocks::POWDER_SNOW()) {
-            return BlockID::Snow;
-        }
-        // Ore blocks
-        else if (blockType == MinecraftBlocks::COAL_ORE()) {
-            return BlockID::CoalOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_COAL_ORE()) {
-            return BlockID::DeepslateCoalOre;
-        }
-        else if (blockType == MinecraftBlocks::IRON_ORE()) {
-            return BlockID::IronOre;
-        }
-        else if (blockType == MinecraftBlocks::GOLD_ORE()) {
-            return BlockID::GoldOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_GOLD_ORE()) {
-            return BlockID::DeepslateGoldOre;
-        }
-        else if (blockType == MinecraftBlocks::REDSTONE_ORE()) {
-            return BlockID::RedstoneOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_REDSTONE_ORE()) {
-            return BlockID::DeepslateRedstoneOre;
-        }
-        else if (blockType == MinecraftBlocks::DIAMOND_ORE()) {
-            return BlockID::DiamondOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_DIAMOND_ORE()) {
-            return BlockID::DeepslateDiamondOre;
-        }
-        else if (blockType == MinecraftBlocks::LAPIS_ORE()) {
-            return BlockID::LapisOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_LAPIS_ORE()) {
-            return BlockID::DeepslateLapisOre;
-        }
-        else if (blockType == MinecraftBlocks::EMERALD_ORE()) {
-            return BlockID::EmeraldOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_EMERALD_ORE()) {
-            return BlockID::DeepslateEmeraldOre;
-        }
-        else if (blockType == MinecraftBlocks::DEEPSLATE_COPPER_ORE()) {
-            return BlockID::DeepslateCopperOre;
-        }
-        else if (blockType == MinecraftBlocks::DIORITE()) {
-            return BlockID::Diorite;
-        }
-        else if (blockType == MinecraftBlocks::ANDESITE()) {
-            return BlockID::Andesite;
-        }
-        else {
-            // Unknown block type - log the identifier and default to stone
-            if (blockType) {
-                Log::Warning("[MyTerrainGenerator] Unknown block type '%s', defaulting to Stone",
-                           blockType->getIdentifier().c_str());
-            }
-            return BlockID::Stone;
-        }
+        if (blockState->is(Blocks::SANDSTONE))      return BlockID::Sandstone;
+        if (blockState->is(Blocks::POWDER_SNOW))    return BlockID::Snow;
+
+        // Logs
+        if (blockState->is(Blocks::OAK_LOG))        return BlockID::OakLog;
+        if (blockState->is(Blocks::BIRCH_LOG))      return BlockID::BirchLog;
+        if (blockState->is(Blocks::SPRUCE_LOG))     return BlockID::SpruceLog;
+        if (blockState->is(Blocks::ACACIA_LOG))     return BlockID::AcaciaLog;
+        if (blockState->is(Blocks::JUNGLE_LOG))     return BlockID::JungleLog;
+        if (blockState->is(Blocks::DARK_OAK_LOG))   return BlockID::DarkOakLog;
+        if (blockState->is(Blocks::CHERRY_LOG))     return BlockID::CherryLog;
+
+        // Leaves
+        if (blockState->is(Blocks::OAK_LEAVES))     return BlockID::OakLeaves;
+        if (blockState->is(Blocks::BIRCH_LEAVES))   return BlockID::BirchLeaves;
+        if (blockState->is(Blocks::SPRUCE_LEAVES))  return BlockID::SpruceLeaves;
+        if (blockState->is(Blocks::JUNGLE_LEAVES))  return BlockID::JungleLeaves;
+        if (blockState->is(Blocks::DARK_OAK_LEAVES)) return BlockID::DarkOakLeaves;
+        if (blockState->is(Blocks::ACACIA_LEAVES))  return BlockID::AcaciaLeaves;
+        if (blockState->is(Blocks::CHERRY_LEAVES))  return BlockID::CherryLeaves;
+
+        // Ores
+        if (blockState->is(Blocks::COAL_ORE))              return BlockID::CoalOre;
+        if (blockState->is(Blocks::DEEPSLATE_COAL_ORE))    return BlockID::deepslate_coal_ore;
+        if (blockState->is(Blocks::IRON_ORE))              return BlockID::IronOre;
+        if (blockState->is(Blocks::DEEPSLATE_IRON_ORE))    return BlockID::DeepslateIronOre;
+        if (blockState->is(Blocks::COPPER_ORE))            return BlockID::CopperOre;
+        if (blockState->is(Blocks::DEEPSLATE_COPPER_ORE))  return BlockID::DeepslateCopperOre;
+        if (blockState->is(Blocks::GOLD_ORE))              return BlockID::GoldOre;
+        if (blockState->is(Blocks::DEEPSLATE_GOLD_ORE))    return BlockID::DeepslateGoldOre;
+        if (blockState->is(Blocks::REDSTONE_ORE))          return BlockID::RedstoneOre;
+        if (blockState->is(Blocks::DEEPSLATE_REDSTONE_ORE)) return BlockID::DeepslateRedstoneOre;
+        if (blockState->is(Blocks::DIAMOND_ORE))           return BlockID::DiamondOre;
+        if (blockState->is(Blocks::DEEPSLATE_DIAMOND_ORE)) return BlockID::DeepslateDiamondOre;
+        if (blockState->is(Blocks::LAPIS_ORE))             return BlockID::LapisOre;
+        if (blockState->is(Blocks::DEEPSLATE_LAPIS_ORE))   return BlockID::DeepslateLapisOre;
+        if (blockState->is(Blocks::EMERALD_ORE))           return BlockID::EmeraldOre;
+        if (blockState->is(Blocks::DEEPSLATE_EMERALD_ORE)) return BlockID::DeepslateEmeraldOre;
+        if (blockState->is(Blocks::RAW_IRON_BLOCK))        return BlockID::RawIronBlock;
+        if (blockState->is(Blocks::RAW_COPPER_BLOCK))      return BlockID::CopperOre; // No raw copper block in game, use copper ore
+
+        // Mushrooms
+        if (blockState->is(Blocks::RED_MUSHROOM))    return BlockID::RedMushroom;
+        if (blockState->is(Blocks::BROWN_MUSHROOM))  return BlockID::BrownMushroom;
+
+        // Fallback: unknown block type
+        Log::Warning("[MyTerrainGenerator] Unknown block type '%s', defaulting to Stone",
+                   blockState->getBlock()->getIdentifier().c_str());
+        return BlockID::Stone;
     }
+
+    // === Configuration methods ===
 
     void MyTerrainGenerator::SetConfig(const GenerationConfig& config) {
         m_config = config;
-        // Note: Changing config after initialization may require reinitializing
         if (m_initialized && config.seed != m_config.seed) {
             Log::Warning("[MyTerrainGenerator] Seed changed after initialization - requires restart");
         }
     }
 
-    void MyTerrainGenerator::SetSeed(int32_t seed) {
-        m_config.seed = seed;
-        if (m_initialized) {
-            Log::Warning("[MyTerrainGenerator] Seed changed after initialization - requires restart");
-        }
-    }
+    GenerationConfig MyTerrainGenerator::GetConfig() const { return m_config; }
+    void MyTerrainGenerator::SetSeed(int32_t seed) { m_config.seed = seed; }
+    int32_t MyTerrainGenerator::GetSeed() const { return m_config.seed; }
+    void MyTerrainGenerator::SetWorldType(const std::string&) {}
+    std::string MyTerrainGenerator::GetWorldType() const { return "overworld"; }
+    void MyTerrainGenerator::SetPassEnabled(GenerationPass, bool) {}
+    bool MyTerrainGenerator::IsPassEnabled(GenerationPass) const { return true; }
+    bool MyTerrainGenerator::IsReady() const { return m_initialized; }
 
-    int32_t MyTerrainGenerator::GetSeed() const {
-        return m_config.seed;
+    ChunkGenerationResult MyTerrainGenerator::GenerateWithPasses(
+        Math::ChunkPos position, const std::vector<GenerationPass>&) {
+        return GenerateChunk(position);
     }
-
-    void MyTerrainGenerator::SetPassEnabled(GenerationPass pass, bool enabled) {
-        // Your library handles all generation internally, so this is a no-op
-        // Could log if needed for debugging
-    }
-
-    IChunkGenerator::GeneratorStats MyTerrainGenerator::GetStats() const {
-        return m_stats;
-    }
-
-    void MyTerrainGenerator::ResetStats() {
-        m_stats = IChunkGenerator::GeneratorStats{};
-    }
-
-    // === STUB IMPLEMENTATIONS FOR EXTENDED INTERFACE ===
 
     std::future<ChunkGenerationResult> MyTerrainGenerator::GenerateChunkAsync(Math::ChunkPos position) {
-        // Simple async wrapper around GenerateChunk
         return std::async(std::launch::async, [this, position]() {
             return GenerateChunk(position);
         });
     }
 
-    std::vector<int> MyTerrainGenerator::GenerateHeightMap(Math::ChunkPos position) {
-        // Not implemented - terrain library doesn't expose heightmap separately
-        return std::vector<int>(16 * 16, 64);  // Return flat heightmap at y=64
+    std::vector<int> MyTerrainGenerator::GenerateHeightMap(Math::ChunkPos) {
+        return std::vector<int>(16 * 16, 64);
     }
 
-    std::string MyTerrainGenerator::GenerateBiome(Math::ChunkPos position) {
-        // Not implemented - terrain library handles biomes internally
-        return "plains";
-    }
+    std::string MyTerrainGenerator::GenerateBiome(Math::ChunkPos) { return "plains"; }
 
-    GenerationConfig MyTerrainGenerator::GetConfig() const {
-        return m_config;
-    }
+    IChunkGenerator::GeneratorStats MyTerrainGenerator::GetStats() const { return m_stats; }
+    void MyTerrainGenerator::ResetStats() { m_stats = GeneratorStats{}; }
+    void MyTerrainGenerator::SetMaxGenerationTime(float) {}
+    float MyTerrainGenerator::GetMaxGenerationTime() const { return 0.0f; }
+    void MyTerrainGenerator::RegisterTerrainFunction(const std::string&, TerrainFunction) {}
+    void MyTerrainGenerator::RegisterFeatureFunction(const std::string&, FeatureFunction) {}
+    void MyTerrainGenerator::SetTerrainFunction(const std::string&) {}
+    void MyTerrainGenerator::AddFeatureFunction(const std::string&) {}
 
-    void MyTerrainGenerator::SetWorldType(const std::string& worldType) {
-        // Not implemented - terrain library uses fixed overworld generation
-    }
-
-    std::string MyTerrainGenerator::GetWorldType() const {
-        return "overworld";
-    }
-
-    bool MyTerrainGenerator::IsPassEnabled(GenerationPass pass) const {
-        // Terrain library does all passes internally
-        return true;
-    }
-
-    ChunkGenerationResult MyTerrainGenerator::GenerateWithPasses(Math::ChunkPos position, const std::vector<GenerationPass>& passes) {
-        // Terrain library doesn't support selective passes - generate normally
-        return GenerateChunk(position);
-    }
-
-    bool MyTerrainGenerator::IsReady() const {
-        return m_initialized;
-    }
-
-    void MyTerrainGenerator::SetMaxGenerationTime(float maxTimeMs) {
-        // Not implemented
-    }
-
-    float MyTerrainGenerator::GetMaxGenerationTime() const {
-        return 0.0f;
-    }
-
-    void MyTerrainGenerator::RegisterTerrainFunction(const std::string& name, TerrainFunction func) {
-        // Not implemented - terrain library uses internal functions
-    }
-
-    void MyTerrainGenerator::RegisterFeatureFunction(const std::string& name, FeatureFunction func) {
-        // Not implemented - terrain library uses internal features
-    }
-
-    void MyTerrainGenerator::SetTerrainFunction(const std::string& name) {
-        // Not implemented
-    }
-
-    void MyTerrainGenerator::AddFeatureFunction(const std::string& name) {
-        // Not implemented
-    }
-
-    IChunkGenerator::DebugInfo MyTerrainGenerator::GetDebugInfo(Math::ChunkPos position) {
+    IChunkGenerator::DebugInfo MyTerrainGenerator::GetDebugInfo(Math::ChunkPos) {
         DebugInfo info;
         info.biome = "plains";
         info.heightMap = std::vector<int>(16 * 16, 64);
-        for (int i = 0; i < 7; ++i) {
-            info.generationTimePerPass[i] = 0.0f;
-        }
+        for (int i = 0; i < 7; ++i) info.generationTimePerPass[i] = 0.0f;
         return info;
     }
 
-    void MyTerrainGenerator::SetDebugMode(bool enabled) {
-        // Not implemented
-    }
-
-    bool MyTerrainGenerator::IsDebugMode() const {
-        return false;
-    }
-
-    std::string MyTerrainGenerator::GetLastError() const {
-        return "";
-    }
-
-    void MyTerrainGenerator::ClearErrors() {
-        // Not implemented
-    }
+    void MyTerrainGenerator::SetDebugMode(bool) {}
+    bool MyTerrainGenerator::IsDebugMode() const { return false; }
+    std::string MyTerrainGenerator::GetLastError() const { return ""; }
+    void MyTerrainGenerator::ClearErrors() {}
 
 } // namespace Game

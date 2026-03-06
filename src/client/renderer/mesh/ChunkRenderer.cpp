@@ -1,6 +1,7 @@
 // File: src/client/renderer/mesh/ChunkRenderer.cpp
 #include "ChunkRenderer.hpp"
 #include "../texture/AtlasBuilder.hpp"
+#include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "platform/GameDirectory.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <glm/gtc/matrix_transform.hpp>
+#include <GLFW/glfw3.h>
 
 namespace Render {
 
@@ -47,36 +49,49 @@ namespace Render {
         m_translucentConfig.enableBlending = true;
         m_translucentConfig.enableAlphaTest = false;
         m_translucentConfig.enableBackFaceCulling = false;  // Disable culling for translucent blocks like water
-        m_translucentConfig.blendSrc = GL_SRC_ALPHA;
-        m_translucentConfig.blendDst = GL_ONE_MINUS_SRC_ALPHA;
+        m_translucentConfig.blendSrc = BlendFactor::SrcAlpha;
+        m_translucentConfig.blendDst = BlendFactor::OneMinusSrcAlpha;
         m_translucentConfig.frontToBack = false;  // Back-to-front for proper blending
     }
 
     bool ChunkRenderer::Initialize() {
         Log::Info("Initializing ChunkRenderer...");
 
-        // Load shaders
-        try {
-            m_blockShader = std::make_unique<Shader>("shaders/block.vert", "shaders/block.frag");
-            m_shadersLoaded = true;
-            Log::Info("✓ Block shaders loaded successfully");
-        } catch (const std::exception& e) {
-            Log::Error("Failed to load block shaders: %s", e.what());
+        if (!g_renderBackend) {
+            Log::Error("Cannot initialize ChunkRenderer: no render backend");
             return false;
+        }
+
+        // Create backend shader (works for both GL and Vulkan)
+        m_backendShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block.frag");
+        if (m_backendShader == INVALID_SHADER) {
+            Log::Error("Failed to create block shader");
+            return false;
+        }
+        m_shadersLoaded = true;
+        Log::Info("Block shader created successfully");
+
+        // Grab backend atlas texture handle (created by AtlasBuilder)
+        if (g_atlasBuilder) {
+            m_backendAtlasTexture = g_atlasBuilder->GetBackendTextureHandle();
         }
 
         // Reset statistics
         m_stats.Reset();
 
-        Log::Info("✓ ChunkRenderer initialized successfully (render distance: %d chunks)", Platform::g_gameSettings.GetRenderDistance());
+        Log::Info("ChunkRenderer initialized (render distance: %d chunks, backend: %s)",
+                  Platform::g_gameSettings.GetRenderDistance(),
+                  g_renderBackend->GetName());
         return true;
     }
 
     void ChunkRenderer::Shutdown() {
-        if (m_blockShader) {
-            m_blockShader.reset();
-            m_shadersLoaded = false;
+        if (m_backendShader != INVALID_SHADER && g_renderBackend) {
+            g_renderBackend->DestroyShader(m_backendShader);
+            m_backendShader = INVALID_SHADER;
         }
+        m_blockShader.reset();
+        m_shadersLoaded = false;
         Log::Info("ChunkRenderer shutdown complete");
     }
 
@@ -109,18 +124,10 @@ namespace Render {
             return;
         }
 
-        // Sort front to back for depth buffer optimization
-        SortSections(camera, opaqueSections, true);
+        // Already sorted front-to-back by PrepareVisibleSections - no re-sort needed
 
         // Setup render state for opaque pass
         SetupRenderPass(m_opaqueConfig);
-
-        // **DEBUG**: Log render state
-        GLboolean depthTest, depthMask, blendEnabled;
-        glGetBooleanv(GL_DEPTH_TEST, &depthTest);
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
-        blendEnabled = glIsEnabled(GL_BLEND);
-        //Log::Debug("Render state: depth_test=%d, depth_mask=%d, blend=%d", depthTest, depthMask, blendEnabled);
 
         // Render the layer
         RenderLayerPass(RenderLayer::Opaque, camera, opaqueSections);
@@ -152,8 +159,7 @@ namespace Render {
             return;
         }
 
-        // Sort front to back for depth buffer optimization
-        SortSections(camera, cutoutSections, true);
+        // Already sorted front-to-back by PrepareVisibleSections - no re-sort needed
 
         // Setup render state for cutout pass
         SetupRenderPass(m_cutoutConfig);
@@ -190,8 +196,8 @@ namespace Render {
             return;
         }
 
-        // Sort back to front for correct alpha blending
-        SortSections(camera, translucentSections, false);
+        // Reverse the front-to-back order from PrepareVisibleSections for back-to-front blending
+        std::reverse(translucentSections.begin(), translucentSections.end());
 
         // Setup render state for translucent pass
         SetupRenderPass(m_translucentConfig);
@@ -238,11 +244,7 @@ namespace Render {
 
     void ChunkRenderer::SetWireframeMode(bool enable) {
         m_wireframeMode = enable;
-        if (enable) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        } else {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
+        // Wireframe state is applied in SetupRenderPass via PipelineState
     }
 
     void ChunkRenderer::PrepareVisibleSections(const Camera& camera, const Frustum& frustum) {
@@ -373,58 +375,67 @@ namespace Render {
     }
 
     void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections) {
-        if (sections.empty() || !m_blockShader) {
+        if (sections.empty() || !g_renderBackend || m_backendShader == INVALID_SHADER) {
             return;
         }
 
-        // Use shader and setup uniforms
-        m_blockShader->Use();
-        SetupShaderUniforms(camera);
-        BindTextureAtlas();
+        // Bind shader and set uniforms through backend (works for both GL and Vulkan)
+        g_renderBackend->BindShader(m_backendShader);
+
+        // Compute and set MVP
+        int width, height;
+        glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
+        float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
+        glm::mat4 view = camera.GetViewMatrix();
+        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.01f, 800.0f);
+        glm::mat4 mvp = proj * view;
+        g_renderBackend->SetUniformMat4(m_backendShader, "uMVP", mvp);
+
+        // Bind texture atlas (fetch fresh handle in case atlas was rebuilt)
+        if (g_atlasBuilder) {
+            m_backendAtlasTexture = g_atlasBuilder->GetBackendTextureHandle();
+        }
+        if (m_backendAtlasTexture != INVALID_TEXTURE) {
+            g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
+        }
 
         // Render each section
         for (const auto& section : sections) {
             RenderSectionLayer(section, layer);
             m_stats.totalDrawCalls++;
         }
-
-        CheckShaderErrors("RenderLayer");
     }
 
     void ChunkRenderer::RenderSectionLayer(const SectionRenderData& section, RenderLayer layer) {
-        if (!section.gpuData) {
-            return;
-        }
+        if (!section.gpuData || !g_renderBackend) return;
 
-        GLuint vao = 0;
+        MeshHandle mesh = INVALID_MESH;
         uint32_t indexCount = 0;
+        uint32_t vertexCount = 0;
 
-        // Select appropriate VAO and index count based on layer
         switch (layer) {
             case RenderLayer::Opaque:
-                vao = section.gpuData->opaqueVAO;
+                mesh = section.gpuData->opaqueMesh;
                 indexCount = section.gpuData->opaqueIndexCount;
+                vertexCount = section.gpuData->opaqueVertexCount;
                 break;
             case RenderLayer::Cutout:
-                vao = section.gpuData->cutoutVAO;
+                mesh = section.gpuData->cutoutMesh;
                 indexCount = section.gpuData->cutoutIndexCount;
+                vertexCount = section.gpuData->cutoutVertexCount;
                 break;
             case RenderLayer::Translucent:
-                vao = section.gpuData->translucentVAO;
+                mesh = section.gpuData->translucentMesh;
                 indexCount = section.gpuData->translucentIndexCount;
+                vertexCount = section.gpuData->translucentVertexCount;
                 break;
         }
 
-        if (vao == 0 || indexCount == 0) {
-            return;
-        }
+        if (indexCount == 0 || mesh == INVALID_MESH) return;
 
-        // Bind and draw
-        glBindVertexArray(vao);
-        glDrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, nullptr);
+        g_renderBackend->DrawIndexed(mesh, indexCount);
 
-        // Update statistics
-        m_stats.totalVerticesRendered += indexCount / 6 * 4; // Approximate vertices from indices
+        m_stats.totalVerticesRendered += vertexCount;
         m_stats.totalIndicesRendered += indexCount;
     }
 
@@ -452,49 +463,33 @@ namespace Render {
 
     // Utility methods still needed by the new optimized rendering system
     void ChunkRenderer::SetupRenderPass(const RenderPassConfig& config) {
-        // Depth testing - Minecraft uses GL_LEQUAL for all passes
-        if (config.enableDepthTest) {
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_LEQUAL);  // Minecraft standard
-        } else {
-            glDisable(GL_DEPTH_TEST);
-        }
+        if (!g_renderBackend) return;
 
-        // Depth writing
-        glDepthMask(config.enableDepthWrite ? GL_TRUE : GL_FALSE);
-
-        // Blending - use config values for blend function
-        if (config.enableBlending) {
-            glEnable(GL_BLEND);
-            glBlendFunc(config.blendSrc, config.blendDst);
-        } else {
-            glDisable(GL_BLEND);
-        }
-
-        // Alpha testing (handled in shader)
-        // Set alpha threshold uniform if needed
-
-        // Face culling with proper winding order
-        if (config.enableBackFaceCulling) {
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_BACK);
-            glFrontFace(GL_CCW);  // Counter-clockwise front faces
-        } else {
-            glDisable(GL_CULL_FACE);
-        }
+        PipelineState state;
+        state.depthTestEnabled = config.enableDepthTest;
+        state.depthWriteEnabled = config.enableDepthWrite;
+        state.depthCompareOp = CompareOp::LessEqual;
+        state.blendEnabled = config.enableBlending;
+        state.srcBlendFactor = config.blendSrc;
+        state.dstBlendFactor = config.blendDst;
+        state.cullMode = config.enableBackFaceCulling ? CullMode::Back : CullMode::None;
+        state.frontFace = FrontFace::CounterClockwise;
+        state.polygonMode = m_wireframeMode ? PolygonMode::Line : PolygonMode::Fill;
+        g_renderBackend->SetPipelineState(state);
     }
 
     void ChunkRenderer::RestoreRenderState() {
-        // Restore default OpenGL state
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_TRUE);
-        glDisable(GL_BLEND);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
+        if (!g_renderBackend) return;
 
-        if (m_wireframeMode) {
-            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        }
+        PipelineState defaultState;
+        defaultState.depthTestEnabled = true;
+        defaultState.depthWriteEnabled = true;
+        defaultState.depthCompareOp = CompareOp::LessEqual;
+        defaultState.blendEnabled = false;
+        defaultState.cullMode = CullMode::Back;
+        defaultState.frontFace = FrontFace::CounterClockwise;
+        defaultState.polygonMode = PolygonMode::Fill;
+        g_renderBackend->SetPipelineState(defaultState);
     }
 
     float ChunkRenderer::CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY) {
@@ -542,74 +537,9 @@ namespace Render {
         // This would draw wireframe boxes around each section
     }
 
-    // Essential utility methods still needed by the optimized rendering system
-    void ChunkRenderer::SetupShaderUniforms(const Camera& camera) {
-        if (!m_blockShader) return;
-
-        // Get current viewport dimensions to calculate correct aspect ratio
-        GLint viewport[4];
-        glGetIntegerv(GL_VIEWPORT, viewport);
-        int width = viewport[2];
-        int height = viewport[3];
-        
-        // Calculate aspect ratio, with fallback to prevent division by zero
-        float aspectRatio = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
-
-        // Calculate matrices
-        glm::mat4 view = camera.GetViewMatrix();
-        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspectRatio, 0.01f, 800.0f);
-        glm::mat4 mvp = proj * view;
-
-        // Set MVP matrix
-        m_blockShader->SetMat4("uMVP", mvp);
-
-        // Set other uniforms as needed
-        // BiomeTint, time for animations, etc.
-    }
-
-    void ChunkRenderer::BindTextureAtlas() {
-        if (g_atlasBuilder && g_atlasBuilder->GetAtlasTextureID() != 0) {
-            glActiveTexture(GL_TEXTURE0);
-            glBindTexture(GL_TEXTURE_2D, g_atlasBuilder->GetAtlasTextureID());
-
-            // **DEBUG**: Verify texture binding
-            GLint boundTexture;
-            glGetIntegerv(GL_TEXTURE_BINDING_2D, &boundTexture);
-            static int bindLogCount = 0;
-            if (bindLogCount < 3) {
-                bindLogCount++;
-                Log::Debug("BindTextureAtlas %d: Atlas ID=%u, bound texture=%d",
-                          bindLogCount, g_atlasBuilder->GetAtlasTextureID(), boundTexture);
-            }
-        } else {
-            static int noTextureLogCount = 0;
-            if (noTextureLogCount < 3) {
-                noTextureLogCount++;
-                Log::Error("BindTextureAtlas %d: No atlas available! AtlasBuilder=%p",
-                          noTextureLogCount, g_atlasBuilder.get());
-            }
-        }
-    }
-
     bool ChunkRenderer::CheckShaderErrors(const std::string& pass) {
-        GLenum error = glGetError();
-        if (error != GL_NO_ERROR) {
-            LogRenderError(pass, error);
-            return false;
-        }
+        // Error checking is handled internally by each backend
         return true;
-    }
-
-    void ChunkRenderer::LogRenderError(const std::string& operation, GLenum error) {
-        const char* errorString = "Unknown";
-        switch (error) {
-            case GL_INVALID_ENUM: errorString = "GL_INVALID_ENUM"; break;
-            case GL_INVALID_VALUE: errorString = "GL_INVALID_VALUE"; break;
-            case GL_INVALID_OPERATION: errorString = "GL_INVALID_OPERATION"; break;
-            case GL_INVALID_FRAMEBUFFER_OPERATION: errorString = "GL_INVALID_FRAMEBUFFER_OPERATION"; break;
-            case GL_OUT_OF_MEMORY: errorString = "GL_OUT_OF_MEMORY"; break;
-        }
-        Log::Error("OpenGL error in %s: %s (0x%x)", operation.c_str(), errorString, error);
     }
 
     // Global utility functions

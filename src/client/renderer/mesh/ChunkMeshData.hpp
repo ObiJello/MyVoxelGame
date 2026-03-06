@@ -3,8 +3,11 @@
 
 #include "SectionMesh.hpp"
 #include "common/core/Log.hpp"
-#include <glad/glad.h>
 #include <memory>
+
+// Legacy GL type aliases for API compatibility (this file is dead code)
+using GLuint = unsigned int;
+using GLenum = unsigned int;
 
 namespace Render {
 

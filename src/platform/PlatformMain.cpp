@@ -38,6 +38,7 @@
 #include "client/network/ClientConnection.hpp"
 #include "client/network/NetworkIOService.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/network/NetworkServer.hpp"
 #include "client/world/ClientChunkManager.hpp"
 #include "server/world/ServerWorkerPool.hpp"
 #include "client/world/ClientWorkerPool.hpp"
@@ -53,6 +54,7 @@
 
 #include "platform/GameDirectory.hpp"
 #include "common/core/JobSystem.hpp"
+#include "client/renderer/backend/RenderBackend.hpp"
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
@@ -233,7 +235,34 @@ namespace PlatformMain {
 
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam) {
-        Log::Error("[GL DEBUG] %s", message);
+        // Classify severity
+        const char* severityStr = "UNKNOWN";
+        switch (severity) {
+            case GL_DEBUG_SEVERITY_HIGH:         severityStr = "HIGH"; break;
+            case GL_DEBUG_SEVERITY_MEDIUM:       severityStr = "MEDIUM"; break;
+            case GL_DEBUG_SEVERITY_LOW:          severityStr = "LOW"; break;
+            case GL_DEBUG_SEVERITY_NOTIFICATION: severityStr = "NOTIFICATION"; break;
+        }
+
+        // Classify source
+        const char* sourceStr = "UNKNOWN";
+        switch (source) {
+            case GL_DEBUG_SOURCE_API:             sourceStr = "API"; break;
+            case GL_DEBUG_SOURCE_WINDOW_SYSTEM:   sourceStr = "WINDOW"; break;
+            case GL_DEBUG_SOURCE_SHADER_COMPILER: sourceStr = "SHADER"; break;
+            case GL_DEBUG_SOURCE_THIRD_PARTY:     sourceStr = "3RD_PARTY"; break;
+            case GL_DEBUG_SOURCE_APPLICATION:     sourceStr = "APP"; break;
+            case GL_DEBUG_SOURCE_OTHER:           sourceStr = "OTHER"; break;
+        }
+
+        // Route to appropriate log level
+        if (severity == GL_DEBUG_SEVERITY_HIGH) {
+            Log::Error("[GL %s/%s] %s", sourceStr, severityStr, message);
+        } else if (severity == GL_DEBUG_SEVERITY_MEDIUM) {
+            Log::Warning("[GL %s/%s] %s", sourceStr, severityStr, message);
+        } else {
+            Log::Debug("[GL %s/%s] %s", sourceStr, severityStr, message);
+        }
     }
 
 
@@ -292,6 +321,15 @@ namespace PlatformMain {
     }
 
     int Run(int argc, char** argv) {
+        // Parse command-line arguments
+        bool useVulkan = false;
+        for (int i = 1; i < argc; ++i) {
+            if (std::string(argv[i]) == "--vulkan") {
+                useVulkan = true;
+                Log::Info("Vulkan backend requested via --vulkan flag");
+            }
+        }
+
         // Initialize systems
         Log::Info("Starting Voxel Engine");
 
@@ -301,15 +339,31 @@ namespace PlatformMain {
             return -1;
         }
 
-        // Setup OpenGL context
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config::OpenGLMajor);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config::OpenGLMinor);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        // Setup graphics API context based on backend choice
+        if (useVulkan) {
+#ifdef HAS_VULKAN
+            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // Vulkan manages its own context
     #ifdef __APPLE__
-        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-        glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
+            glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
     #endif
-        glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+            Log::Info("Window configured for Vulkan (no OpenGL context)");
+#else
+            Log::Error("Vulkan backend not available (compiled without HAS_VULKAN). Falling back to OpenGL.");
+            useVulkan = false;
+            // Fall through to OpenGL setup below
+#endif
+        }
+
+        if (!useVulkan) {
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config::OpenGLMajor);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config::OpenGLMinor);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    #ifdef __APPLE__
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+            glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
+    #endif
+            glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+        }
 
         // Create window
         GLFWwindow* window = glfwCreateWindow(
@@ -322,25 +376,68 @@ namespace PlatformMain {
             return -2;
         }
 
-        glfwMakeContextCurrent(window);
-        if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-            Log::Error("Failed to initialize GLAD");
-            glfwDestroyWindow(window);
-            glfwTerminate();
-            return -3;
+        if (!useVulkan) {
+            glfwMakeContextCurrent(window);
+            if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+                Log::Error("Failed to initialize GLAD");
+                glfwDestroyWindow(window);
+                glfwTerminate();
+                return -3;
+            }
+
+            // Log system info
+            Log::Info("Vendor: %s", glGetString(GL_VENDOR));
+            Log::Info("Renderer: %s", glGetString(GL_RENDERER));
+            Log::Info("Version: %s", glGetString(GL_VERSION));
+
+            // Register OpenGL debug callback
+        #ifndef NDEBUG
+            {
+                GLint contextFlags = 0;
+                glGetIntegerv(GL_CONTEXT_FLAGS, &contextFlags);
+                if (contextFlags & GL_CONTEXT_FLAG_DEBUG_BIT) {
+                    glEnable(GL_DEBUG_OUTPUT);
+                    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+                    glDebugMessageCallback(glDebugOutput, nullptr);
+                    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
+                    Log::Info("OpenGL debug output enabled");
+                } else {
+                    Log::Warning("OpenGL debug context not available");
+                }
+            }
+        #endif
+
+            // Setup OpenGL state
+            glEnable(GL_DEPTH_TEST);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);
+            glfwSwapInterval(1); // VSync
+        } else {
+            Log::Info("Vulkan mode: skipping OpenGL initialization");
         }
 
-        // Log system info
-        Log::Info("Vendor: %s", glGetString(GL_VENDOR));
-        Log::Info("Renderer: %s", glGetString(GL_RENDERER));
-        Log::Info("Version: %s", glGetString(GL_VERSION));
-
-        // Setup OpenGL state
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_BACK);
-        glFrontFace(GL_CCW);
-        glfwSwapInterval(1); // VSync
+        // Initialize render backend abstraction
+        {
+            Render::BackendType backendType = useVulkan ? Render::BackendType::Vulkan : Render::BackendType::OpenGL;
+            Render::g_renderBackend = Render::CreateRenderBackend(backendType);
+            if (!Render::g_renderBackend) {
+                Log::Error("Failed to create render backend");
+                if (useVulkan) {
+                    Log::Error("Vulkan backend creation failed. Try running without --vulkan");
+                }
+                glfwDestroyWindow(window);
+                glfwTerminate();
+                return -3;
+            }
+            if (!Render::g_renderBackend->Initialize(window)) {
+                Log::Error("Failed to initialize render backend: %s", Render::g_renderBackend->GetName());
+                glfwDestroyWindow(window);
+                glfwTerminate();
+                return -3;
+            }
+            Log::Info("Render backend initialized: %s", Render::g_renderBackend->GetName());
+        }
 
         // Initialize game directory system (creates obeycraft folder and loads options.txt)
         if (!Platform::InitializeGameDirectorySystem()) {
@@ -439,9 +536,12 @@ namespace PlatformMain {
             *connectionComplete = true;
         });
         
+        // Get the dynamically assigned port from the integrated server
+        uint16_t serverPort = Server::g_integratedServer->GetNetworkServer()->GetPort();
+
         // Start async connection (all socket ops on I/O thread)
-        Log::Info("Connecting to localhost:25565...");
-        networkClient->ConnectAsync("127.0.0.1", 25565);
+        Log::Info("Connecting to localhost:%d...", serverPort);
+        networkClient->ConnectAsync("127.0.0.1", serverPort);
         
         // Wait for connection with timeout (using yield instead of sleep)
         auto startTime = std::chrono::steady_clock::now();
@@ -458,7 +558,7 @@ namespace PlatformMain {
             return -8;
         }
         
-        Log::Info("✓ NetworkClient connected to localhost:25565");
+        Log::Info("✓ NetworkClient connected to localhost:%d", serverPort);
         Log::Info("✓ Handshake automatically sent to server");
         
         // Wire up NetworkClient to PlayerController for packet sending
@@ -467,7 +567,7 @@ namespace PlatformMain {
         
         Log::Info("🎮 Minecraft Java Edition Architecture fully initialized!");
         Log::Info("   Server Thread: 20 TPS | Client Thread: Unlocked FPS | I/O Thread: Async | Workers: 6 threads");
-        Log::Info("   Client connected via TCP to localhost:25565");
+        Log::Info("   Client connected via TCP to localhost:%d", serverPort);
         Log::Info("=== ENTERING CLIENT RENDER LOOP (UNLOCKED FPS) ===");
 
         // === MINECRAFT-STYLE CLIENT RENDER LOOP (UNLOCKED FPS) ===
@@ -523,7 +623,7 @@ namespace PlatformMain {
             PROFILE_TIMER_START(gamelogic);
             Time::Tick();
             float dt = static_cast<float>(Time::Delta());
-            metrics.AddFrameTimeSample(dt);
+            metrics.AddFrameTimeSample(dt * 1000.0f);
 
             // Update player physics and camera
             player.UpdatePhysics(dt, world);
@@ -599,14 +699,25 @@ namespace PlatformMain {
 
             // 9. Main rendering phase (frustum culling + GPU draw calls)
             PROFILE_TIMER_START(render);
+
+            // Begin render backend frame (acquires swapchain image for Vulkan)
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->BeginFrame();
+            }
+
             Debug::DebugSystem::BeginFrame();
             
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
 
-            // Clear framebuffer
-            glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            // Clear framebuffer via render backend
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->SetClearColor(0.5f, 0.7f, 1.0f, 1.0f);
+                Render::g_renderBackend->Clear(true, true);
+            } else {
+                glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            }
 
             // Calculate view-projection matrices
             int width, height;
@@ -641,6 +752,57 @@ namespace PlatformMain {
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
 
+            // Snapshot cross-thread metrics for debug panels
+            {
+                Debug::ServerMetricsSnapshot srvSnap;
+                if (Server::g_integratedServer) {
+                    srvSnap.serverRunning = Server::g_integratedServer->IsRunning();
+                    if (auto* ns = Server::g_integratedServer->GetNetworkServer())
+                        srvSnap.serverPort = ns->GetPort();
+                    const auto& ss = Server::g_integratedServer->GetStats();
+                    srvSnap.ticksProcessed = ss.ticksProcessed.load(std::memory_order_relaxed);
+                    srvSnap.chunksLoaded = ss.chunksLoaded.load(std::memory_order_relaxed);
+                    srvSnap.chunksSent = ss.chunksSent.load(std::memory_order_relaxed);
+                    srvSnap.blockChangesProcessed = ss.blockChangesProcessed.load(std::memory_order_relaxed);
+                    srvSnap.packetsReceived = ss.packetsReceived.load(std::memory_order_relaxed);
+                    srvSnap.packetsSent = ss.packetsSent.load(std::memory_order_relaxed);
+                    srvSnap.averageTickTime = ss.averageTickTime.load(std::memory_order_relaxed);
+                    srvSnap.averageTPS = ss.averageTPS.load(std::memory_order_relaxed);
+                }
+                if (Threading::g_serverWorkerPool) {
+                    srvSnap.serverWorkerCount = Threading::g_serverWorkerPool->GetWorkerCount();
+                    srvSnap.serverPendingJobs = Threading::g_serverWorkerPool->GetPendingJobCount();
+                    srvSnap.serverActiveJobs = Threading::g_serverWorkerPool->GetActiveJobCount();
+                    const auto& sw = Threading::g_serverWorkerPool->GetStats();
+                    srvSnap.serverChunksGenerated = sw.chunksGenerated.load(std::memory_order_relaxed);
+                    srvSnap.serverChunksLoaded = sw.chunksLoaded.load(std::memory_order_relaxed);
+                    srvSnap.serverChunksSaved = sw.chunksSaved.load(std::memory_order_relaxed);
+                    srvSnap.serverJobsSubmitted = sw.jobsSubmitted.load(std::memory_order_relaxed);
+                    srvSnap.serverJobsCompleted = sw.jobsCompleted.load(std::memory_order_relaxed);
+                    srvSnap.serverJobsCancelled = sw.jobsCancelled.load(std::memory_order_relaxed);
+                    srvSnap.serverJobsFailed = sw.jobsFailed.load(std::memory_order_relaxed);
+                }
+                Debug::DebugSystem::SetServerSnapshot(srvSnap);
+
+                Debug::NetworkMetricsSnapshot netSnap;
+                if (networkClient) {
+                    netSnap.connected = networkClient->IsConnected();
+                    auto conn = networkClient->GetConnection();
+                    if (conn) {
+                        const auto& cs = conn->GetStats();
+                        netSnap.bytesSent = cs.bytesSent.load(std::memory_order_relaxed);
+                        netSnap.bytesReceived = cs.bytesReceived.load(std::memory_order_relaxed);
+                        netSnap.packetsSent = cs.packetsSent.load(std::memory_order_relaxed);
+                        netSnap.packetsReceived = cs.packetsReceived.load(std::memory_order_relaxed);
+                        netSnap.incomingQueueSize = conn->GetIncomingQueueSize();
+                        netSnap.droppedPacketCount = conn->GetDroppedPacketCount();
+                        auto elapsed = std::chrono::steady_clock::now() - cs.connectedTime;
+                        netSnap.connectionUptimeSec = std::chrono::duration<float>(elapsed).count();
+                    }
+                }
+                Debug::DebugSystem::SetNetworkSnapshot(netSnap);
+            }
+
             Debug::DebugSystem::RenderDebugUI(
                 camera, frustum, player, playerController, metrics, cursorEnabled,
                 windowWidth, windowHeight, width, height
@@ -651,7 +813,11 @@ namespace PlatformMain {
 
             // 11. Swap buffers (includes VSync wait)
             PROFILE_TIMER_START(vsync);
-            glfwSwapBuffers(window);
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->EndFrame(window);
+            } else {
+                glfwSwapBuffers(window);
+            }
             PROFILE_TIMER_END(vsync, metrics.vsyncWaitTime);
             
             Input::ResetMouseDelta();
@@ -667,7 +833,7 @@ namespace PlatformMain {
                                  metrics.meshSchedulingTime + metrics.gpuUploadTime + 
                                  metrics.textureAnimationTime + metrics.renderTime + 
                                  metrics.debugUITime + metrics.vsyncWaitTime;
-            metrics.otherTime = metrics.frameTime - totalMeasured;
+            metrics.otherTime = std::max(0.0f, metrics.frameTime - totalMeasured);
         }
 
         // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===
@@ -710,12 +876,31 @@ namespace PlatformMain {
         
         // 8. Shutdown rendering systems
         Render::ShutdownChunkRenderer();
-        
+
+        // 8a. Destroy resources that depend on the render backend BEFORE destroying it
+        Render::g_crosshair.~Crosshair();
+        new (&Render::g_crosshair) Render::Crosshair(); // Reinit to safe empty state
+        Render::g_blockHighlight.~BlockHighlight();
+        new (&Render::g_blockHighlight) Render::BlockHighlight();
+        if (Render::g_atlasBuilder) {
+            Render::g_atlasBuilder.reset();
+        }
+        if (Render::g_textureAnimator) {
+            Render::g_textureAnimator.reset();
+        }
+
+        // 8b. Cleanup debug system (before render backend, since ImGui shutdown needs the backend)
+        Debug::DebugSystem::Shutdown();
+
+        // 8c. Shutdown render backend (now safe — all dependent resources are gone)
+        if (Render::g_renderBackend) {
+            Render::g_renderBackend->Shutdown();
+            Render::g_renderBackend.reset();
+            Log::Info("Render backend shutdown");
+        }
+
         // 9. Clear world reference (world is shutdown by IntegratedServer)
         Game::g_world = nullptr;  // Clear global reference
-        
-        // 10. Cleanup debug system
-        Debug::DebugSystem::Shutdown();
         
         // 11. Stop legacy job system
         Log::Info("Stopping legacy job system...");
@@ -728,24 +913,12 @@ namespace PlatformMain {
             Log::Error("Unknown exception stopping job system");
         }
 
-        // Clean up OpenGL resources
-        Log::Info("Cleaning up OpenGL resources...");
+        // Clean up remaining OpenGL resources
+        Log::Info("Cleaning up rendering resources...");
         try {
-            if (glfwGetCurrentContext() == window) {
-                // Clean up global rendering resources
-                if (Render::g_atlasBuilder) {
-                    Render::g_atlasBuilder.reset();
-                }
-                if (Render::g_textureAnimator) {
-                    Render::g_textureAnimator.reset();
-                }
-
-                // Clear any remaining OpenGL errors
-                while (glGetError() != GL_NO_ERROR) {
-                    // Clear error queue
-                }
-            } else {
-                Log::Warning("No valid OpenGL context during cleanup");
+            // Clear any remaining OpenGL errors (only if GL context exists)
+            if (!useVulkan && glfwGetCurrentContext() == window) {
+                while (glGetError() != GL_NO_ERROR) {}
             }
         } catch (const std::exception& e) {
             Log::Error("Exception during OpenGL cleanup: %s", e.what());

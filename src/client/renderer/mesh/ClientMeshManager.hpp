@@ -102,7 +102,9 @@ namespace Render {
         const GPUSectionData* GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const;
         
         // Get set of all active sections (sections with GPU data)
-        const std::unordered_set<SectionKey, SectionKeyHash>& GetActiveSections() const {
+        // Returns a copy under shared lock for thread safety
+        std::unordered_set<SectionKey, SectionKeyHash> GetActiveSections() const {
+            std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
             return m_activeSections;
         }
         

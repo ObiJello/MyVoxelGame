@@ -36,9 +36,12 @@ namespace Server {
             m_acceptor.set_option(tcp::acceptor::reuse_address(true));
             m_acceptor.bind(endpoint);
             m_acceptor.listen();
-            
+
+            // Read back actual port (important when binding to port 0)
+            m_port = m_acceptor.local_endpoint().port();
+
             m_running.store(true);
-            
+
             Log::Info("NetworkServer listening on %s:%d", bindAddress.c_str(), m_port);
             
             // Start accepting connections

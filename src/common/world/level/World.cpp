@@ -78,19 +78,30 @@ namespace Game {
             return;
         }
 
-        // Initialize chunk provider
-        Log::Info("Initializing ChunkProvider...");
+        // NOTE: ChunkProvider::Initialize() is deferred to the server thread
+        // via World::InitializeChunkProvider(). This ensures ServerChunkCache
+        // captures the correct thread ID (matching Minecraft's architecture).
+
+        Log::Info("✓ World created successfully (render distance: %d chunks)", m_renderDistance);
+        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION COMPLETE ===");
+    }
+
+    bool World::InitializeChunkProvider() {
+        if (!m_chunkProvider) {
+            Log::Error("InitializeChunkProvider: No ChunkProvider created");
+            return false;
+        }
+
+        Log::Info("Initializing ChunkProvider on server thread...");
         if (!m_chunkProvider->Initialize()) {
             Log::Error("Failed to initialize ChunkProvider");
             m_chunkProvider.reset();
-            return;
+            return false;
         }
 
-        // Set the global block access for physics system
         SetGlobalBlockAccess(this);
-
-        Log::Info("✓ World initialized successfully (render distance: %d chunks)", m_renderDistance);
-        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION COMPLETE ===");
+        Log::Info("ChunkProvider initialized successfully on server thread");
+        return true;
     }
 
     void World::Shutdown() {
@@ -330,6 +341,8 @@ namespace Game {
 
         // Load chunks in order of proximity to player
         for (const auto& chunkPos : chunksToLoad) {
+            if (m_stopRequested.load()) break;
+
             // Load the chunk
             auto chunk = m_chunkProvider->GetChunk(chunkPos);
             if (chunk) {
@@ -553,11 +566,13 @@ namespace Game {
     // ========================================================================
 
     void World::WorldLoop(float deltaTime, int maxChunksPerTick) {
+        if (m_stopRequested.load()) return;
+
         // Main world tick function - processes all world updates
-        
+
         // 1. Chunk loading/unloading based on player positions
         ChunkLoadUnload();
-        
+
         // 2. Process any pending block updates
         ProcessBlockUpdates();
         

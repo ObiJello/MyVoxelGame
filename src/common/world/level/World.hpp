@@ -7,6 +7,7 @@
 #include "../math/WorldMath.hpp"
 #include "server/world/tracking/DirtyTracker.hpp"
 #include <memory>
+#include <atomic>
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -33,6 +34,7 @@ namespace Game {
 
         // Core world operations
         void Initialize();
+        bool InitializeChunkProvider();
         void Shutdown();
 
         // Refresh settings from game settings
@@ -96,6 +98,10 @@ namespace Game {
         // Direct access to chunk provider for advanced use cases
         ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }
 
+        // Signal the world to stop all long-running operations (called from shutdown)
+        void RequestStop() { m_stopRequested.store(true); }
+        bool IsStopRequested() const { return m_stopRequested.load(); }
+
         // ========================================================================
         // SERVER WORLD LOOP
         // ========================================================================
@@ -151,6 +157,9 @@ namespace Game {
         
         // Track chunks already sent to client (reset when player moves significantly)
         std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_sentChunks;
+
+        // Stop flag for early termination of long-running loops
+        std::atomic<bool> m_stopRequested{false};
     };
 
 } // namespace Game

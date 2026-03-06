@@ -83,8 +83,9 @@ struct Frustum {
             positiveVertex.z = (normal.z >= 0.0f) ? boxMax.z : boxMin.z;
 
             // Test if positive vertex is behind this plane
+            // Use small negative epsilon (half a block) to prevent boundary flickering
             float distance = glm::dot(normal, positiveVertex) + plane.w;
-            if (distance < 0.0f) {
+            if (distance < -0.5f) {
                 return false; // Box is completely outside this plane
             }
         }

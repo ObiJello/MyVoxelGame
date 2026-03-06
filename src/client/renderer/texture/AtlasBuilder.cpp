@@ -1,6 +1,7 @@
 // File: src/client/renderer/texture/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
 #include "TextureAnimator.hpp"
+#include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include <filesystem>
 #include <fstream>
@@ -21,25 +22,28 @@ namespace Render {
     std::unique_ptr<AtlasBuilder> g_atlasBuilder = nullptr;
 
     AtlasBuilder::AtlasBuilder()
-        : atlasTextureID(0)
-        , grassColormapID(0)
-        , foliageColormapID(0)
-        , atlasWidth(DEFAULT_ATLAS_SIZE)
+        : atlasWidth(DEFAULT_ATLAS_SIZE)
         , atlasHeight(DEFAULT_ATLAS_SIZE)
-        , mipmapEnabled(false)  // Start with original settings (no mipmaps)
+        , mipmapEnabled(false)
         , textureAnimator(nullptr) {
     }
 
     AtlasBuilder::~AtlasBuilder() {
-        if (atlasTextureID != 0) {
-            glDeleteTextures(1, &atlasTextureID);
+        if (Render::g_renderBackend) {
+            if (m_atlasTexture != Render::INVALID_TEXTURE)
+                Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+            if (m_grassColormap != Render::INVALID_TEXTURE)
+                Render::g_renderBackend->DestroyTexture(m_grassColormap);
+            if (m_foliageColormap != Render::INVALID_TEXTURE)
+                Render::g_renderBackend->DestroyTexture(m_foliageColormap);
         }
-        if (grassColormapID != 0) {
-            glDeleteTextures(1, &grassColormapID);
+    }
+
+    uintptr_t AtlasBuilder::GetAtlasTextureID() const {
+        if (m_atlasTexture != Render::INVALID_TEXTURE && Render::g_renderBackend) {
+            return Render::g_renderBackend->GetNativeTextureID(m_atlasTexture);
         }
-        if (foliageColormapID != 0) {
-            glDeleteTextures(1, &foliageColormapID);
-        }
+        return 0;
     }
 
     bool AtlasBuilder::BuildFromJSON(const std::string& atlasJsonPath,
@@ -83,9 +87,9 @@ namespace Render {
         }
 
         Log::Info("=== ATLAS BUILDER COMPLETE ===");
-        Log::Info("Atlas texture ID: %u (%dx%d)", atlasTextureID, atlasWidth, atlasHeight);
-        Log::Info("Grass colormap ID: %u", grassColormapID);
-        Log::Info("Foliage colormap ID: %u", foliageColormapID);
+        Log::Info("Atlas texture handle: %u (%dx%d)", m_atlasTexture, atlasWidth, atlasHeight);
+        Log::Info("Grass colormap ID: %u", m_grassColormap);
+        Log::Info("Foliage colormap ID: %u", m_foliageColormap);
         Log::Info("Total textures: %zu", textureKeyToUV.size());
 
         return true;
@@ -254,7 +258,7 @@ namespace Render {
 
         if (LoadPNG(grassPath, grassWidth, grassHeight, grassData)) {
             if (grassWidth == 256 && grassHeight == 256) {
-                grassColormapID = CreateColormapTexture(grassData, grassWidth, grassHeight);
+                m_grassColormap = CreateColormapTexture(grassData, grassWidth, grassHeight);
                 Log::Info("✓ Loaded grass colormap: %dx%d", grassWidth, grassHeight);
             } else {
                 Log::Warning("Grass colormap is %dx%d, expected 256x256",
@@ -271,7 +275,7 @@ namespace Render {
 
         if (LoadPNG(foliagePath, foliageWidth, foliageHeight, foliageData)) {
             if (foliageWidth == 256 && foliageHeight == 256) {
-                foliageColormapID = CreateColormapTexture(foliageData,
+                m_foliageColormap = CreateColormapTexture(foliageData,
                                                          foliageWidth, foliageHeight);
                 Log::Info("✓ Loaded foliage colormap: %dx%d", foliageWidth, foliageHeight);
             } else {
@@ -282,7 +286,7 @@ namespace Render {
             Log::Warning("Failed to load foliage colormap: %s", foliagePath.c_str());
         }
 
-        return grassColormapID != 0 || foliageColormapID != 0;
+        return m_grassColormap != 0 || m_foliageColormap != 0;
     }
 
     bool AtlasBuilder::LoadAllTextures(std::vector<TextureSource>& sources) {
@@ -521,163 +525,98 @@ namespace Render {
             }
         }
 
-        // Create OpenGL texture
-        glGenTextures(1, &atlasTextureID);
-        glBindTexture(GL_TEXTURE_2D, atlasTextureID);
+        // Upload atlas to GPU through the backend
+        if (!Render::g_renderBackend) {
+            Log::Error("No render backend available for atlas texture upload");
+            return false;
+        }
 
-        // Upload atlas data - start with GL_RGBA (original format, no sRGB)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasWidth, atlasHeight, 0,
-                    GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
+        m_atlasTexture = Render::g_renderBackend->CreateTexture2D(
+            atlasWidth, atlasHeight, Render::TextureFormat::RGBA8, atlasData.data());
 
-        // Use the new parameter system instead of hardcoded values
+        if (m_atlasTexture == Render::INVALID_TEXTURE) {
+            Log::Error("Failed to create atlas texture via backend");
+            return false;
+        }
+
         UpdateTextureParameters();
+        Log::Info("Created atlas texture (%dx%d, mipmaps: %s)",
+                 atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
 
-        glBindTexture(GL_TEXTURE_2D, 0);
+        // Register pending animations with texture animator
+        if (textureAnimator && !pendingAnimations.empty() && m_atlasTexture != Render::INVALID_TEXTURE) {
+            textureAnimator->Initialize(m_atlasTexture);
 
-        Log::Info("✓ Created atlas texture ID %u (%dx%d, mipmaps: %s)",
-                 atlasTextureID, atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
-
-        // **NEW**: Register pending animations with texture animator
-        if (textureAnimator && !pendingAnimations.empty()) {
-            textureAnimator->Initialize(atlasTextureID);
-            
             for (const auto& pending : pendingAnimations) {
-                // Find atlas position for this texture
                 auto uvIt = textureKeyToUV.find(pending.textureKey);
                 if (uvIt != textureKeyToUV.end()) {
                     const AtlasUVRect& uvRect = uvIt->second;
-                    
-                    // Convert UV coordinates back to pixel coordinates
                     int atlasX = static_cast<int>(uvRect.uvMin.x * atlasWidth);
                     int atlasY = static_cast<int>(uvRect.uvMin.y * atlasHeight);
-                    
-                    // Register animated texture
+
                     textureAnimator->RegisterAnimatedTexture(
-                        pending.textureKey,
-                        pending.animation,
-                        pending.frames,
+                        pending.textureKey, pending.animation, pending.frames,
                         atlasX, atlasY
                     );
-                    
-                    Log::Debug("Registered animated texture: %s at atlas pos (%d,%d)",
-                              pending.textureKey.c_str(), atlasX, atlasY);
                 }
             }
-            
-            Log::Info("✓ Registered %zu animated textures", pendingAnimations.size());
+            Log::Info("Registered %zu animated textures", pendingAnimations.size());
         }
 
         return true;
     }
 
-    // **NEW**: Mipmap control implementation
     void AtlasBuilder::SetMipmapEnabled(bool enabled) {
-        if (mipmapEnabled == enabled) {
-            return; // No change needed
-        }
-
+        if (mipmapEnabled == enabled) return;
         mipmapEnabled = enabled;
-
-        if (atlasTextureID != 0) {
+        if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
         }
     }
-    
+
     void AtlasBuilder::SetMipmapLevel(int level) {
-        // Clamp level to valid range (0-4 as per Minecraft)
         m_mipmapLevel = std::max(0, std::min(4, level));
-        
-        if (atlasTextureID != 0) {
-            glBindTexture(GL_TEXTURE_2D, atlasTextureID);
-            
-            if (m_mipmapLevel == 0) {
-                // No mipmaps - pure nearest filtering
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
-            } else {
-                // Calculate actual max mipmap level based on atlas size
-                int maxPossible = static_cast<int>(std::floor(std::log2(std::min(atlasWidth, atlasHeight))));
-                int desiredLevel = std::min(m_mipmapLevel, maxPossible);
-                
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, desiredLevel);
-                
-                if (mipmapEnabled) {
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-                } else {
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                }
-            }
-            
-            glBindTexture(GL_TEXTURE_2D, 0);
+        if (m_atlasTexture != Render::INVALID_TEXTURE) {
+            UpdateTextureParameters();
             Log::Info("Set mipmap level to %d", m_mipmapLevel);
         }
     }
 
-    // **NEW**: Update texture parameters
     void AtlasBuilder::UpdateTextureParameters() {
-        if (atlasTextureID == 0) {
-            return;
-        }
-
-        glBindTexture(GL_TEXTURE_2D, atlasTextureID);
+        if (m_atlasTexture == Render::INVALID_TEXTURE || !Render::g_renderBackend) return;
 
         if (mipmapEnabled) {
-            // Minecraft-style filtering: crisp pixels with smooth mipmap transitions
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-            // Regenerate mipmaps with current data
-            glGenerateMipmap(GL_TEXTURE_2D);
-            
-            // Enable anisotropic filtering if available
-            if (GLAD_GL_EXT_texture_filter_anisotropic) {
-                GLfloat maxAniso;
-                glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
-                Log::Info("✓ Enabled anisotropic filtering (max: %.0f)", maxAniso);
-            }
+            Render::g_renderBackend->SetTextureFilter(m_atlasTexture,
+                Render::TextureFilter::NearestMipmapLinear, Render::TextureFilter::Nearest);
+            Render::g_renderBackend->GenerateMipmaps(m_atlasTexture);
         } else {
-            // Mipmap disabled - use original nearest filtering
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            Render::g_renderBackend->SetTextureFilter(m_atlasTexture,
+                Render::TextureFilter::Nearest, Render::TextureFilter::Nearest);
         }
 
-        // Keep wrap mode unchanged
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glBindTexture(GL_TEXTURE_2D, 0);
+        Render::g_renderBackend->SetTextureWrap(m_atlasTexture,
+            Render::TextureWrap::ClampToEdge, Render::TextureWrap::ClampToEdge);
     }
-    
+
     void AtlasBuilder::RebuildAtlas(bool useMinecraftStyle) {
-        if (atlasTextureID == 0) {
+        if (m_atlasTexture == Render::INVALID_TEXTURE || !Render::g_renderBackend) {
             Log::Warning("Cannot rebuild atlas: no texture created yet");
             return;
         }
-        
+
         if (originalAtlasData.empty()) {
             Log::Warning("Cannot rebuild atlas: no original data saved");
             return;
         }
-        
-        // Delete existing texture
-        glDeleteTextures(1, &atlasTextureID);
-        
-        // Create new texture
-        glGenTextures(1, &atlasTextureID);
-        glBindTexture(GL_TEXTURE_2D, atlasTextureID);
-        
-        // Choose format and data based on mode
-        GLenum internalFormat = useMinecraftStyle ? GL_SRGB8_ALPHA8 : GL_RGBA;
-        
-        // If Minecraft style, we need to apply border extrusion to a copy of the data
+
+        // Destroy existing texture
+        Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+
+        // If Minecraft style, apply border extrusion to a copy of the data
+        const unsigned char* uploadData = originalAtlasData.data();
         if (useMinecraftStyle) {
-            // Copy original data to working buffer
             atlasData = originalAtlasData;
-            
-            // Apply border extrusion
             for (const auto& kvp : textureKeyToUV) {
                 const AtlasUVRect& uvRect = kvp.second;
                 int x = static_cast<int>(uvRect.uvMin.x * atlasWidth);
@@ -686,49 +625,26 @@ namespace Render {
                 int height = static_cast<int>((uvRect.uvMax.y - uvRect.uvMin.y) * atlasHeight);
                 ExtrudeTextureBorders(x, y, width, height);
             }
-            
-            // Upload with sRGB format and extruded data
-            glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, atlasWidth, atlasHeight, 0,
-                        GL_RGBA, GL_UNSIGNED_BYTE, atlasData.data());
-        } else {
-            // Use original data without modifications
-            glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, atlasWidth, atlasHeight, 0,
-                        GL_RGBA, GL_UNSIGNED_BYTE, originalAtlasData.data());
+            uploadData = atlasData.data();
         }
-        
-        // Set appropriate filtering based on mode
-        if (useMinecraftStyle) {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            
-            // Generate mipmaps
-            glGenerateMipmap(GL_TEXTURE_2D);
-            
-            // Apply anisotropic filtering if available
-            if (GLAD_GL_EXT_texture_filter_anisotropic) {
-                GLfloat maxAniso;
-                glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &maxAniso);
-                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, maxAniso);
-            }
-            
-            mipmapEnabled = true;
-            m_borderExtrusionEnabled = true;
-        } else {
-            // Original settings - simple nearest filtering, no mipmaps
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            
-            mipmapEnabled = false;
-            m_borderExtrusionEnabled = false;
+
+        // Create new texture via backend
+        Render::TextureFormat format = useMinecraftStyle ?
+            Render::TextureFormat::SRGB8_A8 : Render::TextureFormat::RGBA8;
+        m_atlasTexture = Render::g_renderBackend->CreateTexture2D(
+            atlasWidth, atlasHeight, format, uploadData);
+
+        // Set filtering based on mode
+        mipmapEnabled = useMinecraftStyle;
+        m_borderExtrusionEnabled = useMinecraftStyle;
+        UpdateTextureParameters();
+
+        // Update TextureAnimator with the new atlas handle
+        if (textureAnimator) {
+            textureAnimator->Initialize(m_atlasTexture);
         }
-        
-        glBindTexture(GL_TEXTURE_2D, 0);
-        
-        Log::Info("Atlas rebuilt with %s rendering mode", 
+
+        Log::Info("Atlas rebuilt with %s rendering mode",
                   useMinecraftStyle ? "Minecraft-style" : "Classic");
     }
 
@@ -835,25 +751,19 @@ namespace Render {
         }
     }
 
-    GLuint AtlasBuilder::CreateColormapTexture(const std::vector<unsigned char>& data,
-                                              int width, int height) {
-        GLuint textureID;
-        glGenTextures(1, &textureID);
-        glBindTexture(GL_TEXTURE_2D, textureID);
+    Render::TextureHandle AtlasBuilder::CreateColormapTexture(const std::vector<unsigned char>& data,
+                                                              int width, int height) {
+        if (!Render::g_renderBackend) return Render::INVALID_TEXTURE;
 
-        // Upload colormap data
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
-                    GL_RGBA, GL_UNSIGNED_BYTE, data.data());
-
-        // Use nearest filtering for pixel-perfect lookup
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glBindTexture(GL_TEXTURE_2D, 0);
-
-        return textureID;
+        auto handle = Render::g_renderBackend->CreateTexture2D(width, height,
+            Render::TextureFormat::RGBA8, data.data());
+        if (handle != Render::INVALID_TEXTURE) {
+            Render::g_renderBackend->SetTextureFilter(handle,
+                Render::TextureFilter::Nearest, Render::TextureFilter::Nearest);
+            Render::g_renderBackend->SetTextureWrap(handle,
+                Render::TextureWrap::ClampToEdge, Render::TextureWrap::ClampToEdge);
+        }
+        return handle;
     }
 
     bool AtlasBuilder::GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const {
@@ -888,8 +798,8 @@ namespace Render {
     // **NEW**: Animation support methods
     void AtlasBuilder::SetTextureAnimator(TextureAnimator* animator) {
         textureAnimator = animator;
-        if (textureAnimator && atlasTextureID != 0) {
-            textureAnimator->Initialize(atlasTextureID);
+        if (textureAnimator && m_atlasTexture != Render::INVALID_TEXTURE) {
+            textureAnimator->Initialize(m_atlasTexture);
         }
     }
 

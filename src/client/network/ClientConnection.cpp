@@ -80,15 +80,15 @@ namespace Client {
         }
     }
 
-    void ClientConnection::StartHandshake(const std::string& playerName) {
+    void ClientConnection::StartHandshake(const std::string& playerName, uint16_t serverPort) {
         m_playerName = playerName;
         m_phase = ConnectionPhase::HANDSHAKING;
-        
+
         // Send handshake packet
         Network::PacketBuffer buffer;
         buffer.WriteVarInt(754); // Protocol version (1.16.5)
         buffer.WriteString("127.0.0.1"); // Server address
-        buffer.WriteShort(25565); // Server port
+        buffer.WriteShort(serverPort); // Server port
         buffer.WriteVarInt(2); // Next state: LOGIN
         SendPacket(static_cast<uint8_t>(Network::PacketId::Handshake), buffer.GetData());
         

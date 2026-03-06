@@ -2,12 +2,15 @@
 #pragma once
 
 #include "../core/Vertex.hpp"
+#include "../backend/RenderTypes.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include <vector>
 #include <cstdint>
-#include <glad/glad.h>
 
 namespace Render {
+
+    // Forward declaration for DestroyAllResources
+    class RenderBackend;
 
     // Plain-old data struct to hold CPU-side mesh buffers for one 16x16x16 section
     struct SectionMesh {
@@ -74,21 +77,29 @@ namespace Render {
         }
     };
 
-    // GPU data for one section (holds OpenGL buffer objects)
+    // GPU data for one section (holds backend resource handles)
     struct GPUSectionData {
-        // Buffer objects for each layer
-        GLuint opaqueVAO = 0, opaqueVBO = 0, opaqueIBO = 0;
-        GLuint cutoutVAO = 0, cutoutVBO = 0, cutoutIBO = 0;
-        GLuint translucentVAO = 0, translucentVBO = 0, translucentIBO = 0;
-
         // Index counts for rendering
         uint32_t opaqueIndexCount = 0;
         uint32_t cutoutIndexCount = 0;
         uint32_t translucentIndexCount = 0;
 
+        // Vertex counts for accurate statistics
+        uint32_t opaqueVertexCount = 0;
+        uint32_t cutoutVertexCount = 0;
+        uint32_t translucentVertexCount = 0;
+
         // Section identification
         Game::Math::ChunkPos chunkPos{0, 0};
         int sectionY = 0;
+
+        // Backend resource handles
+        MeshHandle opaqueMesh = INVALID_MESH;
+        MeshHandle cutoutMesh = INVALID_MESH;
+        MeshHandle translucentMesh = INVALID_MESH;
+        BufferHandle opaqueVB = INVALID_BUFFER, opaqueIB = INVALID_BUFFER;
+        BufferHandle cutoutVB = INVALID_BUFFER, cutoutIB = INVALID_BUFFER;
+        BufferHandle translucentVB = INVALID_BUFFER, translucentIB = INVALID_BUFFER;
 
         // Upload timestamp for LRU management
         uint64_t lastUploadFrame = 0;
@@ -104,7 +115,7 @@ namespace Render {
 
         // Check if GPU buffers are allocated
         bool IsUploaded() const {
-            return opaqueVAO != 0 || cutoutVAO != 0 || translucentVAO != 0;
+            return opaqueMesh != INVALID_MESH || cutoutMesh != INVALID_MESH || translucentMesh != INVALID_MESH;
         }
 
         // Get total memory usage estimate
@@ -112,6 +123,10 @@ namespace Render {
             return (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) *
                    (sizeof(Vertex) + sizeof(uint32_t));
         }
+
+        // Destroy all backend resources and reset handles/counts
+        // Pass the backend pointer to avoid including RenderBackend.hpp in this header
+        void DestroyAllResources(RenderBackend* backend);
     };
 
     // Complete mesh data for one chunk (24 sections)

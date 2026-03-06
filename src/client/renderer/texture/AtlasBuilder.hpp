@@ -6,8 +6,8 @@
 #include <unordered_map>
 #include <memory>
 #include <glm/glm.hpp>
-#include <glad/glad.h>
 #include <nlohmann/json.hpp>
+#include "../backend/RenderTypes.hpp"
 
 // Forward declaration for animation system
 namespace Render {
@@ -79,12 +79,15 @@ namespace Render {
         bool BuildFromJSON(const std::string& atlasJsonPath,
                           const std::string& texturesRootPath = "assets/textures");
 
-        // Get the packed atlas texture ID
-        GLuint GetAtlasTextureID() const { return atlasTextureID; }
+        // Get backend texture handle (works with both GL and Vulkan)
+        Render::TextureHandle GetBackendTextureHandle() const { return m_atlasTexture; }
 
-        // Get grass/foliage colormap texture IDs
-        GLuint GetGrassColormapID() const { return grassColormapID; }
-        GLuint GetFoliageColormapID() const { return foliageColormapID; }
+        // Get the native texture ID (for ImGui display / legacy code)
+        uintptr_t GetAtlasTextureID() const;
+
+        // Get grass/foliage colormap texture handles
+        Render::TextureHandle GetGrassColormapHandle() const { return m_grassColormap; }
+        Render::TextureHandle GetFoliageColormapHandle() const { return m_foliageColormap; }
 
         // Look up UV coordinates for a texture key
         bool GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const;
@@ -118,10 +121,10 @@ namespace Render {
         TextureAnimator* GetTextureAnimator() const { return textureAnimator; }
 
     private:
-        // OpenGL texture IDs
-        GLuint atlasTextureID;
-        GLuint grassColormapID;
-        GLuint foliageColormapID;
+        // Backend texture handles
+        Render::TextureHandle m_atlasTexture = Render::INVALID_TEXTURE;
+        Render::TextureHandle m_grassColormap = Render::INVALID_TEXTURE;
+        Render::TextureHandle m_foliageColormap = Render::INVALID_TEXTURE;
 
         // Atlas dimensions
         int atlasWidth;
@@ -193,8 +196,8 @@ namespace Render {
                     std::vector<unsigned char>& data);
 
         // Helper: Create and upload a colormap texture
-        GLuint CreateColormapTexture(const std::vector<unsigned char>& data,
-                                    int width, int height);
+        Render::TextureHandle CreateColormapTexture(const std::vector<unsigned char>& data,
+                                                    int width, int height);
 
         // Bin packing algorithm
         PackNode* InsertRect(PackNode* node, int width, int height, int index);

@@ -1,11 +1,13 @@
 #include "levelgen/ChunkGenerator.h"
-#include "levelgen/SurfaceSystem.h"
-#include "levelgen/SurfaceRules.h"
+#include "levelgen/WorldGenLevel.h"
+#include "levelgen/FeatureSorter.h"
 #include "levelgen/placement/PlacedFeature.h"
-#include "levelgen/placement/PlacementContext.h"
-#include <iostream>
+#include "levelgen/feature/Feature.h"
+#include "levelgen/SurfaceSystem.h"
+#include "core/SectionPos.h"
+#include "levelgen/SurfaceRules.h"
 #include "world/level/block/state/BlockState.h"
-#include "world/MinecraftBlockType.h"
+#include "world/level/block/Blocks.h"
 #include "levelgen/NoiseChunk.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/Blender.h"
@@ -34,78 +36,200 @@ namespace levelgen {
 // ChunkGenerator
 //=============================================================================
 
+// Feature logging control - static variables
+static bool s_featureLoggingEnabled = false;
+static std::ostream* s_featureLogStream = &std::cerr;
+static int s_logLevel = 0;  // 0=off, 1=basic, 2=detailed (positions), 3=verbose (random state)
+
+void ChunkGenerator::setFeatureLoggingEnabled(bool enabled, int level) {
+    s_featureLoggingEnabled = enabled;
+    s_logLevel = level;
+}
+
+void ChunkGenerator::setFeatureLogStream(std::ostream* stream) {
+    s_featureLogStream = stream ? stream : &std::cerr;
+}
+
 void ChunkGenerator::applyBiomeDecoration(
-    int64_t seed,
+    WorldGenLevel* level,
     ::world::IChunk* chunk,
-    std::function<world::biome::BiomeHolder(const core::BlockPos&)> biomeGetter,
-    const std::vector<std::vector<placement::PlacedFeature*>>& featuresPerStep
+    const std::vector<StepFeatureData>& featuresPerStep
 ) {
     // Reference: ChunkGenerator.java lines 269-375
 
     ::world::ChunkPos centerPos = chunk->getPos();
-    core::BlockPos origin(centerPos.getMinBlockX(), getMinY(), centerPos.getMinBlockZ());
+
+    // Get origin at the corner of the chunk at min section Y
+    // Reference: SectionPos.of(centerPos, level.getMinSectionY()).origin()
+    // origin = (chunkX * 16, minSectionY * 16, chunkZ * 16)
+    int32_t minSectionY = level->getMinY() >> 4;
+    core::BlockPos origin(
+        centerPos.getMinBlockX(),
+        minSectionY << 4,  // sectionY * 16
+        centerPos.getMinBlockZ()
+    );
+
+    // Get seed from level
+    int64_t seed = level->getSeed();
 
     // Create random source with unique seed
-    // Reference: ChunkGenerator.java line 277
+    // Reference: new WorldgenRandom(new XoroshiroRandomSource(RandomSupport.generateUniqueSeed()))
     XoroshiroRandomSource randomSource{RandomSupport::generateUniqueSeed()};
     WorldgenRandom random{randomSource};
 
     // Set decoration seed based on chunk position
-    // Reference: ChunkGenerator.java line 278
+    // Reference: random.setDecorationSeed(level.getSeed(), origin.getX(), origin.getZ())
     int64_t decorationSeed = random.setDecorationSeed(seed, origin.getX(), origin.getZ());
 
+    // Block trace: log decoration seed and chunk info
+    if (feature::BlockChangeTrace::enabled && feature::BlockChangeTrace::stream) {
+        *feature::BlockChangeTrace::stream << "# CHUNK (" << centerPos.x() << ", " << centerPos.z() << ")\n";
+        *feature::BlockChangeTrace::stream << "# Origin: " << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << "\n";
+        *feature::BlockChangeTrace::stream << "# DecorationSeed: " << decorationSeed << "\n";
+        *feature::BlockChangeTrace::stream << "# WorldSeed: " << seed << "\n\n";
+    }
+
+    // Feature logging - chunk header
+    if (s_featureLoggingEnabled && s_featureLogStream) {
+        *s_featureLogStream << "\n# CHUNK (" << centerPos.x() << ", " << centerPos.z() << ")\n";
+        *s_featureLogStream << "# Origin: " << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << "\n";
+        *s_featureLogStream << "# WorldSeed: " << seed << "\n";
+        *s_featureLogStream << "# DecorationSeed: " << decorationSeed << "\n\n";
+    }
+
+    // Collect biomes from 3x3 chunk area
+    // Reference: ChunkPos.rangeClosed(sectionPos.chunk(), 1).forEach(...)
+    std::set<const world::biome::Biome*> possibleBiomes;
+    for (int dz = -1; dz <= 1; ++dz) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ::world::IChunk* neighborChunk = level->getChunk(centerPos.x() + dx, centerPos.z() + dz);
+            if (neighborChunk) {
+                // Collect all biomes from all sections
+                for (int sectionY = neighborChunk->getMinBuildHeight() >> 4;
+                     sectionY < neighborChunk->getMaxBuildHeight() >> 4; ++sectionY) {
+                    // Sample biomes at section corners (simplified)
+                    int blockY = sectionY << 4;
+                    for (int y = 0; y < 16; y += 4) {
+                        for (int x = 0; x < 16; x += 4) {
+                            for (int z = 0; z < 16; z += 4) {
+                                core::BlockPos biomePos(
+                                    neighborChunk->getPos().getMinBlockX() + x,
+                                    blockY + y,
+                                    neighborChunk->getPos().getMinBlockZ() + z
+                                );
+                                const world::biome::Biome* biome = neighborChunk->getBiome(biomePos);
+                                if (biome) {
+                                    possibleBiomes.insert(biome);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Get number of generation steps
-    // Reference: ChunkGenerator.java lines 295-296
     int32_t featureStepCount = static_cast<int32_t>(featuresPerStep.size());
     int32_t generationSteps = std::max(GenerationStep::DECORATION_COUNT, featureStepCount);
 
-    // Create placement context
-    // We need height getter, block getter, biome getter functions
-    placement::PlacementContext context(
-        chunk,
-        getMinY(),
-        getGenDepth(),
-        [chunk](Heightmap::Types type, int32_t x, int32_t z) -> int32_t {
-            return chunk->getHeight(static_cast<int>(type), x, z);
-        },
-        [chunk](const core::BlockPos& pos) -> BlockState* {
-            ::world::IBlockType* block = chunk->getBlockState(pos.getX() & 15, pos.getY(), pos.getZ() & 15);
-            return static_cast<BlockState*>(block ? block : ::world::MinecraftBlocks::AIR());
-        },
-        [biomeGetter](const core::BlockPos& pos) -> void* {
-            return const_cast<world::biome::Biome*>(biomeGetter(pos));
-        },
-        [](const ::world::ChunkPos& pos) -> carver::CarvingMask* {
-            return nullptr; // Carving mask not needed for decoration
-        },
-        this,
-        std::nullopt
-    );
-
     // Iterate through all generation steps
-    // Reference: ChunkGenerator.java lines 297-362
+    // Reference: for(int stepIndex = 0; stepIndex < generationSteps; ++stepIndex)
     for (int32_t stepIndex = 0; stepIndex < generationSteps; ++stepIndex) {
-        // Skip if no features for this step
         if (stepIndex >= featureStepCount) {
             continue;
         }
 
-        const std::vector<placement::PlacedFeature*>& featuresInStep = featuresPerStep[stepIndex];
+        const StepFeatureData& stepFeatureData = featuresPerStep[stepIndex];
+        if (stepFeatureData.features.empty()) continue;
 
-        // Place each feature in the step
-        // Reference: ChunkGenerator.java lines 340-360
-        for (size_t featureIndex = 0; featureIndex < featuresInStep.size(); ++featureIndex) {
-            placement::PlacedFeature* feature = featuresInStep[featureIndex];
+        // Collect possible feature indices for this step from biomes in 3x3 area
+        // Reference: IntSet possibleFeaturesThisStep = new IntArraySet();
+        std::set<int> possibleFeatureIndices;
+
+        for (const world::biome::Biome* biome : possibleBiomes) {
+            if (!biome) continue;
+            // Get features for this biome at this step
+            // In Java: featuresInBiome = biome.getGenerationSettings().features()
+            // We check if each feature in stepFeatureData is valid for this biome
+            for (placement::PlacedFeature* feature : stepFeatureData.features) {
+                int idx = stepFeatureData.getIndex(feature);
+                if (idx >= 0) {
+                    possibleFeatureIndices.insert(idx);
+                }
+            }
+        }
+
+        // Sort indices and place features
+        // Reference: int[] indexArray = possibleFeaturesThisStep.toIntArray(); Arrays.sort(indexArray);
+        std::vector<int> sortedIndices(possibleFeatureIndices.begin(), possibleFeatureIndices.end());
+        std::sort(sortedIndices.begin(), sortedIndices.end());
+
+        // Log step header if enabled
+        if (s_featureLoggingEnabled && s_featureLogStream && s_logLevel >= 1) {
+            *s_featureLogStream << "# ===== STEP " << stepIndex << " (" << sortedIndices.size() << " features) =====\n";
+        }
+
+        // Place each feature using global index for seeding
+        for (int globalIndex : sortedIndices) {
+            if (globalIndex < 0 || globalIndex >= static_cast<int>(stepFeatureData.features.size())) {
+                continue;
+            }
+
+            placement::PlacedFeature* feature = stepFeatureData.features[globalIndex];
             if (!feature) continue;
 
-            // Set feature seed
-            // Reference: ChunkGenerator.java line 348
-            random.setFeatureSeed(decorationSeed, static_cast<int32_t>(featureIndex), stepIndex);
+            // DEBUG: trace pointer for step 4 features
+            if (stepIndex == 4 && globalIndex < 5) {
+                std::cerr << "DEBUG applyBiomeDecoration: step=" << stepIndex << " idx=" << globalIndex
+                          << " feature ptr=" << (void*)feature
+                          << " name='" << feature->getName() << "'\n";
+            }
+
+            // Set current step/index for logging and block-change tracing
+            placement::PlacedFeature::setCurrentStepIndex(stepIndex, globalIndex);
+            feature::BlockChangeTrace::currentStep = stepIndex;
+            feature::BlockChangeTrace::currentIndex = globalIndex;
+            feature::BlockChangeTrace::currentFeatureName = feature->getName();
+
+            // Set feature seed using GLOBAL index (critical for parity)
+            // Reference: random.setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex);
+            random.setFeatureSeed(decorationSeed, globalIndex, stepIndex);
+
+            // Block trace: log seed state after setFeatureSeed
+            if (feature::BlockChangeTrace::enabled && feature::BlockChangeTrace::stream) {
+                uint64_t seedLo, seedHi;
+                random.getSeedState(seedLo, seedHi);
+                *feature::BlockChangeTrace::stream << "FEATURE STEP=" << stepIndex << " IDX=" << globalIndex
+                    << " " << feature->getName()
+                    << " seed_lo=" << seedLo << " seed_hi=" << seedHi
+                    << " gauss_cached=" << random.hasNextGaussian() << "\n";
+            }
+
+            // Log feature info with random state if enabled
+            if (s_featureLoggingEnabled && s_featureLogStream && s_logLevel >= 2) {
+                const std::string& featureName = feature->getName();
+                *s_featureLogStream << "FEATURE STEP=" << stepIndex << " IDX=" << globalIndex
+                                    << " " << (featureName.empty() ? "(unnamed)" : featureName) << "\n";
+
+                // Log random state for verbose mode
+                if (s_logLevel >= 3) {
+                    uint64_t seedLo, seedHi;
+                    random.getSeedState(seedLo, seedHi);
+                    *s_featureLogStream << "  SEED_LO=" << static_cast<int64_t>(seedLo)
+                                        << " SEED_HI=" << static_cast<int64_t>(seedHi) << "\n";
+                }
+            }
 
             // Place the feature with biome check
-            // Reference: ChunkGenerator.java line 352
-            feature->placeWithBiomeCheck(context, random.getRandomSource(), origin);
+            // Reference: feature.placeWithBiomeCheck(level, this, random, origin);
+            feature->placeWithBiomeCheck(level, this, random, origin);
         }
+    }
+
+    // Log completion
+    if (s_featureLoggingEnabled && s_featureLogStream && s_logLevel >= 1) {
+        *s_featureLogStream << "# END CHUNK (" << centerPos.x() << ", " << centerPos.z() << ")\n\n";
     }
 }
 
@@ -132,8 +256,8 @@ NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     NoiseGeneratorSettings* settings,
     SurfaceSystem* surfaceSystem,
     RuleSource* surfaceRules,
-    ::world::IBlockType* defaultBlock,
-    ::world::IBlockType* airBlock,
+    BlockState* defaultBlock,
+    BlockState* airBlock,
     FluidPicker* fluidPicker,
     Beardifier* beardifier
 )
@@ -160,8 +284,8 @@ NoiseBasedChunkGenerator::NoiseBasedChunkGenerator(
     int32_t cellHeight,
     SurfaceSystem* surfaceSystem,
     RuleSource* surfaceRules,
-    ::world::IBlockType* defaultBlock,
-    ::world::IBlockType* airBlock,
+    BlockState* defaultBlock,
+    BlockState* airBlock,
     FluidPicker* fluidPicker,
     Beardifier* beardifier
 )
@@ -346,7 +470,7 @@ void NoiseBasedChunkGenerator::doFill(
 
                             // Get interpolated block state
                             // Reference: lines 311-314
-                            ::world::IBlockType* state = noiseChunk->getInterpolatedState();
+                            BlockState* state = noiseChunk->getInterpolatedState();
 
                             // If state is null, use defaultBlock (stone)
                             // Reference: Java lines 312-314
@@ -780,8 +904,8 @@ int32_t NoiseBasedChunkGenerator::getBaseHeight(
             noiseChunk->updateForZ(z, factorZ);
 
             // Get interpolated state - Reference: lines 165-166
-            ::world::IBlockType* baseState = noiseChunk->getInterpolatedState();
-            ::world::IBlockType* state = (baseState == nullptr) ? m_defaultBlock : baseState;
+            BlockState* baseState = noiseChunk->getInterpolatedState();
+            BlockState* state = (baseState == nullptr) ? m_defaultBlock : baseState;
 
             // Check if this block matches the heightmap predicate - Reference: lines 172-175
             if (state != nullptr && isOpaque(state)) {
@@ -801,7 +925,7 @@ void NoiseBasedChunkGenerator::getBaseColumn(
     int32_t x,
     int32_t z,
     RandomState* randomState,
-    std::vector<::world::IBlockType*>& outColumn
+    std::vector<BlockState*>& outColumn
 ) const {
     // Reference: NoiseBasedChunkGenerator.java getBaseColumn() lines 111-115
     // Reference: iterateNoiseColumn() lines 126-181
@@ -864,8 +988,8 @@ void NoiseBasedChunkGenerator::getBaseColumn(
             noiseChunk->updateForZ(z, factorZ);
 
             // Get interpolated state - Reference: lines 165-166
-            ::world::IBlockType* baseState = noiseChunk->getInterpolatedState();
-            ::world::IBlockType* state = (baseState == nullptr) ? m_defaultBlock : baseState;
+            BlockState* baseState = noiseChunk->getInterpolatedState();
+            BlockState* state = (baseState == nullptr) ? m_defaultBlock : baseState;
 
             // Store in column array - Reference: lines 167-170
             int32_t yIndex = cellYIndex * cellHeight + yInCell;

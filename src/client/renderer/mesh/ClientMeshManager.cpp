@@ -3,11 +3,27 @@
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "../../world/ClientWorkerPool.hpp"
-#include <glad/glad.h>
+#include "../backend/RenderBackend.hpp"
 #include <algorithm>
 #include <chrono>
 
 namespace Render {
+
+    // Implementation of GPUSectionData::DestroyAllResources (declared in SectionMesh.hpp)
+    void GPUSectionData::DestroyAllResources(RenderBackend* backend) {
+        if (!backend) return;
+        if (opaqueMesh != INVALID_MESH)       { backend->DestroyMesh(opaqueMesh);       opaqueMesh = INVALID_MESH; }
+        if (opaqueVB != INVALID_BUFFER)       { backend->DestroyBuffer(opaqueVB);       opaqueVB = INVALID_BUFFER; }
+        if (opaqueIB != INVALID_BUFFER)       { backend->DestroyBuffer(opaqueIB);       opaqueIB = INVALID_BUFFER; }
+        if (cutoutMesh != INVALID_MESH)       { backend->DestroyMesh(cutoutMesh);       cutoutMesh = INVALID_MESH; }
+        if (cutoutVB != INVALID_BUFFER)       { backend->DestroyBuffer(cutoutVB);       cutoutVB = INVALID_BUFFER; }
+        if (cutoutIB != INVALID_BUFFER)       { backend->DestroyBuffer(cutoutIB);       cutoutIB = INVALID_BUFFER; }
+        if (translucentMesh != INVALID_MESH)  { backend->DestroyMesh(translucentMesh);  translucentMesh = INVALID_MESH; }
+        if (translucentVB != INVALID_BUFFER)  { backend->DestroyBuffer(translucentVB);  translucentVB = INVALID_BUFFER; }
+        if (translucentIB != INVALID_BUFFER)  { backend->DestroyBuffer(translucentIB);  translucentIB = INVALID_BUFFER; }
+        opaqueIndexCount = cutoutIndexCount = translucentIndexCount = 0;
+        opaqueVertexCount = cutoutVertexCount = translucentVertexCount = 0;
+    }
 
     // Global instance
     std::unique_ptr<ClientMeshManager> g_clientMeshManager = nullptr;
@@ -46,27 +62,12 @@ namespace Render {
 
     void ClientMeshManager::Shutdown() {
         Log::Info("Shutting down ClientMeshManager...");
-        
+
         // Clean up all GPU data
         {
             std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
             for (auto& [key, gpuData] : m_gpuData) {
-                if (gpuData.IsUploaded()) {
-                    // Delete opaque layer
-                    if (gpuData.opaqueVAO != 0) glDeleteVertexArrays(1, &gpuData.opaqueVAO);
-                    if (gpuData.opaqueVBO != 0) glDeleteBuffers(1, &gpuData.opaqueVBO);
-                    if (gpuData.opaqueIBO != 0) glDeleteBuffers(1, &gpuData.opaqueIBO);
-                    
-                    // Delete cutout layer
-                    if (gpuData.cutoutVAO != 0) glDeleteVertexArrays(1, &gpuData.cutoutVAO);
-                    if (gpuData.cutoutVBO != 0) glDeleteBuffers(1, &gpuData.cutoutVBO);
-                    if (gpuData.cutoutIBO != 0) glDeleteBuffers(1, &gpuData.cutoutIBO);
-                    
-                    // Delete translucent layer
-                    if (gpuData.translucentVAO != 0) glDeleteVertexArrays(1, &gpuData.translucentVAO);
-                    if (gpuData.translucentVBO != 0) glDeleteBuffers(1, &gpuData.translucentVBO);
-                    if (gpuData.translucentIBO != 0) glDeleteBuffers(1, &gpuData.translucentIBO);
-                }
+                gpuData.DestroyAllResources(g_renderBackend.get());
             }
             m_gpuData.clear();
             m_activeSections.clear();
@@ -482,79 +483,44 @@ namespace Render {
 
     void ClientMeshManager::RemoveSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) {
         std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-        
+
         SectionKey key{chunkPos, sectionY};
         auto it = m_gpuData.find(key);
         if (it != m_gpuData.end()) {
             // Tell the grid this section is gone BEFORE deleting buffers
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
-            
+
             // Clean up GPU resources
-            GPUSectionData& gpuData = it->second;
-            if (gpuData.IsUploaded()) {
-                // Delete opaque layer
-                if (gpuData.opaqueVAO != 0) glDeleteVertexArrays(1, &gpuData.opaqueVAO);
-                if (gpuData.opaqueVBO != 0) glDeleteBuffers(1, &gpuData.opaqueVBO);
-                if (gpuData.opaqueIBO != 0) glDeleteBuffers(1, &gpuData.opaqueIBO);
-                
-                // Delete cutout layer
-                if (gpuData.cutoutVAO != 0) glDeleteVertexArrays(1, &gpuData.cutoutVAO);
-                if (gpuData.cutoutVBO != 0) glDeleteBuffers(1, &gpuData.cutoutVBO);
-                if (gpuData.cutoutIBO != 0) glDeleteBuffers(1, &gpuData.cutoutIBO);
-                
-                // Delete translucent layer
-                if (gpuData.translucentVAO != 0) glDeleteVertexArrays(1, &gpuData.translucentVAO);
-                if (gpuData.translucentVBO != 0) glDeleteBuffers(1, &gpuData.translucentVBO);
-                if (gpuData.translucentIBO != 0) glDeleteBuffers(1, &gpuData.translucentIBO);
-            }
-            
+            it->second.DestroyAllResources(g_renderBackend.get());
+
             m_gpuData.erase(it);
-            m_activeSections.erase(key);  // Remove from active sections
+            m_activeSections.erase(key);
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
         }
     }
 
     void ClientMeshManager::RemoveChunkGPUData(::Game::Math::ChunkPos chunkPos) {
         std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-        
+
         // Remove all sections for this chunk
         for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
             SectionKey key{chunkPos, sectionY};
             auto it = m_gpuData.find(key);
             if (it != m_gpuData.end()) {
-                // Clean up GPU resources
-                GPUSectionData& gpuData = it->second;
-                if (gpuData.IsUploaded()) {
-                    // Delete opaque layer
-                    if (gpuData.opaqueVAO != 0) glDeleteVertexArrays(1, &gpuData.opaqueVAO);
-                    if (gpuData.opaqueVBO != 0) glDeleteBuffers(1, &gpuData.opaqueVBO);
-                    if (gpuData.opaqueIBO != 0) glDeleteBuffers(1, &gpuData.opaqueIBO);
-                    
-                    // Delete cutout layer
-                    if (gpuData.cutoutVAO != 0) glDeleteVertexArrays(1, &gpuData.cutoutVAO);
-                    if (gpuData.cutoutVBO != 0) glDeleteBuffers(1, &gpuData.cutoutVBO);
-                    if (gpuData.cutoutIBO != 0) glDeleteBuffers(1, &gpuData.cutoutIBO);
-                    
-                    // Delete translucent layer
-                    if (gpuData.translucentVAO != 0) glDeleteVertexArrays(1, &gpuData.translucentVAO);
-                    if (gpuData.translucentVBO != 0) glDeleteBuffers(1, &gpuData.translucentVBO);
-                    if (gpuData.translucentIBO != 0) glDeleteBuffers(1, &gpuData.translucentIBO);
-                }
-                
-                // NEW: Clear the atomic GPU data pointer in SectionInfo
+                it->second.DestroyAllResources(g_renderBackend.get());
+
                 auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
                 if (sectionInfo) {
                     sectionInfo->gpuData.store(nullptr, std::memory_order_release);
                 }
-                
-                // Tell the grid this section is gone
+
                 m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
-                
+
                 m_gpuData.erase(it);
-                m_activeSections.erase(key);  // Remove from active sections
+                m_activeSections.erase(key);
             }
         }
-        
+
         LogMeshActivity("Removed chunk GPU data", chunkPos);
     }
 
@@ -577,114 +543,53 @@ namespace Render {
         
         // Clean up existing GPU resources if allocated
         if (gpuData.IsUploaded()) {
-            // Delete opaque layer
-            if (gpuData.opaqueVAO != 0) { glDeleteVertexArrays(1, &gpuData.opaqueVAO); gpuData.opaqueVAO = 0; }
-            if (gpuData.opaqueVBO != 0) { glDeleteBuffers(1, &gpuData.opaqueVBO); gpuData.opaqueVBO = 0; }
-            if (gpuData.opaqueIBO != 0) { glDeleteBuffers(1, &gpuData.opaqueIBO); gpuData.opaqueIBO = 0; }
-            
-            // Delete cutout layer
-            if (gpuData.cutoutVAO != 0) { glDeleteVertexArrays(1, &gpuData.cutoutVAO); gpuData.cutoutVAO = 0; }
-            if (gpuData.cutoutVBO != 0) { glDeleteBuffers(1, &gpuData.cutoutVBO); gpuData.cutoutVBO = 0; }
-            if (gpuData.cutoutIBO != 0) { glDeleteBuffers(1, &gpuData.cutoutIBO); gpuData.cutoutIBO = 0; }
-            
-            // Delete translucent layer
-            if (gpuData.translucentVAO != 0) { glDeleteVertexArrays(1, &gpuData.translucentVAO); gpuData.translucentVAO = 0; }
-            if (gpuData.translucentVBO != 0) { glDeleteBuffers(1, &gpuData.translucentVBO); gpuData.translucentVBO = 0; }
-            if (gpuData.translucentIBO != 0) { glDeleteBuffers(1, &gpuData.translucentIBO); gpuData.translucentIBO = 0; }
-            
-            // Reset index counts
-            gpuData.opaqueIndexCount = gpuData.cutoutIndexCount = gpuData.translucentIndexCount = 0;
+            gpuData.DestroyAllResources(g_renderBackend.get());
         }
 
-        // Helper lambda for vertex attributes setup (12 floats per vertex: pos(3) + normal(3) + uv(2) + color(4))
-        auto setupVertexAttributes = []() {
-            // Position (3 floats)
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 12, nullptr);
-            glEnableVertexAttribArray(0);
-            
-            // Normal (3 floats)
-            glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 12, reinterpret_cast<void*>(sizeof(float) * 3));
-            glEnableVertexAttribArray(1);
-            
-            // TexCoord (2 floats)
-            glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 12, reinterpret_cast<void*>(sizeof(float) * 6));
-            glEnableVertexAttribArray(2);
-            
-            // Color (4 floats)
-            glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(float) * 12, reinterpret_cast<void*>(sizeof(float) * 8));
-            glEnableVertexAttribArray(3);
-        };
-
-        // Upload opaque layer
+        // Set index/vertex counts
         if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
-            glGenVertexArrays(1, &gpuData.opaqueVAO);
-            glGenBuffers(1, &gpuData.opaqueVBO);
-            glGenBuffers(1, &gpuData.opaqueIBO);
-            
-            glBindVertexArray(gpuData.opaqueVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.opaqueVBO);
-            glBufferData(GL_ARRAY_BUFFER, meshData.opaqueVertices.size() * sizeof(float), 
-                        meshData.opaqueVertices.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.opaqueIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, meshData.opaqueIndices.size() * sizeof(uint32_t),
-                        meshData.opaqueIndices.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
             gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndices.size());
+            gpuData.opaqueVertexCount = static_cast<uint32_t>(meshData.opaqueVertexCount);
         }
-        
-        // Upload cutout layer
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
-            glGenVertexArrays(1, &gpuData.cutoutVAO);
-            glGenBuffers(1, &gpuData.cutoutVBO);
-            glGenBuffers(1, &gpuData.cutoutIBO);
-            
-            glBindVertexArray(gpuData.cutoutVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.cutoutVBO);
-            glBufferData(GL_ARRAY_BUFFER, meshData.cutoutVertices.size() * sizeof(float),
-                        meshData.cutoutVertices.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.cutoutIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, meshData.cutoutIndices.size() * sizeof(uint32_t),
-                        meshData.cutoutIndices.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
             gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndices.size());
+            gpuData.cutoutVertexCount = static_cast<uint32_t>(meshData.cutoutVertexCount);
         }
-        
-        // Upload translucent layer
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
-            glGenVertexArrays(1, &gpuData.translucentVAO);
-            glGenBuffers(1, &gpuData.translucentVBO);
-            glGenBuffers(1, &gpuData.translucentIBO);
-            
-            glBindVertexArray(gpuData.translucentVAO);
-            
-            // Upload vertex data
-            glBindBuffer(GL_ARRAY_BUFFER, gpuData.translucentVBO);
-            glBufferData(GL_ARRAY_BUFFER, meshData.translucentVertices.size() * sizeof(float),
-                        meshData.translucentVertices.data(), GL_STATIC_DRAW);
-            
-            // Upload index data
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpuData.translucentIBO);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, meshData.translucentIndices.size() * sizeof(uint32_t),
-                        meshData.translucentIndices.data(), GL_STATIC_DRAW);
-            
-            setupVertexAttributes();
-            glBindVertexArray(0);
-            
             gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndices.size());
+            gpuData.translucentVertexCount = static_cast<uint32_t>(meshData.translucentVertexCount);
+        }
+
+        // Create GPU resources through the render backend
+        if (g_renderBackend) {
+            auto blockLayout = GetBlockVertexLayout();
+
+            // Opaque backend resources
+            if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
+                gpuData.opaqueVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
+                    meshData.opaqueVertices.size() * sizeof(float), meshData.opaqueVertices.data());
+                gpuData.opaqueIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
+                    meshData.opaqueIndices.size() * sizeof(uint32_t), meshData.opaqueIndices.data());
+                gpuData.opaqueMesh = g_renderBackend->CreateMesh(gpuData.opaqueVB, gpuData.opaqueIB, blockLayout);
+            }
+
+            // Cutout backend resources
+            if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
+                gpuData.cutoutVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
+                    meshData.cutoutVertices.size() * sizeof(float), meshData.cutoutVertices.data());
+                gpuData.cutoutIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
+                    meshData.cutoutIndices.size() * sizeof(uint32_t), meshData.cutoutIndices.data());
+                gpuData.cutoutMesh = g_renderBackend->CreateMesh(gpuData.cutoutVB, gpuData.cutoutIB, blockLayout);
+            }
+
+            // Translucent backend resources
+            if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
+                gpuData.translucentVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
+                    meshData.translucentVertices.size() * sizeof(float), meshData.translucentVertices.data());
+                gpuData.translucentIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
+                    meshData.translucentIndices.size() * sizeof(uint32_t), meshData.translucentIndices.data());
+                gpuData.translucentMesh = g_renderBackend->CreateMesh(gpuData.translucentVB, gpuData.translucentIB, blockLayout);
+            }
         }
 
         // Update metadata

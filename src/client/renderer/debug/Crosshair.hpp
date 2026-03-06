@@ -2,8 +2,8 @@
 #pragma once
 
 #include <glm/glm.hpp>
-#include <glad/glad.h>
 #include <string>
+#include "../backend/RenderTypes.hpp"
 
 namespace Render {
 
@@ -32,32 +32,25 @@ namespace Render {
         int GetSize() const { return crosshairSize; }
 
     private:
-        GLuint vao;
-        GLuint vbo;
-        GLuint textureID;
-        GLuint shaderProgram;
-
         bool isVisible;
         int crosshairSize;
         bool isInitialized;
 
-        // Shader source code
+        // Backend handles
+        ShaderHandle m_shader = INVALID_SHADER;
+        TextureHandle m_texture = INVALID_TEXTURE;
+        BufferHandle m_vb = INVALID_BUFFER;
+        BufferHandle m_ib = INVALID_BUFFER;
+        MeshHandle m_mesh = INVALID_MESH;
+
+        // Shader source code (for GL backend's CreateShader)
         static const char* vertexShaderSource;
         static const char* fragmentShaderSource;
 
-        // Create and compile shaders
-        bool CreateShaders();
-
-        // Create the quad geometry for the crosshair
-        void CreateGeometry();
-
-        // Load the crosshair texture
+        // Load the crosshair texture through backend
         bool LoadTexture(const std::string& texturePath);
 
-        // Utility function to compile a shader
-        GLuint CompileShader(GLenum type, const char* source);
-
-        // Create a fallback crosshair if texture loading fails
+        // Create a fallback crosshair texture
         void CreateFallbackTexture();
     };
 

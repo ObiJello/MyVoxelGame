@@ -91,6 +91,8 @@ namespace Input {
             case Key::Alpha7:      glfwKey = GLFW_KEY_7; break;
             case Key::Alpha8:      glfwKey = GLFW_KEY_8; break;
             case Key::Alpha9:      glfwKey = GLFW_KEY_9; break;
+            case Key::F3:          glfwKey = GLFW_KEY_F3; break;
+            case Key::Tilde:       glfwKey = GLFW_KEY_GRAVE_ACCENT; break;
             default: return false;
         }
         return glfwGetKey(gWindow, glfwKey) == GLFW_PRESS;
@@ -173,5 +175,7 @@ namespace Input {
         currentKeyStates[Key::Alpha9] = IsKeyDown(Key::Alpha9);
         currentKeyStates[Key::LeftMouse] = IsMouseButtonDown(Key::LeftMouse);
         currentKeyStates[Key::RightMouse] = IsMouseButtonDown(Key::RightMouse);
+        currentKeyStates[Key::F3] = IsKeyDown(Key::F3);
+        currentKeyStates[Key::Tilde] = IsKeyDown(Key::Tilde);
     }
 }

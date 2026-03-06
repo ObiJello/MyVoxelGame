@@ -1,7 +1,7 @@
 // File: src/client/renderer/mesh/GPUDataPool.cpp
 #include "GPUDataPool.hpp"
+#include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
-#include <glad/glad.h>
 
 namespace Render {
 
@@ -66,12 +66,8 @@ namespace Render {
         
         std::lock_guard<std::mutex> lock(m_poolMutex);
         
-        // Clear GPU resources but keep the OpenGL objects allocated
-        // This avoids the cost of glGen*/glDelete* calls
-        // Just reset the index counts to mark as empty
-        data->opaqueIndexCount = 0;
-        data->cutoutIndexCount = 0;
-        data->translucentIndexCount = 0;
+        // Destroy backend resources and reset counts
+        data->DestroyAllResources(g_renderBackend.get());
         data->needsUpload = false;
         
         // Return to pool
@@ -103,28 +99,7 @@ namespace Render {
 
     void GPUDataPool::clearGPUResources(GPUSectionData* data) {
         if (!data) return;
-        
-        // Delete OpenGL objects
-        if (data->opaqueVAO) {
-            glDeleteVertexArrays(1, &data->opaqueVAO);
-            glDeleteBuffers(1, &data->opaqueVBO);
-            glDeleteBuffers(1, &data->opaqueIBO);
-        }
-        
-        if (data->cutoutVAO) {
-            glDeleteVertexArrays(1, &data->cutoutVAO);
-            glDeleteBuffers(1, &data->cutoutVBO);
-            glDeleteBuffers(1, &data->cutoutIBO);
-        }
-        
-        if (data->translucentVAO) {
-            glDeleteVertexArrays(1, &data->translucentVAO);
-            glDeleteBuffers(1, &data->translucentVBO);
-            glDeleteBuffers(1, &data->translucentIBO);
-        }
-        
-        // Reset to clean state
-        *data = GPUSectionData();
+        data->DestroyAllResources(g_renderBackend.get());
     }
 
     // Global initialization/shutdown functions

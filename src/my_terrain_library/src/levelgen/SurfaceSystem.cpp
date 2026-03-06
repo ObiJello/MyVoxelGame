@@ -7,7 +7,8 @@
 #include "synth/NormalNoise.h"
 #include "random/XoroshiroRandomSource.h"
 #include "random/PositionalRandomFactory.h"
-#include "world/MinecraftBlockType.h"
+#include "world/level/block/Blocks.h"
+#include "world/level/block/Blocks.h"
 #include "world/biome/Biome.h"
 #include "world/biome/Biomes.h"
 #include "core/BlockPos.h"
@@ -20,12 +21,14 @@
 namespace minecraft {
 namespace levelgen {
 
+using Blocks = minecraft::world::level::block::Blocks;
+
 // Reference: SurfaceSystem.java lines 295-307
 void SurfaceSystem::makeBands(
     XoroshiroRandomSource& random,
-    std::vector<::world::IBlockType*>& clayBands,
+    std::vector<BlockState*>& clayBands,
     int32_t baseWidth,
-    ::world::IBlockType* state
+    BlockState* state
 ) {
     // int bandCount = random.nextIntBetweenInclusive(6, 15);
     int32_t bandCount = 6 + random.nextInt(10);  // 6-15 inclusive
@@ -43,22 +46,22 @@ void SurfaceSystem::makeBands(
 }
 
 // Reference: SurfaceSystem.java lines 262-293
-std::vector<::world::IBlockType*> SurfaceSystem::generateBands(XoroshiroRandomSource& random) {
+std::vector<BlockState*> SurfaceSystem::generateBands(XoroshiroRandomSource& random) {
     // Line 263: BlockState[] clayBands = new BlockState[192];
-    std::vector<::world::IBlockType*> clayBands(192, ::world::MinecraftBlocks::TERRACOTTA());
+    std::vector<BlockState*> clayBands(192, minecraft::world::level::block::Blocks::TERRACOTTA->defaultBlockState());
 
     // Lines 266-271: Add orange terracotta bands
     for (int32_t i = 0; i < static_cast<int32_t>(clayBands.size()); ) {
         i += random.nextInt(5) + 1;
         if (i < static_cast<int32_t>(clayBands.size())) {
-            clayBands[i] = ::world::MinecraftBlocks::ORANGE_TERRACOTTA();
+            clayBands[i] = minecraft::world::level::block::Blocks::ORANGE_TERRACOTTA->defaultBlockState();
         }
     }
 
     // Lines 273-275: Add colored bands
-    makeBands(random, clayBands, 1, ::world::MinecraftBlocks::YELLOW_TERRACOTTA());
-    makeBands(random, clayBands, 2, ::world::MinecraftBlocks::BROWN_TERRACOTTA());
-    makeBands(random, clayBands, 1, ::world::MinecraftBlocks::RED_TERRACOTTA());
+    makeBands(random, clayBands, 1, minecraft::world::level::block::Blocks::YELLOW_TERRACOTTA->defaultBlockState());
+    makeBands(random, clayBands, 2, minecraft::world::level::block::Blocks::BROWN_TERRACOTTA->defaultBlockState());
+    makeBands(random, clayBands, 1, minecraft::world::level::block::Blocks::RED_TERRACOTTA->defaultBlockState());
 
     // Lines 276-290: Add white terracotta bands
     // int whiteBandCount = random.nextIntBetweenInclusive(9, 15);
@@ -66,14 +69,14 @@ std::vector<::world::IBlockType*> SurfaceSystem::generateBands(XoroshiroRandomSo
     int32_t bandIndex = 0;
 
     for (int32_t start = 0; bandIndex < whiteBandCount && start < static_cast<int32_t>(clayBands.size()); start += random.nextInt(16) + 4) {
-        clayBands[start] = ::world::MinecraftBlocks::WHITE_TERRACOTTA();
+        clayBands[start] = minecraft::world::level::block::Blocks::WHITE_TERRACOTTA->defaultBlockState();
 
         if (start - 1 > 0 && random.nextBoolean()) {
-            clayBands[start - 1] = ::world::MinecraftBlocks::LIGHT_GRAY_TERRACOTTA();
+            clayBands[start - 1] = minecraft::world::level::block::Blocks::LIGHT_GRAY_TERRACOTTA->defaultBlockState();
         }
 
         if (start + 1 < static_cast<int32_t>(clayBands.size()) && random.nextBoolean()) {
-            clayBands[start + 1] = ::world::MinecraftBlocks::LIGHT_GRAY_TERRACOTTA();
+            clayBands[start + 1] = minecraft::world::level::block::Blocks::LIGHT_GRAY_TERRACOTTA->defaultBlockState();
         }
 
         ++bandIndex;
@@ -85,7 +88,7 @@ std::vector<::world::IBlockType*> SurfaceSystem::generateBands(XoroshiroRandomSo
 // Reference: SurfaceSystem.java lines 51-65
 SurfaceSystem::SurfaceSystem(
     RandomState* randomState,
-    ::world::IBlockType* defaultBlock,
+    BlockState* defaultBlock,
     int32_t seaLevel,
     random::PositionalRandomFactory* noiseRandom
 )
@@ -151,7 +154,7 @@ double SurfaceSystem::getSurfaceSecondary(int32_t blockX, int32_t blockZ) const 
 }
 
 // Reference: SurfaceSystem.java lines 309-312
-::world::IBlockType* SurfaceSystem::getBand(int32_t worldX, int32_t y, int32_t worldZ) const {
+BlockState* SurfaceSystem::getBand(int32_t worldX, int32_t y, int32_t worldZ) const {
     // int offset = (int)Math.round(this.clayBandsOffsetNoise.getValue((double)worldX, 0.0, (double)worldZ) * 4.0);
     int32_t offset = static_cast<int32_t>(std::round(
         m_clayBandsOffsetNoise->getValue(
@@ -168,7 +171,7 @@ double SurfaceSystem::getSurfaceSecondary(int32_t blockX, int32_t blockZ) const 
 }
 
 // Reference: SurfaceSystem.java lines 170-172
-bool SurfaceSystem::isStone(const ::world::IBlockType* block) const {
+bool SurfaceSystem::isStone(const BlockState* block) const {
     // Check if block is not air and has no fluid state
     // In Minecraft: !state.isAir() && state.getFluidState().isEmpty()
     return block && !block->isAir() && !block->isFluid();
@@ -244,7 +247,7 @@ void SurfaceSystem::buildSurface(
             // Reference: lines 119-151 - scan column from top to bottom
             for (int32_t y = height; y >= endY; --y) {
                 // Get current block
-                ::world::IBlockType* oldBlock = chunk->getBlockState(x, y, z);
+                BlockState* oldBlock = chunk->getBlockState(x, y, z);
                 if (oldBlock == nullptr) continue;
 
                 // Reference: lines 121-127 - check block type
@@ -264,7 +267,7 @@ void SurfaceSystem::buildSurface(
                         nextCeilingStoneY = -2000000000;  // DimensionType.WAY_BELOW_MIN_Y
 
                         for (int32_t lookaheadY = y - 1; lookaheadY >= endY - 1; --lookaheadY) {
-                            ::world::IBlockType* nextBlock = chunk->getBlockState(x, lookaheadY, z);
+                            BlockState* nextBlock = chunk->getBlockState(x, lookaheadY, z);
                             if (nextBlock == nullptr) continue;
 
                             if (!isStone(nextBlock)) {
@@ -284,7 +287,7 @@ void SurfaceSystem::buildSurface(
                     // Reference: lines 144-149 - apply rule if block is default
                     // Check if current block is the default block (stone)
                     if (oldBlock == m_defaultBlock) {
-                        ::world::IBlockType* newBlock = rule->tryApply(blockX, y, blockZ);
+                        BlockState* newBlock = rule->tryApply(blockX, y, blockZ);
 
                         if (newBlock != nullptr) {
                             chunk->setBlockState(x, y, z, newBlock, false);
@@ -357,7 +360,7 @@ void SurfaceSystem::erodedBadlandsExtension(
 
     // Reference: lines 202-211 - check for water blocks
     for (int32_t y = startY; y >= minY; --y) {
-        ::world::IBlockType* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
+        BlockState* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
         if (block == nullptr) continue;
 
         if (block == m_defaultBlock) {
@@ -371,7 +374,7 @@ void SurfaceSystem::erodedBadlandsExtension(
 
     // Reference: lines 213-215 - fill air with default block
     for (int32_t y = startY; y >= minY; --y) {
-        ::world::IBlockType* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
+        BlockState* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
         if (block == nullptr) continue;
 
         if (!block->isAir()) {
@@ -450,7 +453,7 @@ void SurfaceSystem::frozenOceanExtension(
     // Reference: lines 248-257
     int32_t startY = std::max(height, static_cast<int32_t>(top) + 1);
     for (int32_t y = startY; y >= minSurfaceLevel; --y) {
-        ::world::IBlockType* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
+        BlockState* block = chunk->getBlockState(blockX & 15, y, blockZ & 15);
         if (block == nullptr) continue;
 
         bool shouldPlace = false;
@@ -467,14 +470,14 @@ void SurfaceSystem::frozenOceanExtension(
         if (shouldPlace) {
             if (snowDepth <= maxSnowDepth && y > minSnowHeight) {
                 // Place snow block
-                ::world::IBlockType* snowBlock = ::world::MinecraftBlocks::get("minecraft:snow_block");
+                BlockState* snowBlock = minecraft::world::level::block::Blocks::getDefaultState("minecraft:snow_block");
                 if (snowBlock != nullptr) {
                     chunk->setBlockState(blockX & 15, y, blockZ & 15, snowBlock, false);
                 }
                 ++snowDepth;
             } else {
                 // Place packed ice
-                ::world::IBlockType* packedIce = ::world::MinecraftBlocks::get("minecraft:packed_ice");
+                BlockState* packedIce = minecraft::world::level::block::Blocks::getDefaultState("minecraft:packed_ice");
                 if (packedIce != nullptr) {
                     chunk->setBlockState(blockX & 15, y, blockZ & 15, packedIce, false);
                 }

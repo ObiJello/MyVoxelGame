@@ -15,12 +15,32 @@ namespace Log {
         return logMutex;
     }
 
+    static LogCallback& getCallback() {
+        static LogCallback callback;
+        return callback;
+    }
+
+    static std::mutex& getCallbackMutex() {
+        static std::mutex cbMutex;
+        return cbMutex;
+    }
+
     void Init() {
         // No-op for now; future file setup could go here.
     }
 
     void SetLevel(Level level) {
         getCurrentLevel() = level;
+    }
+
+    void RegisterCallback(LogCallback callback) {
+        std::lock_guard<std::mutex> lock(getCallbackMutex());
+        getCallback() = std::move(callback);
+    }
+
+    void UnregisterCallback() {
+        std::lock_guard<std::mutex> lock(getCallbackMutex());
+        getCallback() = nullptr;
     }
 
     static void vLog(Level level, const char* prefix, const char* fmt, va_list args) {
@@ -45,11 +65,26 @@ namespace Log {
                 break;
         }
 
+        // Format message for callback before consuming va_list
+        va_list argsCopy;
+        va_copy(argsCopy, args);
+        char callbackBuf[2048];
+        std::vsnprintf(callbackBuf, sizeof(callbackBuf), fmt, argsCopy);
+        va_end(argsCopy);
+
         std::lock_guard<std::mutex> lock(getLogMutex());
         std::FILE* out = (level == Level::Error ? stderr : stdout);
         std::fprintf(out, "%s%s%s: ", colorStart, prefix, colorEnd);
         std::vfprintf(out, fmt, args);
         std::fprintf(out, "\n");
+
+        // Invoke callback if registered
+        {
+            std::lock_guard<std::mutex> cbLock(getCallbackMutex());
+            if (getCallback()) {
+                getCallback()(level, std::string(callbackBuf));
+            }
+        }
     }
 
     void Info(const char* fmt, ...) {

@@ -4,7 +4,14 @@ project(MyVoxelGame LANGUAGES CXX VERSION 0.1.0)
 # ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices,
 #     and force a minimum deployment target ─────────────────────────────────
 if(APPLE)
-    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+    # When Vulkan is enabled, build arm64 only (MoltenVK/Vulkan are arm64-only via Homebrew)
+    # For OpenGL-only builds, universal binaries are supported
+    option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
+    if(ENABLE_VULKAN)
+        set(CMAKE_OSX_ARCHITECTURES "arm64")
+    else()
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
+    endif()
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.7.6" CACHE STRING "Minimum macOS version" FORCE)
 endif()
 # ────────────────────────────────────────────────────────────────────────────
@@ -150,12 +157,12 @@ endif()
 # 5a) Terrain library - static library from your custom terrain generation system
 # For MD5 hashing: Use CommonCrypto on macOS (built-in, universal), OpenSSL elsewhere
 file(GLOB_RECURSE TERRAIN_LIBRARY_SOURCES
-        "src/my_terrain_library_old/src/*.cpp"
+        "src/my_terrain_library/src/*.cpp"
 )
 
 add_library(terrain_library STATIC ${TERRAIN_LIBRARY_SOURCES})
 target_include_directories(terrain_library PUBLIC
-        src/my_terrain_library_old/include
+        src/my_terrain_library/include
         ${PROJECT_SOURCE_DIR}/ext/md5  # MD5 wrapper (uses CommonCrypto on macOS, OpenSSL elsewhere)
 )
 target_compile_features(terrain_library PUBLIC cxx_std_20)
@@ -168,6 +175,72 @@ else()
     # Other platforms: Use OpenSSL
     find_package(OpenSSL REQUIRED)
     target_link_libraries(terrain_library PUBLIC OpenSSL::Crypto)
+endif()
+
+# 5b) Optional Vulkan backend
+option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
+if(ENABLE_VULKAN)
+    find_package(Vulkan QUIET)
+    if(Vulkan_FOUND)
+        message(STATUS "Vulkan found: ${Vulkan_LIBRARY}")
+        set(HAS_VULKAN TRUE)
+    else()
+        # Try homebrew paths on macOS
+        if(APPLE)
+            find_library(VULKAN_LIBRARY NAMES vulkan PATHS /opt/homebrew/lib /usr/local/lib)
+            find_path(VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h PATHS /opt/homebrew/include /usr/local/include)
+            if(VULKAN_LIBRARY AND VULKAN_INCLUDE_DIR)
+                message(STATUS "Vulkan found via Homebrew: ${VULKAN_LIBRARY}")
+                set(HAS_VULKAN TRUE)
+                # Also find MoltenVK for bundling
+                find_library(MOLTENVK_LIBRARY NAMES MoltenVK PATHS /opt/homebrew/lib /usr/local/lib)
+            else()
+                message(STATUS "Vulkan not found, Vulkan backend disabled")
+                set(HAS_VULKAN FALSE)
+            endif()
+        else()
+            message(STATUS "Vulkan not found, Vulkan backend disabled")
+            set(HAS_VULKAN FALSE)
+        endif()
+    endif()
+else()
+    set(HAS_VULKAN FALSE)
+endif()
+
+# SPIR-V shader compilation (if Vulkan enabled and glslc available)
+if(HAS_VULKAN)
+    find_program(GLSLC glslc PATHS /opt/homebrew/bin /usr/local/bin)
+    if(GLSLC)
+        message(STATUS "glslc found: ${GLSLC}")
+        # Compile Vulkan shaders to SPIR-V
+        set(VK_SHADER_DIR "${PROJECT_SOURCE_DIR}/shaders")
+        set(VK_SPV_DIR "${CMAKE_BINARY_DIR}/shaders")
+        file(MAKE_DIRECTORY ${VK_SPV_DIR})
+
+        set(VK_SHADERS
+            ${VK_SHADER_DIR}/block_vk.vert
+            ${VK_SHADER_DIR}/block_vk.frag
+            ${VK_SHADER_DIR}/crosshair_vk.vert
+            ${VK_SHADER_DIR}/crosshair_vk.frag
+            ${VK_SHADER_DIR}/highlight_vk.vert
+            ${VK_SHADER_DIR}/highlight_vk.frag
+        )
+        set(VK_SPV_FILES)
+        foreach(SHADER ${VK_SHADERS})
+            get_filename_component(SHADER_NAME ${SHADER} NAME)
+            set(SPV_FILE ${VK_SPV_DIR}/${SHADER_NAME}.spv)
+            add_custom_command(
+                OUTPUT ${SPV_FILE}
+                COMMAND ${GLSLC} ${SHADER} -o ${SPV_FILE}
+                DEPENDS ${SHADER}
+                COMMENT "Compiling SPIR-V: ${SHADER_NAME}"
+            )
+            list(APPEND VK_SPV_FILES ${SPV_FILE})
+        endforeach()
+        add_custom_target(compile_shaders ALL DEPENDS ${VK_SPV_FILES})
+    else()
+        message(STATUS "glslc not found, using pre-compiled SPIR-V shaders")
+    endif()
 endif()
 
 # 6) The game executable (on macOS, it's a bundle)
@@ -207,6 +280,7 @@ if(APPLE)
             src/server/world/storage/MinecraftChunkLoader.cpp
             src/common/world/level/World.cpp
             src/server/world/ChunkProvider.cpp
+            src/server/world/MyTerrainGenerator.cpp
             src/common/world/chunk/Chunk.cpp
             src/server/world/tracking/DirtyTracker.cpp
             src/server/world/storage/AsyncChunkSaver.cpp
@@ -214,7 +288,6 @@ if(APPLE)
             src/server/world/storage/AnvilChunkSaver.cpp
             src/server/world/storage/MinecraftChunkLoaderImpl.cpp
             src/common/world/gen/ProceduralChunkGenerator.cpp
-            src/server/world/MyTerrainGenerator.cpp
             src/server/world/cache/ChunkCache.cpp
             src/platform/GameDirectory.cpp
             src/common/world/math/WorldCoordinates.cpp
@@ -251,7 +324,16 @@ if(APPLE)
             src/client/network/ClientConnection.cpp
             src/client/network/NetworkIOService.cpp
             src/client/network/ClientPacketHandler.cpp
+
+            # Render backend abstraction
+            src/client/renderer/backend/opengl/GLBackend.cpp
     )
+    # Add Vulkan backend source if available
+    if(HAS_VULKAN)
+        target_sources(MyVoxelGame PRIVATE
+            src/client/renderer/backend/vulkan/VKBackend.cpp
+        )
+    endif()
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
     )
@@ -400,6 +482,8 @@ else()
             src/server/IntegratedServer.hpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
+            src/server/world/MyTerrainGenerator.cpp
+            src/server/world/MyTerrainGenerator.hpp
             src/server/world/ServerWorkerPool.cpp
             src/server/world/ServerWorkerPool.hpp
             src/server/world/ignore.cpp
@@ -408,8 +492,6 @@ else()
             # ========================================================================
             # CUSTOM TERRAIN GENERATION (MyTerrainGenerator wrapper)
             # ========================================================================
-            src/server/world/MyTerrainGenerator.cpp
-            src/server/world/MyTerrainGenerator.hpp
 
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
@@ -486,7 +568,17 @@ else()
             src/common/network/packets/LoginStartC2S.hpp
             src/common/network/packets/KeepAliveC2S.cpp
             src/common/network/packets/KeepAliveC2S.hpp
+
+            # Render backend abstraction
+            src/client/renderer/backend/opengl/GLBackend.cpp
+            src/client/renderer/backend/opengl/GLBackend.hpp
     )
+    # Add Vulkan backend source if available (non-Apple builds)
+    if(HAS_VULKAN)
+        target_sources(MyVoxelGame PRIVATE
+            src/client/renderer/backend/vulkan/VKBackend.cpp
+        )
+    endif()
 endif()
 
 # 7) PCH
@@ -507,7 +599,7 @@ target_include_directories(MyVoxelGame PRIVATE
         # ========================================================================
         # CUSTOM TERRAIN LIBRARY
         # ========================================================================
-        src/my_terrain_library_old/include
+        src/my_terrain_library/include
 )
 
 # Add Asio or Boost includes
@@ -530,6 +622,56 @@ target_link_libraries(MyVoxelGame PRIVATE
 # Link with Asio if using standalone
 if(TARGET asio)
     target_link_libraries(MyVoxelGame PRIVATE asio)
+endif()
+
+# Link Vulkan if available
+if(HAS_VULKAN)
+    target_compile_definitions(MyVoxelGame PRIVATE HAS_VULKAN=1)
+    target_compile_definitions(imgui PRIVATE HAS_VULKAN=1)
+    if(Vulkan_FOUND)
+        target_link_libraries(MyVoxelGame PRIVATE Vulkan::Vulkan)
+        target_include_directories(MyVoxelGame PRIVATE ${Vulkan_INCLUDE_DIRS})
+    else()
+        target_link_libraries(MyVoxelGame PRIVATE ${VULKAN_LIBRARY})
+        target_include_directories(MyVoxelGame PRIVATE ${VULKAN_INCLUDE_DIR})
+    endif()
+    # Add ImGui Vulkan backend to imgui target
+    target_sources(imgui PRIVATE
+        ext/imgui/backends/imgui_impl_vulkan.cpp
+    )
+    if(Vulkan_FOUND)
+        target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
+        target_include_directories(imgui PRIVATE ${Vulkan_INCLUDE_DIRS})
+    else()
+        target_link_libraries(imgui PRIVATE ${VULKAN_LIBRARY})
+        target_include_directories(imgui PRIVATE ${VULKAN_INCLUDE_DIR})
+    endif()
+    # Copy SPIR-V shaders to bundle/output
+    if(APPLE)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PROJECT_SOURCE_DIR}/shaders/block_vk.vert.spv"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.vert.spv"
+        )
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${PROJECT_SOURCE_DIR}/shaders/block_vk.frag.spv"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.frag.spv"
+        )
+    endif()
+    # Tell GLFW where to find the Vulkan loader at runtime (needed for macOS/MoltenVK)
+    if(APPLE)
+        if(Vulkan_LIBRARY)
+            target_compile_definitions(glfw PRIVATE _GLFW_VULKAN_LIBRARY="${Vulkan_LIBRARY}")
+            message(STATUS "GLFW Vulkan library path: ${Vulkan_LIBRARY}")
+        elseif(VULKAN_LIBRARY)
+            target_compile_definitions(glfw PRIVATE _GLFW_VULKAN_LIBRARY="${VULKAN_LIBRARY}")
+            message(STATUS "GLFW Vulkan library path: ${VULKAN_LIBRARY}")
+        endif()
+    endif()
+    message(STATUS "Vulkan backend: ENABLED")
+else()
+    message(STATUS "Vulkan backend: DISABLED")
 endif()
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────

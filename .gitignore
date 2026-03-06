@@ -1,24 +1,37 @@
 # Ignore CMake build folders
-cmake-build-debug/
-cmake-build-release/
 build/
- 
+build-*/
+cmake-build-*/
+
 # CLion / IntelliJ files
 .idea/
 *.iml
- 
+
+# VS Code
+.vscode/
+
 # macOS system files
 .DS_Store
- 
+
 # Ninja filesystem lock
 .ninja_deps
 .ninja_log
- 
+
 # Editor backups / swap files
 *~
 *.swp
+*.swo
+
+# Compiled objects / libraries / executables
+*.o
+*.a
+*.so
+*.dylib
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
 
 # My own ignore
-
 depreciated/
-

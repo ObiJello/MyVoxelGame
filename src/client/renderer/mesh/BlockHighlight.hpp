@@ -2,11 +2,11 @@
 #pragma once
 
 #include <glm/glm.hpp>
-#include <glad/glad.h>
 #include <optional>
 
 #include "../../input/PlayerController.hpp"
 #include "common/physics/RayCast.hpp"
+#include "../backend/RenderTypes.hpp"
 
 namespace Render {
 
@@ -25,23 +25,16 @@ namespace Render {
         static bool IsValidHighlight(const std::optional<Game::RaycastHit>& hit);
 
     private:
-        GLuint vao;
-        GLuint vbo;
-        GLuint ebo;
-        GLuint shaderProgram;
+        // Backend handles
+        ShaderHandle m_shader = INVALID_SHADER;
+        MeshHandle m_mesh = INVALID_MESH;
+        BufferHandle m_vb = INVALID_BUFFER;
+        BufferHandle m_ib = INVALID_BUFFER;
+        TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
-        // Shader source code
+        // Shader source code (used by GL backend's CreateShader)
         static const char* vertexShaderSource;
         static const char* fragmentShaderSource;
-
-        // Create and compile shaders
-        bool CreateShaders();
-
-        // Create the wireframe cube geometry
-        void CreateGeometry();
-
-        // Utility function to compile a shader
-        GLuint CompileShader(GLenum type, const char* source);
     };
 
     // Global highlight renderer instance

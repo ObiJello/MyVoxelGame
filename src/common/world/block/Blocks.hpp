@@ -75,7 +75,15 @@ namespace Game {
         MossBlock      = 67,
         SpruceLeaves   = 68,
         DeepslateRedstoneOre = 69,
-
+        JungleLog      = 70,
+        DarkOakLog     = 71,
+        JungleLeaves   = 72,
+        DarkOakLeaves  = 73,
+        AcaciaLeaves   = 74,
+        DeepslateEmeraldOre = 75,
+        PackedIce      = 76,
+        RedMushroom    = 77,
+        BrownMushroom  = 78,
 
         Count // Always keep this as the last entry.
     };

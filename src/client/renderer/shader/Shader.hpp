@@ -2,51 +2,46 @@
 #pragma once
 
 #include <string>
-#include <unordered_map>
 #include <filesystem>
 #include <glm/glm.hpp>
+#include "../backend/RenderTypes.hpp"
+
+namespace Render { class RenderBackend; }
 
 class Shader {
 public:
     // Construct with paths to vertex and fragment shader files.
     Shader(const std::string& vertexPath, const std::string& fragmentPath);
 
-    // Destructor: deletes the GL program
+    // Destructor: destroys the backend shader handle
     ~Shader();
 
-    // Use (bind) this shader - const because it doesn't modify the shader object
+    // Use (bind) this shader
     void Use() const;
 
-    // Retrieve uniform location (cached) - mutable cache allows const method
-    int GetUniformLocation(const std::string& name) const;
-
-    // Set a mat4 uniform (e.g. uMVP) - const because it doesn't modify the shader object
+    // Set a mat4 uniform (e.g. uMVP)
     void SetMat4(const std::string& name, const glm::mat4& matrix) const;
 
     // Query and report if the underlying files have changed; if so, recompile & relink.
-    // This is NOT const because it can modify the shader program
     void HotReloadIfNeeded();
 
-    // Return the OpenGL program ID
-    unsigned int ID() const { return programID; }
+    // Return the backend shader handle
+    Render::ShaderHandle GetHandle() const { return m_handle; }
+
+    // Return the legacy OpenGL program ID (for backward compatibility)
+    unsigned int ID() const;
 
 private:
     std::string vertexFile;
     std::string fragmentFile;
-    unsigned int programID = 0;
+    Render::ShaderHandle m_handle = Render::INVALID_SHADER;
 
     // Track last write times for hot-reload
     std::filesystem::file_time_type lastWriteVert;
     std::filesystem::file_time_type lastWriteFrag;
 
-    // Uniform location cache - mutable so it can be modified in const methods
-    mutable std::unordered_map<std::string, int> uniformCache;
-
-    // Internal: compile and link shaders, replacing programID.
+    // Internal: compile and link shaders via backend
     void CompileAndLink();
-
-    // Internal: load file content
-    static std::string ReadFile(const std::string& path);
 
     // Internal: check and update last-write timestamps
     void UpdateTimestamps();

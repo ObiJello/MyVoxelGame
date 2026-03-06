@@ -1,15 +1,16 @@
 // File: src/client/renderer/mesh/BlockHighlight.cpp
 #include "BlockHighlight.hpp"
+#include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockRegistry.hpp"
-#include <vector>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace Render {
 
     // Global instance
     BlockHighlight g_blockHighlight;
 
-    // Shader sources
+    // Shader sources (used by GL backend's CreateShader from source)
     const char* BlockHighlight::vertexShaderSource = R"(
 #version 330 core
 
@@ -19,8 +20,7 @@ uniform mat4 uMVP;
 uniform vec3 uBlockPos;
 
 void main() {
-    // Offset the wireframe slightly to prevent z-fighting
-    vec3 worldPos = aPos + uBlockPos + vec3(0.001, 0.001, 0.001);
+    vec3 worldPos = aPos + uBlockPos;
     gl_Position = uMVP * vec4(worldPos, 1.0);
 }
 )";
@@ -31,254 +31,116 @@ void main() {
 out vec4 FragColor;
 
 void main() {
-    // Minecraft-style black outline
     FragColor = vec4(0.0, 0.0, 0.0, 1.0);
 }
 )";
 
-    BlockHighlight::BlockHighlight()
-        : vao(0), vbo(0), ebo(0), shaderProgram(0) {
-    }
+    BlockHighlight::BlockHighlight() = default;
 
     BlockHighlight::~BlockHighlight() {
-        if (vao != 0) glDeleteVertexArrays(1, &vao);
-        if (vbo != 0) glDeleteBuffers(1, &vbo);
-        if (ebo != 0) glDeleteBuffers(1, &ebo);
-        if (shaderProgram != 0) glDeleteProgram(shaderProgram);
+        if (g_renderBackend) {
+            if (m_mesh != INVALID_MESH)         g_renderBackend->DestroyMesh(m_mesh);
+            if (m_vb != INVALID_BUFFER)         g_renderBackend->DestroyBuffer(m_vb);
+            if (m_ib != INVALID_BUFFER)         g_renderBackend->DestroyBuffer(m_ib);
+            if (m_dummyTexture != INVALID_TEXTURE) g_renderBackend->DestroyTexture(m_dummyTexture);
+            if (m_shader != INVALID_SHADER)     g_renderBackend->DestroyShader(m_shader);
+        }
     }
 
     bool BlockHighlight::Initialize() {
         Log::Info("Initializing block highlight system");
 
-        if (!CreateShaders()) {
-            Log::Error("Failed to create highlight shaders");
+        if (!g_renderBackend) {
+            Log::Error("Block highlight: No render backend available");
             return false;
         }
 
-        CreateGeometry();
+        // Create shader — try SPIR-V files first (Vulkan), fall back to source (GL)
+        m_shader = g_renderBackend->CreateShaderFromFiles("shaders/highlight.vert", "shaders/highlight.frag");
+        if (m_shader == INVALID_SHADER) {
+            // Fall back to compiling from source (OpenGL path)
+            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
+        }
+        if (m_shader == INVALID_SHADER) {
+            Log::Error("Block highlight: Failed to create shader");
+            return false;
+        }
+
+        // Create 1x1 white dummy texture (Vulkan pipeline layout requires a descriptor set)
+        unsigned char white[] = {255, 255, 255, 255};
+        m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
+
+        // Build wireframe cube geometry using 12-float vertex format
+        // Small offset to avoid z-fighting
+        const float e = 0.005f;
+        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f; // black
+        // 8 vertices: pos(3) + norm(3) + uv(2) + color(4)
+        float verts[] = {
+            0-e,0-e,0-e, 0,0,0, 0,0, r,g,b,a,  // 0
+            1+e,0-e,0-e, 0,0,0, 0,0, r,g,b,a,  // 1
+            1+e,0-e,1+e, 0,0,0, 0,0, r,g,b,a,  // 2
+            0-e,0-e,1+e, 0,0,0, 0,0, r,g,b,a,  // 3
+            0-e,1+e,0-e, 0,0,0, 0,0, r,g,b,a,  // 4
+            1+e,1+e,0-e, 0,0,0, 0,0, r,g,b,a,  // 5
+            1+e,1+e,1+e, 0,0,0, 0,0, r,g,b,a,  // 6
+            0-e,1+e,1+e, 0,0,0, 0,0, r,g,b,a,  // 7
+        };
+        uint32_t indices[] = {
+            0,1, 1,2, 2,3, 3,0, // bottom
+            4,5, 5,6, 6,7, 7,4, // top
+            0,4, 1,5, 2,6, 3,7  // verticals
+        };
+
+        m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, sizeof(verts), verts);
+        m_ib = g_renderBackend->CreateBuffer(BufferUsage::Index, sizeof(indices), indices);
+        m_mesh = g_renderBackend->CreateMesh(m_vb, m_ib, GetBlockVertexLayout());
 
         Log::Info("Block highlight system initialized successfully");
         return true;
     }
 
     void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& viewProjectionMatrix) {
-        // Clear any pending OpenGL errors before we start
-        while (glGetError() != GL_NO_ERROR) {
-            // Clear error queue
-        }
+        if (m_mesh == INVALID_MESH || m_shader == INVALID_SHADER || !g_renderBackend) return;
 
-        // Store ALL current OpenGL state that we might change
-        GLint currentProgram;
-        GLboolean depthMask;
-        GLboolean blendEnabled;
-        GLint polygonMode[2];
-        GLfloat lineWidth;
-        GLint blendSrc, blendDst;
-        GLint currentVAO;
-        GLint currentArrayBuffer;
-        GLint currentElementBuffer;
+        PipelineState state;
+        state.depthTestEnabled = true;
+        state.depthWriteEnabled = false;
+        state.blendEnabled = true;
+        state.srcBlendFactor = BlendFactor::SrcAlpha;
+        state.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+        state.cullMode = CullMode::None;
+        state.primitiveType = PrimitiveType::Lines;
+        state.lineWidth = 3.0f;
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->BindTexture(m_dummyTexture, 0);
 
-        glGetIntegerv(GL_CURRENT_PROGRAM, &currentProgram);
-        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
-        blendEnabled = glIsEnabled(GL_BLEND);
-        glGetIntegerv(GL_POLYGON_MODE, polygonMode);
-        glGetFloatv(GL_LINE_WIDTH, &lineWidth);
-        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrc);
-        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDst);
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &currentVAO);
-        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &currentArrayBuffer);
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &currentElementBuffer);
+        // Set uniforms
+        g_renderBackend->SetUniformMat4(m_shader, "uMVP", viewProjectionMatrix);
+        g_renderBackend->SetUniformVec3(m_shader, "uBlockPos",
+            glm::vec3(static_cast<float>(blockPos.x),
+                      static_cast<float>(blockPos.y),
+                      static_cast<float>(blockPos.z)));
 
-        // Set up our rendering state
-        glUseProgram(shaderProgram);
-        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-        glDepthMask(GL_FALSE);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glLineWidth(2.0f);
+        g_renderBackend->DrawIndexed(m_mesh, 24); // 12 edges * 2 indices
 
-        // Set uniforms ONLY on our shader (we're sure it's active now)
-        GLint mvpLoc = glGetUniformLocation(shaderProgram, "uMVP");
-        GLint blockPosLoc = glGetUniformLocation(shaderProgram, "uBlockPos");
-
-        if (mvpLoc != -1) {
-            glUniformMatrix4fv(mvpLoc, 1, GL_FALSE, &viewProjectionMatrix[0][0]);
-        }
-
-        if (blockPosLoc != -1) {
-            glUniform3f(blockPosLoc,
-                       static_cast<float>(blockPos.x),
-                       static_cast<float>(blockPos.y),
-                       static_cast<float>(blockPos.z));
-        }
-
-        // Render the wireframe cube
-        glBindVertexArray(vao);
-        glDrawElements(GL_LINES, 24, GL_UNSIGNED_INT, nullptr);
-
-        // Restore ALL OpenGL state exactly as it was
-        glBindVertexArray(currentVAO);
-        glBindBuffer(GL_ARRAY_BUFFER, currentArrayBuffer);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, currentElementBuffer);
-        glUseProgram(currentProgram);
-        glPolygonMode(GL_FRONT_AND_BACK, polygonMode[0]);
-        glDepthMask(depthMask);
-        glBlendFunc(blendSrc, blendDst);
-        if (!blendEnabled) {
-            glDisable(GL_BLEND);
-        }
-        glLineWidth(lineWidth);
-
-        // Clear any errors that might have occurred during our rendering
-        // (without logging them since they're not from the main renderer)
-        while (glGetError() != GL_NO_ERROR) {
-            // Silently clear error queue
-        }
+        // Restore default pipeline state
+        PipelineState defaultState;
+        defaultState.depthTestEnabled = true;
+        defaultState.depthWriteEnabled = true;
+        defaultState.blendEnabled = false;
+        defaultState.cullMode = CullMode::Back;
+        defaultState.polygonMode = PolygonMode::Fill;
+        g_renderBackend->SetPipelineState(defaultState);
     }
 
     bool BlockHighlight::IsValidHighlight(const std::optional<Game::RaycastHit>& hit) {
-        if (!hit.has_value()) {
-            return false;
-        }
-
-        // Check if the block is within interaction range
-        if (hit->distance > Game::PlayerController::INTERACTION_RANGE) {
-            return false;
-        }
-
-        // Check if it's a solid block (not air)
-        if (hit->blockId == Game::BlockID::Air) {
-            return false;
-        }
-
-        // Check if the block exists in the registry
-        const Game::Block& block = Game::BlockRegistry::Get(hit->blockId);
-
-        // Don't highlight transparent blocks like water or glass in some cases
-        // For now, we'll highlight all non-air blocks
+        if (!hit.has_value()) return false;
+        if (hit->distance > Game::PlayerController::INTERACTION_RANGE) return false;
+        if (hit->blockId == Game::BlockID::Air) return false;
+        // Verify block exists in registry
+        Game::BlockRegistry::Get(hit->blockId);
         return true;
-    }
-
-    bool BlockHighlight::CreateShaders() {
-        // Compile vertex shader
-        GLuint vertexShader = CompileShader(GL_VERTEX_SHADER, vertexShaderSource);
-        if (vertexShader == 0) {
-            return false;
-        }
-
-        // Compile fragment shader
-        GLuint fragmentShader = CompileShader(GL_FRAGMENT_SHADER, fragmentShaderSource);
-        if (fragmentShader == 0) {
-            glDeleteShader(vertexShader);
-            return false;
-        }
-
-        // Create shader program
-        shaderProgram = glCreateProgram();
-        glAttachShader(shaderProgram, vertexShader);
-        glAttachShader(shaderProgram, fragmentShader);
-        glLinkProgram(shaderProgram);
-
-        // Check linking status
-        GLint success;
-        glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-        if (!success) {
-            char infoLog[512];
-            glGetProgramInfoLog(shaderProgram, 512, nullptr, infoLog);
-            Log::Error("Block highlight shader linking failed: %s", infoLog);
-
-            glDeleteShader(vertexShader);
-            glDeleteShader(fragmentShader);
-            glDeleteProgram(shaderProgram);
-            shaderProgram = 0;
-            return false;
-        }
-
-        // Clean up individual shaders
-        glDeleteShader(vertexShader);
-        glDeleteShader(fragmentShader);
-
-        Log::Debug("Block highlight shaders compiled and linked successfully");
-        return true;
-    }
-
-    void BlockHighlight::CreateGeometry() {
-        // Define the 8 vertices of a unit cube
-        std::vector<glm::vec3> vertices = {
-            // Bottom face
-            {0.0f, 0.0f, 0.0f}, // 0: bottom-back-left
-            {1.0f, 0.0f, 0.0f}, // 1: bottom-back-right
-            {1.0f, 0.0f, 1.0f}, // 2: bottom-front-right
-            {0.0f, 0.0f, 1.0f}, // 3: bottom-front-left
-
-            // Top face
-            {0.0f, 1.0f, 0.0f}, // 4: top-back-left
-            {1.0f, 1.0f, 0.0f}, // 5: top-back-right
-            {1.0f, 1.0f, 1.0f}, // 6: top-front-right
-            {0.0f, 1.0f, 1.0f}  // 7: top-front-left
-        };
-
-        // Define the 12 edges of the cube (24 indices for 12 lines)
-        std::vector<unsigned int> indices = {
-            // Bottom face edges
-            0, 1,  1, 2,  2, 3,  3, 0,
-
-            // Top face edges
-            4, 5,  5, 6,  6, 7,  7, 4,
-
-            // Vertical edges
-            0, 4,  1, 5,  2, 6,  3, 7
-        };
-
-        // Generate and bind VAO
-        glGenVertexArrays(1, &vao);
-        glBindVertexArray(vao);
-
-        // Generate and upload vertex buffer
-        glGenBuffers(1, &vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     vertices.size() * sizeof(glm::vec3),
-                     vertices.data(),
-                     GL_STATIC_DRAW);
-
-        // Generate and upload index buffer
-        glGenBuffers(1, &ebo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                     indices.size() * sizeof(unsigned int),
-                     indices.data(),
-                     GL_STATIC_DRAW);
-
-        // Set up vertex attributes
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-
-        // Unbind VAO to prevent accidental modification
-        glBindVertexArray(0);
-
-        Log::Debug("Block highlight geometry created: %zu vertices, %zu indices",
-                  vertices.size(), indices.size());
-    }
-
-    GLuint BlockHighlight::CompileShader(GLenum type, const char* source) {
-        GLuint shader = glCreateShader(type);
-        glShaderSource(shader, 1, &source, nullptr);
-        glCompileShader(shader);
-
-        // Check compilation status
-        GLint success;
-        glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-        if (!success) {
-            char infoLog[512];
-            glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-            const char* shaderType = (type == GL_VERTEX_SHADER) ? "vertex" : "fragment";
-            Log::Error("Block highlight %s shader compilation failed: %s", shaderType, infoLog);
-            glDeleteShader(shader);
-            return 0;
-        }
-
-        return shader;
     }
 
 } // namespace Render
