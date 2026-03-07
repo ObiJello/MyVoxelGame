@@ -14,18 +14,25 @@ layout(push_constant) uniform PushConstants {
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    vec4 clipPos  = pc.uMVP * vec4(aPos, 1.0);
-    vec4 clipPos2 = pc.uMVP * vec4(aPos + aNormal, 1.0);
+    // VIEW_SCALE is pre-baked into uMVP on CPU: Proj * VIEW_SCALE * ModelView
+    vec4 linePosStart = pc.uMVP * vec4(aPos, 1.0);
+    vec4 linePosEnd   = pc.uMVP * vec4(aPos + aNormal, 1.0);
 
-    vec2 ndcPos  = clipPos.xy  / clipPos.w;
-    vec2 ndcPos2 = clipPos2.xy / clipPos2.w;
+    vec3 ndc1 = linePosStart.xyz / linePosStart.w;
+    vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;
 
-    vec2 screenDir = (ndcPos2 - ndcPos) * pc.uScreenSize;
-    vec2 perp = normalize(vec2(-screenDir.y, screenDir.x));
+    vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * pc.uScreenSize);
+    vec2 lineOffset = vec2(-lineScreenDirection.y, lineScreenDirection.x) * pc.uLineWidth / pc.uScreenSize;
 
-    float side = (gl_VertexIndex % 2 == 0) ? -1.0 : 1.0;
-    vec2 offset = perp * pc.uLineWidth * side / pc.uScreenSize;
+    if (lineOffset.x < 0.0) {
+        lineOffset *= -1.0;
+    }
 
-    gl_Position = clipPos + vec4(offset * clipPos.w, 0.0, 0.0);
+    if (gl_VertexIndex % 2 == 0) {
+        gl_Position = vec4((ndc1 + vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
+    } else {
+        gl_Position = vec4((ndc1 - vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
+    }
+
     fragColor = aColor;
 }

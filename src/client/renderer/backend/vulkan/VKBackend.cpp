@@ -658,6 +658,10 @@ namespace Render {
         m_currentPipelineState = state;
     }
 
+    void VKBackend::InvalidateStateCache() {
+        // Vulkan rebuilds pipeline state each draw, no cache to invalidate
+    }
+
     // ========================================================================
     // DRAWING
     // ========================================================================
@@ -1688,8 +1692,8 @@ namespace Render {
         colorBlendAttachment.srcColorBlendFactor = ToVkBlendFactor(state.srcBlendFactor);
         colorBlendAttachment.dstColorBlendFactor = ToVkBlendFactor(state.dstBlendFactor);
         colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-        colorBlendAttachment.srcAlphaBlendFactor = ToVkBlendFactor(state.srcBlendFactor);
-        colorBlendAttachment.dstAlphaBlendFactor = ToVkBlendFactor(state.dstBlendFactor);
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
@@ -1745,6 +1749,10 @@ namespace Render {
         switch (factor) {
             case BlendFactor::Zero:              return VK_BLEND_FACTOR_ZERO;
             case BlendFactor::One:               return VK_BLEND_FACTOR_ONE;
+            case BlendFactor::SrcColor:          return VK_BLEND_FACTOR_SRC_COLOR;
+            case BlendFactor::OneMinusSrcColor:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            case BlendFactor::DstColor:          return VK_BLEND_FACTOR_DST_COLOR;
+            case BlendFactor::OneMinusDstColor:  return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
             case BlendFactor::SrcAlpha:          return VK_BLEND_FACTOR_SRC_ALPHA;
             case BlendFactor::OneMinusSrcAlpha:  return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
             case BlendFactor::DstAlpha:          return VK_BLEND_FACTOR_DST_ALPHA;

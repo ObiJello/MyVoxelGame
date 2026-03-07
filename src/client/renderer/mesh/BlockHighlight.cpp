@@ -6,6 +6,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <GLFW/glfw3.h>
 #include <vector>
+#include <algorithm>
 
 namespace Render {
 
@@ -21,27 +22,41 @@ layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec4 aColor;
 
-uniform mat4 uMVP;
-uniform vec3 uBlockPos;
+uniform mat4 uProjMat;
+uniform mat4 uModelViewMat;
 uniform vec2 uScreenSize;
 uniform float uLineWidth;
 
 out vec4 vColor;
 
+const float VIEW_SHRINK = 1.0 - (1.0 / 256.0);
+const mat4 VIEW_SCALE = mat4(
+    VIEW_SHRINK, 0.0, 0.0, 0.0,
+    0.0, VIEW_SHRINK, 0.0, 0.0,
+    0.0, 0.0, VIEW_SHRINK, 0.0,
+    0.0, 0.0, 0.0, 1.0
+);
+
 void main() {
-    vec4 clipPos  = uMVP * vec4(aPos, 1.0);
-    vec4 clipPos2 = uMVP * vec4(aPos + aNormal, 1.0);
+    vec4 linePosStart = uProjMat * VIEW_SCALE * uModelViewMat * vec4(aPos, 1.0);
+    vec4 linePosEnd   = uProjMat * VIEW_SCALE * uModelViewMat * vec4(aPos + aNormal, 1.0);
 
-    vec2 ndcPos  = clipPos.xy  / clipPos.w;
-    vec2 ndcPos2 = clipPos2.xy / clipPos2.w;
+    vec3 ndc1 = linePosStart.xyz / linePosStart.w;
+    vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;
 
-    vec2 screenDir = (ndcPos2 - ndcPos) * uScreenSize;
-    vec2 perp = normalize(vec2(-screenDir.y, screenDir.x));
+    vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * uScreenSize);
+    vec2 lineOffset = vec2(-lineScreenDirection.y, lineScreenDirection.x) * uLineWidth / uScreenSize;
 
-    float side = (gl_VertexID % 2 == 0) ? -1.0 : 1.0;
-    vec2 offset = perp * uLineWidth * side / uScreenSize;
+    if (lineOffset.x < 0.0) {
+        lineOffset *= -1.0;
+    }
 
-    gl_Position = clipPos + vec4(offset * clipPos.w, 0.0, 0.0);
+    if (gl_VertexID % 2 == 0) {
+        gl_Position = vec4((ndc1 + vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
+    } else {
+        gl_Position = vec4((ndc1 - vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
+    }
+
     vColor = aColor;
 }
 )";
@@ -93,13 +108,12 @@ void main() {
         m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
 
         // Build screen-space quad geometry for each edge (Minecraft-style)
-        // Small offset to avoid z-fighting
-        const float e = 0.005f;
-        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.4f; // black at 40% opacity
+        // No geometric offset — z-layering in shader handles depth fighting
+        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.4f; // black at 40% opacity (Minecraft: ARGB.black(102))
 
         glm::vec3 corners[8] = {
-            {0-e, 0-e, 0-e}, {1+e, 0-e, 0-e}, {1+e, 0-e, 1+e}, {0-e, 0-e, 1+e},
-            {0-e, 1+e, 0-e}, {1+e, 1+e, 0-e}, {1+e, 1+e, 1+e}, {0-e, 1+e, 1+e},
+            {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
+            {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {0, 1, 1},
         };
         int edges[12][2] = {
             {0,1}, {1,2}, {2,3}, {3,0},  // bottom
@@ -140,7 +154,7 @@ void main() {
         return true;
     }
 
-    void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& viewProjectionMatrix) {
+    void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix) {
         if (m_mesh == INVALID_MESH || m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         PipelineState state;
@@ -155,19 +169,30 @@ void main() {
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(m_dummyTexture, 0);
 
+        // Separate projection and modelview like Minecraft:
+        // ProjMat * VIEW_SCALE * ModelViewMat (VIEW_SCALE applied in view space)
+        const float VIEW_SHRINK = 1.0f - (1.0f / 256.0f);
         glm::mat4 model = glm::translate(glm::mat4(1.0f),
             glm::vec3(static_cast<float>(blockPos.x),
                       static_cast<float>(blockPos.y),
                       static_cast<float>(blockPos.z)));
-        glm::mat4 mvp = viewProjectionMatrix * model;
+        glm::mat4 modelView = viewMatrix * model;
+        g_renderBackend->SetUniformMat4(m_shader, "uProjMat", projectionMatrix);
+        g_renderBackend->SetUniformMat4(m_shader, "uModelViewMat", modelView);
+        // Pre-compute MVP with VIEW_SCALE for Vulkan (push constants only support uMVP)
+        glm::mat4 viewScale = glm::scale(glm::mat4(1.0f), glm::vec3(VIEW_SHRINK));
+        glm::mat4 mvp = projectionMatrix * viewScale * modelView;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
-        g_renderBackend->SetUniformVec3(m_shader, "uBlockPos", glm::vec3(0.0f));
 
-        int fbWidth, fbHeight;
-        glfwGetFramebufferSize(g_renderBackend->GetWindow(), &fbWidth, &fbHeight);
+        int fbWidth, fbHeight, winWidth, winHeight;
+        GLFWwindow* win = g_renderBackend->GetWindow();
+        glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
+        glfwGetWindowSize(win, &winWidth, &winHeight);
         g_renderBackend->SetUniformVec2(m_shader, "uScreenSize",
             glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
-        g_renderBackend->SetUniformFloat(m_shader, "uLineWidth", 2.0f);
+        // Minecraft: max(2.5, windowWidth / 1920.0 * 2.5)
+        float lineWidth = std::max(2.5f, static_cast<float>(winWidth) / 1920.0f * 2.5f);
+        g_renderBackend->SetUniformFloat(m_shader, "uLineWidth", lineWidth);
 
         g_renderBackend->DrawIndexed(m_mesh, 72); // 12 edges * 6 indices
 

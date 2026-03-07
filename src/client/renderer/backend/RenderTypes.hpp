@@ -86,6 +86,10 @@ namespace Render {
     enum class BlendFactor {
         Zero,
         One,
+        SrcColor,
+        OneMinusSrcColor,
+        DstColor,
+        OneMinusDstColor,
         SrcAlpha,
         OneMinusSrcAlpha,
         DstAlpha,

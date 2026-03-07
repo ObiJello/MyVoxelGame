@@ -44,7 +44,9 @@ out vec4 FragColor;
 uniform sampler2D uTexture;
 
 void main() {
-    FragColor = texture(uTexture, TexCoord);
+    vec4 texColor = texture(uTexture, TexCoord);
+    if (texColor.a < 0.5) discard;
+    FragColor = texColor;
 }
 )";
 
@@ -117,13 +119,13 @@ void main() {
         if (!isInitialized || !isVisible || framebufferWidth <= 0 || framebufferHeight <= 0) return;
         if (m_mesh == INVALID_MESH || m_shader == INVALID_SHADER || m_texture == INVALID_TEXTURE || !g_renderBackend) return;
 
-        // Set up 2D pipeline state
+        // Screen inversion blending (like Minecraft's crosshair)
         PipelineState state;
         state.depthTestEnabled = false;
         state.depthWriteEnabled = false;
         state.blendEnabled = true;
-        state.srcBlendFactor = BlendFactor::SrcAlpha;
-        state.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+        state.srcBlendFactor = BlendFactor::OneMinusDstColor;
+        state.dstBlendFactor = BlendFactor::Zero;
         state.cullMode = CullMode::None;
         g_renderBackend->SetPipelineState(state);
         g_renderBackend->BindShader(m_shader);

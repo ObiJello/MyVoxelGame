@@ -105,10 +105,10 @@ namespace PlatformMain {
 #endif
     }
 
-    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& viewProj) {
+    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj, const glm::mat4& view) {
         const auto& hit = player.lastBlockHit;
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
-            Render::g_blockHighlight.Render(hit->blockPos, viewProj);
+            Render::g_blockHighlight.Render(hit->blockPos, proj, view);
         }
     }
 
@@ -764,7 +764,7 @@ namespace PlatformMain {
             }
 
             // Render UI overlay elements
-            RenderBlockHighlight(player, viewProj);
+            RenderBlockHighlight(player, proj, view);
             RenderCrosshair(window);
             PROFILE_TIMER_END(render, metrics.renderTime);
 

@@ -108,6 +108,9 @@ namespace Render {
 
         virtual void SetPipelineState(const PipelineState& state) = 0;
 
+        // Invalidate cached pipeline state, forcing full reapplication on next SetPipelineState
+        virtual void InvalidateStateCache() = 0;
+
         // ====================================================================
         // DRAWING
         // ====================================================================

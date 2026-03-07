@@ -67,6 +67,7 @@ namespace Render {
 
         // Pipeline state
         void SetPipelineState(const PipelineState& state) override;
+        void InvalidateStateCache() override;
 
         // Drawing
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;

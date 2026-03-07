@@ -35,3 +35,5 @@ compile_commands.json
 
 # My own ignore
 depreciated/
+decompiled_net/
+decompiled_com/

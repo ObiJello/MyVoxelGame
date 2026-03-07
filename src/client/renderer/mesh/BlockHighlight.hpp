@@ -19,7 +19,7 @@ namespace Render {
         bool Initialize();
 
         // Render the highlight for the given block position
-        void Render(const glm::ivec3& blockPos, const glm::mat4& viewProjectionMatrix);
+        void Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix);
 
         // Check if a hit is valid for highlighting (in range, solid block, etc.)
         static bool IsValidHighlight(const std::optional<Game::RaycastHit>& hit);

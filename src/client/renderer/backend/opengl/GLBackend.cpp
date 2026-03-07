@@ -453,6 +453,10 @@ namespace Render {
     // PIPELINE STATE (with render state caching)
     // ========================================================================
 
+    void GLBackend::InvalidateStateCache() {
+        m_stateInitialized = false;
+    }
+
     void GLBackend::SetPipelineState(const PipelineState& state) {
         // Depth test
         if (!m_stateInitialized || state.depthTestEnabled != m_currentState.depthTestEnabled) {
@@ -539,6 +543,7 @@ namespace Render {
         glBindVertexArray(it->second.vao);
         glDrawElements(ToGLPrimitive(m_currentState.primitiveType), indexCount, GL_UNSIGNED_INT,
                       reinterpret_cast<void*>(static_cast<uintptr_t>(indexOffset * sizeof(uint32_t))));
+        glBindVertexArray(0);
     }
 
     void GLBackend::DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) {
@@ -547,6 +552,7 @@ namespace Render {
 
         glBindVertexArray(it->second.vao);
         glDrawArrays(ToGLPrimitive(m_currentState.primitiveType), firstVertex, vertexCount);
+        glBindVertexArray(0);
     }
 
     // ========================================================================
@@ -676,6 +682,10 @@ namespace Render {
         switch (factor) {
             case BlendFactor::Zero:              return GL_ZERO;
             case BlendFactor::One:               return GL_ONE;
+            case BlendFactor::SrcColor:          return GL_SRC_COLOR;
+            case BlendFactor::OneMinusSrcColor:  return GL_ONE_MINUS_SRC_COLOR;
+            case BlendFactor::DstColor:          return GL_DST_COLOR;
+            case BlendFactor::OneMinusDstColor:  return GL_ONE_MINUS_DST_COLOR;
             case BlendFactor::SrcAlpha:          return GL_SRC_ALPHA;
             case BlendFactor::OneMinusSrcAlpha:  return GL_ONE_MINUS_SRC_ALPHA;
             case BlendFactor::DstAlpha:          return GL_DST_ALPHA;
