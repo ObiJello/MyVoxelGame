@@ -245,6 +245,9 @@ namespace Render {
             Log::Error("Error scanning directory %s: %s", dirPath.c_str(), e.what());
         }
 
+        // Sort for deterministic atlas packing across runs
+        std::sort(pngFiles.begin(), pngFiles.end());
+
         return pngFiles;
     }
 

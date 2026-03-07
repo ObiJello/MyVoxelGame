@@ -80,6 +80,7 @@ namespace Debug {
     struct ServerMetricsSnapshot {
         bool serverRunning = false;
         uint16_t serverPort = 0;
+        int32_t worldSeed = 0;
         uint64_t ticksProcessed = 0;
         uint64_t chunksLoaded = 0;
         uint64_t chunksSent = 0;

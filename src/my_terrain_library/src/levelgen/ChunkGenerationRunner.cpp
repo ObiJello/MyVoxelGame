@@ -90,7 +90,6 @@ void ChunkGenerationRunner::clearChunkCache() {
     // Create new chunk - need the parameters to be set
     if (!m_airBlock || !m_defaultBlock) {
         // Use fallback if not configured
-        std::cerr << "Warning: ChunkGenerationRunner not configured with chunk creation params\n";
         return nullptr;
     }
 
@@ -489,12 +488,8 @@ void ChunkGenerationRunner::clearChunkCache() {
         // Get ALL biome keys in bootstrap order (matches Java's biomeSource.possibleBiomes())
         const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
 
-        // DEBUG: Print first few biome keys to verify order
-        std::cerr << "DEBUG: First 5 biomes in order: ";
         for (size_t i = 0; i < std::min(size_t(5), allBiomeKeys.size()); ++i) {
-            std::cerr << allBiomeKeys[i] << " ";
         }
-        std::cerr << std::endl;
 
         // Use FeatureSorter to build global feature order
         // Reference: FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.possibleBiomes()), ...)

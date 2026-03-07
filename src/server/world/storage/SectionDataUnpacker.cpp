@@ -104,83 +104,21 @@ namespace Game {
 
         Log::Info("Initializing BlockStateRegistry...");
 
-        // Map Minecraft block names to our internal BlockID enum
-        // NOTE: These mappings should match your BlockRegistry::Init() blocks
+        // Air must be manual (not in .inc)
         s_nameToBlockId["minecraft:air"] = BlockID::Air;
-        s_nameToBlockId["minecraft:stone"] = BlockID::Stone;
-        s_nameToBlockId["minecraft:dirt"] = BlockID::Dirt;
-        s_nameToBlockId["minecraft:grass_block"] = BlockID::Grass;
-        s_nameToBlockId["minecraft:sand"] = BlockID::Sand;
-        s_nameToBlockId["minecraft:sandstone"] = BlockID::Sandstone;
-        s_nameToBlockId["minecraft:oak_log"] = BlockID::OakLog;
-        s_nameToBlockId["minecraft:spruce_log"] = BlockID::SpruceLog;
-        s_nameToBlockId["minecraft:snow_block"] = BlockID::Snow;
-        s_nameToBlockId["minecraft:ice"] = BlockID::Ice;
-        s_nameToBlockId["minecraft:glass"] = BlockID::Glass;
-        s_nameToBlockId["minecraft:bedrock"] = BlockID::Bedrock;
-        s_nameToBlockId["minecraft:water"] = BlockID::Water;
-        s_nameToBlockId["minecraft:oak_leaves"] = BlockID::OakLeaves;
-        s_nameToBlockId["minecraft:birch_leaves"] = BlockID::BirchLeaves;
-        s_nameToBlockId["minecraft:cherry_log"] = BlockID::CherryLog;
-        s_nameToBlockId["minecraft:birch_log"] = BlockID::BirchLog;
-        s_nameToBlockId["minecraft:acacia_log"] = BlockID::AcaciaLog;
-        s_nameToBlockId["minecraft:cherry_leaves"] = BlockID::CherryLeaves;
-        s_nameToBlockId["minecraft:coal_ore"] = BlockID::CoalOre;
-        s_nameToBlockId["minecraft:redstone_ore"] = BlockID::RedstoneOre;
-        s_nameToBlockId["minecraft:deepslate_redstone_ore"] = BlockID::DeepslateRedstoneOre;
-        s_nameToBlockId["minecraft:lapis_ore"] = BlockID::LapisOre;
-        s_nameToBlockId["minecraft:iron_ore"] = BlockID::IronOre;
-        s_nameToBlockId["minecraft:gold_ore"] = BlockID::GoldOre;
-        s_nameToBlockId["minecraft:emerald_ore"] = BlockID::EmeraldOre;
-        s_nameToBlockId["minecraft:diamond_ore"] = BlockID::DiamondOre;
-        s_nameToBlockId["minecraft:gravel"] = BlockID::Gravel;
-        s_nameToBlockId["minecraft:mycelium"] = BlockID::Mycelium;
-        s_nameToBlockId["minecraft:deepslate"] = BlockID::Deepslate;
-        s_nameToBlockId["minecraft:lava"] = BlockID::Lava;
-        s_nameToBlockId["minecraft:diorite"] = BlockID::Diorite;
-        s_nameToBlockId["minecraft:andesite"] = BlockID::Andesite;
-        s_nameToBlockId["minecraft:granite"] = BlockID::Granite;
-        s_nameToBlockId["minecraft:copper_ore"] = BlockID::CopperOre;
-        s_nameToBlockId["minecraft:deepslate_lapis_ore"] = BlockID::DeepslateLapisOre;
-        s_nameToBlockId["minecraft:deepslate_iron_ore"] = BlockID::DeepslateIronOre;
-        s_nameToBlockId["minecraft:deepslate_gold_ore"] = BlockID::DeepslateGoldOre;
-        s_nameToBlockId["minecraft:deepslate_diamond_ore"] = BlockID::DeepslateDiamondOre;
-        s_nameToBlockId["minecraft:deepslate_copper_ore"] = BlockID::DeepslateCopperOre;
-        s_nameToBlockId["minecraft:tuff"] = BlockID::Tuff;
-        s_nameToBlockId["minecraft:chiseled_tuff_bricks"] = BlockID::ChiseledTuffBricks;
-        s_nameToBlockId["minecraft:tuff_bricks"] = BlockID::TuffBricks;
-        s_nameToBlockId["minecraft:waxed_cut_copper"] = BlockID::WaxedCutCopper;
-        s_nameToBlockId["minecraft:waxed_chiseled_copper"] = BlockID::waxed_chiseled_copper;
-        s_nameToBlockId["minecraft:spawner"] = BlockID::Spawner;
-        s_nameToBlockId["minecraft:cobblestone"] = BlockID::Cobblestone;
-        s_nameToBlockId["minecraft:mossy_cobblestone"] = BlockID::MossyCobblestone;
-        s_nameToBlockId["minecraft:polished_tuff"] = BlockID::polished_tuff;
-        s_nameToBlockId["minecraft:waxed_oxidized_chiseled_copper"] = BlockID::waxed_oxidized_chiseled_copper;
-        s_nameToBlockId["minecraft:deepslate_coal_ore"] = BlockID::deepslate_coal_ore;
-        s_nameToBlockId["minecraft:clay"] = BlockID::Clay;
-        s_nameToBlockId["minecraft:smooth_basalt"] = BlockID::SmoothBasalt;
-        s_nameToBlockId["minecraft:amethyst_block"] = BlockID::AmethystBlock;
-        s_nameToBlockId["minecraft:magma_block"] = BlockID::MagmaBlock;
-        s_nameToBlockId["minecraft:raw_iron_block"] = BlockID::RawIronBlock;
-        s_nameToBlockId["minecraft:obsidian"] = BlockID::Obsidian;
-        s_nameToBlockId["minecraft:oak_planks"] = BlockID::OakPlanks;
-        s_nameToBlockId["minecraft:pumpkin"] = BlockID::Pumpkin;
-        s_nameToBlockId["minecraft:waxed_copper_bulb"] = BlockID::WaxedCopperBulb;
-        s_nameToBlockId["minecraft:waxed_oxidized_copper"] = BlockID::WaxedOxidizedCopper;
-        s_nameToBlockId["minecraft:waxed_oxidized_cut_copper"] = BlockID::WaxedOxidizedCutCopper;
-        s_nameToBlockId["minecraft:waxed_copper_block"] = BlockID::WaxedCopperBlock;
-        s_nameToBlockId["minecraft:waxed_exposed_copper_bulb"] = BlockID::WaxedExposedCopperBulb;
-        s_nameToBlockId["minecraft:waxed_weathered_copper_bulb"] = BlockID::WaxedWeatheredCopperBulb;
-        s_nameToBlockId["minecraft:waxed_oxidized_copper_bulb"] = BlockID::WaxedOxidizedCopperBulb;
-        s_nameToBlockId["minecraft:bee_nest"] = BlockID::BeeNest;
-        s_nameToBlockId["minecraft:moss_block"] = BlockID::MossBlock;
-        s_nameToBlockId["minecraft:spruce_leaves"] = BlockID::SpruceLeaves;
 
-        // Add common block variants
-        s_nameToBlockId["minecraft:grass"] = BlockID::Grass; // Legacy name
-        s_nameToBlockId["minecraft:snow"] = BlockID::Snow;   // Alternative name
+        // All blocks from BlockDefs.inc (single source of truth)
+        #define BLOCK_DEF(e, m, d, o) s_nameToBlockId["minecraft:" m] = BlockID::e;
+        #include "common/world/block/BlockDefs.inc"
+        #undef BLOCK_DEF
 
-        // Add specific block states that need special handling
+        // Manual aliases
+        s_nameToBlockId["minecraft:grass"] = BlockID::Grass;
+        s_nameToBlockId["minecraft:cave_air"] = BlockID::Air;
+        s_nameToBlockId["minecraft:void_air"] = BlockID::Air;
+        s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
+
+        // Specific block state overrides
         s_stateToBlockId["minecraft:grass_block{snowy:true}"] = BlockID::SnowGrass;
 
         // Log statistics

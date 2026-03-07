@@ -57,83 +57,17 @@ namespace Game {
         // SPECIAL: Air block - always transparent, no model
         RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
 
-        // SOLID BLOCKS (Opaque layer)
-        RegisterModelBlock(BlockID::Stone, "Stone", true, "stone");
-        RegisterModelBlock(BlockID::Dirt, "Dirt", true, "dirt");
-        RegisterModelBlock(BlockID::Grass, "Grass", true, "grass_block");
-        RegisterModelBlock(BlockID::Sand, "Sand", true, "sand");
-        RegisterModelBlock(BlockID::Sandstone, "Sandstone", true, "sandstone");
-        RegisterModelBlock(BlockID::OakLog, "Oak Log", true, "oak_log");
-        RegisterModelBlock(BlockID::SpruceLog, "Spruce Log", true, "spruce_log");
-        RegisterModelBlock(BlockID::Snow, "Snow", true, "snow_block");
+        // All blocks from BlockDefs.inc (single source of truth)
+        #define BLOCK_DEF(e, m, d, o) RegisterModelBlock(BlockID::e, d, o, m);
+        #include "BlockDefs.inc"
+        #undef BLOCK_DEF
+
+        // Manual entries not in all_blocks.txt
         RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow");
-        RegisterModelBlock(BlockID::Bedrock, "Bedrock", true, "bedrock");
-        RegisterModelBlock(BlockID::CherryLog, "Cherry Log", true, "cherry_log");
-        RegisterModelBlock(BlockID::BirchLog, "Birch Log", true, "birch_log");
-        RegisterModelBlock(BlockID::AcaciaLog, "Acacia Log", true, "acacia_log");
-        RegisterModelBlock(BlockID::CoalOre, "Coal Ore", true, "coal_ore");
-        RegisterModelBlock(BlockID::RedstoneOre, "Redstone Ore", true, "redstone_ore");
-        RegisterModelBlock(BlockID::DeepslateRedstoneOre, "Deepslate Redstone Ore", true, "deepslate_redstone_ore");
-        RegisterModelBlock(BlockID::LapisOre, "Lapis Ore", true, "lapis_ore");
-        RegisterModelBlock(BlockID::IronOre, "Iron Ore", true, "iron_ore");
-        RegisterModelBlock(BlockID::GoldOre, "Gold Ore", true, "gold_ore");
-        RegisterModelBlock(BlockID::EmeraldOre, "Emerald Ore", true, "emerald_ore");
-        RegisterModelBlock(BlockID::DiamondOre, "Diamond Ore", true, "diamond_ore");
-        RegisterModelBlock(BlockID::Gravel, "Gravel", true, "gravel");
-        RegisterModelBlock(BlockID::Mycelium, "Mycelium", true, "mycelium");
-        RegisterModelBlock(BlockID::Deepslate, "Deepslate", true, "deepslate");
-        RegisterModelBlock(BlockID::Diorite,                       "Diorite",                        true,  "diorite");
-        RegisterModelBlock(BlockID::Andesite,                      "Andesite",                       true,  "andesite");
-        RegisterModelBlock(BlockID::Granite,                       "Granite",                        true,  "granite");
-        RegisterModelBlock(BlockID::CopperOre,                     "Copper Ore",                     true,  "copper_ore");
-        RegisterModelBlock(BlockID::DeepslateLapisOre,             "Deepslate Lapis Ore",            true,  "deepslate_lapis_ore");
-        RegisterModelBlock(BlockID::DeepslateIronOre,              "Deepslate Iron Ore",             true,  "deepslate_iron_ore");
-        RegisterModelBlock(BlockID::DeepslateGoldOre,              "Deepslate Gold Ore",             true,  "deepslate_gold_ore");
-        RegisterModelBlock(BlockID::DeepslateDiamondOre,           "Deepslate Diamond Ore",          true,  "deepslate_diamond_ore");
-        RegisterModelBlock(BlockID::DeepslateCopperOre,            "Deepslate Copper Ore",           true,  "deepslate_copper_ore");
-        RegisterModelBlock(BlockID::Tuff,                          "Tuff",                           true,  "tuff");
-        RegisterModelBlock(BlockID::ChiseledTuffBricks,            "Chiseled Tuff Bricks",           true,  "chiseled_tuff_bricks");
-        RegisterModelBlock(BlockID::TuffBricks,                    "Tuff Bricks",                    true,  "tuff_bricks");
-        RegisterModelBlock(BlockID::WaxedCutCopper,                "Waxed Cut Copper",               true,  "waxed_cut_copper");
-        RegisterModelBlock(BlockID::waxed_chiseled_copper,         "Waxed Chiseled Copper",          true,  "waxed_chiseled_copper");
-        RegisterModelBlock(BlockID::Cobblestone,                   "Cobblestone",                    true,  "cobblestone");
-        RegisterModelBlock(BlockID::MossyCobblestone,              "Mossy Cobblestone",              true,  "mossy_cobblestone");
-        RegisterModelBlock(BlockID::polished_tuff,                 "Polished Tuff",                  true,  "polished_tuff");
-        RegisterModelBlock(BlockID::waxed_oxidized_chiseled_copper,"Waxed Oxidized Chiseled Copper", true,  "waxed_oxidized_chiseled_copper");
-        RegisterModelBlock(BlockID::deepslate_coal_ore,            "Deepslate Coal Ore",             true,  "deepslate_coal_ore");
-        RegisterModelBlock(BlockID::Clay,                          "Clay",                           true,  "clay");
-        RegisterModelBlock(BlockID::SmoothBasalt,                  "Smooth Basalt",                  true,  "smooth_basalt");
-        RegisterModelBlock(BlockID::AmethystBlock,                 "Amethyst Block",                 true,  "amethyst_block");
-        RegisterModelBlock(BlockID::MagmaBlock,                    "Magma Block",                    true,  "magma_block");
-        RegisterModelBlock(BlockID::RawIronBlock,                  "Raw Iron Block",                 true,  "raw_iron_block");
-        RegisterModelBlock(BlockID::Obsidian,                      "Obsidian",                       true,  "obsidian");
-        RegisterModelBlock(BlockID::OakPlanks,                     "Oak Planks",                     true,  "oak_planks");
-        RegisterModelBlock(BlockID::Pumpkin,                       "Pumpkin",                        true,  "pumpkin");
-        RegisterModelBlock(BlockID::WaxedCopperBulb,               "Waxed Copper Bulb",              true,  "waxed_copper_bulb");
-        RegisterModelBlock(BlockID::WaxedOxidizedCopper,           "Waxed Oxidized Copper",          true,  "waxed_oxidized_copper");
-        RegisterModelBlock(BlockID::WaxedOxidizedCutCopper,        "Waxed Oxidized Cut Copper",      true,  "waxed_oxidized_cut_copper");
-        RegisterModelBlock(BlockID::WaxedCopperBlock,              "Waxed Copper Block",             true,  "waxed_copper_block");
-        RegisterModelBlock(BlockID::WaxedExposedCopperBulb,        "Waxed Exposed Copper Bulb",      true,  "waxed_exposed_copper_bulb");
-        RegisterModelBlock(BlockID::WaxedWeatheredCopperBulb,      "Waxed Weathered Copper Bulb",    true,  "waxed_weathered_copper_bulb");
-        RegisterModelBlock(BlockID::WaxedOxidizedCopperBulb,       "Waxed Oxidized Copper Bulb",     true,  "waxed_oxidized_copper_bulb");
-        RegisterModelBlock(BlockID::BeeNest,                       "Bee Nest",                       true,  "bee_nest");
-        RegisterModelBlock(BlockID::MossBlock,                     "Moss Block",                     true,  "moss_block");
 
-        // CUTOUT BLOCKS (Alpha-test layer)
-        RegisterModelBlock(BlockID::OakLeaves, "Oak Leaves", false, "oak_leaves");
-        RegisterModelBlock(BlockID::BirchLeaves, "Birch Leaves", false, "birch_leaves");
-        RegisterModelBlock(BlockID::CherryLeaves, "Cherry Leaves", false, "cherry_leaves");
-        RegisterModelBlock(BlockID::SpruceLeaves, "Spruce Leaves", false, "spruce_leaves");
-        RegisterModelBlock(BlockID::Spawner,                       "Spawner",                        false,  "spawner");
-
-        // TRANSLUCENT BLOCKS (Blended layer)
-        RegisterModelBlock(BlockID::Ice, "Ice", false, "ice");
-        RegisterModelBlock(BlockID::Glass, "Glass", false, "glass");
-
-        // FLUID BLOCKS (Special translucent layer)
+        // Override model names for blocks where minecraft ID != model file name
         RegisterModelBlock(BlockID::Water, "Water", false, "water_still");
         RegisterModelBlock(BlockID::Lava, "Lava", true, "lava_still");
-
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));

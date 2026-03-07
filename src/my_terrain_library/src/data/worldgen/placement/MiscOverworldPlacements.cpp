@@ -134,18 +134,11 @@ void MiscOverworldPlacements::bootstrap() {
     // =========================================================================
     {
         s_countPlacements.push_back(CountPlacement::of(3));
-        std::cerr << "DEBUG: ICE_SPIKE CountPlacement created at " << &s_countPlacements.back()
-                  << " with type: " << s_countPlacements.back().getTypeName() << "\n";
         ICE_SPIKE = createPlaced(
             MiscOverworldFeatures::ICE_SPIKE,
             { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
             "ICE_SPIKE"
         );
-        std::cerr << "DEBUG: ICE_SPIKE created at " << ICE_SPIKE
-                  << " with " << ICE_SPIKE->placement().size() << " modifiers"
-                  << " name='" << ICE_SPIKE->getName() << "'\n";
-        std::cerr << "  modifier[0] at " << ICE_SPIKE->placement()[0]
-                  << " type: " << ICE_SPIKE->placement()[0]->getTypeName() << "\n";
     }
 
     // =========================================================================
@@ -155,18 +148,11 @@ void MiscOverworldPlacements::bootstrap() {
     // =========================================================================
     {
         s_countPlacements.push_back(CountPlacement::of(2));
-        std::cerr << "DEBUG: ICE_PATCH CountPlacement created at " << &s_countPlacements.back()
-                  << " with type: " << s_countPlacements.back().getTypeName() << "\n";
         ICE_PATCH = createPlaced(
             MiscOverworldFeatures::ICE_PATCH,
             { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
             "ICE_PATCH"
         );
-        std::cerr << "DEBUG: ICE_PATCH created at " << ICE_PATCH
-                  << " with " << ICE_PATCH->placement().size() << " modifiers"
-                  << " name='" << ICE_PATCH->getName() << "'\n";
-        std::cerr << "  modifier[0] at " << ICE_PATCH->placement()[0]
-                  << " type: " << ICE_PATCH->placement()[0]->getTypeName() << "\n";
     }
 
     // =========================================================================
@@ -464,10 +450,6 @@ void MiscOverworldPlacements::bootstrap() {
     s_initialized = true;
 
     // Debug: verify pointers at end of bootstrap
-    std::cerr << "DEBUG MiscOverworldPlacements::bootstrap() END\n";
-    std::cerr << "  ICE_SPIKE ptr=" << ICE_SPIKE << " name='" << ICE_SPIKE->getName() << "'\n";
-    std::cerr << "  ICE_PATCH ptr=" << ICE_PATCH << " name='" << ICE_PATCH->getName() << "'\n";
-    std::cerr << "  s_placedFeatures.size()=" << s_placedFeatures.size() << "\n";
 }
 
 } // namespace placement

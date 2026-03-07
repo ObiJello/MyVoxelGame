@@ -20,18 +20,17 @@ namespace Render {
     const char* Crosshair::vertexShaderSource = R"(
 #version 330 core
 
-layout(location = 0) in vec2 aPos;
-layout(location = 1) in vec2 aTexCoord;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoord;
+layout(location = 3) in vec4 aColor;
 
-uniform mat4 uProjection;
-uniform vec2 uPosition;
-uniform vec2 uSize;
+uniform mat4 uMVP;
 
 out vec2 TexCoord;
 
 void main() {
-    vec2 screenPos = aPos * uSize + uPosition;
-    gl_Position = uProjection * vec4(screenPos, 0.0, 1.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
     TexCoord = aTexCoord;
 }
 )";
@@ -43,11 +42,9 @@ in vec2 TexCoord;
 out vec4 FragColor;
 
 uniform sampler2D uTexture;
-uniform float uOpacity;
 
 void main() {
-    vec4 texColor = texture(uTexture, TexCoord);
-    FragColor = vec4(texColor.rgb, texColor.a * uOpacity);
+    FragColor = texture(uTexture, TexCoord);
 }
 )";
 

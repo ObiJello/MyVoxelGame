@@ -616,13 +616,21 @@ namespace Render {
     void VKBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) {
         if (name == "uMVP") {
-            m_pushConstantMVP = value;
+            m_pushConstants.uMVP = value;
         }
     }
 
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string&, const glm::vec3&) { /* Push constants or UBO */ }
-    void VKBackend::SetUniformVec2(ShaderHandle, const std::string&, const glm::vec2&) { /* Push constants or UBO */ }
-    void VKBackend::SetUniformFloat(ShaderHandle, const std::string&, float) { /* Push constants or UBO */ }
+    void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
+        if (name == "uScreenSize") {
+            m_pushConstants.uScreenSize = value;
+        }
+    }
+    void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
+        if (name == "uLineWidth") {
+            m_pushConstants.uLineWidth = value;
+        }
+    }
     void VKBackend::SetUniformInt(ShaderHandle, const std::string&, int) { /* Push constants or UBO */ }
 
     // ========================================================================
@@ -677,7 +685,7 @@ namespace Render {
 
         // Push MVP matrix
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                          0, sizeof(glm::mat4), &m_pushConstantMVP);
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
 
         // Bind texture descriptor set (required by pipeline layout)
         auto texIt = m_textures.find(m_boundTexture);
@@ -720,7 +728,7 @@ namespace Render {
         }
 
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                          0, sizeof(glm::mat4), &m_pushConstantMVP);
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
@@ -1209,7 +1217,7 @@ namespace Render {
         VkPushConstantRange pushConstant{};
         pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushConstant.offset = 0;
-        pushConstant.size = sizeof(glm::mat4);
+        pushConstant.size = sizeof(PushConstantBlock);
 
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

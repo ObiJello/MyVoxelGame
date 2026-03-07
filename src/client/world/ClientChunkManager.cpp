@@ -680,7 +680,7 @@ namespace Client {
                                     uint16_t blockId = 0; // Default to air
                                     if (blockStateId > 0) {
                                         // Very simplified mapping - in reality this needs a proper block state registry
-                                        blockId = static_cast<uint16_t>(blockStateId & 0xFF);
+                                        blockId = static_cast<uint16_t>(blockStateId);
                                     }
                                     
                                     // Calculate block position within section

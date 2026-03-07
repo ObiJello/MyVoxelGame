@@ -179,12 +179,6 @@ void ChunkGenerator::applyBiomeDecoration(
             placement::PlacedFeature* feature = stepFeatureData.features[globalIndex];
             if (!feature) continue;
 
-            // DEBUG: trace pointer for step 4 features
-            if (stepIndex == 4 && globalIndex < 5) {
-                std::cerr << "DEBUG applyBiomeDecoration: step=" << stepIndex << " idx=" << globalIndex
-                          << " feature ptr=" << (void*)feature
-                          << " name='" << feature->getName() << "'\n";
-            }
 
             // Set current step/index for logging and block-change tracing
             placement::PlacedFeature::setCurrentStepIndex(stepIndex, globalIndex);

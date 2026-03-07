@@ -333,6 +333,27 @@ namespace PlatformMain {
         // Initialize systems
         Log::Info("Starting Voxel Engine");
 
+#if defined(__APPLE__) && defined(HAS_VULKAN)
+        // Point the Vulkan loader to the bundled MoltenVK ICD manifest.
+        // This makes Vulkan work without any system-wide Vulkan/MoltenVK installation.
+        if (useVulkan) {
+            CFBundleRef mainBundle = CFBundleGetMainBundle();
+            if (mainBundle) {
+                CFURLRef resourcesURL = CFBundleCopyResourcesDirectoryURL(mainBundle);
+                if (resourcesURL) {
+                    char resourcesPath[PATH_MAX];
+                    if (CFURLGetFileSystemRepresentation(resourcesURL, TRUE, (UInt8*)resourcesPath, PATH_MAX)) {
+                        std::string icdPath = std::string(resourcesPath) + "/vulkan/icd.d/MoltenVK_icd.json";
+                        setenv("VK_ICD_FILENAMES", icdPath.c_str(), 1);
+                        setenv("VK_DRIVER_FILES", icdPath.c_str(), 1);
+                        Log::Info("Set bundled MoltenVK ICD path: %s", icdPath.c_str());
+                    }
+                    CFRelease(resourcesURL);
+                }
+            }
+        }
+#endif
+
         // Initialize GLFW
         if (!glfwInit()) {
             Log::Error("Failed to initialize GLFW");
@@ -759,6 +780,8 @@ namespace PlatformMain {
                     srvSnap.serverRunning = Server::g_integratedServer->IsRunning();
                     if (auto* ns = Server::g_integratedServer->GetNetworkServer())
                         srvSnap.serverPort = ns->GetPort();
+                    if (auto* w = Server::g_integratedServer->GetWorld())
+                        srvSnap.worldSeed = w->GetGenerationSeed();
                     const auto& ss = Server::g_integratedServer->GetStats();
                     srvSnap.ticksProcessed = ss.ticksProcessed.load(std::memory_order_relaxed);
                     srvSnap.chunksLoaded = ss.chunksLoaded.load(std::memory_order_relaxed);

@@ -396,8 +396,6 @@ public:
                 // Get ALL biome keys in bootstrap order (matches Java's biomeSource.possibleBiomes())
                 const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
 
-                // DEBUG: Check feature distribution across biomes
-                std::cerr << "DEBUG: allBiomeKeys.size() = " << allBiomeKeys.size() << std::endl;
 
                 // Check for features appearing at multiple steps
                 std::map<const levelgen::placement::PlacedFeature*, std::set<int>> featureSteps;
@@ -405,10 +403,8 @@ public:
                     const auto& biomeKey = allBiomeKeys[i];
                     const auto& feats = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
                     if (i == 0) {
-                        std::cerr << "DEBUG: First biome '" << biomeKey << "' has " << feats.size() << " steps" << std::endl;
                         for (size_t s = 0; s < feats.size(); ++s) {
                             if (!feats[s].empty()) {
-                                std::cerr << "  step " << s << ": " << feats[s].size() << " features" << std::endl;
                             }
                         }
                     }
@@ -418,19 +414,14 @@ public:
                         }
                     }
                 }
-                std::cerr << "DEBUG: Total unique features across all biomes: " << featureSteps.size() << std::endl;
                 int multiStepFeatures = 0;
                 for (const auto& [f, steps] : featureSteps) {
                     if (steps.size() > 1) {
                         if (multiStepFeatures < 5) {
-                            std::cerr << "DEBUG WARNING: Feature at steps: ";
-                            for (int s : steps) std::cerr << s << " ";
-                            std::cerr << std::endl;
                         }
                         multiStepFeatures++;
                     }
                 }
-                std::cerr << "DEBUG: Features appearing at multiple steps: " << multiStepFeatures << std::endl;
 
                 // Use FeatureSorter to build global feature order
                 // Reference: FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.possibleBiomes()), ...)
@@ -439,17 +430,14 @@ public:
                     allBiomeKeys,
                     [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
                         const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
-                        // DEBUG: Check what the lambda receives
                         static int lambdaCalls = 0;
                         if (lambdaCalls < 1) {
                             int totalFeatures = 0;
                             for (const auto& sv : features) totalFeatures += sv.size();
-                            std::cerr << "DEBUG Lambda call #" << lambdaCalls << ": biomeKey='" << biomeKey << "' returned " << features.size() << " steps, " << totalFeatures << " total features" << std::endl;
                             // Also check directly
                             const auto& directFeatures = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome("minecraft:mushroom_fields");
                             int directTotal = 0;
                             for (const auto& sv : directFeatures) directTotal += sv.size();
-                            std::cerr << "DEBUG Lambda: Direct call for mushroom_fields: " << directFeatures.size() << " steps, " << directTotal << " total features" << std::endl;
                             lambdaCalls++;
                         }
                         // Convert const PlacedFeature* to PlacedFeature* (FeatureSorter needs non-const)
@@ -470,10 +458,7 @@ public:
 
                 s_featuresPerStepBuilt = true;
 
-                // DEBUG: Print feature counts per step
-                std::cerr << "DEBUG: FeatureSorter built " << s_cachedFeaturesPerStep.size() << " steps" << std::endl;
                 for (size_t i = 0; i < s_cachedFeaturesPerStep.size(); ++i) {
-                    std::cerr << "  Step " << i << ": " << s_cachedFeaturesPerStep[i].features.size() << " features" << std::endl;
                 }
             }
 

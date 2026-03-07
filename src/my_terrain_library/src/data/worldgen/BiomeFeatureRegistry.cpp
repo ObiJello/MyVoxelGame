@@ -38,16 +38,7 @@ static bool s_debugIceFeatures = true;
 void BiomeFeatureRegistry::addFeature(const std::string& biomeKey, int step, const PlacedFeature* feature) {
     if (step < 0 || step >= GenerationStep::DECORATION_COUNT) return;
     if (!feature) {
-        if (s_debugNullptrFeatures) {
-            std::cerr << "WARNING: nullptr PlacedFeature for biome " << biomeKey << " step " << step << std::endl;
-        }
         return;
-    }
-
-    // Debug: track ICE features
-    if (s_debugIceFeatures && feature->getName().find("ICE") != std::string::npos) {
-        std::cerr << "DEBUG addFeature: biome=" << biomeKey << " step=" << step
-                  << " feature=" << (void*)feature << " name='" << feature->getName() << "'\n";
     }
 
     auto& biome = s_biomeFeatures[biomeKey];

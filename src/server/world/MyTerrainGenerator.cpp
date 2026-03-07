@@ -1,5 +1,6 @@
 // File: src/server/world/MyTerrainGenerator.cpp
 #include "MyTerrainGenerator.hpp"
+#include "storage/SectionDataUnpacker.hpp"
 #include <chrono>
 #include <future>
 
@@ -232,7 +233,7 @@ namespace Game {
                         minecraft::core::BlockPos blockPos(
                             worldMinX + localX, y, worldMinZ + localZ
                         );
-                        BlockState* blockState = chunk->getBlockState(blockPos);
+                        auto* blockState = chunk->getBlockState(blockPos);
                         BlockID gameBlockId = MapBlockType(blockState);
                         gameChunk->SetBlock(localX, y, localZ, gameBlockId);
 
@@ -264,76 +265,21 @@ namespace Game {
         return result;
     }
 
-    BlockID MyTerrainGenerator::MapBlockType(BlockState* blockState) const {
+    BlockID MyTerrainGenerator::MapBlockType(minecraft::world::BlockState* blockState) const {
         if (!blockState) return BlockID::Stone;
 
-        if (blockState->is(Blocks::AIR) || blockState->is(Blocks::CAVE_AIR))
-            return BlockID::Air;
-        if (blockState->is(Blocks::STONE))        return BlockID::Stone;
-        if (blockState->is(Blocks::WATER))         return BlockID::Water;
-        if (blockState->is(Blocks::LAVA))          return BlockID::Lava;
-        if (blockState->is(Blocks::DEEPSLATE))     return BlockID::Deepslate;
-        if (blockState->is(Blocks::BEDROCK))       return BlockID::Bedrock;
-        if (blockState->is(Blocks::GRASS_BLOCK))   return BlockID::Grass;
-        if (blockState->is(Blocks::DIRT))           return BlockID::Dirt;
-        if (blockState->is(Blocks::SAND))           return BlockID::Sand;
-        if (blockState->is(Blocks::GRAVEL))         return BlockID::Gravel;
-        if (blockState->is(Blocks::GRANITE))        return BlockID::Granite;
-        if (blockState->is(Blocks::TUFF))           return BlockID::Tuff;
-        if (blockState->is(Blocks::DIORITE))        return BlockID::Diorite;
-        if (blockState->is(Blocks::ANDESITE))       return BlockID::Andesite;
-        if (blockState->is(Blocks::SNOW_BLOCK))     return BlockID::Snow;
-        if (blockState->is(Blocks::ICE) || blockState->is(Blocks::PACKED_ICE))
-            return BlockID::Ice;
-        if (blockState->is(Blocks::SANDSTONE))      return BlockID::Sandstone;
-        if (blockState->is(Blocks::POWDER_SNOW))    return BlockID::Snow;
+        // Use the unified BlockStateRegistry name-to-ID map (populated from BlockDefs.inc).
+        // This automatically handles all 1150+ blocks via string lookup.
+        Game::BlockStateRegistry::Initialize();
 
-        // Logs
-        if (blockState->is(Blocks::OAK_LOG))        return BlockID::OakLog;
-        if (blockState->is(Blocks::BIRCH_LOG))      return BlockID::BirchLog;
-        if (blockState->is(Blocks::SPRUCE_LOG))     return BlockID::SpruceLog;
-        if (blockState->is(Blocks::ACACIA_LOG))     return BlockID::AcaciaLog;
-        if (blockState->is(Blocks::JUNGLE_LOG))     return BlockID::JungleLog;
-        if (blockState->is(Blocks::DARK_OAK_LOG))   return BlockID::DarkOakLog;
-        if (blockState->is(Blocks::CHERRY_LOG))     return BlockID::CherryLog;
+        std::string identifier = blockState->getBlock()->getIdentifier();
 
-        // Leaves
-        if (blockState->is(Blocks::OAK_LEAVES))     return BlockID::OakLeaves;
-        if (blockState->is(Blocks::BIRCH_LEAVES))   return BlockID::BirchLeaves;
-        if (blockState->is(Blocks::SPRUCE_LEAVES))  return BlockID::SpruceLeaves;
-        if (blockState->is(Blocks::JUNGLE_LEAVES))  return BlockID::JungleLeaves;
-        if (blockState->is(Blocks::DARK_OAK_LEAVES)) return BlockID::DarkOakLeaves;
-        if (blockState->is(Blocks::ACACIA_LEAVES))  return BlockID::AcaciaLeaves;
-        if (blockState->is(Blocks::CHERRY_LEAVES))  return BlockID::CherryLeaves;
+        // Create a Game::BlockState and resolve through the registry
+        Game::BlockState gameState;
+        gameState.name = identifier;
+        gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
 
-        // Ores
-        if (blockState->is(Blocks::COAL_ORE))              return BlockID::CoalOre;
-        if (blockState->is(Blocks::DEEPSLATE_COAL_ORE))    return BlockID::deepslate_coal_ore;
-        if (blockState->is(Blocks::IRON_ORE))              return BlockID::IronOre;
-        if (blockState->is(Blocks::DEEPSLATE_IRON_ORE))    return BlockID::DeepslateIronOre;
-        if (blockState->is(Blocks::COPPER_ORE))            return BlockID::CopperOre;
-        if (blockState->is(Blocks::DEEPSLATE_COPPER_ORE))  return BlockID::DeepslateCopperOre;
-        if (blockState->is(Blocks::GOLD_ORE))              return BlockID::GoldOre;
-        if (blockState->is(Blocks::DEEPSLATE_GOLD_ORE))    return BlockID::DeepslateGoldOre;
-        if (blockState->is(Blocks::REDSTONE_ORE))          return BlockID::RedstoneOre;
-        if (blockState->is(Blocks::DEEPSLATE_REDSTONE_ORE)) return BlockID::DeepslateRedstoneOre;
-        if (blockState->is(Blocks::DIAMOND_ORE))           return BlockID::DiamondOre;
-        if (blockState->is(Blocks::DEEPSLATE_DIAMOND_ORE)) return BlockID::DeepslateDiamondOre;
-        if (blockState->is(Blocks::LAPIS_ORE))             return BlockID::LapisOre;
-        if (blockState->is(Blocks::DEEPSLATE_LAPIS_ORE))   return BlockID::DeepslateLapisOre;
-        if (blockState->is(Blocks::EMERALD_ORE))           return BlockID::EmeraldOre;
-        if (blockState->is(Blocks::DEEPSLATE_EMERALD_ORE)) return BlockID::DeepslateEmeraldOre;
-        if (blockState->is(Blocks::RAW_IRON_BLOCK))        return BlockID::RawIronBlock;
-        if (blockState->is(Blocks::RAW_COPPER_BLOCK))      return BlockID::CopperOre; // No raw copper block in game, use copper ore
-
-        // Mushrooms
-        if (blockState->is(Blocks::RED_MUSHROOM))    return BlockID::RedMushroom;
-        if (blockState->is(Blocks::BROWN_MUSHROOM))  return BlockID::BrownMushroom;
-
-        // Fallback: unknown block type
-        Log::Warning("[MyTerrainGenerator] Unknown block type '%s', defaulting to Stone",
-                   blockState->getBlock()->getIdentifier().c_str());
-        return BlockID::Stone;
+        return gameState.resolvedId;
     }
 
     // === Configuration methods ===

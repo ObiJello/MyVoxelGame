@@ -4,15 +4,24 @@ project(MyVoxelGame LANGUAGES CXX VERSION 0.1.0)
 # ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices,
 #     and force a minimum deployment target ─────────────────────────────────
 if(APPLE)
-    # When Vulkan is enabled, build arm64 only (MoltenVK/Vulkan are arm64-only via Homebrew)
-    # For OpenGL-only builds, universal binaries are supported
     option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
-    if(ENABLE_VULKAN)
-        set(CMAKE_OSX_ARCHITECTURES "arm64")
-    else()
-        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
-    endif()
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.7.6" CACHE STRING "Minimum macOS version" FORCE)
+
+    # Architecture must be set BEFORE add_subdirectory() calls.
+    # Determine early based on VULKAN_SDK env var presence.
+    if(NOT CMAKE_OSX_ARCHITECTURES)
+        if(ENABLE_VULKAN AND DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+            set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+            message(STATUS "Vulkan SDK detected - building universal binary (arm64 + x86_64)")
+        elseif(ENABLE_VULKAN)
+            set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS architectures" FORCE)
+            message(STATUS "Vulkan (Homebrew) - building arm64 only")
+        else()
+            set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+            message(STATUS "No Vulkan - building universal binary (arm64 + x86_64)")
+        endif()
+    endif()
+    message(STATUS "macOS Architectures: ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -180,36 +189,60 @@ endif()
 # 5b) Optional Vulkan backend
 option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
 if(ENABLE_VULKAN)
-    find_package(Vulkan QUIET)
-    if(Vulkan_FOUND)
-        message(STATUS "Vulkan found: ${Vulkan_LIBRARY}")
-        set(HAS_VULKAN TRUE)
-    else()
-        # Try homebrew paths on macOS
-        if(APPLE)
-            find_library(VULKAN_LIBRARY NAMES vulkan PATHS /opt/homebrew/lib /usr/local/lib)
-            find_path(VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h PATHS /opt/homebrew/include /usr/local/include)
-            if(VULKAN_LIBRARY AND VULKAN_INCLUDE_DIR)
-                message(STATUS "Vulkan found via Homebrew: ${VULKAN_LIBRARY}")
-                set(HAS_VULKAN TRUE)
-                # Also find MoltenVK for bundling
-                find_library(MOLTENVK_LIBRARY NAMES MoltenVK PATHS /opt/homebrew/lib /usr/local/lib)
-            else()
-                message(STATUS "Vulkan not found, Vulkan backend disabled")
-                set(HAS_VULKAN FALSE)
+    set(HAS_VULKAN FALSE)
+    set(VULKAN_IS_SDK FALSE)
+
+    # 1) Check for Vulkan SDK via VULKAN_SDK env var (preferred - provides universal binaries)
+    if(DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
+        set(VULKAN_SDK_PATH "$ENV{VULKAN_SDK}")
+        find_library(VULKAN_LIBRARY NAMES vulkan PATHS "${VULKAN_SDK_PATH}/lib" NO_DEFAULT_PATH)
+        find_path(VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h PATHS "${VULKAN_SDK_PATH}/include" NO_DEFAULT_PATH)
+        if(VULKAN_LIBRARY AND VULKAN_INCLUDE_DIR)
+            message(STATUS "Vulkan found via SDK: ${VULKAN_LIBRARY}")
+            set(HAS_VULKAN TRUE)
+            set(VULKAN_IS_SDK TRUE)
+            # Prefer the dylib directly over xcframework
+            set(MOLTENVK_LIBRARY "${VULKAN_SDK_PATH}/lib/libMoltenVK.dylib")
+            if(NOT EXISTS "${MOLTENVK_LIBRARY}")
+                find_library(MOLTENVK_LIBRARY NAMES MoltenVK PATHS "${VULKAN_SDK_PATH}/lib" NO_DEFAULT_PATH)
             endif()
-        else()
-            message(STATUS "Vulkan not found, Vulkan backend disabled")
-            set(HAS_VULKAN FALSE)
         endif()
+    endif()
+
+    # 2) Fallback: try find_package (may find Homebrew or system Vulkan)
+    if(NOT HAS_VULKAN)
+        find_package(Vulkan QUIET)
+        if(Vulkan_FOUND)
+            set(VULKAN_LIBRARY "${Vulkan_LIBRARY}")
+            set(VULKAN_INCLUDE_DIR "${Vulkan_INCLUDE_DIRS}")
+            message(STATUS "Vulkan found via system/Homebrew: ${VULKAN_LIBRARY}")
+            set(HAS_VULKAN TRUE)
+        endif()
+    endif()
+
+    # 3) Last resort: try Homebrew paths directly on macOS
+    if(NOT HAS_VULKAN AND APPLE)
+        find_library(VULKAN_LIBRARY NAMES vulkan PATHS /opt/homebrew/lib /usr/local/lib)
+        find_path(VULKAN_INCLUDE_DIR NAMES vulkan/vulkan.h PATHS /opt/homebrew/include /usr/local/include)
+        if(VULKAN_LIBRARY AND VULKAN_INCLUDE_DIR)
+            message(STATUS "Vulkan found via Homebrew: ${VULKAN_LIBRARY}")
+            set(HAS_VULKAN TRUE)
+            find_library(MOLTENVK_LIBRARY NAMES MoltenVK PATHS /opt/homebrew/lib /usr/local/lib)
+        endif()
+    endif()
+
+    if(NOT HAS_VULKAN)
+        message(STATUS "Vulkan not found, Vulkan backend disabled")
     endif()
 else()
     set(HAS_VULKAN FALSE)
 endif()
 
+    # (Architecture was already set at the top of CMakeLists.txt)
+
 # SPIR-V shader compilation (if Vulkan enabled and glslc available)
 if(HAS_VULKAN)
-    find_program(GLSLC glslc PATHS /opt/homebrew/bin /usr/local/bin)
+    find_program(GLSLC glslc PATHS $ENV{VULKAN_SDK}/bin /opt/homebrew/bin /usr/local/bin)
     if(GLSLC)
         message(STATUS "glslc found: ${GLSLC}")
         # Compile Vulkan shaders to SPIR-V
@@ -628,47 +661,109 @@ endif()
 if(HAS_VULKAN)
     target_compile_definitions(MyVoxelGame PRIVATE HAS_VULKAN=1)
     target_compile_definitions(imgui PRIVATE HAS_VULKAN=1)
-    if(Vulkan_FOUND)
-        target_link_libraries(MyVoxelGame PRIVATE Vulkan::Vulkan)
-        target_include_directories(MyVoxelGame PRIVATE ${Vulkan_INCLUDE_DIRS})
-    else()
-        target_link_libraries(MyVoxelGame PRIVATE ${VULKAN_LIBRARY})
-        target_include_directories(MyVoxelGame PRIVATE ${VULKAN_INCLUDE_DIR})
-    endif()
+    target_link_libraries(MyVoxelGame PRIVATE ${VULKAN_LIBRARY})
+    target_include_directories(MyVoxelGame PRIVATE ${VULKAN_INCLUDE_DIR})
     # Add ImGui Vulkan backend to imgui target
     target_sources(imgui PRIVATE
         ext/imgui/backends/imgui_impl_vulkan.cpp
     )
-    if(Vulkan_FOUND)
-        target_link_libraries(imgui PRIVATE Vulkan::Vulkan)
-        target_include_directories(imgui PRIVATE ${Vulkan_INCLUDE_DIRS})
-    else()
-        target_link_libraries(imgui PRIVATE ${VULKAN_LIBRARY})
-        target_include_directories(imgui PRIVATE ${VULKAN_INCLUDE_DIR})
-    endif()
-    # Copy SPIR-V shaders to bundle/output
+    target_link_libraries(imgui PRIVATE ${VULKAN_LIBRARY})
+    target_include_directories(imgui PRIVATE ${VULKAN_INCLUDE_DIR})
+
     if(APPLE)
-        add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/shaders/block_vk.vert.spv"
-            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.vert.spv"
+        # ── Bundle Vulkan libraries into .app so users don't need to install anything ──
+
+        # Set RPATH so the executable finds dylibs in Contents/Frameworks/
+        set_target_properties(MyVoxelGame PROPERTIES
+            INSTALL_RPATH "@executable_path/../Frameworks"
+            BUILD_RPATH "@executable_path/../Frameworks"
         )
-        add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${PROJECT_SOURCE_DIR}/shaders/block_vk.frag.spv"
-            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.frag.spv"
-        )
-    endif()
-    # Tell GLFW where to find the Vulkan loader at runtime (needed for macOS/MoltenVK)
-    if(APPLE)
-        if(Vulkan_LIBRARY)
-            target_compile_definitions(glfw PRIVATE _GLFW_VULKAN_LIBRARY="${Vulkan_LIBRARY}")
-            message(STATUS "GLFW Vulkan library path: ${Vulkan_LIBRARY}")
-        elseif(VULKAN_LIBRARY)
-            target_compile_definitions(glfw PRIVATE _GLFW_VULKAN_LIBRARY="${VULKAN_LIBRARY}")
-            message(STATUS "GLFW Vulkan library path: ${VULKAN_LIBRARY}")
+
+        # Find MoltenVK library and ICD manifest
+        if(NOT MOLTENVK_LIBRARY)
+            find_library(MOLTENVK_LIBRARY NAMES MoltenVK
+                PATHS $ENV{VULKAN_SDK}/lib /opt/homebrew/lib /usr/local/lib)
         endif()
+        find_file(MOLTENVK_ICD_JSON NAMES MoltenVK_icd.json
+            PATHS $ENV{VULKAN_SDK}/share/vulkan/icd.d
+                  /opt/homebrew/etc/vulkan/icd.d
+                  /usr/local/etc/vulkan/icd.d
+                  /opt/homebrew/share/vulkan/icd.d)
+
+        # Copy Vulkan loader into Frameworks/
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${VULKAN_LIBRARY}"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks/libvulkan.1.dylib"
+            COMMENT "Bundling Vulkan loader into app"
+        )
+        # Copy MoltenVK into Frameworks/
+        if(MOLTENVK_LIBRARY)
+            add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MOLTENVK_LIBRARY}"
+                    "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks/libMoltenVK.dylib"
+                COMMENT "Bundling MoltenVK into app"
+            )
+            message(STATUS "MoltenVK will be bundled: ${MOLTENVK_LIBRARY}")
+        else()
+            message(WARNING "MoltenVK not found - Vulkan will require system MoltenVK at runtime")
+        endif()
+
+        # Fix install names and re-sign all bundled dylibs
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND install_name_tool -id "@rpath/libvulkan.1.dylib"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks/libvulkan.1.dylib"
+            COMMAND codesign --force --sign -
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks/libvulkan.1.dylib"
+            COMMAND codesign --force --sign -
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Frameworks/libMoltenVK.dylib"
+            COMMENT "Fixing install names and re-signing bundled Vulkan dylibs"
+        )
+
+        # Fix the executable to link against the bundled loader
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_SOURCE_DIR}/tools/fix_vulkan_rpath.sh
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/MyVoxelGame"
+            COMMENT "Fixing executable Vulkan loader reference"
+        )
+
+        # Create bundled ICD manifest that points to the Frameworks/ copy
+        file(WRITE "${CMAKE_BINARY_DIR}/MoltenVK_icd.json"
+            "{\n"
+            "    \"file_format_version\": \"1.0.0\",\n"
+            "    \"ICD\": {\n"
+            "        \"library_path\": \"../../../Frameworks/libMoltenVK.dylib\",\n"
+            "        \"api_version\": \"1.2.0\",\n"
+            "        \"is_portability_driver\": true\n"
+            "    }\n"
+            "}\n"
+        )
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/vulkan/icd.d"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_BINARY_DIR}/MoltenVK_icd.json"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/vulkan/icd.d/MoltenVK_icd.json"
+            COMMENT "Bundling MoltenVK ICD manifest"
+        )
+
+        # Copy SPIR-V shaders to bundle
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/shaders/block_vk.vert.spv"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.vert.spv"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/shaders/block_vk.frag.spv"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.frag.spv"
+        )
+
+        # Don't hardcode GLFW's Vulkan path - let it find the bundled one via RPATH
+        message(STATUS "Vulkan libraries will be bundled in .app/Contents/Frameworks/")
     endif()
+
     message(STATUS "Vulkan backend: ENABLED")
 else()
     message(STATUS "Vulkan backend: DISABLED")

@@ -4,6 +4,8 @@
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include <glm/gtc/matrix_transform.hpp>
+#include <GLFW/glfw3.h>
+#include <vector>
 
 namespace Render {
 
@@ -15,23 +17,43 @@ namespace Render {
 #version 330 core
 
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec4 aColor;
 
 uniform mat4 uMVP;
 uniform vec3 uBlockPos;
+uniform vec2 uScreenSize;
+uniform float uLineWidth;
+
+out vec4 vColor;
 
 void main() {
-    vec3 worldPos = aPos + uBlockPos;
-    gl_Position = uMVP * vec4(worldPos, 1.0);
+    vec4 clipPos  = uMVP * vec4(aPos, 1.0);
+    vec4 clipPos2 = uMVP * vec4(aPos + aNormal, 1.0);
+
+    vec2 ndcPos  = clipPos.xy  / clipPos.w;
+    vec2 ndcPos2 = clipPos2.xy / clipPos2.w;
+
+    vec2 screenDir = (ndcPos2 - ndcPos) * uScreenSize;
+    vec2 perp = normalize(vec2(-screenDir.y, screenDir.x));
+
+    float side = (gl_VertexID % 2 == 0) ? -1.0 : 1.0;
+    vec2 offset = perp * uLineWidth * side / uScreenSize;
+
+    gl_Position = clipPos + vec4(offset * clipPos.w, 0.0, 0.0);
+    vColor = aColor;
 }
 )";
 
     const char* BlockHighlight::fragmentShaderSource = R"(
 #version 330 core
 
+in vec4 vColor;
 out vec4 FragColor;
 
 void main() {
-    FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    FragColor = vColor;
 }
 )";
 
@@ -70,29 +92,48 @@ void main() {
         unsigned char white[] = {255, 255, 255, 255};
         m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
 
-        // Build wireframe cube geometry using 12-float vertex format
+        // Build screen-space quad geometry for each edge (Minecraft-style)
         // Small offset to avoid z-fighting
         const float e = 0.005f;
-        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f; // black
-        // 8 vertices: pos(3) + norm(3) + uv(2) + color(4)
-        float verts[] = {
-            0-e,0-e,0-e, 0,0,0, 0,0, r,g,b,a,  // 0
-            1+e,0-e,0-e, 0,0,0, 0,0, r,g,b,a,  // 1
-            1+e,0-e,1+e, 0,0,0, 0,0, r,g,b,a,  // 2
-            0-e,0-e,1+e, 0,0,0, 0,0, r,g,b,a,  // 3
-            0-e,1+e,0-e, 0,0,0, 0,0, r,g,b,a,  // 4
-            1+e,1+e,0-e, 0,0,0, 0,0, r,g,b,a,  // 5
-            1+e,1+e,1+e, 0,0,0, 0,0, r,g,b,a,  // 6
-            0-e,1+e,1+e, 0,0,0, 0,0, r,g,b,a,  // 7
+        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.4f; // black at 40% opacity
+
+        glm::vec3 corners[8] = {
+            {0-e, 0-e, 0-e}, {1+e, 0-e, 0-e}, {1+e, 0-e, 1+e}, {0-e, 0-e, 1+e},
+            {0-e, 1+e, 0-e}, {1+e, 1+e, 0-e}, {1+e, 1+e, 1+e}, {0-e, 1+e, 1+e},
         };
-        uint32_t indices[] = {
-            0,1, 1,2, 2,3, 3,0, // bottom
-            4,5, 5,6, 6,7, 7,4, // top
-            0,4, 1,5, 2,6, 3,7  // verticals
+        int edges[12][2] = {
+            {0,1}, {1,2}, {2,3}, {3,0},  // bottom
+            {4,5}, {5,6}, {6,7}, {7,4},  // top
+            {0,4}, {1,5}, {2,6}, {3,7},  // verticals
         };
 
-        m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, sizeof(verts), verts);
-        m_ib = g_renderBackend->CreateBuffer(BufferUsage::Index, sizeof(indices), indices);
+        // 4 verts per edge (quad), 6 indices per edge (2 triangles)
+        std::vector<float> verts;
+        std::vector<uint32_t> indices;
+        verts.reserve(12 * 4 * 12);
+        indices.reserve(12 * 6);
+
+        for (int i = 0; i < 12; i++) {
+            glm::vec3 p0 = corners[edges[i][0]];
+            glm::vec3 p1 = corners[edges[i][1]];
+            glm::vec3 dir = glm::normalize(p1 - p0);
+            uint32_t base = i * 4;
+
+            // 4 vertices: even gl_VertexID = side -1, odd = side +1
+            for (int v = 0; v < 2; v++) {
+                glm::vec3 p = (v == 0) ? p0 : p1;
+                // Two vertices at each endpoint (one per side)
+                verts.insert(verts.end(), {p.x, p.y, p.z, dir.x, dir.y, dir.z, 0,0, r,g,b,a});
+                verts.insert(verts.end(), {p.x, p.y, p.z, dir.x, dir.y, dir.z, 0,0, r,g,b,a});
+            }
+
+            indices.insert(indices.end(), {base+0, base+1, base+3, base+0, base+3, base+2});
+        }
+
+        m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
+            verts.size() * sizeof(float), verts.data());
+        m_ib = g_renderBackend->CreateBuffer(BufferUsage::Index,
+            indices.size() * sizeof(uint32_t), indices.data());
         m_mesh = g_renderBackend->CreateMesh(m_vb, m_ib, GetBlockVertexLayout());
 
         Log::Info("Block highlight system initialized successfully");
@@ -109,20 +150,26 @@ void main() {
         state.srcBlendFactor = BlendFactor::SrcAlpha;
         state.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
         state.cullMode = CullMode::None;
-        state.primitiveType = PrimitiveType::Lines;
-        state.lineWidth = 3.0f;
+        state.primitiveType = PrimitiveType::Triangles;
         g_renderBackend->SetPipelineState(state);
         g_renderBackend->BindShader(m_shader);
         g_renderBackend->BindTexture(m_dummyTexture, 0);
 
-        // Set uniforms
-        g_renderBackend->SetUniformMat4(m_shader, "uMVP", viewProjectionMatrix);
-        g_renderBackend->SetUniformVec3(m_shader, "uBlockPos",
+        glm::mat4 model = glm::translate(glm::mat4(1.0f),
             glm::vec3(static_cast<float>(blockPos.x),
                       static_cast<float>(blockPos.y),
                       static_cast<float>(blockPos.z)));
+        glm::mat4 mvp = viewProjectionMatrix * model;
+        g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+        g_renderBackend->SetUniformVec3(m_shader, "uBlockPos", glm::vec3(0.0f));
 
-        g_renderBackend->DrawIndexed(m_mesh, 24); // 12 edges * 2 indices
+        int fbWidth, fbHeight;
+        glfwGetFramebufferSize(g_renderBackend->GetWindow(), &fbWidth, &fbHeight);
+        g_renderBackend->SetUniformVec2(m_shader, "uScreenSize",
+            glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+        g_renderBackend->SetUniformFloat(m_shader, "uLineWidth", 2.0f);
+
+        g_renderBackend->DrawIndexed(m_mesh, 72); // 12 edges * 6 indices
 
         // Restore default pipeline state
         PipelineState defaultState;

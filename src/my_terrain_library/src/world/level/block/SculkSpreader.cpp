@@ -326,17 +326,8 @@ void SculkSpreader::clear() {
     // Clear auxiliary vein face tracking
     clearVeinFaces();
 
-    // Print debug counters
+    // Reset debug counters
     if (s_attemptUseChargeCount > 0) {
-        std::cerr << "[SculkDebug] attemptUseCharge=" << s_attemptUseChargeCount
-                  << " enteredMainLogic=" << s_enteredMainLogic
-                  << " canPlaceGrowthTrue=" << s_canPlaceGrowthTrue
-                  << " growthPlaced=" << s_growthPlaced
-                  << " canPlaceChecks=" << s_canPlaceGrowthChecks
-                  << " canPlaceFailAbove=" << s_canPlaceGrowthFailAbove
-                  << " canPlacePass=" << s_canPlaceGrowthPass
-                  << " veinToAir=" << s_veinToAirCount << std::endl;
-        // Reset counters
         s_attemptUseChargeCount = 0;
         s_enteredMainLogic = 0;
         s_canPlaceGrowthTrue = 0;

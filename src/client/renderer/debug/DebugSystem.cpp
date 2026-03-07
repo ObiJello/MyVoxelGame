@@ -625,6 +625,7 @@ namespace Debug {
             ImGui::TextColored(tpsCol, "TPS: %.1f / 20", srv.averageTPS);
             ImGui::Text("Avg Tick Time:  %.2f ms", srv.averageTickTime);
             ImGui::Text("Ticks Total:    %llu", (unsigned long long)srv.ticksProcessed);
+            ImGui::Text("World Seed:     %d", srv.worldSeed);
             ImGui::Separator();
             ImGui::Text("Chunks Loaded:  %llu", (unsigned long long)srv.chunksLoaded);
             ImGui::Text("Chunks Sent:    %llu", (unsigned long long)srv.chunksSent);

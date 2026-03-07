@@ -1,0 +1,1154 @@
+Model Name: acacia_button | Name: Acacia Button | Opaque: No
+Model Name: acacia_door | Name: Acacia Door | Opaque: No
+Model Name: acacia_fence | Name: Acacia Fence | Opaque: Yes
+Model Name: acacia_fence_gate | Name: Acacia Fence Gate | Opaque: Yes
+Model Name: acacia_hanging_sign | Name: Acacia Hanging Sign | Opaque: No
+Model Name: acacia_leaves | Name: Acacia Leaves | Opaque: No
+Model Name: acacia_log | Name: Acacia Log | Opaque: Yes
+Model Name: acacia_planks | Name: Acacia Planks | Opaque: Yes
+Model Name: acacia_pressure_plate | Name: Acacia Pressure Plate | Opaque: No
+Model Name: acacia_sapling | Name: Acacia Sapling | Opaque: No
+Model Name: acacia_shelf | Name: Acacia Shelf | Opaque: Yes
+Model Name: acacia_sign | Name: Acacia Sign | Opaque: No
+Model Name: acacia_slab | Name: Acacia Slab | Opaque: Yes
+Model Name: acacia_stairs | Name: Acacia Stairs | Opaque: Yes
+Model Name: acacia_trapdoor | Name: Acacia Trapdoor | Opaque: No
+Model Name: acacia_wall_hanging_sign | Name: Acacia Wall Hanging Sign | Opaque: No
+Model Name: acacia_wall_sign | Name: Acacia Wall Sign | Opaque: No
+Model Name: acacia_wood | Name: Acacia Wood | Opaque: Yes
+Model Name: activator_rail | Name: Activator Rail | Opaque: No
+Model Name: air | Name: Air | Opaque: No
+Model Name: allium | Name: Allium | Opaque: No
+Model Name: amethyst_block | Name: Block of Amethyst | Opaque: Yes
+Model Name: amethyst_cluster | Name: Amethyst Cluster | Opaque: No
+Model Name: ancient_debris | Name: Ancient Debris | Opaque: Yes
+Model Name: andesite | Name: Andesite | Opaque: Yes
+Model Name: andesite_slab | Name: Andesite Slab | Opaque: Yes
+Model Name: andesite_stairs | Name: Andesite Stairs | Opaque: Yes
+Model Name: andesite_wall | Name: Andesite Wall | Opaque: Yes
+Model Name: anvil | Name: Anvil | Opaque: Yes
+Model Name: attached_melon_stem | Name: Attached Melon Stem | Opaque: Yes
+Model Name: attached_pumpkin_stem | Name: Attached Pumpkin Stem | Opaque: Yes
+Model Name: azalea | Name: Azalea | Opaque: No
+Model Name: azalea_leaves | Name: Azalea Leaves | Opaque: No
+Model Name: azure_bluet | Name: Azure Bluet | Opaque: No
+Model Name: bamboo | Name: Bamboo | Opaque: No
+Model Name: bamboo_block | Name: Block of Bamboo | Opaque: Yes
+Model Name: bamboo_button | Name: Bamboo Button | Opaque: No
+Model Name: bamboo_door | Name: Bamboo Door | Opaque: No
+Model Name: bamboo_fence | Name: Bamboo Fence | Opaque: Yes
+Model Name: bamboo_fence_gate | Name: Bamboo Fence Gate | Opaque: Yes
+Model Name: bamboo_hanging_sign | Name: Bamboo Hanging Sign | Opaque: No
+Model Name: bamboo_mosaic | Name: Bamboo Mosaic | Opaque: Yes
+Model Name: bamboo_mosaic_slab | Name: Bamboo Mosaic Slab | Opaque: Yes
+Model Name: bamboo_mosaic_stairs | Name: Bamboo Mosaic Stairs | Opaque: Yes
+Model Name: bamboo_planks | Name: Bamboo Planks | Opaque: Yes
+Model Name: bamboo_pressure_plate | Name: Bamboo Pressure Plate | Opaque: No
+Model Name: bamboo_sapling | Name: Bamboo Shoot | Opaque: No
+Model Name: bamboo_shelf | Name: Bamboo Shelf | Opaque: Yes
+Model Name: bamboo_sign | Name: Bamboo Sign | Opaque: No
+Model Name: bamboo_slab | Name: Bamboo Slab | Opaque: Yes
+Model Name: bamboo_stairs | Name: Bamboo Stairs | Opaque: Yes
+Model Name: bamboo_trapdoor | Name: Bamboo Trapdoor | Opaque: No
+Model Name: bamboo_wall_hanging_sign | Name: Bamboo Wall Hanging Sign | Opaque: No
+Model Name: bamboo_wall_sign | Name: Bamboo Wall Sign | Opaque: No
+Model Name: barrel | Name: Barrel | Opaque: Yes
+Model Name: barrier | Name: Barrier | Opaque: No
+Model Name: basalt | Name: Basalt | Opaque: Yes
+Model Name: beacon | Name: Beacon | Opaque: No
+Model Name: bedrock | Name: Bedrock | Opaque: Yes
+Model Name: bee_nest | Name: Bee Nest | Opaque: Yes
+Model Name: beehive | Name: Beehive | Opaque: Yes
+Model Name: beetroots | Name: Beetroots | Opaque: No
+Model Name: bell | Name: Bell | Opaque: Yes
+Model Name: big_dripleaf | Name: Big Dripleaf | Opaque: Yes
+Model Name: big_dripleaf_stem | Name: Big Dripleaf Stem | Opaque: No
+Model Name: birch_button | Name: Birch Button | Opaque: No
+Model Name: birch_door | Name: Birch Door | Opaque: No
+Model Name: birch_fence | Name: Birch Fence | Opaque: Yes
+Model Name: birch_fence_gate | Name: Birch Fence Gate | Opaque: Yes
+Model Name: birch_hanging_sign | Name: Birch Hanging Sign | Opaque: No
+Model Name: birch_leaves | Name: Birch Leaves | Opaque: No
+Model Name: birch_log | Name: Birch Log | Opaque: Yes
+Model Name: birch_planks | Name: Birch Planks | Opaque: Yes
+Model Name: birch_pressure_plate | Name: Birch Pressure Plate | Opaque: No
+Model Name: birch_sapling | Name: Birch Sapling | Opaque: No
+Model Name: birch_shelf | Name: Birch Shelf | Opaque: Yes
+Model Name: birch_sign | Name: Birch Sign | Opaque: No
+Model Name: birch_slab | Name: Birch Slab | Opaque: Yes
+Model Name: birch_stairs | Name: Birch Stairs | Opaque: Yes
+Model Name: birch_trapdoor | Name: Birch Trapdoor | Opaque: No
+Model Name: birch_wall_hanging_sign | Name: Birch Wall Hanging Sign | Opaque: No
+Model Name: birch_wall_sign | Name: Birch Wall Sign | Opaque: No
+Model Name: birch_wood | Name: Birch Wood | Opaque: Yes
+Model Name: black_banner | Name: Black Banner | Opaque: No
+Model Name: black_bed | Name: Black Bed | Opaque: No
+Model Name: black_candle | Name: Black Candle | Opaque: No
+Model Name: black_candle_cake | Name: Cake with Black Candle | Opaque: Yes
+Model Name: black_carpet | Name: Black Carpet | Opaque: Yes
+Model Name: black_concrete | Name: Black Concrete | Opaque: Yes
+Model Name: black_concrete_powder | Name: Black Concrete Powder | Opaque: Yes
+Model Name: black_glazed_terracotta | Name: Black Glazed Terracotta | Opaque: Yes
+Model Name: black_shulker_box | Name: Black Shulker Box | Opaque: No
+Model Name: black_stained_glass | Name: Black Stained Glass | Opaque: No
+Model Name: black_stained_glass_pane | Name: Black Stained Glass Pane | Opaque: No
+Model Name: black_terracotta | Name: Black Terracotta | Opaque: Yes
+Model Name: black_wool | Name: Black Wool | Opaque: Yes
+Model Name: blackstone | Name: Blackstone | Opaque: Yes
+Model Name: blackstone_slab | Name: Blackstone Slab | Opaque: Yes
+Model Name: blackstone_stairs | Name: Blackstone Stairs | Opaque: Yes
+Model Name: blackstone_wall | Name: Blackstone Wall | Opaque: Yes
+Model Name: blast_furnace | Name: Blast Furnace | Opaque: Yes
+Model Name: blue_banner | Name: Blue Banner | Opaque: No
+Model Name: blue_bed | Name: Blue Bed | Opaque: No
+Model Name: blue_candle | Name: Blue Candle | Opaque: No
+Model Name: blue_candle_cake | Name: Cake with Blue Candle | Opaque: Yes
+Model Name: blue_carpet | Name: Blue Carpet | Opaque: Yes
+Model Name: blue_concrete | Name: Blue Concrete | Opaque: Yes
+Model Name: blue_concrete_powder | Name: Blue Concrete Powder | Opaque: Yes
+Model Name: blue_glazed_terracotta | Name: Blue Glazed Terracotta | Opaque: Yes
+Model Name: blue_ice | Name: Blue Ice | Opaque: Yes
+Model Name: blue_orchid | Name: Blue Orchid | Opaque: No
+Model Name: blue_shulker_box | Name: Blue Shulker Box | Opaque: No
+Model Name: blue_stained_glass | Name: Blue Stained Glass | Opaque: No
+Model Name: blue_stained_glass_pane | Name: Blue Stained Glass Pane | Opaque: No
+Model Name: blue_terracotta | Name: Blue Terracotta | Opaque: Yes
+Model Name: blue_wool | Name: Blue Wool | Opaque: Yes
+Model Name: bone_block | Name: Bone Block | Opaque: Yes
+Model Name: bookshelf | Name: Bookshelf | Opaque: Yes
+Model Name: brain_coral | Name: Brain Coral | Opaque: No
+Model Name: brain_coral_block | Name: Brain Coral Block | Opaque: Yes
+Model Name: brain_coral_fan | Name: Brain Coral Fan | Opaque: No
+Model Name: brain_coral_wall_fan | Name: Brain Coral Wall Fan | Opaque: No
+Model Name: brewing_stand | Name: Brewing Stand | Opaque: No
+Model Name: brick_slab | Name: Brick Slab | Opaque: Yes
+Model Name: brick_stairs | Name: Brick Stairs | Opaque: Yes
+Model Name: brick_wall | Name: Brick Wall | Opaque: Yes
+Model Name: bricks | Name: Bricks | Opaque: Yes
+Model Name: brown_banner | Name: Brown Banner | Opaque: No
+Model Name: brown_bed | Name: Brown Bed | Opaque: No
+Model Name: brown_candle | Name: Brown Candle | Opaque: No
+Model Name: brown_candle_cake | Name: Cake with Brown Candle | Opaque: Yes
+Model Name: brown_carpet | Name: Brown Carpet | Opaque: Yes
+Model Name: brown_concrete | Name: Brown Concrete | Opaque: Yes
+Model Name: brown_concrete_powder | Name: Brown Concrete Powder | Opaque: Yes
+Model Name: brown_glazed_terracotta | Name: Brown Glazed Terracotta | Opaque: Yes
+Model Name: brown_mushroom | Name: Brown Mushroom | Opaque: No
+Model Name: brown_mushroom_block | Name: Brown Mushroom Block | Opaque: Yes
+Model Name: brown_shulker_box | Name: Brown Shulker Box | Opaque: No
+Model Name: brown_stained_glass | Name: Brown Stained Glass | Opaque: No
+Model Name: brown_stained_glass_pane | Name: Brown Stained Glass Pane | Opaque: No
+Model Name: brown_terracotta | Name: Brown Terracotta | Opaque: Yes
+Model Name: brown_wool | Name: Brown Wool | Opaque: Yes
+Model Name: bubble_column | Name: Bubble Column | Opaque: No
+Model Name: bubble_coral | Name: Bubble Coral | Opaque: No
+Model Name: bubble_coral_block | Name: Bubble Coral Block | Opaque: Yes
+Model Name: bubble_coral_fan | Name: Bubble Coral Fan | Opaque: No
+Model Name: bubble_coral_wall_fan | Name: Bubble Coral Wall Fan | Opaque: No
+Model Name: budding_amethyst | Name: Budding Amethyst | Opaque: Yes
+Model Name: bush | Name: Bush | Opaque: No
+Model Name: cactus | Name: Cactus | Opaque: Yes
+Model Name: cactus_flower | Name: Cactus Flower | Opaque: No
+Model Name: cake | Name: Cake | Opaque: Yes
+Model Name: calcite | Name: Calcite | Opaque: Yes
+Model Name: calibrated_sculk_sensor | Name: Calibrated Sculk Sensor | Opaque: Yes
+Model Name: campfire | Name: Campfire | Opaque: No
+Model Name: candle | Name: Candle | Opaque: No
+Model Name: candle_cake | Name: Cake with Candle | Opaque: Yes
+Model Name: carrots | Name: Carrots | Opaque: No
+Model Name: cartography_table | Name: Cartography Table | Opaque: Yes
+Model Name: carved_pumpkin | Name: Carved Pumpkin | Opaque: Yes
+Model Name: cauldron | Name: Cauldron | Opaque: No
+Model Name: cave_air | Name: Cave Air | Opaque: No
+Model Name: cave_vines | Name: Cave Vines | Opaque: No
+Model Name: cave_vines_plant | Name: Cave Vines Plant | Opaque: No
+Model Name: chain | Name: Chain | Opaque: Yes
+Model Name: chain_command_block | Name: Chain Command Block | Opaque: Yes
+Model Name: cherry_button | Name: Cherry Button | Opaque: No
+Model Name: cherry_door | Name: Cherry Door | Opaque: No
+Model Name: cherry_fence | Name: Cherry Fence | Opaque: Yes
+Model Name: cherry_fence_gate | Name: Cherry Fence Gate | Opaque: Yes
+Model Name: cherry_hanging_sign | Name: Cherry Hanging Sign | Opaque: No
+Model Name: cherry_leaves | Name: Cherry Leaves | Opaque: No
+Model Name: cherry_log | Name: Cherry Log | Opaque: Yes
+Model Name: cherry_planks | Name: Cherry Planks | Opaque: Yes
+Model Name: cherry_pressure_plate | Name: Cherry Pressure Plate | Opaque: No
+Model Name: cherry_sapling | Name: Cherry Sapling | Opaque: No
+Model Name: cherry_shelf | Name: Cherry Shelf | Opaque: Yes
+Model Name: cherry_sign | Name: Cherry Sign | Opaque: No
+Model Name: cherry_slab | Name: Cherry Slab | Opaque: Yes
+Model Name: cherry_stairs | Name: Cherry Stairs | Opaque: Yes
+Model Name: cherry_trapdoor | Name: Cherry Trapdoor | Opaque: No
+Model Name: cherry_wall_hanging_sign | Name: Cherry Wall Hanging Sign | Opaque: No
+Model Name: cherry_wall_sign | Name: Cherry Wall Sign | Opaque: No
+Model Name: cherry_wood | Name: Cherry Wood | Opaque: Yes
+Model Name: chest | Name: Chest | Opaque: Yes
+Model Name: chipped_anvil | Name: Chipped Anvil | Opaque: Yes
+Model Name: chiseled_bookshelf | Name: Chiseled Bookshelf | Opaque: Yes
+Model Name: chiseled_copper | Name: Chiseled Copper | Opaque: Yes
+Model Name: chiseled_deepslate | Name: Chiseled Deepslate | Opaque: Yes
+Model Name: chiseled_nether_bricks | Name: Chiseled Nether Bricks | Opaque: Yes
+Model Name: chiseled_polished_blackstone | Name: Chiseled Polished Blackstone | Opaque: Yes
+Model Name: chiseled_quartz_block | Name: Chiseled Quartz Block | Opaque: Yes
+Model Name: chiseled_red_sandstone | Name: Chiseled Red Sandstone | Opaque: Yes
+Model Name: chiseled_resin_bricks | Name: Chiseled Resin Bricks | Opaque: Yes
+Model Name: chiseled_sandstone | Name: Chiseled Sandstone | Opaque: Yes
+Model Name: chiseled_stone_bricks | Name: Chiseled Stone Bricks | Opaque: Yes
+Model Name: chiseled_tuff | Name: Chiseled Tuff | Opaque: Yes
+Model Name: chiseled_tuff_bricks | Name: Chiseled Tuff Bricks | Opaque: Yes
+Model Name: chorus_flower | Name: Chorus Flower | Opaque: No
+Model Name: chorus_plant | Name: Chorus Plant | Opaque: No
+Model Name: clay | Name: Clay | Opaque: Yes
+Model Name: closed_eyeblossom | Name: Closed Eyeblossom | Opaque: No
+Model Name: coal_block | Name: Block of Coal | Opaque: Yes
+Model Name: coal_ore | Name: Coal Ore | Opaque: Yes
+Model Name: coarse_dirt | Name: Coarse Dirt | Opaque: Yes
+Model Name: cobbled_deepslate | Name: Cobbled Deepslate | Opaque: Yes
+Model Name: cobbled_deepslate_slab | Name: Cobbled Deepslate Slab | Opaque: Yes
+Model Name: cobbled_deepslate_stairs | Name: Cobbled Deepslate Stairs | Opaque: Yes
+Model Name: cobbled_deepslate_wall | Name: Cobbled Deepslate Wall | Opaque: Yes
+Model Name: cobblestone | Name: Cobblestone | Opaque: Yes
+Model Name: cobblestone_slab | Name: Cobblestone Slab | Opaque: Yes
+Model Name: cobblestone_stairs | Name: Cobblestone Stairs | Opaque: Yes
+Model Name: cobblestone_wall | Name: Cobblestone Wall | Opaque: Yes
+Model Name: cobweb | Name: Cobweb | Opaque: No
+Model Name: cocoa | Name: Cocoa | Opaque: No
+Model Name: command_block | Name: Command Block | Opaque: Yes
+Model Name: comparator | Name: Redstone Comparator | Opaque: Yes
+Model Name: composter | Name: Composter | Opaque: Yes
+Model Name: conduit | Name: Conduit | Opaque: No
+Model Name: copper_bars | Name: Copper Bars | Opaque: Yes
+Model Name: copper_block | Name: Block of Copper | Opaque: Yes
+Model Name: copper_bulb | Name: Copper Bulb | Opaque: Yes
+Model Name: copper_chain | Name: Copper Chain | Opaque: Yes
+Model Name: copper_chest | Name: Copper Chest | Opaque: Yes
+Model Name: copper_door | Name: Copper Door | Opaque: No
+Model Name: copper_golem_statue | Name: Copper Golem Statue | Opaque: No
+Model Name: copper_grate | Name: Copper Grate | Opaque: No
+Model Name: copper_lantern | Name: Copper Lantern | Opaque: Yes
+Model Name: copper_ore | Name: Copper Ore | Opaque: Yes
+Model Name: copper_torch | Name: Copper Torch | Opaque: No
+Model Name: copper_trapdoor | Name: Copper Trapdoor | Opaque: No
+Model Name: copper_wall_torch | Name: Copper Wall Torch | Opaque: No
+Model Name: cornflower | Name: Cornflower | Opaque: No
+Model Name: cracked_deepslate_bricks | Name: Cracked Deepslate Bricks | Opaque: Yes
+Model Name: cracked_deepslate_tiles | Name: Cracked Deepslate Tiles | Opaque: Yes
+Model Name: cracked_nether_bricks | Name: Cracked Nether Bricks | Opaque: Yes
+Model Name: cracked_polished_blackstone_bricks | Name: Cracked Polished Blackstone Bricks | Opaque: Yes
+Model Name: cracked_stone_bricks | Name: Cracked Stone Bricks | Opaque: Yes
+Model Name: crafter | Name: Crafter | Opaque: Yes
+Model Name: crafting_table | Name: Crafting Table | Opaque: Yes
+Model Name: creaking_heart | Name: Creaking Heart | Opaque: Yes
+Model Name: creeper_head | Name: Creeper Head | Opaque: No
+Model Name: creeper_wall_head | Name: Creeper Wall Head | Opaque: Yes
+Model Name: crimson_button | Name: Crimson Button | Opaque: No
+Model Name: crimson_door | Name: Crimson Door | Opaque: No
+Model Name: crimson_fence | Name: Crimson Fence | Opaque: Yes
+Model Name: crimson_fence_gate | Name: Crimson Fence Gate | Opaque: Yes
+Model Name: crimson_fungus | Name: Crimson Fungus | Opaque: No
+Model Name: crimson_hanging_sign | Name: Crimson Hanging Sign | Opaque: No
+Model Name: crimson_hyphae | Name: Crimson Hyphae | Opaque: Yes
+Model Name: crimson_nylium | Name: Crimson Nylium | Opaque: Yes
+Model Name: crimson_planks | Name: Crimson Planks | Opaque: Yes
+Model Name: crimson_pressure_plate | Name: Crimson Pressure Plate | Opaque: No
+Model Name: crimson_roots | Name: Crimson Roots | Opaque: No
+Model Name: crimson_shelf | Name: Crimson Shelf | Opaque: Yes
+Model Name: crimson_sign | Name: Crimson Sign | Opaque: No
+Model Name: crimson_slab | Name: Crimson Slab | Opaque: Yes
+Model Name: crimson_stairs | Name: Crimson Stairs | Opaque: Yes
+Model Name: crimson_stem | Name: Crimson Stem | Opaque: Yes
+Model Name: crimson_trapdoor | Name: Crimson Trapdoor | Opaque: No
+Model Name: crimson_wall_hanging_sign | Name: Crimson Wall Hanging Sign | Opaque: No
+Model Name: crimson_wall_sign | Name: Crimson Wall Sign | Opaque: No
+Model Name: crying_obsidian | Name: Crying Obsidian | Opaque: Yes
+Model Name: cut_copper | Name: Cut Copper | Opaque: Yes
+Model Name: cut_copper_slab | Name: Cut Copper Slab | Opaque: Yes
+Model Name: cut_copper_stairs | Name: Cut Copper Stairs | Opaque: Yes
+Model Name: cut_red_sandstone | Name: Cut Red Sandstone | Opaque: Yes
+Model Name: cut_red_sandstone_slab | Name: Cut Red Sandstone Slab | Opaque: Yes
+Model Name: cut_sandstone | Name: Cut Sandstone | Opaque: Yes
+Model Name: cut_sandstone_slab | Name: Cut Sandstone Slab | Opaque: Yes
+Model Name: cyan_banner | Name: Cyan Banner | Opaque: No
+Model Name: cyan_bed | Name: Cyan Bed | Opaque: No
+Model Name: cyan_candle | Name: Cyan Candle | Opaque: No
+Model Name: cyan_candle_cake | Name: Cake with Cyan Candle | Opaque: Yes
+Model Name: cyan_carpet | Name: Cyan Carpet | Opaque: Yes
+Model Name: cyan_concrete | Name: Cyan Concrete | Opaque: Yes
+Model Name: cyan_concrete_powder | Name: Cyan Concrete Powder | Opaque: Yes
+Model Name: cyan_glazed_terracotta | Name: Cyan Glazed Terracotta | Opaque: Yes
+Model Name: cyan_shulker_box | Name: Cyan Shulker Box | Opaque: No
+Model Name: cyan_stained_glass | Name: Cyan Stained Glass | Opaque: No
+Model Name: cyan_stained_glass_pane | Name: Cyan Stained Glass Pane | Opaque: No
+Model Name: cyan_terracotta | Name: Cyan Terracotta | Opaque: Yes
+Model Name: cyan_wool | Name: Cyan Wool | Opaque: Yes
+Model Name: damaged_anvil | Name: Damaged Anvil | Opaque: Yes
+Model Name: dandelion | Name: Dandelion | Opaque: No
+Model Name: dark_oak_button | Name: Dark Oak Button | Opaque: No
+Model Name: dark_oak_door | Name: Dark Oak Door | Opaque: No
+Model Name: dark_oak_fence | Name: Dark Oak Fence | Opaque: Yes
+Model Name: dark_oak_fence_gate | Name: Dark Oak Fence Gate | Opaque: Yes
+Model Name: dark_oak_hanging_sign | Name: Dark Oak Hanging Sign | Opaque: No
+Model Name: dark_oak_leaves | Name: Dark Oak Leaves | Opaque: No
+Model Name: dark_oak_log | Name: Dark Oak Log | Opaque: Yes
+Model Name: dark_oak_planks | Name: Dark Oak Planks | Opaque: Yes
+Model Name: dark_oak_pressure_plate | Name: Dark Oak Pressure Plate | Opaque: No
+Model Name: dark_oak_sapling | Name: Dark Oak Sapling | Opaque: No
+Model Name: dark_oak_shelf | Name: Dark Oak Shelf | Opaque: Yes
+Model Name: dark_oak_sign | Name: Dark Oak Sign | Opaque: No
+Model Name: dark_oak_slab | Name: Dark Oak Slab | Opaque: Yes
+Model Name: dark_oak_stairs | Name: Dark Oak Stairs | Opaque: Yes
+Model Name: dark_oak_trapdoor | Name: Dark Oak Trapdoor | Opaque: No
+Model Name: dark_oak_wall_hanging_sign | Name: Dark Oak Wall Hanging Sign | Opaque: No
+Model Name: dark_oak_wall_sign | Name: Dark Oak Wall Sign | Opaque: No
+Model Name: dark_oak_wood | Name: Dark Oak Wood | Opaque: Yes
+Model Name: dark_prismarine | Name: Dark Prismarine | Opaque: Yes
+Model Name: dark_prismarine_slab | Name: Dark Prismarine Slab | Opaque: Yes
+Model Name: dark_prismarine_stairs | Name: Dark Prismarine Stairs | Opaque: Yes
+Model Name: daylight_detector | Name: Daylight Detector | Opaque: Yes
+Model Name: dead_brain_coral | Name: Dead Brain Coral | Opaque: No
+Model Name: dead_brain_coral_block | Name: Dead Brain Coral Block | Opaque: Yes
+Model Name: dead_brain_coral_fan | Name: Dead Brain Coral Fan | Opaque: No
+Model Name: dead_brain_coral_wall_fan | Name: Dead Brain Coral Wall Fan | Opaque: No
+Model Name: dead_bubble_coral | Name: Dead Bubble Coral | Opaque: No
+Model Name: dead_bubble_coral_block | Name: Dead Bubble Coral Block | Opaque: Yes
+Model Name: dead_bubble_coral_fan | Name: Dead Bubble Coral Fan | Opaque: No
+Model Name: dead_bubble_coral_wall_fan | Name: Dead Bubble Coral Wall Fan | Opaque: No
+Model Name: dead_bush | Name: Dead Bush | Opaque: No
+Model Name: dead_fire_coral | Name: Dead Fire Coral | Opaque: No
+Model Name: dead_fire_coral_block | Name: Dead Fire Coral Block | Opaque: Yes
+Model Name: dead_fire_coral_fan | Name: Dead Fire Coral Fan | Opaque: No
+Model Name: dead_fire_coral_wall_fan | Name: Dead Fire Coral Wall Fan | Opaque: No
+Model Name: dead_horn_coral | Name: Dead Horn Coral | Opaque: No
+Model Name: dead_horn_coral_block | Name: Dead Horn Coral Block | Opaque: Yes
+Model Name: dead_horn_coral_fan | Name: Dead Horn Coral Fan | Opaque: No
+Model Name: dead_horn_coral_wall_fan | Name: Dead Horn Coral Wall Fan | Opaque: No
+Model Name: dead_tube_coral | Name: Dead Tube Coral | Opaque: No
+Model Name: dead_tube_coral_block | Name: Dead Tube Coral Block | Opaque: Yes
+Model Name: dead_tube_coral_fan | Name: Dead Tube Coral Fan | Opaque: No
+Model Name: dead_tube_coral_wall_fan | Name: Dead Tube Coral Wall Fan | Opaque: No
+Model Name: decorated_pot | Name: Decorated Pot | Opaque: No
+Model Name: deepslate | Name: Deepslate | Opaque: Yes
+Model Name: deepslate_brick_slab | Name: Deepslate Brick Slab | Opaque: Yes
+Model Name: deepslate_brick_stairs | Name: Deepslate Brick Stairs | Opaque: Yes
+Model Name: deepslate_brick_wall | Name: Deepslate Brick Wall | Opaque: Yes
+Model Name: deepslate_bricks | Name: Deepslate Bricks | Opaque: Yes
+Model Name: deepslate_coal_ore | Name: Deepslate Coal Ore | Opaque: Yes
+Model Name: deepslate_copper_ore | Name: Deepslate Copper Ore | Opaque: Yes
+Model Name: deepslate_diamond_ore | Name: Deepslate Diamond Ore | Opaque: Yes
+Model Name: deepslate_emerald_ore | Name: Deepslate Emerald Ore | Opaque: Yes
+Model Name: deepslate_gold_ore | Name: Deepslate Gold Ore | Opaque: Yes
+Model Name: deepslate_iron_ore | Name: Deepslate Iron Ore | Opaque: Yes
+Model Name: deepslate_lapis_ore | Name: Deepslate Lapis Lazuli Ore | Opaque: Yes
+Model Name: deepslate_redstone_ore | Name: Deepslate Redstone Ore | Opaque: Yes
+Model Name: deepslate_tile_slab | Name: Deepslate Tile Slab | Opaque: Yes
+Model Name: deepslate_tile_stairs | Name: Deepslate Tile Stairs | Opaque: Yes
+Model Name: deepslate_tile_wall | Name: Deepslate Tile Wall | Opaque: Yes
+Model Name: deepslate_tiles | Name: Deepslate Tiles | Opaque: Yes
+Model Name: detector_rail | Name: Detector Rail | Opaque: No
+Model Name: diamond_block | Name: Block of Diamond | Opaque: Yes
+Model Name: diamond_ore | Name: Diamond Ore | Opaque: Yes
+Model Name: diorite | Name: Diorite | Opaque: Yes
+Model Name: diorite_slab | Name: Diorite Slab | Opaque: Yes
+Model Name: diorite_stairs | Name: Diorite Stairs | Opaque: Yes
+Model Name: diorite_wall | Name: Diorite Wall | Opaque: Yes
+Model Name: dirt | Name: Dirt | Opaque: Yes
+Model Name: dirt_path | Name: Dirt Path | Opaque: Yes
+Model Name: dispenser | Name: Dispenser | Opaque: Yes
+Model Name: dragon_egg | Name: Dragon Egg | Opaque: No
+Model Name: dragon_head | Name: Dragon Head | Opaque: No
+Model Name: dragon_wall_head | Name: Dragon Wall Head | Opaque: Yes
+Model Name: dried_ghast | Name: Dried Ghast | Opaque: No
+Model Name: dried_kelp_block | Name: Dried Kelp Block | Opaque: Yes
+Model Name: dripstone_block | Name: Dripstone Block | Opaque: Yes
+Model Name: dropper | Name: Dropper | Opaque: Yes
+Model Name: emerald_block | Name: Block of Emerald | Opaque: Yes
+Model Name: emerald_ore | Name: Emerald Ore | Opaque: Yes
+Model Name: enchanting_table | Name: Enchanting Table | Opaque: Yes
+Model Name: end_gateway | Name: End Gateway | Opaque: No
+Model Name: end_portal | Name: End Portal | Opaque: No
+Model Name: end_portal_frame | Name: End Portal Frame | Opaque: Yes
+Model Name: end_rod | Name: End Rod | Opaque: No
+Model Name: end_stone | Name: End Stone | Opaque: Yes
+Model Name: end_stone_brick_slab | Name: End Stone Brick Slab | Opaque: Yes
+Model Name: end_stone_brick_stairs | Name: End Stone Brick Stairs | Opaque: Yes
+Model Name: end_stone_brick_wall | Name: End Stone Brick Wall | Opaque: Yes
+Model Name: end_stone_bricks | Name: End Stone Bricks | Opaque: Yes
+Model Name: ender_chest | Name: Ender Chest | Opaque: Yes
+Model Name: exposed_chiseled_copper | Name: Exposed Chiseled Copper | Opaque: Yes
+Model Name: exposed_copper | Name: Exposed Copper | Opaque: Yes
+Model Name: exposed_copper_bars | Name: Exposed Copper Bars | Opaque: Yes
+Model Name: exposed_copper_bulb | Name: Exposed Copper Bulb | Opaque: Yes
+Model Name: exposed_copper_chain | Name: Exposed Copper Chain | Opaque: Yes
+Model Name: exposed_copper_chest | Name: Exposed Copper Chest | Opaque: Yes
+Model Name: exposed_copper_door | Name: Exposed Copper Door | Opaque: No
+Model Name: exposed_copper_golem_statue | Name: Exposed Copper Golem Statue | Opaque: No
+Model Name: exposed_copper_grate | Name: Exposed Copper Grate | Opaque: No
+Model Name: exposed_copper_lantern | Name: Exposed Copper Lantern | Opaque: Yes
+Model Name: exposed_copper_trapdoor | Name: Exposed Copper Trapdoor | Opaque: No
+Model Name: exposed_cut_copper | Name: Exposed Cut Copper | Opaque: Yes
+Model Name: exposed_cut_copper_slab | Name: Exposed Cut Copper Slab | Opaque: Yes
+Model Name: exposed_cut_copper_stairs | Name: Exposed Cut Copper Stairs | Opaque: Yes
+Model Name: exposed_lightning_rod | Name: Exposed Lightning Rod | Opaque: No
+Model Name: farmland | Name: Farmland | Opaque: Yes
+Model Name: fern | Name: Fern | Opaque: No
+Model Name: fire | Name: Fire | Opaque: No
+Model Name: fire_coral | Name: Fire Coral | Opaque: No
+Model Name: fire_coral_block | Name: Fire Coral Block | Opaque: Yes
+Model Name: fire_coral_fan | Name: Fire Coral Fan | Opaque: No
+Model Name: fire_coral_wall_fan | Name: Fire Coral Wall Fan | Opaque: No
+Model Name: firefly_bush | Name: Firefly Bush | Opaque: No
+Model Name: fletching_table | Name: Fletching Table | Opaque: Yes
+Model Name: flower_pot | Name: Flower Pot | Opaque: No
+Model Name: flowering_azalea | Name: Flowering Azalea | Opaque: No
+Model Name: flowering_azalea_leaves | Name: Flowering Azalea Leaves | Opaque: No
+Model Name: frogspawn | Name: Frogspawn | Opaque: No
+Model Name: frosted_ice | Name: Frosted Ice | Opaque: No
+Model Name: furnace | Name: Furnace | Opaque: Yes
+Model Name: gilded_blackstone | Name: Gilded Blackstone | Opaque: Yes
+Model Name: glass | Name: Glass | Opaque: No
+Model Name: glass_pane | Name: Glass Pane | Opaque: No
+Model Name: glow_lichen | Name: Glow Lichen | Opaque: No
+Model Name: glowstone | Name: Glowstone | Opaque: Yes
+Model Name: gold_block | Name: Block of Gold | Opaque: Yes
+Model Name: gold_ore | Name: Gold Ore | Opaque: Yes
+Model Name: granite | Name: Granite | Opaque: Yes
+Model Name: granite_slab | Name: Granite Slab | Opaque: Yes
+Model Name: granite_stairs | Name: Granite Stairs | Opaque: Yes
+Model Name: granite_wall | Name: Granite Wall | Opaque: Yes
+Model Name: grass | Name: Grass | Opaque: Yes
+Model Name: grass_block | Name: Grass Block | Opaque: Yes
+Model Name: gravel | Name: Gravel | Opaque: Yes
+Model Name: gray_banner | Name: Gray Banner | Opaque: No
+Model Name: gray_bed | Name: Gray Bed | Opaque: No
+Model Name: gray_candle | Name: Gray Candle | Opaque: No
+Model Name: gray_candle_cake | Name: Cake with Gray Candle | Opaque: Yes
+Model Name: gray_carpet | Name: Gray Carpet | Opaque: Yes
+Model Name: gray_concrete | Name: Gray Concrete | Opaque: Yes
+Model Name: gray_concrete_powder | Name: Gray Concrete Powder | Opaque: Yes
+Model Name: gray_glazed_terracotta | Name: Gray Glazed Terracotta | Opaque: Yes
+Model Name: gray_shulker_box | Name: Gray Shulker Box | Opaque: No
+Model Name: gray_stained_glass | Name: Gray Stained Glass | Opaque: No
+Model Name: gray_stained_glass_pane | Name: Gray Stained Glass Pane | Opaque: No
+Model Name: gray_terracotta | Name: Gray Terracotta | Opaque: Yes
+Model Name: gray_wool | Name: Gray Wool | Opaque: Yes
+Model Name: green_banner | Name: Green Banner | Opaque: No
+Model Name: green_bed | Name: Green Bed | Opaque: No
+Model Name: green_candle | Name: Green Candle | Opaque: No
+Model Name: green_candle_cake | Name: Cake with Green Candle | Opaque: Yes
+Model Name: green_carpet | Name: Green Carpet | Opaque: Yes
+Model Name: green_concrete | Name: Green Concrete | Opaque: Yes
+Model Name: green_concrete_powder | Name: Green Concrete Powder | Opaque: Yes
+Model Name: green_glazed_terracotta | Name: Green Glazed Terracotta | Opaque: Yes
+Model Name: green_shulker_box | Name: Green Shulker Box | Opaque: No
+Model Name: green_stained_glass | Name: Green Stained Glass | Opaque: No
+Model Name: green_stained_glass_pane | Name: Green Stained Glass Pane | Opaque: No
+Model Name: green_terracotta | Name: Green Terracotta | Opaque: Yes
+Model Name: green_wool | Name: Green Wool | Opaque: Yes
+Model Name: grindstone | Name: Grindstone | Opaque: Yes
+Model Name: hanging_roots | Name: Hanging Roots | Opaque: No
+Model Name: hay_block | Name: Hay Bale | Opaque: Yes
+Model Name: heavy_core | Name: Heavy Core | Opaque: Yes
+Model Name: heavy_weighted_pressure_plate | Name: Heavy Weighted Pressure Plate | Opaque: No
+Model Name: honey_block | Name: Honey Block | Opaque: No
+Model Name: honeycomb_block | Name: Honeycomb Block | Opaque: Yes
+Model Name: hopper | Name: Hopper | Opaque: No
+Model Name: horn_coral | Name: Horn Coral | Opaque: No
+Model Name: horn_coral_block | Name: Horn Coral Block | Opaque: Yes
+Model Name: horn_coral_fan | Name: Horn Coral Fan | Opaque: No
+Model Name: horn_coral_wall_fan | Name: Horn Coral Wall Fan | Opaque: No
+Model Name: ice | Name: Ice | Opaque: No
+Model Name: infested_chiseled_stone_bricks | Name: Infested Chiseled Stone Bricks | Opaque: Yes
+Model Name: infested_cobblestone | Name: Infested Cobblestone | Opaque: Yes
+Model Name: infested_cracked_stone_bricks | Name: Infested Cracked Stone Bricks | Opaque: Yes
+Model Name: infested_deepslate | Name: Infested Deepslate | Opaque: Yes
+Model Name: infested_mossy_stone_bricks | Name: Infested Mossy Stone Bricks | Opaque: Yes
+Model Name: infested_stone | Name: Infested Stone | Opaque: Yes
+Model Name: infested_stone_bricks | Name: Infested Stone Bricks | Opaque: Yes
+Model Name: iron_bars | Name: Iron Bars | Opaque: No
+Model Name: iron_block | Name: Block of Iron | Opaque: Yes
+Model Name: iron_chain | Name: Iron Chain | Opaque: No
+Model Name: iron_door | Name: Iron Door | Opaque: No
+Model Name: iron_ore | Name: Iron Ore | Opaque: Yes
+Model Name: iron_trapdoor | Name: Iron Trapdoor | Opaque: No
+Model Name: jack_o_lantern | Name: Jack o'Lantern | Opaque: Yes
+Model Name: jigsaw | Name: Jigsaw Block | Opaque: Yes
+Model Name: jukebox | Name: Jukebox | Opaque: Yes
+Model Name: jungle_button | Name: Jungle Button | Opaque: No
+Model Name: jungle_door | Name: Jungle Door | Opaque: No
+Model Name: jungle_fence | Name: Jungle Fence | Opaque: Yes
+Model Name: jungle_fence_gate | Name: Jungle Fence Gate | Opaque: Yes
+Model Name: jungle_hanging_sign | Name: Jungle Hanging Sign | Opaque: No
+Model Name: jungle_leaves | Name: Jungle Leaves | Opaque: No
+Model Name: jungle_log | Name: Jungle Log | Opaque: Yes
+Model Name: jungle_planks | Name: Jungle Planks | Opaque: Yes
+Model Name: jungle_pressure_plate | Name: Jungle Pressure Plate | Opaque: No
+Model Name: jungle_sapling | Name: Jungle Sapling | Opaque: No
+Model Name: jungle_shelf | Name: Jungle Shelf | Opaque: Yes
+Model Name: jungle_sign | Name: Jungle Sign | Opaque: No
+Model Name: jungle_slab | Name: Jungle Slab | Opaque: Yes
+Model Name: jungle_stairs | Name: Jungle Stairs | Opaque: Yes
+Model Name: jungle_trapdoor | Name: Jungle Trapdoor | Opaque: No
+Model Name: jungle_wall_hanging_sign | Name: Jungle Wall Hanging Sign | Opaque: No
+Model Name: jungle_wall_sign | Name: Jungle Wall Sign | Opaque: No
+Model Name: jungle_wood | Name: Jungle Wood | Opaque: Yes
+Model Name: kelp | Name: Kelp | Opaque: No
+Model Name: kelp_plant | Name: Kelp Plant | Opaque: No
+Model Name: ladder | Name: Ladder | Opaque: No
+Model Name: lantern | Name: Lantern | Opaque: No
+Model Name: lapis_block | Name: Block of Lapis Lazuli | Opaque: Yes
+Model Name: lapis_ore | Name: Lapis Lazuli Ore | Opaque: Yes
+Model Name: large_amethyst_bud | Name: Large Amethyst Bud | Opaque: No
+Model Name: large_fern | Name: Large Fern | Opaque: No
+Model Name: lava | Name: Lava | Opaque: No
+Model Name: lava_cauldron | Name: Lava Cauldron | Opaque: No
+Model Name: leaf_litter | Name: Leaf Litter | Opaque: No
+Model Name: lectern | Name: Lectern | Opaque: Yes
+Model Name: lever | Name: Lever | Opaque: No
+Model Name: light | Name: Light | Opaque: No
+Model Name: light_blue_banner | Name: Light Blue Banner | Opaque: No
+Model Name: light_blue_bed | Name: Light Blue Bed | Opaque: No
+Model Name: light_blue_candle | Name: Light Blue Candle | Opaque: No
+Model Name: light_blue_candle_cake | Name: Cake with Light Blue Candle | Opaque: Yes
+Model Name: light_blue_carpet | Name: Light Blue Carpet | Opaque: Yes
+Model Name: light_blue_concrete | Name: Light Blue Concrete | Opaque: Yes
+Model Name: light_blue_concrete_powder | Name: Light Blue Concrete Powder | Opaque: Yes
+Model Name: light_blue_glazed_terracotta | Name: Light Blue Glazed Terracotta | Opaque: Yes
+Model Name: light_blue_shulker_box | Name: Light Blue Shulker Box | Opaque: No
+Model Name: light_blue_stained_glass | Name: Light Blue Stained Glass | Opaque: No
+Model Name: light_blue_stained_glass_pane | Name: Light Blue Stained Glass Pane | Opaque: No
+Model Name: light_blue_terracotta | Name: Light Blue Terracotta | Opaque: Yes
+Model Name: light_blue_wool | Name: Light Blue Wool | Opaque: Yes
+Model Name: light_gray_banner | Name: Light Gray Banner | Opaque: No
+Model Name: light_gray_bed | Name: Light Gray Bed | Opaque: No
+Model Name: light_gray_candle | Name: Light Gray Candle | Opaque: No
+Model Name: light_gray_candle_cake | Name: Cake with Light Gray Candle | Opaque: Yes
+Model Name: light_gray_carpet | Name: Light Gray Carpet | Opaque: Yes
+Model Name: light_gray_concrete | Name: Light Gray Concrete | Opaque: Yes
+Model Name: light_gray_concrete_powder | Name: Light Gray Concrete Powder | Opaque: Yes
+Model Name: light_gray_glazed_terracotta | Name: Light Gray Glazed Terracotta | Opaque: Yes
+Model Name: light_gray_shulker_box | Name: Light Gray Shulker Box | Opaque: No
+Model Name: light_gray_stained_glass | Name: Light Gray Stained Glass | Opaque: No
+Model Name: light_gray_stained_glass_pane | Name: Light Gray Stained Glass Pane | Opaque: No
+Model Name: light_gray_terracotta | Name: Light Gray Terracotta | Opaque: Yes
+Model Name: light_gray_wool | Name: Light Gray Wool | Opaque: Yes
+Model Name: light_weighted_pressure_plate | Name: Light Weighted Pressure Plate | Opaque: No
+Model Name: lightning_rod | Name: Lightning Rod | Opaque: No
+Model Name: lilac | Name: Lilac | Opaque: No
+Model Name: lily_of_the_valley | Name: Lily of the Valley | Opaque: No
+Model Name: lily_pad | Name: Lily Pad | Opaque: No
+Model Name: lime_banner | Name: Lime Banner | Opaque: No
+Model Name: lime_bed | Name: Lime Bed | Opaque: No
+Model Name: lime_candle | Name: Lime Candle | Opaque: No
+Model Name: lime_candle_cake | Name: Cake with Lime Candle | Opaque: Yes
+Model Name: lime_carpet | Name: Lime Carpet | Opaque: Yes
+Model Name: lime_concrete | Name: Lime Concrete | Opaque: Yes
+Model Name: lime_concrete_powder | Name: Lime Concrete Powder | Opaque: Yes
+Model Name: lime_glazed_terracotta | Name: Lime Glazed Terracotta | Opaque: Yes
+Model Name: lime_shulker_box | Name: Lime Shulker Box | Opaque: No
+Model Name: lime_stained_glass | Name: Lime Stained Glass | Opaque: No
+Model Name: lime_stained_glass_pane | Name: Lime Stained Glass Pane | Opaque: No
+Model Name: lime_terracotta | Name: Lime Terracotta | Opaque: Yes
+Model Name: lime_wool | Name: Lime Wool | Opaque: Yes
+Model Name: lodestone | Name: Lodestone | Opaque: Yes
+Model Name: loom | Name: Loom | Opaque: Yes
+Model Name: magenta_banner | Name: Magenta Banner | Opaque: No
+Model Name: magenta_bed | Name: Magenta Bed | Opaque: No
+Model Name: magenta_candle | Name: Magenta Candle | Opaque: No
+Model Name: magenta_candle_cake | Name: Cake with Magenta Candle | Opaque: Yes
+Model Name: magenta_carpet | Name: Magenta Carpet | Opaque: Yes
+Model Name: magenta_concrete | Name: Magenta Concrete | Opaque: Yes
+Model Name: magenta_concrete_powder | Name: Magenta Concrete Powder | Opaque: Yes
+Model Name: magenta_glazed_terracotta | Name: Magenta Glazed Terracotta | Opaque: Yes
+Model Name: magenta_shulker_box | Name: Magenta Shulker Box | Opaque: No
+Model Name: magenta_stained_glass | Name: Magenta Stained Glass | Opaque: No
+Model Name: magenta_stained_glass_pane | Name: Magenta Stained Glass Pane | Opaque: No
+Model Name: magenta_terracotta | Name: Magenta Terracotta | Opaque: Yes
+Model Name: magenta_wool | Name: Magenta Wool | Opaque: Yes
+Model Name: magma_block | Name: Magma Block | Opaque: Yes
+Model Name: mangrove_button | Name: Mangrove Button | Opaque: No
+Model Name: mangrove_door | Name: Mangrove Door | Opaque: No
+Model Name: mangrove_fence | Name: Mangrove Fence | Opaque: Yes
+Model Name: mangrove_fence_gate | Name: Mangrove Fence Gate | Opaque: Yes
+Model Name: mangrove_hanging_sign | Name: Mangrove Hanging Sign | Opaque: No
+Model Name: mangrove_leaves | Name: Mangrove Leaves | Opaque: No
+Model Name: mangrove_log | Name: Mangrove Log | Opaque: Yes
+Model Name: mangrove_planks | Name: Mangrove Planks | Opaque: Yes
+Model Name: mangrove_pressure_plate | Name: Mangrove Pressure Plate | Opaque: No
+Model Name: mangrove_propagule | Name: Mangrove Propagule | Opaque: No
+Model Name: mangrove_roots | Name: Mangrove Roots | Opaque: No
+Model Name: mangrove_shelf | Name: Mangrove Shelf | Opaque: Yes
+Model Name: mangrove_sign | Name: Mangrove Sign | Opaque: No
+Model Name: mangrove_slab | Name: Mangrove Slab | Opaque: Yes
+Model Name: mangrove_stairs | Name: Mangrove Stairs | Opaque: Yes
+Model Name: mangrove_trapdoor | Name: Mangrove Trapdoor | Opaque: No
+Model Name: mangrove_wall_hanging_sign | Name: Mangrove Wall Hanging Sign | Opaque: No
+Model Name: mangrove_wall_sign | Name: Mangrove Wall Sign | Opaque: No
+Model Name: mangrove_wood | Name: Mangrove Wood | Opaque: Yes
+Model Name: medium_amethyst_bud | Name: Medium Amethyst Bud | Opaque: No
+Model Name: melon | Name: Melon | Opaque: Yes
+Model Name: melon_stem | Name: Melon Stem | Opaque: Yes
+Model Name: moss_block | Name: Moss Block | Opaque: Yes
+Model Name: moss_carpet | Name: Moss Carpet | Opaque: Yes
+Model Name: mossy_cobblestone | Name: Mossy Cobblestone | Opaque: Yes
+Model Name: mossy_cobblestone_slab | Name: Mossy Cobblestone Slab | Opaque: Yes
+Model Name: mossy_cobblestone_stairs | Name: Mossy Cobblestone Stairs | Opaque: Yes
+Model Name: mossy_cobblestone_wall | Name: Mossy Cobblestone Wall | Opaque: Yes
+Model Name: mossy_stone_brick_slab | Name: Mossy Stone Brick Slab | Opaque: Yes
+Model Name: mossy_stone_brick_stairs | Name: Mossy Stone Brick Stairs | Opaque: Yes
+Model Name: mossy_stone_brick_wall | Name: Mossy Stone Brick Wall | Opaque: Yes
+Model Name: mossy_stone_bricks | Name: Mossy Stone Bricks | Opaque: Yes
+Model Name: moving_piston | Name: Moving Piston | Opaque: No
+Model Name: mud | Name: Mud | Opaque: Yes
+Model Name: mud_brick_slab | Name: Mud Brick Slab | Opaque: Yes
+Model Name: mud_brick_stairs | Name: Mud Brick Stairs | Opaque: Yes
+Model Name: mud_brick_wall | Name: Mud Brick Wall | Opaque: Yes
+Model Name: mud_bricks | Name: Mud Bricks | Opaque: Yes
+Model Name: muddy_mangrove_roots | Name: Muddy Mangrove Roots | Opaque: Yes
+Model Name: mushroom_stem | Name: Mushroom Stem | Opaque: Yes
+Model Name: mycelium | Name: Mycelium | Opaque: Yes
+Model Name: nether_brick_fence | Name: Nether Brick Fence | Opaque: Yes
+Model Name: nether_brick_slab | Name: Nether Brick Slab | Opaque: Yes
+Model Name: nether_brick_stairs | Name: Nether Brick Stairs | Opaque: Yes
+Model Name: nether_brick_wall | Name: Nether Brick Wall | Opaque: Yes
+Model Name: nether_bricks | Name: Nether Bricks | Opaque: Yes
+Model Name: nether_gold_ore | Name: Nether Gold Ore | Opaque: Yes
+Model Name: nether_portal | Name: Nether Portal | Opaque: No
+Model Name: nether_quartz_ore | Name: Nether Quartz Ore | Opaque: Yes
+Model Name: nether_sprouts | Name: Nether Sprouts | Opaque: No
+Model Name: nether_wart | Name: Nether Wart | Opaque: No
+Model Name: nether_wart_block | Name: Nether Wart Block | Opaque: Yes
+Model Name: netherite_block | Name: Block of Netherite | Opaque: Yes
+Model Name: netherrack | Name: Netherrack | Opaque: Yes
+Model Name: note_block | Name: Note Block | Opaque: Yes
+Model Name: oak_button | Name: Oak Button | Opaque: No
+Model Name: oak_door | Name: Oak Door | Opaque: No
+Model Name: oak_fence | Name: Oak Fence | Opaque: Yes
+Model Name: oak_fence_gate | Name: Oak Fence Gate | Opaque: Yes
+Model Name: oak_hanging_sign | Name: Oak Hanging Sign | Opaque: No
+Model Name: oak_leaves | Name: Oak Leaves | Opaque: No
+Model Name: oak_log | Name: Oak Log | Opaque: Yes
+Model Name: oak_planks | Name: Oak Planks | Opaque: Yes
+Model Name: oak_pressure_plate | Name: Oak Pressure Plate | Opaque: No
+Model Name: oak_sapling | Name: Oak Sapling | Opaque: No
+Model Name: oak_shelf | Name: Oak Shelf | Opaque: Yes
+Model Name: oak_sign | Name: Oak Sign | Opaque: No
+Model Name: oak_slab | Name: Oak Slab | Opaque: Yes
+Model Name: oak_stairs | Name: Oak Stairs | Opaque: Yes
+Model Name: oak_trapdoor | Name: Oak Trapdoor | Opaque: No
+Model Name: oak_wall_hanging_sign | Name: Oak Wall Hanging Sign | Opaque: No
+Model Name: oak_wall_sign | Name: Oak Wall Sign | Opaque: No
+Model Name: oak_wood | Name: Oak Wood | Opaque: Yes
+Model Name: observer | Name: Observer | Opaque: Yes
+Model Name: obsidian | Name: Obsidian | Opaque: Yes
+Model Name: ochre_froglight | Name: Ochre Froglight | Opaque: Yes
+Model Name: ominous_banner | Name: Ominous Banner | Opaque: Yes
+Model Name: open_eyeblossom | Name: Open Eyeblossom | Opaque: No
+Model Name: orange_banner | Name: Orange Banner | Opaque: No
+Model Name: orange_bed | Name: Orange Bed | Opaque: No
+Model Name: orange_candle | Name: Orange Candle | Opaque: No
+Model Name: orange_candle_cake | Name: Cake with Orange Candle | Opaque: Yes
+Model Name: orange_carpet | Name: Orange Carpet | Opaque: Yes
+Model Name: orange_concrete | Name: Orange Concrete | Opaque: Yes
+Model Name: orange_concrete_powder | Name: Orange Concrete Powder | Opaque: Yes
+Model Name: orange_glazed_terracotta | Name: Orange Glazed Terracotta | Opaque: Yes
+Model Name: orange_shulker_box | Name: Orange Shulker Box | Opaque: No
+Model Name: orange_stained_glass | Name: Orange Stained Glass | Opaque: No
+Model Name: orange_stained_glass_pane | Name: Orange Stained Glass Pane | Opaque: No
+Model Name: orange_terracotta | Name: Orange Terracotta | Opaque: Yes
+Model Name: orange_tulip | Name: Orange Tulip | Opaque: No
+Model Name: orange_wool | Name: Orange Wool | Opaque: Yes
+Model Name: oxeye_daisy | Name: Oxeye Daisy | Opaque: No
+Model Name: oxidized_chiseled_copper | Name: Oxidized Chiseled Copper | Opaque: Yes
+Model Name: oxidized_copper | Name: Oxidized Copper | Opaque: Yes
+Model Name: oxidized_copper_bars | Name: Oxidized Copper Bars | Opaque: Yes
+Model Name: oxidized_copper_bulb | Name: Oxidized Copper Bulb | Opaque: Yes
+Model Name: oxidized_copper_chain | Name: Oxidized Copper Chain | Opaque: Yes
+Model Name: oxidized_copper_chest | Name: Oxidized Copper Chest | Opaque: Yes
+Model Name: oxidized_copper_door | Name: Oxidized Copper Door | Opaque: No
+Model Name: oxidized_copper_golem_statue | Name: Oxidized Copper Golem Statue | Opaque: No
+Model Name: oxidized_copper_grate | Name: Oxidized Copper Grate | Opaque: No
+Model Name: oxidized_copper_lantern | Name: Oxidized Copper Lantern | Opaque: Yes
+Model Name: oxidized_copper_trapdoor | Name: Oxidized Copper Trapdoor | Opaque: No
+Model Name: oxidized_cut_copper | Name: Oxidized Cut Copper | Opaque: Yes
+Model Name: oxidized_cut_copper_slab | Name: Oxidized Cut Copper Slab | Opaque: Yes
+Model Name: oxidized_cut_copper_stairs | Name: Oxidized Cut Copper Stairs | Opaque: Yes
+Model Name: oxidized_lightning_rod | Name: Oxidized Lightning Rod | Opaque: No
+Model Name: packed_ice | Name: Packed Ice | Opaque: Yes
+Model Name: packed_mud | Name: Packed Mud | Opaque: Yes
+Model Name: pale_hanging_moss | Name: Pale Hanging Moss | Opaque: No
+Model Name: pale_moss_block | Name: Pale Moss Block | Opaque: Yes
+Model Name: pale_moss_carpet | Name: Pale Moss Carpet | Opaque: No
+Model Name: pale_oak_button | Name: Pale Oak Button | Opaque: No
+Model Name: pale_oak_door | Name: Pale Oak Door | Opaque: No
+Model Name: pale_oak_fence | Name: Pale Oak Fence | Opaque: Yes
+Model Name: pale_oak_fence_gate | Name: Pale Oak Fence Gate | Opaque: Yes
+Model Name: pale_oak_hanging_sign | Name: Pale Oak Hanging Sign | Opaque: No
+Model Name: pale_oak_leaves | Name: Pale Oak Leaves | Opaque: No
+Model Name: pale_oak_log | Name: Pale Oak Log | Opaque: Yes
+Model Name: pale_oak_planks | Name: Pale Oak Planks | Opaque: Yes
+Model Name: pale_oak_pressure_plate | Name: Pale Oak Pressure Plate | Opaque: No
+Model Name: pale_oak_sapling | Name: Pale Oak Sapling | Opaque: No
+Model Name: pale_oak_shelf | Name: Pale Oak Shelf | Opaque: Yes
+Model Name: pale_oak_sign | Name: Pale Oak Sign | Opaque: No
+Model Name: pale_oak_slab | Name: Pale Oak Slab | Opaque: Yes
+Model Name: pale_oak_stairs | Name: Pale Oak Stairs | Opaque: Yes
+Model Name: pale_oak_trapdoor | Name: Pale Oak Trapdoor | Opaque: No
+Model Name: pale_oak_wall_hanging_sign | Name: Pale Oak Wall Hanging Sign | Opaque: No
+Model Name: pale_oak_wall_sign | Name: Pale Oak Wall Sign | Opaque: No
+Model Name: pale_oak_wood | Name: Pale Oak Wood | Opaque: Yes
+Model Name: pearlescent_froglight | Name: Pearlescent Froglight | Opaque: Yes
+Model Name: peony | Name: Peony | Opaque: No
+Model Name: petrified_oak_slab | Name: Petrified Oak Slab | Opaque: Yes
+Model Name: piglin_head | Name: Piglin Head | Opaque: No
+Model Name: piglin_wall_head | Name: Piglin Wall Head | Opaque: Yes
+Model Name: pink_banner | Name: Pink Banner | Opaque: No
+Model Name: pink_bed | Name: Pink Bed | Opaque: No
+Model Name: pink_candle | Name: Pink Candle | Opaque: No
+Model Name: pink_candle_cake | Name: Cake with Pink Candle | Opaque: Yes
+Model Name: pink_carpet | Name: Pink Carpet | Opaque: Yes
+Model Name: pink_concrete | Name: Pink Concrete | Opaque: Yes
+Model Name: pink_concrete_powder | Name: Pink Concrete Powder | Opaque: Yes
+Model Name: pink_glazed_terracotta | Name: Pink Glazed Terracotta | Opaque: Yes
+Model Name: pink_petals | Name: Pink Petals | Opaque: No
+Model Name: pink_shulker_box | Name: Pink Shulker Box | Opaque: No
+Model Name: pink_stained_glass | Name: Pink Stained Glass | Opaque: No
+Model Name: pink_stained_glass_pane | Name: Pink Stained Glass Pane | Opaque: No
+Model Name: pink_terracotta | Name: Pink Terracotta | Opaque: Yes
+Model Name: pink_tulip | Name: Pink Tulip | Opaque: No
+Model Name: pink_wool | Name: Pink Wool | Opaque: Yes
+Model Name: piston | Name: Piston | Opaque: Yes
+Model Name: piston_head | Name: Piston Head | Opaque: Yes
+Model Name: pitcher_crop | Name: Pitcher Crop | Opaque: No
+Model Name: pitcher_plant | Name: Pitcher Plant | Opaque: No
+Model Name: player_head | Name: Player Head | Opaque: No
+Model Name: player_wall_head | Name: Player Wall Head | Opaque: Yes
+Model Name: podzol | Name: Podzol | Opaque: Yes
+Model Name: pointed_dripstone | Name: Pointed Dripstone | Opaque: No
+Model Name: polished_andesite | Name: Polished Andesite | Opaque: Yes
+Model Name: polished_andesite_slab | Name: Polished Andesite Slab | Opaque: Yes
+Model Name: polished_andesite_stairs | Name: Polished Andesite Stairs | Opaque: Yes
+Model Name: polished_basalt | Name: Polished Basalt | Opaque: Yes
+Model Name: polished_blackstone | Name: Polished Blackstone | Opaque: Yes
+Model Name: polished_blackstone_brick_slab | Name: Polished Blackstone Brick Slab | Opaque: Yes
+Model Name: polished_blackstone_brick_stairs | Name: Polished Blackstone Brick Stairs | Opaque: Yes
+Model Name: polished_blackstone_brick_wall | Name: Polished Blackstone Brick Wall | Opaque: Yes
+Model Name: polished_blackstone_bricks | Name: Polished Blackstone Bricks | Opaque: Yes
+Model Name: polished_blackstone_button | Name: Polished Blackstone Button | Opaque: No
+Model Name: polished_blackstone_pressure_plate | Name: Polished Blackstone Pressure Plate | Opaque: No
+Model Name: polished_blackstone_slab | Name: Polished Blackstone Slab | Opaque: Yes
+Model Name: polished_blackstone_stairs | Name: Polished Blackstone Stairs | Opaque: Yes
+Model Name: polished_blackstone_wall | Name: Polished Blackstone Wall | Opaque: Yes
+Model Name: polished_deepslate | Name: Polished Deepslate | Opaque: Yes
+Model Name: polished_deepslate_slab | Name: Polished Deepslate Slab | Opaque: Yes
+Model Name: polished_deepslate_stairs | Name: Polished Deepslate Stairs | Opaque: Yes
+Model Name: polished_deepslate_wall | Name: Polished Deepslate Wall | Opaque: Yes
+Model Name: polished_diorite | Name: Polished Diorite | Opaque: Yes
+Model Name: polished_diorite_slab | Name: Polished Diorite Slab | Opaque: Yes
+Model Name: polished_diorite_stairs | Name: Polished Diorite Stairs | Opaque: Yes
+Model Name: polished_granite | Name: Polished Granite | Opaque: Yes
+Model Name: polished_granite_slab | Name: Polished Granite Slab | Opaque: Yes
+Model Name: polished_granite_stairs | Name: Polished Granite Stairs | Opaque: Yes
+Model Name: polished_tuff | Name: Polished Tuff | Opaque: Yes
+Model Name: polished_tuff_slab | Name: Polished Tuff Slab | Opaque: Yes
+Model Name: polished_tuff_stairs | Name: Polished Tuff Stairs | Opaque: Yes
+Model Name: polished_tuff_wall | Name: Polished Tuff Wall | Opaque: Yes
+Model Name: poppy | Name: Poppy | Opaque: No
+Model Name: potatoes | Name: Potatoes | Opaque: No
+Model Name: potted_acacia_sapling | Name: Potted Acacia Sapling | Opaque: No
+Model Name: potted_allium | Name: Potted Allium | Opaque: No
+Model Name: potted_azalea_bush | Name: Potted Azalea | Opaque: No
+Model Name: potted_azure_bluet | Name: Potted Azure Bluet | Opaque: No
+Model Name: potted_bamboo | Name: Potted Bamboo | Opaque: No
+Model Name: potted_birch_sapling | Name: Potted Birch Sapling | Opaque: No
+Model Name: potted_blue_orchid | Name: Potted Blue Orchid | Opaque: No
+Model Name: potted_brown_mushroom | Name: Potted Brown Mushroom | Opaque: No
+Model Name: potted_cactus | Name: Potted Cactus | Opaque: No
+Model Name: potted_cherry_sapling | Name: Potted Cherry Sapling | Opaque: No
+Model Name: potted_closed_eyeblossom | Name: Potted Closed Eyeblossom | Opaque: No
+Model Name: potted_cornflower | Name: Potted Cornflower | Opaque: No
+Model Name: potted_crimson_fungus | Name: Potted Crimson Fungus | Opaque: No
+Model Name: potted_crimson_roots | Name: Potted Crimson Roots | Opaque: No
+Model Name: potted_dandelion | Name: Potted Dandelion | Opaque: No
+Model Name: potted_dark_oak_sapling | Name: Potted Dark Oak Sapling | Opaque: No
+Model Name: potted_dead_bush | Name: Potted Dead Bush | Opaque: No
+Model Name: potted_fern | Name: Potted Fern | Opaque: No
+Model Name: potted_flowering_azalea_bush | Name: Potted Flowering Azalea | Opaque: No
+Model Name: potted_jungle_sapling | Name: Potted Jungle Sapling | Opaque: No
+Model Name: potted_lily_of_the_valley | Name: Potted Lily of the Valley | Opaque: No
+Model Name: potted_mangrove_propagule | Name: Potted Mangrove Propagule | Opaque: No
+Model Name: potted_oak_sapling | Name: Potted Oak Sapling | Opaque: No
+Model Name: potted_open_eyeblossom | Name: Potted Open Eyeblossom | Opaque: No
+Model Name: potted_orange_tulip | Name: Potted Orange Tulip | Opaque: No
+Model Name: potted_oxeye_daisy | Name: Potted Oxeye Daisy | Opaque: No
+Model Name: potted_pale_oak_sapling | Name: Potted Pale Oak Sapling | Opaque: No
+Model Name: potted_pink_tulip | Name: Potted Pink Tulip | Opaque: No
+Model Name: potted_poppy | Name: Potted Poppy | Opaque: No
+Model Name: potted_red_mushroom | Name: Potted Red Mushroom | Opaque: No
+Model Name: potted_red_tulip | Name: Potted Red Tulip | Opaque: No
+Model Name: potted_spruce_sapling | Name: Potted Spruce Sapling | Opaque: No
+Model Name: potted_torchflower | Name: Potted Torchflower | Opaque: No
+Model Name: potted_warped_fungus | Name: Potted Warped Fungus | Opaque: No
+Model Name: potted_warped_roots | Name: Potted Warped Roots | Opaque: No
+Model Name: potted_white_tulip | Name: Potted White Tulip | Opaque: No
+Model Name: potted_wither_rose | Name: Potted Wither Rose | Opaque: No
+Model Name: powder_snow | Name: Powder Snow | Opaque: No
+Model Name: powder_snow_cauldron | Name: Powder Snow Cauldron | Opaque: No
+Model Name: powered_rail | Name: Powered Rail | Opaque: No
+Model Name: prismarine | Name: Prismarine | Opaque: Yes
+Model Name: prismarine_brick_slab | Name: Prismarine Brick Slab | Opaque: Yes
+Model Name: prismarine_brick_stairs | Name: Prismarine Brick Stairs | Opaque: Yes
+Model Name: prismarine_bricks | Name: Prismarine Bricks | Opaque: Yes
+Model Name: prismarine_slab | Name: Prismarine Slab | Opaque: Yes
+Model Name: prismarine_stairs | Name: Prismarine Stairs | Opaque: Yes
+Model Name: prismarine_wall | Name: Prismarine Wall | Opaque: Yes
+Model Name: pumpkin | Name: Pumpkin | Opaque: Yes
+Model Name: pumpkin_stem | Name: Pumpkin Stem | Opaque: Yes
+Model Name: purple_banner | Name: Purple Banner | Opaque: No
+Model Name: purple_bed | Name: Purple Bed | Opaque: No
+Model Name: purple_candle | Name: Purple Candle | Opaque: No
+Model Name: purple_candle_cake | Name: Cake with Purple Candle | Opaque: Yes
+Model Name: purple_carpet | Name: Purple Carpet | Opaque: Yes
+Model Name: purple_concrete | Name: Purple Concrete | Opaque: Yes
+Model Name: purple_concrete_powder | Name: Purple Concrete Powder | Opaque: Yes
+Model Name: purple_glazed_terracotta | Name: Purple Glazed Terracotta | Opaque: Yes
+Model Name: purple_shulker_box | Name: Purple Shulker Box | Opaque: No
+Model Name: purple_stained_glass | Name: Purple Stained Glass | Opaque: No
+Model Name: purple_stained_glass_pane | Name: Purple Stained Glass Pane | Opaque: No
+Model Name: purple_terracotta | Name: Purple Terracotta | Opaque: Yes
+Model Name: purple_wool | Name: Purple Wool | Opaque: Yes
+Model Name: purpur_block | Name: Purpur Block | Opaque: Yes
+Model Name: purpur_pillar | Name: Purpur Pillar | Opaque: Yes
+Model Name: purpur_slab | Name: Purpur Slab | Opaque: Yes
+Model Name: purpur_stairs | Name: Purpur Stairs | Opaque: Yes
+Model Name: quartz_block | Name: Block of Quartz | Opaque: Yes
+Model Name: quartz_bricks | Name: Quartz Bricks | Opaque: Yes
+Model Name: quartz_pillar | Name: Quartz Pillar | Opaque: Yes
+Model Name: quartz_slab | Name: Quartz Slab | Opaque: Yes
+Model Name: quartz_stairs | Name: Quartz Stairs | Opaque: Yes
+Model Name: rail | Name: Rail | Opaque: No
+Model Name: raw_copper_block | Name: Block of Raw Copper | Opaque: Yes
+Model Name: raw_gold_block | Name: Block of Raw Gold | Opaque: Yes
+Model Name: raw_iron_block | Name: Block of Raw Iron | Opaque: Yes
+Model Name: red_banner | Name: Red Banner | Opaque: No
+Model Name: red_bed | Name: Red Bed | Opaque: No
+Model Name: red_candle | Name: Red Candle | Opaque: No
+Model Name: red_candle_cake | Name: Cake with Red Candle | Opaque: Yes
+Model Name: red_carpet | Name: Red Carpet | Opaque: Yes
+Model Name: red_concrete | Name: Red Concrete | Opaque: Yes
+Model Name: red_concrete_powder | Name: Red Concrete Powder | Opaque: Yes
+Model Name: red_glazed_terracotta | Name: Red Glazed Terracotta | Opaque: Yes
+Model Name: red_mushroom | Name: Red Mushroom | Opaque: No
+Model Name: red_mushroom_block | Name: Red Mushroom Block | Opaque: Yes
+Model Name: red_nether_brick_slab | Name: Red Nether Brick Slab | Opaque: Yes
+Model Name: red_nether_brick_stairs | Name: Red Nether Brick Stairs | Opaque: Yes
+Model Name: red_nether_brick_wall | Name: Red Nether Brick Wall | Opaque: Yes
+Model Name: red_nether_bricks | Name: Red Nether Bricks | Opaque: Yes
+Model Name: red_sand | Name: Red Sand | Opaque: Yes
+Model Name: red_sandstone | Name: Red Sandstone | Opaque: Yes
+Model Name: red_sandstone_slab | Name: Red Sandstone Slab | Opaque: Yes
+Model Name: red_sandstone_stairs | Name: Red Sandstone Stairs | Opaque: Yes
+Model Name: red_sandstone_wall | Name: Red Sandstone Wall | Opaque: Yes
+Model Name: red_shulker_box | Name: Red Shulker Box | Opaque: No
+Model Name: red_stained_glass | Name: Red Stained Glass | Opaque: No
+Model Name: red_stained_glass_pane | Name: Red Stained Glass Pane | Opaque: No
+Model Name: red_terracotta | Name: Red Terracotta | Opaque: Yes
+Model Name: red_tulip | Name: Red Tulip | Opaque: No
+Model Name: red_wool | Name: Red Wool | Opaque: Yes
+Model Name: redstone_block | Name: Block of Redstone | Opaque: Yes
+Model Name: redstone_lamp | Name: Redstone Lamp | Opaque: Yes
+Model Name: redstone_ore | Name: Redstone Ore | Opaque: Yes
+Model Name: redstone_torch | Name: Redstone Torch | Opaque: No
+Model Name: redstone_wall_torch | Name: Redstone Wall Torch | Opaque: No
+Model Name: redstone_wire | Name: Redstone Wire | Opaque: No
+Model Name: reinforced_deepslate | Name: Reinforced Deepslate | Opaque: Yes
+Model Name: repeater | Name: Redstone Repeater | Opaque: Yes
+Model Name: repeating_command_block | Name: Repeating Command Block | Opaque: Yes
+Model Name: resin_block | Name: Block of Resin | Opaque: Yes
+Model Name: resin_brick_slab | Name: Resin Brick Slab | Opaque: Yes
+Model Name: resin_brick_stairs | Name: Resin Brick Stairs | Opaque: Yes
+Model Name: resin_brick_wall | Name: Resin Brick Wall | Opaque: Yes
+Model Name: resin_bricks | Name: Resin Bricks | Opaque: Yes
+Model Name: resin_clump | Name: Resin Clump | Opaque: No
+Model Name: respawn_anchor | Name: Respawn Anchor | Opaque: Yes
+Model Name: rooted_dirt | Name: Rooted Dirt | Opaque: Yes
+Model Name: rose_bush | Name: Rose Bush | Opaque: No
+Model Name: sand | Name: Sand | Opaque: Yes
+Model Name: sandstone | Name: Sandstone | Opaque: Yes
+Model Name: sandstone_slab | Name: Sandstone Slab | Opaque: Yes
+Model Name: sandstone_stairs | Name: Sandstone Stairs | Opaque: Yes
+Model Name: sandstone_wall | Name: Sandstone Wall | Opaque: Yes
+Model Name: scaffolding | Name: Scaffolding | Opaque: No
+Model Name: sculk | Name: Sculk | Opaque: Yes
+Model Name: sculk_catalyst | Name: Sculk Catalyst | Opaque: Yes
+Model Name: sculk_sensor | Name: Sculk Sensor | Opaque: Yes
+Model Name: sculk_shrieker | Name: Sculk Shrieker | Opaque: Yes
+Model Name: sculk_vein | Name: Sculk Vein | Opaque: No
+Model Name: sea_lantern | Name: Sea Lantern | Opaque: Yes
+Model Name: sea_pickle | Name: Sea Pickle | Opaque: No
+Model Name: seagrass | Name: Seagrass | Opaque: No
+Model Name: set_spawn | Name: Respawn point set | Opaque: Yes
+Model Name: short_dry_grass | Name: Short Dry Grass | Opaque: No
+Model Name: short_grass | Name: Short Grass | Opaque: No
+Model Name: shroomlight | Name: Shroomlight | Opaque: Yes
+Model Name: shulker_box | Name: Shulker Box | Opaque: No
+Model Name: skeleton_skull | Name: Skeleton Skull | Opaque: No
+Model Name: skeleton_wall_skull | Name: Skeleton Wall Skull | Opaque: Yes
+Model Name: slime_block | Name: Slime Block | Opaque: No
+Model Name: small_amethyst_bud | Name: Small Amethyst Bud | Opaque: No
+Model Name: small_dripleaf | Name: Small Dripleaf | Opaque: No
+Model Name: smithing_table | Name: Smithing Table | Opaque: Yes
+Model Name: smoker | Name: Smoker | Opaque: Yes
+Model Name: smooth_basalt | Name: Smooth Basalt | Opaque: Yes
+Model Name: smooth_quartz | Name: Smooth Quartz Block | Opaque: Yes
+Model Name: smooth_quartz_slab | Name: Smooth Quartz Slab | Opaque: Yes
+Model Name: smooth_quartz_stairs | Name: Smooth Quartz Stairs | Opaque: Yes
+Model Name: smooth_red_sandstone | Name: Smooth Red Sandstone | Opaque: Yes
+Model Name: smooth_red_sandstone_slab | Name: Smooth Red Sandstone Slab | Opaque: Yes
+Model Name: smooth_red_sandstone_stairs | Name: Smooth Red Sandstone Stairs | Opaque: Yes
+Model Name: smooth_sandstone | Name: Smooth Sandstone | Opaque: Yes
+Model Name: smooth_sandstone_slab | Name: Smooth Sandstone Slab | Opaque: Yes
+Model Name: smooth_sandstone_stairs | Name: Smooth Sandstone Stairs | Opaque: Yes
+Model Name: smooth_stone | Name: Smooth Stone | Opaque: Yes
+Model Name: smooth_stone_slab | Name: Smooth Stone Slab | Opaque: Yes
+Model Name: sniffer_egg | Name: Sniffer Egg | Opaque: No
+Model Name: snow | Name: Snow | Opaque: Yes
+Model Name: snow_block | Name: Snow Block | Opaque: Yes
+Model Name: soul_campfire | Name: Soul Campfire | Opaque: No
+Model Name: soul_fire | Name: Soul Fire | Opaque: No
+Model Name: soul_lantern | Name: Soul Lantern | Opaque: No
+Model Name: soul_sand | Name: Soul Sand | Opaque: Yes
+Model Name: soul_soil | Name: Soul Soil | Opaque: Yes
+Model Name: soul_torch | Name: Soul Torch | Opaque: No
+Model Name: soul_wall_torch | Name: Soul Wall Torch | Opaque: No
+Model Name: spawner | Name: Monster Spawner | Opaque: No
+Model Name: sponge | Name: Sponge | Opaque: Yes
+Model Name: spore_blossom | Name: Spore Blossom | Opaque: No
+Model Name: spruce_button | Name: Spruce Button | Opaque: No
+Model Name: spruce_door | Name: Spruce Door | Opaque: No
+Model Name: spruce_fence | Name: Spruce Fence | Opaque: Yes
+Model Name: spruce_fence_gate | Name: Spruce Fence Gate | Opaque: Yes
+Model Name: spruce_hanging_sign | Name: Spruce Hanging Sign | Opaque: No
+Model Name: spruce_leaves | Name: Spruce Leaves | Opaque: No
+Model Name: spruce_log | Name: Spruce Log | Opaque: Yes
+Model Name: spruce_planks | Name: Spruce Planks | Opaque: Yes
+Model Name: spruce_pressure_plate | Name: Spruce Pressure Plate | Opaque: No
+Model Name: spruce_sapling | Name: Spruce Sapling | Opaque: No
+Model Name: spruce_shelf | Name: Spruce Shelf | Opaque: Yes
+Model Name: spruce_sign | Name: Spruce Sign | Opaque: No
+Model Name: spruce_slab | Name: Spruce Slab | Opaque: Yes
+Model Name: spruce_stairs | Name: Spruce Stairs | Opaque: Yes
+Model Name: spruce_trapdoor | Name: Spruce Trapdoor | Opaque: No
+Model Name: spruce_wall_hanging_sign | Name: Spruce Wall Hanging Sign | Opaque: No
+Model Name: spruce_wall_sign | Name: Spruce Wall Sign | Opaque: No
+Model Name: spruce_wood | Name: Spruce Wood | Opaque: Yes
+Model Name: sticky_piston | Name: Sticky Piston | Opaque: Yes
+Model Name: stone | Name: Stone | Opaque: Yes
+Model Name: stone_brick_slab | Name: Stone Brick Slab | Opaque: Yes
+Model Name: stone_brick_stairs | Name: Stone Brick Stairs | Opaque: Yes
+Model Name: stone_brick_wall | Name: Stone Brick Wall | Opaque: Yes
+Model Name: stone_bricks | Name: Stone Bricks | Opaque: Yes
+Model Name: stone_button | Name: Stone Button | Opaque: No
+Model Name: stone_pressure_plate | Name: Stone Pressure Plate | Opaque: No
+Model Name: stone_slab | Name: Stone Slab | Opaque: Yes
+Model Name: stone_stairs | Name: Stone Stairs | Opaque: Yes
+Model Name: stonecutter | Name: Stonecutter | Opaque: Yes
+Model Name: stripped_acacia_log | Name: Stripped Acacia Log | Opaque: Yes
+Model Name: stripped_acacia_wood | Name: Stripped Acacia Wood | Opaque: Yes
+Model Name: stripped_bamboo_block | Name: Block of Stripped Bamboo | Opaque: Yes
+Model Name: stripped_birch_log | Name: Stripped Birch Log | Opaque: Yes
+Model Name: stripped_birch_wood | Name: Stripped Birch Wood | Opaque: Yes
+Model Name: stripped_cherry_log | Name: Stripped Cherry Log | Opaque: Yes
+Model Name: stripped_cherry_wood | Name: Stripped Cherry Wood | Opaque: Yes
+Model Name: stripped_crimson_hyphae | Name: Stripped Crimson Hyphae | Opaque: Yes
+Model Name: stripped_crimson_stem | Name: Stripped Crimson Stem | Opaque: Yes
+Model Name: stripped_dark_oak_log | Name: Stripped Dark Oak Log | Opaque: Yes
+Model Name: stripped_dark_oak_wood | Name: Stripped Dark Oak Wood | Opaque: Yes
+Model Name: stripped_jungle_log | Name: Stripped Jungle Log | Opaque: Yes
+Model Name: stripped_jungle_wood | Name: Stripped Jungle Wood | Opaque: Yes
+Model Name: stripped_mangrove_log | Name: Stripped Mangrove Log | Opaque: Yes
+Model Name: stripped_mangrove_wood | Name: Stripped Mangrove Wood | Opaque: Yes
+Model Name: stripped_oak_log | Name: Stripped Oak Log | Opaque: Yes
+Model Name: stripped_oak_wood | Name: Stripped Oak Wood | Opaque: Yes
+Model Name: stripped_pale_oak_log | Name: Stripped Pale Oak Log | Opaque: Yes
+Model Name: stripped_pale_oak_wood | Name: Stripped Pale Oak Wood | Opaque: Yes
+Model Name: stripped_spruce_log | Name: Stripped Spruce Log | Opaque: Yes
+Model Name: stripped_spruce_wood | Name: Stripped Spruce Wood | Opaque: Yes
+Model Name: stripped_warped_hyphae | Name: Stripped Warped Hyphae | Opaque: Yes
+Model Name: stripped_warped_stem | Name: Stripped Warped Stem | Opaque: Yes
+Model Name: structure_block | Name: Structure Block | Opaque: Yes
+Model Name: structure_void | Name: Structure Void | Opaque: No
+Model Name: sugar_cane | Name: Sugar Cane | Opaque: No
+Model Name: sunflower | Name: Sunflower | Opaque: No
+Model Name: suspicious_gravel | Name: Suspicious Gravel | Opaque: Yes
+Model Name: suspicious_sand | Name: Suspicious Sand | Opaque: Yes
+Model Name: sweet_berry_bush | Name: Sweet Berry Bush | Opaque: No
+Model Name: tall_dry_grass | Name: Tall Dry Grass | Opaque: No
+Model Name: tall_grass | Name: Tall Grass | Opaque: No
+Model Name: tall_seagrass | Name: Tall Seagrass | Opaque: No
+Model Name: target | Name: Target | Opaque: Yes
+Model Name: terracotta | Name: Terracotta | Opaque: Yes
+Model Name: test_block | Name: Test Block | Opaque: Yes
+Model Name: test_instance_block | Name: Test Instance Block | Opaque: No
+Model Name: tinted_glass | Name: Tinted Glass | Opaque: No
+Model Name: tnt | Name: TNT | Opaque: Yes
+Model Name: torch | Name: Torch | Opaque: No
+Model Name: torchflower | Name: Torchflower | Opaque: No
+Model Name: torchflower_crop | Name: Torchflower Crop | Opaque: No
+Model Name: trapped_chest | Name: Trapped Chest | Opaque: Yes
+Model Name: trial_spawner | Name: Trial Spawner | Opaque: No
+Model Name: tripwire | Name: Tripwire | Opaque: No
+Model Name: tripwire_hook | Name: Tripwire Hook | Opaque: No
+Model Name: tube_coral | Name: Tube Coral | Opaque: No
+Model Name: tube_coral_block | Name: Tube Coral Block | Opaque: Yes
+Model Name: tube_coral_fan | Name: Tube Coral Fan | Opaque: No
+Model Name: tube_coral_wall_fan | Name: Tube Coral Wall Fan | Opaque: No
+Model Name: tuff | Name: Tuff | Opaque: Yes
+Model Name: tuff_brick_slab | Name: Tuff Brick Slab | Opaque: Yes
+Model Name: tuff_brick_stairs | Name: Tuff Brick Stairs | Opaque: Yes
+Model Name: tuff_brick_wall | Name: Tuff Brick Wall | Opaque: Yes
+Model Name: tuff_bricks | Name: Tuff Bricks | Opaque: Yes
+Model Name: tuff_slab | Name: Tuff Slab | Opaque: Yes
+Model Name: tuff_stairs | Name: Tuff Stairs | Opaque: Yes
+Model Name: tuff_wall | Name: Tuff Wall | Opaque: Yes
+Model Name: turtle_egg | Name: Turtle Egg | Opaque: No
+Model Name: twisting_vines | Name: Twisting Vines | Opaque: No
+Model Name: twisting_vines_plant | Name: Twisting Vines Plant | Opaque: No
+Model Name: vault | Name: Vault | Opaque: No
+Model Name: verdant_froglight | Name: Verdant Froglight | Opaque: Yes
+Model Name: vine | Name: Vines | Opaque: No
+Model Name: void_air | Name: Void Air | Opaque: No
+Model Name: wall_torch | Name: Wall Torch | Opaque: No
+Model Name: warped_button | Name: Warped Button | Opaque: No
+Model Name: warped_door | Name: Warped Door | Opaque: No
+Model Name: warped_fence | Name: Warped Fence | Opaque: Yes
+Model Name: warped_fence_gate | Name: Warped Fence Gate | Opaque: Yes
+Model Name: warped_fungus | Name: Warped Fungus | Opaque: No
+Model Name: warped_hanging_sign | Name: Warped Hanging Sign | Opaque: No
+Model Name: warped_hyphae | Name: Warped Hyphae | Opaque: Yes
+Model Name: warped_nylium | Name: Warped Nylium | Opaque: Yes
+Model Name: warped_planks | Name: Warped Planks | Opaque: Yes
+Model Name: warped_pressure_plate | Name: Warped Pressure Plate | Opaque: No
+Model Name: warped_roots | Name: Warped Roots | Opaque: No
+Model Name: warped_shelf | Name: Warped Shelf | Opaque: Yes
+Model Name: warped_sign | Name: Warped Sign | Opaque: No
+Model Name: warped_slab | Name: Warped Slab | Opaque: Yes
+Model Name: warped_stairs | Name: Warped Stairs | Opaque: Yes
+Model Name: warped_stem | Name: Warped Stem | Opaque: Yes
+Model Name: warped_trapdoor | Name: Warped Trapdoor | Opaque: No
+Model Name: warped_wall_hanging_sign | Name: Warped Wall Hanging Sign | Opaque: No
+Model Name: warped_wall_sign | Name: Warped Wall Sign | Opaque: No
+Model Name: warped_wart_block | Name: Warped Wart Block | Opaque: Yes
+Model Name: water | Name: Water | Opaque: No
+Model Name: water_cauldron | Name: Water Cauldron | Opaque: No
+Model Name: waxed_chiseled_copper | Name: Waxed Chiseled Copper | Opaque: Yes
+Model Name: waxed_copper_bars | Name: Waxed Copper Bars | Opaque: Yes
+Model Name: waxed_copper_block | Name: Waxed Block of Copper | Opaque: Yes
+Model Name: waxed_copper_bulb | Name: Waxed Copper Bulb | Opaque: Yes
+Model Name: waxed_copper_chain | Name: Waxed Copper Chain | Opaque: Yes
+Model Name: waxed_copper_chest | Name: Waxed Copper Chest | Opaque: Yes
+Model Name: waxed_copper_door | Name: Waxed Copper Door | Opaque: No
+Model Name: waxed_copper_golem_statue | Name: Waxed Copper Golem Statue | Opaque: No
+Model Name: waxed_copper_grate | Name: Waxed Copper Grate | Opaque: No
+Model Name: waxed_copper_lantern | Name: Waxed Copper Lantern | Opaque: Yes
+Model Name: waxed_copper_trapdoor | Name: Waxed Copper Trapdoor | Opaque: No
+Model Name: waxed_cut_copper | Name: Waxed Cut Copper | Opaque: Yes
+Model Name: waxed_cut_copper_slab | Name: Waxed Cut Copper Slab | Opaque: Yes
+Model Name: waxed_cut_copper_stairs | Name: Waxed Cut Copper Stairs | Opaque: Yes
+Model Name: waxed_exposed_chiseled_copper | Name: Waxed Exposed Chiseled Copper | Opaque: Yes
+Model Name: waxed_exposed_copper | Name: Waxed Exposed Copper | Opaque: Yes
+Model Name: waxed_exposed_copper_bars | Name: Waxed Exposed Copper Bars | Opaque: Yes
+Model Name: waxed_exposed_copper_bulb | Name: Waxed Exposed Copper Bulb | Opaque: Yes
+Model Name: waxed_exposed_copper_chain | Name: Waxed Exposed Copper Chain | Opaque: Yes
+Model Name: waxed_exposed_copper_chest | Name: Waxed Exposed Copper Chest | Opaque: Yes
+Model Name: waxed_exposed_copper_door | Name: Waxed Exposed Copper Door | Opaque: No
+Model Name: waxed_exposed_copper_golem_statue | Name: Waxed Exposed Copper Golem Statue | Opaque: No
+Model Name: waxed_exposed_copper_grate | Name: Waxed Exposed Copper Grate | Opaque: No
+Model Name: waxed_exposed_copper_lantern | Name: Waxed Exposed Copper Lantern | Opaque: Yes
+Model Name: waxed_exposed_copper_trapdoor | Name: Waxed Exposed Copper Trapdoor | Opaque: No
+Model Name: waxed_exposed_cut_copper | Name: Waxed Exposed Cut Copper | Opaque: Yes
+Model Name: waxed_exposed_cut_copper_slab | Name: Waxed Exposed Cut Copper Slab | Opaque: Yes
+Model Name: waxed_exposed_cut_copper_stairs | Name: Waxed Exposed Cut Copper Stairs | Opaque: Yes
+Model Name: waxed_exposed_lightning_rod | Name: Waxed Exposed Lightning Rod | Opaque: No
+Model Name: waxed_lightning_rod | Name: Waxed Lightning Rod | Opaque: No
+Model Name: waxed_oxidized_chiseled_copper | Name: Waxed Oxidized Chiseled Copper | Opaque: Yes
+Model Name: waxed_oxidized_copper | Name: Waxed Oxidized Copper | Opaque: Yes
+Model Name: waxed_oxidized_copper_bars | Name: Waxed Oxidized Copper Bars | Opaque: Yes
+Model Name: waxed_oxidized_copper_bulb | Name: Waxed Oxidized Copper Bulb | Opaque: Yes
+Model Name: waxed_oxidized_copper_chain | Name: Waxed Oxidized Copper Chain | Opaque: Yes
+Model Name: waxed_oxidized_copper_chest | Name: Waxed Oxidized Copper Chest | Opaque: Yes
+Model Name: waxed_oxidized_copper_door | Name: Waxed Oxidized Copper Door | Opaque: No
+Model Name: waxed_oxidized_copper_golem_statue | Name: Waxed Oxidized Copper Golem Statue | Opaque: No
+Model Name: waxed_oxidized_copper_grate | Name: Waxed Oxidized Copper Grate | Opaque: No
+Model Name: waxed_oxidized_copper_lantern | Name: Waxed Oxidized Copper Lantern | Opaque: Yes
+Model Name: waxed_oxidized_copper_trapdoor | Name: Waxed Oxidized Copper Trapdoor | Opaque: No
+Model Name: waxed_oxidized_cut_copper | Name: Waxed Oxidized Cut Copper | Opaque: Yes
+Model Name: waxed_oxidized_cut_copper_slab | Name: Waxed Oxidized Cut Copper Slab | Opaque: Yes
+Model Name: waxed_oxidized_cut_copper_stairs | Name: Waxed Oxidized Cut Copper Stairs | Opaque: Yes
+Model Name: waxed_oxidized_lightning_rod | Name: Waxed Oxidized Lightning Rod | Opaque: No
+Model Name: waxed_weathered_chiseled_copper | Name: Waxed Weathered Chiseled Copper | Opaque: Yes
+Model Name: waxed_weathered_copper | Name: Waxed Weathered Copper | Opaque: Yes
+Model Name: waxed_weathered_copper_bars | Name: Waxed Weathered Copper Bars | Opaque: Yes
+Model Name: waxed_weathered_copper_bulb | Name: Waxed Weathered Copper Bulb | Opaque: Yes
+Model Name: waxed_weathered_copper_chain | Name: Waxed Weathered Copper Chain | Opaque: Yes
+Model Name: waxed_weathered_copper_chest | Name: Waxed Weathered Copper Chest | Opaque: Yes
+Model Name: waxed_weathered_copper_door | Name: Waxed Weathered Copper Door | Opaque: No
+Model Name: waxed_weathered_copper_golem_statue | Name: Waxed Weathered Copper Golem Statue | Opaque: No
+Model Name: waxed_weathered_copper_grate | Name: Waxed Weathered Copper Grate | Opaque: No
+Model Name: waxed_weathered_copper_lantern | Name: Waxed Weathered Copper Lantern | Opaque: Yes
+Model Name: waxed_weathered_copper_trapdoor | Name: Waxed Weathered Copper Trapdoor | Opaque: No
+Model Name: waxed_weathered_cut_copper | Name: Waxed Weathered Cut Copper | Opaque: Yes
+Model Name: waxed_weathered_cut_copper_slab | Name: Waxed Weathered Cut Copper Slab | Opaque: Yes
+Model Name: waxed_weathered_cut_copper_stairs | Name: Waxed Weathered Cut Copper Stairs | Opaque: Yes
+Model Name: waxed_weathered_lightning_rod | Name: Waxed Weathered Lightning Rod | Opaque: No
+Model Name: weathered_chiseled_copper | Name: Weathered Chiseled Copper | Opaque: Yes
+Model Name: weathered_copper | Name: Weathered Copper | Opaque: Yes
+Model Name: weathered_copper_bars | Name: Weathered Copper Bars | Opaque: Yes
+Model Name: weathered_copper_bulb | Name: Weathered Copper Bulb | Opaque: Yes
+Model Name: weathered_copper_chain | Name: Weathered Copper Chain | Opaque: Yes
+Model Name: weathered_copper_chest | Name: Weathered Copper Chest | Opaque: Yes
+Model Name: weathered_copper_door | Name: Weathered Copper Door | Opaque: No
+Model Name: weathered_copper_golem_statue | Name: Weathered Copper Golem Statue | Opaque: No
+Model Name: weathered_copper_grate | Name: Weathered Copper Grate | Opaque: No
+Model Name: weathered_copper_lantern | Name: Weathered Copper Lantern | Opaque: Yes
+Model Name: weathered_copper_trapdoor | Name: Weathered Copper Trapdoor | Opaque: No
+Model Name: weathered_cut_copper | Name: Weathered Cut Copper | Opaque: Yes
+Model Name: weathered_cut_copper_slab | Name: Weathered Cut Copper Slab | Opaque: Yes
+Model Name: weathered_cut_copper_stairs | Name: Weathered Cut Copper Stairs | Opaque: Yes
+Model Name: weathered_lightning_rod | Name: Weathered Lightning Rod | Opaque: No
+Model Name: weeping_vines | Name: Weeping Vines | Opaque: No
+Model Name: weeping_vines_plant | Name: Weeping Vines Plant | Opaque: No
+Model Name: wet_sponge | Name: Wet Sponge | Opaque: Yes
+Model Name: wheat | Name: Wheat Crops | Opaque: No
+Model Name: white_banner | Name: White Banner | Opaque: No
+Model Name: white_bed | Name: White Bed | Opaque: No
+Model Name: white_candle | Name: White Candle | Opaque: No
+Model Name: white_candle_cake | Name: Cake with White Candle | Opaque: Yes
+Model Name: white_carpet | Name: White Carpet | Opaque: Yes
+Model Name: white_concrete | Name: White Concrete | Opaque: Yes
+Model Name: white_concrete_powder | Name: White Concrete Powder | Opaque: Yes
+Model Name: white_glazed_terracotta | Name: White Glazed Terracotta | Opaque: Yes
+Model Name: white_shulker_box | Name: White Shulker Box | Opaque: No
+Model Name: white_stained_glass | Name: White Stained Glass | Opaque: No
+Model Name: white_stained_glass_pane | Name: White Stained Glass Pane | Opaque: No
+Model Name: white_terracotta | Name: White Terracotta | Opaque: Yes
+Model Name: white_tulip | Name: White Tulip | Opaque: No
+Model Name: white_wool | Name: White Wool | Opaque: Yes
+Model Name: wildflowers | Name: Wildflowers | Opaque: No
+Model Name: wither_rose | Name: Wither Rose | Opaque: No
+Model Name: wither_skeleton_skull | Name: Wither Skeleton Skull | Opaque: No
+Model Name: wither_skeleton_wall_skull | Name: Wither Skeleton Wall Skull | Opaque: Yes
+Model Name: yellow_banner | Name: Yellow Banner | Opaque: No
+Model Name: yellow_bed | Name: Yellow Bed | Opaque: No
+Model Name: yellow_candle | Name: Yellow Candle | Opaque: No
+Model Name: yellow_candle_cake | Name: Cake with Yellow Candle | Opaque: Yes
+Model Name: yellow_carpet | Name: Yellow Carpet | Opaque: Yes
+Model Name: yellow_concrete | Name: Yellow Concrete | Opaque: Yes
+Model Name: yellow_concrete_powder | Name: Yellow Concrete Powder | Opaque: Yes
+Model Name: yellow_glazed_terracotta | Name: Yellow Glazed Terracotta | Opaque: Yes
+Model Name: yellow_shulker_box | Name: Yellow Shulker Box | Opaque: No
+Model Name: yellow_stained_glass | Name: Yellow Stained Glass | Opaque: No
+Model Name: yellow_stained_glass_pane | Name: Yellow Stained Glass Pane | Opaque: No
+Model Name: yellow_terracotta | Name: Yellow Terracotta | Opaque: Yes
+Model Name: yellow_wool | Name: Yellow Wool | Opaque: Yes
+Model Name: zombie_head | Name: Zombie Head | Opaque: No
+Model Name: zombie_wall_head | Name: Zombie Wall Head | Opaque: Yes

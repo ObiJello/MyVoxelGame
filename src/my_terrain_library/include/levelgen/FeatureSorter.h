@@ -101,15 +101,7 @@ public:
             auto featuresForStep = featureGetter(featureSource);
             maxStep = std::max(maxStep, static_cast<int>(featuresForStep.size()));
 
-            // DEBUG: For first biome, print feature counts per step
             if (firstBiome) {
-                int totalFeats = 0;
-                for (const auto& sv : featuresForStep) totalFeats += sv.size();
-                std::cerr << "DEBUG FeatureSorter: First biome has " << featuresForStep.size() << " steps, " << totalFeats << " total features" << std::endl;
-                // Print ALL steps, not just non-empty
-                for (size_t s = 0; s < featuresForStep.size(); ++s) {
-                    std::cerr << "  step " << s << ": size=" << featuresForStep[s].size() << std::endl;
-                }
                 firstBiome = false;
             }
 
@@ -131,82 +123,24 @@ public:
                 }
                 if (i < featureList.size() - 1) {
                     edges[featureList[i]].insert(featureList[i + 1]);
-                    // Track potential cycle: if i33 -> i34 or i34 -> i33
-                    int fromIdx = featureList[i].featureIndex;
-                    int toIdx = featureList[i + 1].featureIndex;
-                    // Track edges involving indices 33, 34, 44 (cycle participants)
-                    if ((fromIdx == 33 || fromIdx == 34 || fromIdx == 44) &&
-                        (toIdx == 33 || toIdx == 34 || toIdx == 44)) {
-                        std::cerr << "EDGE: i" << fromIdx << "->i" << toIdx << " in biome " << biomeIdx
-                                  << " at listPos " << i << " step=" << featureList[i].step << std::endl;
-                    }
                 }
             }
             biomeIdx++;
         }
-
-        // DEBUG: Print edges map step distribution
-        std::map<int, int> edgeSteps;
-        for (const auto& [key, _] : edges) {
-            edgeSteps[key.step]++;
-        }
-        std::cerr << "DEBUG FeatureSorter: Edges map by step: ";
-        for (const auto& [step, count] : edgeSteps) {
-            std::cerr << "step" << step << "=" << count << " ";
-        }
-        std::cerr << "(total keys: " << edges.size() << ")" << std::endl;
-
-        // DEBUG: Print first few edges keys
-        std::cerr << "DEBUG: First 10 edges keys: ";
-        int edgeCnt = 0;
-        for (const auto& [key, _] : edges) {
-            if (edgeCnt++ < 10) std::cerr << "(s" << key.step << ",i" << key.featureIndex << ") ";
-        }
-        std::cerr << std::endl;
 
         // DFS topological sort
         std::set<FeatureData> discovered;
         std::set<FeatureData> currentlyVisiting;
         std::vector<FeatureData> sortedFeatures;
 
-        int dfsCallCount = 0;
-        int skippedAsDiscovered = 0;
         for (const auto& [feature, _] : edges) {
             if (discovered.find(feature) == discovered.end()) {
-                dfsCallCount++;
                 depthFirstSearch(edges, discovered, currentlyVisiting, sortedFeatures, feature);
-            } else {
-                skippedAsDiscovered++;
-                if (skippedAsDiscovered <= 3) {
-                    std::cerr << "DEBUG: Skipped (step=" << feature.step << ", idx=" << feature.featureIndex
-                              << ") as already discovered" << std::endl;
-                }
             }
         }
-        std::cerr << "DEBUG FeatureSorter: DFS started " << dfsCallCount << " times, skipped=" << skippedAsDiscovered
-                  << ", discovered=" << discovered.size() << ", sortedFeatures=" << sortedFeatures.size() << std::endl;
-
-        // Debug: print sample of discovered entries
-        std::cerr << "DEBUG: First 5 discovered entries: ";
-        int cnt = 0;
-        for (const auto& d : discovered) {
-            if (cnt++ < 5) std::cerr << "(s" << d.step << ",i" << d.featureIndex << ") ";
-        }
-        std::cerr << std::endl;
 
         // Reverse to get correct order
         std::reverse(sortedFeatures.begin(), sortedFeatures.end());
-
-        // DEBUG: Print step counts in sorted features
-        std::map<int, int> stepCounts;
-        for (const auto& fd : sortedFeatures) {
-            stepCounts[fd.step]++;
-        }
-        std::cerr << "DEBUG FeatureSorter: Sorted features by step: ";
-        for (const auto& [step, count] : stepCounts) {
-            std::cerr << "step" << step << "=" << count << " ";
-        }
-        std::cerr << std::endl;
 
         // Group by step
         std::vector<StepFeatureData> result;
@@ -218,27 +152,6 @@ public:
                 }
             }
             result.push_back(StepFeatureData(featuresInStep));
-        }
-
-        // Output sorted features in Java-compatible format for comparison
-        // Format: STEP=<step> IDX=<index> <feature_name>
-        std::cerr << "\n# C++ Feature Order Output\n";
-        std::cerr << "# Format: STEP=<step> IDX=<index> <feature_name>\n\n";
-        for (int step = 0; step < maxStep; ++step) {
-            const auto& stepData = result[step];
-            std::cerr << "# Step " << step << ": " << stepData.features.size() << " features\n";
-            for (size_t idx = 0; idx < stepData.features.size(); ++idx) {
-                placement::PlacedFeature* feat = stepData.features[idx];
-                const std::string& name = feat->getName();
-                std::cerr << "STEP=" << step << " IDX=" << idx << " "
-                          << (name.empty() ? "(unnamed)" : name);
-                // Debug: print pointer for step 4 features
-                if (step == 4) {
-                    std::cerr << " ptr=" << (void*)feat;
-                }
-                std::cerr << "\n";
-            }
-            std::cerr << "\n";
         }
 
         return result;
@@ -258,39 +171,19 @@ private:
         std::vector<FeatureData>& result,
         const FeatureData& node
     ) {
-        static int dfsDebugCount = 0;
-        static int cycleCount = 0;
-        bool doDebug = (dfsDebugCount < 50);
-        if (doDebug) {
-            std::cerr << "  DFS enter: (s" << node.step << ",i" << node.featureIndex << ") discovered.size=" << discovered.size() << std::endl;
-        }
-
         if (currentlyVisiting.find(node) != currentlyVisiting.end()) {
             // Cycle detected
-            cycleCount++;
-            if (cycleCount == 1) {
-                std::cerr << "  DFS CYCLE at (s" << node.step << ",i" << node.featureIndex
-                          << ") feature ptr=" << (void*)node.feature << std::endl;
-                std::cerr << "  Currently visiting: ";
-                for (const auto& cv : currentlyVisiting) {
-                    std::cerr << "(s" << cv.step << ",i" << cv.featureIndex << ") ";
-                }
-                std::cerr << std::endl;
-            }
             return true;
         }
         if (discovered.find(node) != discovered.end()) {
             // Already processed
-            if (doDebug) std::cerr << "  DFS skip (s" << node.step << ",i" << node.featureIndex << ") already discovered" << std::endl;
             return false;
         }
 
         currentlyVisiting.insert(node);
-        dfsDebugCount++;
 
         auto it = edges.find(node);
         if (it != edges.end()) {
-            if (doDebug) std::cerr << "  DFS (s" << node.step << ",i" << node.featureIndex << ") has " << it->second.size() << " neighbors" << std::endl;
             for (const auto& neighbor : it->second) {
                 if (depthFirstSearch(edges, discovered, currentlyVisiting, result, neighbor)) {
                     // Cycle detected in subtree - must clean up before returning
@@ -303,7 +196,6 @@ private:
         currentlyVisiting.erase(node);
         discovered.insert(node);
         result.push_back(node);
-        if (doDebug) std::cerr << "  DFS added (s" << node.step << ",i" << node.featureIndex << ") to result" << std::endl;
         return false;
     }
 };

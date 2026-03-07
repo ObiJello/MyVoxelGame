@@ -217,8 +217,13 @@ namespace Render {
         PipelineState m_currentPipelineState;
         VkPipeline m_currentPipeline = VK_NULL_HANDLE;
 
-        // Push constant data (MVP matrix)
-        glm::mat4 m_pushConstantMVP = glm::mat4(1.0f);
+        // Push constant data
+        struct PushConstantBlock {
+            glm::mat4 uMVP = glm::mat4(1.0f);   // 64 bytes
+            glm::vec2 uScreenSize = {0, 0};       // 8 bytes
+            float uLineWidth = 0.0f;              // 4 bytes
+            float _pad = 0.0f;                    // 4 bytes (alignment)
+        } m_pushConstants;                        // 80 bytes total
 
         // Clear color
         VkClearColorValue m_clearColor = {{0.5f, 0.7f, 1.0f, 1.0f}};
