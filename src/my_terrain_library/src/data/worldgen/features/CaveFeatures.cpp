@@ -13,6 +13,7 @@ namespace features {
 
 using namespace ::world;
 using namespace levelgen;
+using namespace levelgen::blockpredicates;
 using namespace levelgen::placement;
 using namespace levelgen::feature::stateproviders;
 using Blocks = ::minecraft::world::level::block::Blocks;
@@ -27,6 +28,13 @@ SimpleRandomSelectorFeature CaveFeatures::s_simpleRandomSelectorFeature;
 UnderwaterMagmaFeature CaveFeatures::s_underwaterMagmaFeature;
 SculkPatchFeature CaveFeatures::s_sculkPatchFeature;
 MonsterRoomFeature CaveFeatures::s_monsterRoomFeature;
+FossilFeature CaveFeatures::s_fossilFeature;
+DripstoneClusterFeature CaveFeatures::s_dripstoneClusterFeature;
+LargeDripstoneFeature CaveFeatures::s_largeDripstoneFeature;
+PointedDripstoneFeature CaveFeatures::s_pointedDripstoneFeature;
+RootSystemFeature CaveFeatures::s_rootSystemFeature;
+RandomBooleanSelectorFeature CaveFeatures::s_randomBooleanSelectorFeature;
+WaterloggedVegetationPatchFeature CaveFeatures::s_waterloggedVegPatchFeature;
 bool CaveFeatures::s_initialized = false;
 
 // ConfiguredFeature pointers
@@ -63,12 +71,15 @@ static std::vector<std::unique_ptr<SimpleBlockConfiguration>> s_simpleBlockConfi
 static std::vector<std::unique_ptr<VegetationPatchConfiguration>> s_vegPatchConfigs;
 static std::vector<std::unique_ptr<BlockColumnConfiguration>> s_blockColumnConfigs;
 static std::vector<std::unique_ptr<SimpleRandomFeatureConfiguration>> s_simpleRandomConfigs;
+static std::vector<std::unique_ptr<RandomBooleanFeatureConfiguration>> s_randomBooleanConfigs;
 static std::vector<std::unique_ptr<UnderwaterMagmaConfiguration>> s_underwaterMagmaConfigs;
 static std::vector<std::unique_ptr<SculkPatchConfiguration>> s_sculkPatchConfigs;
 
 // Storage for SimpleStateProviders and WeightedStateProviders
 static std::vector<std::unique_ptr<SimpleStateProvider>> s_stateProviders;
 static std::vector<std::unique_ptr<WeightedStateProvider>> s_weightedStateProviders;
+static std::vector<std::shared_ptr<BlockStateProvider>> s_blockStateProviders;
+static std::vector<std::shared_ptr<RandomizedIntStateProvider>> s_randomizedIntStateProviders;
 
 // Storage for PlacedFeatures (inline placed features for DRIPLEAF)
 static std::vector<std::unique_ptr<PlacedFeature>> s_placedFeatures;
@@ -79,6 +90,24 @@ static BlockColumnFeature s_dripleafBlockColumnFeature;
 
 void CaveFeatures::bootstrap() {
     if (s_initialized) return;
+
+    auto createPlacedFeature = [](ConfiguredFeature* feature, const std::string& name = "") -> PlacedFeature* {
+        auto placed = std::make_unique<PlacedFeature>(feature, std::vector<PlacementModifier*>{}, name);
+        PlacedFeature* raw = placed.get();
+        s_placedFeatures.push_back(std::move(placed));
+        return raw;
+    };
+
+    auto createSimpleBlockConfiguredFeature = [&](std::shared_ptr<BlockStateProvider> provider) -> ConfiguredFeature* {
+        s_blockStateProviders.push_back(std::move(provider));
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
+            &s_simpleBlockFeature,
+            SimpleBlockConfiguration(s_blockStateProviders.back().get())
+        );
+        ConfiguredFeature* raw = feature.get();
+        s_features.push_back(std::move(feature));
+        return raw;
+    };
 
     // =========================================================================
     // AMETHYST_GEODE
@@ -219,53 +248,131 @@ void CaveFeatures::bootstrap() {
     }
 
     // =========================================================================
-    // MOSS_PATCH
-    // Reference: CaveFeatures.java line 113
-    // VegetationPatchFeature with MOSS_BLOCK as ground state
-    // VegetationPatchConfiguration(BlockTags.MOSS_REPLACEABLE, MOSS_BLOCK,
-    //   MOSS_VEGETATION, CaveSurface.FLOOR, depth=1, extraBottomChance=0.0,
-    //   verticalRange=5, vegetationChance=0.8, xzRadius=4-7, extraEdgeChance=0.3)
+    // MOSS_VEGETATION
+    // Reference: CaveFeatures.java line 112
     // =========================================================================
     {
-        auto groundState = std::make_shared<SimpleStateProvider>("minecraft:moss_block");
-        s_stateProviders.push_back(std::make_unique<SimpleStateProvider>("minecraft:moss_block"));
-
-        auto config = std::make_unique<VegetationPatchConfiguration>(
-            "minecraft:moss_replaceable",  // replaceable tag
-            groundState,                    // ground state (moss_block)
-            CaveSurface::FLOOR,            // surface type
-            std::make_shared<util::ConstantInt>(1),  // depth
-            0.0f,                          // extraBottomBlockChance
-            5,                             // verticalRange
-            0.8f,                          // vegetationChance
-            std::make_shared<util::UniformInt>(4, 7),  // xzRadius
-            0.3f                           // extraEdgeColumnChance
+        auto provider = std::make_shared<WeightedStateProvider>(
+            std::vector<WeightedStateEntry>{
+                {Blocks::FLOWERING_AZALEA->defaultBlockState(), 4},
+                {Blocks::AZALEA->defaultBlockState(), 7},
+                {Blocks::MOSS_CARPET->defaultBlockState(), 25},
+                {Blocks::SHORT_GRASS->defaultBlockState(), 50},
+                {Blocks::TALL_GRASS->defaultBlockState(), 10}
+            }
         );
 
-        // Set vegetation placer to place moss_carpet and grass
-        config->vegetationPlacer = [](WorldGenLevel* level, ChunkGenerator* gen,
-                                      WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // Weighted selection: moss_carpet(25), short_grass(50), tall_grass(10)
-            // azalea(7), flowering_azalea(4)
-            int roll = random.nextInt(96);
-            BlockState* state = nullptr;
-            if (roll < 50) {
-                state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:short_grass"));
-            } else if (roll < 75) {
-                state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:moss_carpet"));
-            } else if (roll < 85) {
-                state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:tall_grass"));
-            } else if (roll < 92) {
-                state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:azalea"));
-            } else {
-                state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:flowering_azalea"));
+        MOSS_VEGETATION = createSimpleBlockConfiguredFeature(provider);
+    }
+
+    // =========================================================================
+    // CAVE_VINE / CAVE_VINE_IN_MOSS
+    // Reference: CaveFeatures.java lines 109-110
+    // =========================================================================
+    {
+        auto caveVinesBodyProvider = std::make_shared<WeightedStateProvider>(
+            std::vector<WeightedStateEntry>{
+                {Blocks::CAVE_VINES_PLANT->defaultBlockState(), 4},
+                {Blocks::CAVE_VINES_PLANT->defaultBlockState()->setValue(*BlockStateProperties::BERRIES, true), 1}
             }
-            if (state) {
-                level->setBlock(pos, state, 2);
-                return true;
+        );
+        auto caveVinesHeadBaseProvider = std::make_shared<WeightedStateProvider>(
+            std::vector<WeightedStateEntry>{
+                {Blocks::CAVE_VINES->defaultBlockState(), 4},
+                {Blocks::CAVE_VINES->defaultBlockState()->setValue(*BlockStateProperties::BERRIES, true), 1}
             }
-            return false;
-        };
+        );
+        auto caveVinesHeadProvider = std::make_shared<RandomizedIntStateProvider>(
+            caveVinesHeadBaseProvider,
+            "age",
+            23,
+            25
+        );
+
+        s_blockStateProviders.push_back(caveVinesBodyProvider);
+        s_blockStateProviders.push_back(caveVinesHeadBaseProvider);
+        s_randomizedIntStateProviders.push_back(caveVinesHeadProvider);
+
+        {
+            std::vector<BlockColumnConfiguration::Layer> layers = {
+                BlockColumnConfiguration::layer(
+                    util::WeightedListInt::builder()
+                        .add(std::make_shared<util::UniformInt>(0, 19), 2)
+                        .add(std::make_shared<util::UniformInt>(0, 2), 3)
+                        .add(std::make_shared<util::UniformInt>(0, 6), 10)
+                        .buildShared(),
+                    caveVinesBodyProvider
+                ),
+                BlockColumnConfiguration::layer(
+                    std::make_shared<util::ConstantInt>(1),
+                    caveVinesHeadProvider
+                )
+            };
+
+            auto config = std::make_unique<BlockColumnConfiguration>(
+                layers,
+                core::Direction::DOWN,
+                BlockPredicate::ONLY_IN_AIR_PREDICATE,
+                true
+            );
+
+            auto feature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
+                &s_blockColumnFeature, *config);
+            CAVE_VINE = feature.get();
+            s_blockColumnConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+        }
+
+        {
+            std::vector<BlockColumnConfiguration::Layer> layers = {
+                BlockColumnConfiguration::layer(
+                    util::WeightedListInt::builder()
+                        .add(std::make_shared<util::UniformInt>(0, 3), 5)
+                        .add(std::make_shared<util::UniformInt>(1, 7), 1)
+                        .buildShared(),
+                    caveVinesBodyProvider
+                ),
+                BlockColumnConfiguration::layer(
+                    std::make_shared<util::ConstantInt>(1),
+                    caveVinesHeadProvider
+                )
+            };
+
+            auto config = std::make_unique<BlockColumnConfiguration>(
+                layers,
+                core::Direction::DOWN,
+                BlockPredicate::ONLY_IN_AIR_PREDICATE,
+                true
+            );
+
+            auto feature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
+                &s_blockColumnFeature, *config);
+            CAVE_VINE_IN_MOSS = feature.get();
+            s_blockColumnConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+        }
+    }
+
+    // =========================================================================
+    // MOSS_PATCH / MOSS_PATCH_BONEMEAL
+    // Reference: CaveFeatures.java lines 113-114
+    // =========================================================================
+    {
+        auto mossGroundState = BlockStateProvider::simple(Blocks::MOSS_BLOCK);
+        PlacedFeature* mossVegetation = createPlacedFeature(MOSS_VEGETATION, "MOSS_VEGETATION_INLINE");
+
+        auto config = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:moss_replaceable",
+            mossGroundState,
+            mossVegetation,
+            CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(1),
+            0.0f,
+            5,
+            0.8f,
+            std::make_shared<util::UniformInt>(4, 7),
+            0.3f
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
             &s_vegetationPatchFeature, *config);
@@ -274,215 +381,178 @@ void CaveFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
-    // =========================================================================
-    // CAVE_VINE
-    // Reference: CaveFeatures.java line 110
-    // BlockColumnFeature that places cave_vines hanging down
-    // =========================================================================
     {
-        // Create layers: body (cave_vines_plant) and tip (cave_vines)
-        std::vector<BlockColumnConfiguration::Layer> layers;
-        layers.push_back(BlockColumnConfiguration::layer(
-            std::make_shared<util::UniformInt>(1, 7),
-            std::make_shared<SimpleStateProvider>("minecraft:cave_vines_plant")
-        ));
-        layers.push_back(BlockColumnConfiguration::layer(
-            std::make_shared<util::ConstantInt>(1),
-            std::make_shared<SimpleStateProvider>("minecraft:cave_vines")
-        ));
+        auto mossGroundState = BlockStateProvider::simple(Blocks::MOSS_BLOCK);
+        PlacedFeature* mossVegetation = createPlacedFeature(MOSS_VEGETATION, "MOSS_VEGETATION_BONEMEAL_INLINE");
 
-        auto config = std::make_unique<BlockColumnConfiguration>(
-            layers,
-            core::Direction::DOWN,
-            nullptr,  // allowedPlacement - would be BlockPredicate.ONLY_IN_AIR_PREDICATE
-            true      // prioritizeTip
+        auto config = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:moss_replaceable",
+            mossGroundState,
+            mossVegetation,
+            CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(1),
+            0.0f,
+            5,
+            0.6f,
+            std::make_shared<util::UniformInt>(1, 2),
+            0.75f
         );
 
-        auto feature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
-            &s_blockColumnFeature, *config);
-        CAVE_VINE = feature.get();
-        s_blockColumnConfigs.push_back(std::move(config));
+        auto feature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
+            &s_vegetationPatchFeature, *config);
+        MOSS_PATCH_BONEMEAL = feature.get();
+        s_vegPatchConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
     // =========================================================================
     // DRIPLEAF
     // Reference: CaveFeatures.java line 115
-    // SimpleRandomSelectorFeature with 5 inline placed features:
-    //   - makeSmallDripleaf() - equal weight random facing
-    //   - makeDripleaf(EAST), makeDripleaf(WEST), makeDripleaf(SOUTH), makeDripleaf(NORTH)
     // =========================================================================
     {
-        // Create 5 inline PlacedFeatures for DRIPLEAF
         std::vector<PlacedFeature*> dripleafFeatures;
 
-        // 1. Small dripleaf - uses WeightedStateProvider with 4 directions, each weight 1
-        // Reference: CaveFeatures.java makeSmallDripleaf() lines 88-90
         {
-            std::vector<WeightedStateEntry> smallDripleafStates = {
-                WeightedStateEntry(static_cast<BlockState*>(Blocks::getDefaultState("minecraft:small_dripleaf")), 1),
-                WeightedStateEntry(static_cast<BlockState*>(Blocks::getDefaultState("minecraft:small_dripleaf")), 1),
-                WeightedStateEntry(static_cast<BlockState*>(Blocks::getDefaultState("minecraft:small_dripleaf")), 1),
-                WeightedStateEntry(static_cast<BlockState*>(Blocks::getDefaultState("minecraft:small_dripleaf")), 1)
+            auto provider = std::make_shared<WeightedStateProvider>(
+                std::vector<WeightedStateEntry>{
+                    {Blocks::SMALL_DRIPLEAF->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::EAST), 1},
+                    {Blocks::SMALL_DRIPLEAF->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::WEST), 1},
+                    {Blocks::SMALL_DRIPLEAF->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::NORTH), 1},
+                    {Blocks::SMALL_DRIPLEAF->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, core::Direction::SOUTH), 1}
+                }
+            );
+            ConfiguredFeature* configured = createSimpleBlockConfiguredFeature(provider);
+            dripleafFeatures.push_back(createPlacedFeature(configured, "SMALL_DRIPLEAF_INLINE"));
+        }
+
+        for (core::Direction direction : {core::Direction::EAST, core::Direction::WEST, core::Direction::SOUTH, core::Direction::NORTH}) {
+            auto stemProvider = BlockStateProvider::simple(
+                Blocks::BIG_DRIPLEAF_STEM->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, direction)
+            );
+            auto headProvider = BlockStateProvider::simple(
+                Blocks::BIG_DRIPLEAF->defaultBlockState()->setValue(*BlockStateProperties::HORIZONTAL_FACING, direction)
+            );
+            s_blockStateProviders.push_back(stemProvider);
+            s_blockStateProviders.push_back(headProvider);
+
+            std::vector<BlockColumnConfiguration::Layer> layers = {
+                BlockColumnConfiguration::layer(
+                    util::WeightedListInt::builder()
+                        .add(std::make_shared<util::UniformInt>(0, 4), 2)
+                        .add(std::make_shared<util::ConstantInt>(0), 1)
+                        .buildShared(),
+                    stemProvider
+                ),
+                BlockColumnConfiguration::layer(
+                    std::make_shared<util::ConstantInt>(1),
+                    headProvider
+                )
             };
-            auto smallDripleafProvider = std::make_unique<WeightedStateProvider>(smallDripleafStates);
 
-            auto smallDripleafConfig = std::make_unique<SimpleBlockConfiguration>(smallDripleafProvider.get());
-
-            auto smallDripleafConfiguredFeature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
-                &s_dripleafSimpleBlockFeature, *smallDripleafConfig);
-
-            // Create PlacedFeature with no modifiers (inlinePlaced)
-            auto smallDripleafPlaced = std::make_unique<PlacedFeature>(
-                smallDripleafConfiguredFeature.get(),
-                std::vector<PlacementModifier*>{}
+            auto config = std::make_unique<BlockColumnConfiguration>(
+                layers,
+                core::Direction::UP,
+                BlockPredicate::ONLY_IN_AIR_OR_WATER_PREDICATE,
+                true
             );
 
-            dripleafFeatures.push_back(smallDripleafPlaced.get());
-            s_weightedStateProviders.push_back(std::move(smallDripleafProvider));
-            s_simpleBlockConfigs.push_back(std::move(smallDripleafConfig));
-            s_features.push_back(std::move(smallDripleafConfiguredFeature));
-            s_placedFeatures.push_back(std::move(smallDripleafPlaced));
+            auto feature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
+                &s_blockColumnFeature, *config);
+            ConfiguredFeature* configured = feature.get();
+            s_blockColumnConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+            dripleafFeatures.push_back(createPlacedFeature(configured, "BIG_DRIPLEAF_INLINE"));
         }
 
-        // 2-5. Big dripleaf for each direction (EAST, WEST, SOUTH, NORTH)
-        // Reference: CaveFeatures.java makeDripleaf(Direction) lines 84-86
-        // WeightedListInt: weight 2 for UniformInt(0,4), weight 1 for ConstantInt(0)
-        // Layer 1: stem with weighted length
-        // Layer 2: head with constant 1
-        for (int dir = 0; dir < 4; ++dir) {
-            // Create WeightedListInt for stem height
-            // Reference: new WeightedListInt(WeightedList.builder().add(UniformInt.of(0, 4), 2).add(ConstantInt.of(0), 1).build())
-            auto stemHeightProvider = util::WeightedListInt::builder()
-                .add(std::make_shared<util::UniformInt>(0, 4), 2)
-                .add(std::make_shared<util::ConstantInt>(0), 1)
-                .buildShared();
-
-            // Create layers
-            std::vector<BlockColumnConfiguration::Layer> bigDripleafLayers;
-
-            // Layer 1: BIG_DRIPLEAF_STEM (with weighted height)
-            bigDripleafLayers.push_back(BlockColumnConfiguration::layer(
-                stemHeightProvider,
-                std::make_shared<SimpleStateProvider>("minecraft:big_dripleaf_stem")
-            ));
-
-            // Layer 2: BIG_DRIPLEAF (constant 1)
-            bigDripleafLayers.push_back(BlockColumnConfiguration::layer(
-                std::make_shared<util::ConstantInt>(1),
-                std::make_shared<SimpleStateProvider>("minecraft:big_dripleaf")
-            ));
-
-            auto bigDripleafConfig = std::make_unique<BlockColumnConfiguration>(
-                bigDripleafLayers,
-                core::Direction::UP,  // Direction.UP
-                nullptr,              // BlockPredicate.ONLY_IN_AIR_OR_WATER_PREDICATE
-                true                  // prioritizeTip
-            );
-
-            auto bigDripleafConfiguredFeature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
-                &s_dripleafBlockColumnFeature, *bigDripleafConfig);
-
-            auto bigDripleafPlaced = std::make_unique<PlacedFeature>(
-                bigDripleafConfiguredFeature.get(),
-                std::vector<PlacementModifier*>{}
-            );
-
-            dripleafFeatures.push_back(bigDripleafPlaced.get());
-            s_blockColumnConfigs.push_back(std::move(bigDripleafConfig));
-            s_features.push_back(std::move(bigDripleafConfiguredFeature));
-            s_placedFeatures.push_back(std::move(bigDripleafPlaced));
-        }
-
-        // Create SimpleRandomFeatureConfiguration with all 5 features
-        auto dripleafConfig = std::make_unique<SimpleRandomFeatureConfiguration>(dripleafFeatures);
-
-        auto dripleafFeature = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
-            &s_simpleRandomSelectorFeature, *dripleafConfig);
-        DRIPLEAF = dripleafFeature.get();
-        s_simpleRandomConfigs.push_back(std::move(dripleafConfig));
-        s_features.push_back(std::move(dripleafFeature));
+        auto config = std::make_unique<SimpleRandomFeatureConfiguration>(dripleafFeatures);
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
+            &s_simpleRandomSelectorFeature, *config);
+        DRIPLEAF = feature.get();
+        s_simpleRandomConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
     }
 
     // =========================================================================
-    // CLAY_WITH_DRIPLEAVES
-    // Reference: CaveFeatures.java line 116
-    // VegetationPatchFeature with CLAY ground and DRIPLEAF vegetation
-    // VegetationPatchConfiguration(BlockTags.LUSH_GROUND_REPLACEABLE, CLAY,
-    //   DRIPLEAF, CaveSurface.FLOOR, depth=3, extraBottomChance=0.8,
-    //   verticalRange=2, vegetationChance=0.05, xzRadius=4-7, extraEdgeChance=0.7)
+    // CLAY_WITH_DRIPLEAVES / CLAY_POOL_WITH_DRIPLEAVES / LUSH_CAVES_CLAY
+    // Reference: CaveFeatures.java lines 116-118
     // =========================================================================
     {
-        auto clayGroundState = std::make_shared<SimpleStateProvider>("minecraft:clay");
+        auto clayGroundState = BlockStateProvider::simple(Blocks::CLAY);
+        PlacedFeature* dripleafPlaced = createPlacedFeature(DRIPLEAF, "DRIPLEAF_INLINE");
 
         auto clayConfig = std::make_unique<VegetationPatchConfiguration>(
-            "minecraft:lush_ground_replaceable",  // replaceable tag
-            clayGroundState,                       // ground state (clay)
-            CaveSurface::FLOOR,                   // surface type
-            std::make_shared<util::ConstantInt>(3),  // depth
-            0.8f,                                 // extraBottomBlockChance
-            2,                                    // verticalRange
-            0.05f,                                // vegetationChance
-            std::make_shared<util::UniformInt>(4, 7),  // xzRadius
-            0.7f                                  // extraEdgeColumnChance
+            "minecraft:lush_ground_replaceable",
+            clayGroundState,
+            dripleafPlaced,
+            CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(3),
+            0.8f,
+            2,
+            0.05f,
+            std::make_shared<util::UniformInt>(4, 7),
+            0.7f
         );
-
-        // Set vegetation placer to call DRIPLEAF feature
-        // Reference: Java uses PlacementUtils.inlinePlaced(configuredFeatures.getOrThrow(DRIPLEAF))
-        clayConfig->vegetationPlacer = [](WorldGenLevel* level, ChunkGenerator* gen,
-                                          WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // DRIPLEAF is a SimpleRandomSelectorFeature that randomly selects
-            // from small dripleaf (weighted) or big dripleaf (4 directions)
-            if (!DRIPLEAF) return false;
-
-            // Place dripleaf directly matching the same random consumption pattern
-            int featureIndex = random.nextInt(5);  // 5 sub-features
-            if (featureIndex == 0) {
-                // Small dripleaf - consume 1 random for weighted state selection
-                random.nextInt(4);  // 4 equal weight entries
-                BlockState* state = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:small_dripleaf"));
-                if (state) {
-                    level->setBlock(pos, state, 2);
-                    return true;
-                }
-            } else {
-                // Big dripleaf - consume random for WeightedListInt then place stem + head
-                // WeightedListInt: weight 2 for UniformInt(0,4), weight 1 for ConstantInt(0)
-                int weightSelect = random.nextInt(3);  // total weight = 3
-                int stemHeight;
-                if (weightSelect < 2) {
-                    // UniformInt(0, 4) - range is 5
-                    stemHeight = random.nextInt(5);  // 0-4 inclusive
-                } else {
-                    // ConstantInt(0)
-                    stemHeight = 0;
-                }
-
-                // Place stem blocks
-                core::BlockPos::MutableBlockPos placePos(pos.getX(), pos.getY(), pos.getZ());
-                BlockState* stemState = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:big_dripleaf_stem"));
-                for (int i = 0; i < stemHeight; ++i) {
-                    if (stemState) {
-                        level->setBlock(placePos, stemState, 2);
-                    }
-                    placePos.move(0, 1, 0);
-                }
-
-                // Place head
-                BlockState* headState = static_cast<BlockState*>(Blocks::getDefaultState("minecraft:big_dripleaf"));
-                if (headState) {
-                    level->setBlock(placePos, headState, 2);
-                }
-                return true;
-            }
-            return false;
-        };
 
         auto clayFeature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
             &s_vegetationPatchFeature, *clayConfig);
         CLAY_WITH_DRIPLEAVES = clayFeature.get();
         s_vegPatchConfigs.push_back(std::move(clayConfig));
         s_features.push_back(std::move(clayFeature));
+
+        auto clayPoolConfig = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:lush_ground_replaceable",
+            BlockStateProvider::simple(Blocks::CLAY),
+            createPlacedFeature(DRIPLEAF, "DRIPLEAF_WATERLOGGED_INLINE"),
+            CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(3),
+            0.8f,
+            5,
+            0.1f,
+            std::make_shared<util::UniformInt>(4, 7),
+            0.7f
+        );
+
+        auto clayPoolFeature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, WaterloggedVegetationPatchFeature>>(
+            &s_waterloggedVegPatchFeature, *clayPoolConfig);
+        CLAY_POOL_WITH_DRIPLEAVES = clayPoolFeature.get();
+        s_vegPatchConfigs.push_back(std::move(clayPoolConfig));
+        s_features.push_back(std::move(clayPoolFeature));
+
+        auto lushCavesClayConfig = std::make_unique<RandomBooleanFeatureConfiguration>(
+            createPlacedFeature(CLAY_WITH_DRIPLEAVES, "CLAY_WITH_DRIPLEAVES_INLINE"),
+            createPlacedFeature(CLAY_POOL_WITH_DRIPLEAVES, "CLAY_POOL_WITH_DRIPLEAVES_INLINE")
+        );
+
+        auto lushCavesClayFeature = std::make_unique<ConfiguredFeatureImpl<RandomBooleanFeatureConfiguration, RandomBooleanSelectorFeature>>(
+            &s_randomBooleanSelectorFeature, *lushCavesClayConfig);
+        LUSH_CAVES_CLAY = lushCavesClayFeature.get();
+        s_randomBooleanConfigs.push_back(std::move(lushCavesClayConfig));
+        s_features.push_back(std::move(lushCavesClayFeature));
+    }
+
+    // =========================================================================
+    // MOSS_PATCH_CEILING
+    // Reference: CaveFeatures.java line 119
+    // =========================================================================
+    {
+        auto config = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:moss_replaceable",
+            BlockStateProvider::simple(Blocks::MOSS_BLOCK),
+            createPlacedFeature(CAVE_VINE_IN_MOSS, "CAVE_VINE_IN_MOSS_INLINE"),
+            CaveSurface::CEILING,
+            std::make_shared<util::UniformInt>(1, 2),
+            0.0f,
+            5,
+            0.08f,
+            std::make_shared<util::UniformInt>(4, 7),
+            0.3f
+        );
+
+        auto feature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
+            &s_vegetationPatchFeature, *config);
+        MOSS_PATCH_CEILING = feature.get();
+        s_vegPatchConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
     }
 
     // =========================================================================
@@ -528,18 +598,48 @@ void CaveFeatures::bootstrap() {
     }
 
     // =========================================================================
+    // SCULK_PATCH_ANCIENT_CITY
+    // Reference: CaveFeatures.java line 123
+    // SculkPatchConfiguration(10, 32, 64, 0, 1, UniformInt.of(1, 3), 0.5F)
+    // =========================================================================
+    {
+        auto config = std::make_unique<SculkPatchConfiguration>();
+        config->chargeCount = 10;
+        config->amountPerCharge = 32;
+        config->spreadAttempts = 64;
+        config->growthRounds = 0;
+        config->spreadRounds = 1;
+        config->extraRareGrowths = std::make_shared<util::UniformInt>(1, 3);
+        config->catalystChance = 0.5f;
+
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SculkPatchConfiguration, SculkPatchFeature>>(
+            &s_sculkPatchFeature, *config);
+        SCULK_PATCH_ANCIENT_CITY = feature.get();
+        s_sculkPatchConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
     // SCULK_VEIN
-    // Reference: CaveFeatures.java line 125
-    // MultifaceGrowthConfiguration for sculk vein
+    // Reference: CaveFeatures.java lines 124-125
+    // MultifaceGrowthConfiguration(sculkVeinBlock, 20, true, true, true, 1.0F,
+    //   HolderSet.direct(Block::builtInRegistryHolder, Blocks.STONE, Blocks.ANDESITE,
+    //   Blocks.DIORITE, Blocks.GRANITE, Blocks.DRIPSTONE_BLOCK, Blocks.CALCITE,
+    //   Blocks.TUFF, Blocks.DEEPSLATE))
     // =========================================================================
     {
         auto config = std::make_unique<MultifaceGrowthConfiguration>();
+        config->placeBlock = "minecraft:sculk_vein";
         config->searchRange = 20;
         config->canPlaceOnFloor = true;
         config->canPlaceOnCeiling = true;
         config->canPlaceOnWall = true;
         config->chanceOfSpreading = 1.0f;
-        // Simplified: would add canBePlacedOn blocks list
+        config->canBePlacedOn = {
+            "minecraft:stone", "minecraft:andesite", "minecraft:diorite",
+            "minecraft:granite", "minecraft:dripstone_block", "minecraft:calcite",
+            "minecraft:tuff", "minecraft:deepslate"
+        };
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<MultifaceGrowthConfiguration, MultifaceGrowthFeature>>(
             &s_multifaceGrowthFeature, *config);

@@ -1,9 +1,13 @@
 #pragma once
 
 #include "core/BlockPos.h"
-#include "world/level/block/state/BlockState.h"
-#include "world/level/block/Blocks.h"
+#include "math/Mth.h"
 #include "levelgen/WorldgenRandom.h"
+#include "random/LegacyRandomSource.h"
+#include "synth/NormalNoise.h"
+#include "util/InclusiveRange.h"
+#include "world/level/block/Blocks.h"
+#include "world/level/block/state/BlockState.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -38,6 +42,7 @@ public:
      * Reference: BlockStateProvider.java lines 13-18
      */
     static std::shared_ptr<BlockStateProvider> simple(BlockState* blockState);
+    static std::shared_ptr<BlockStateProvider> simple(minecraft::world::level::block::Block* block);
     static std::shared_ptr<BlockStateProvider> simple(const std::string& blockName);
 };
 
@@ -146,13 +151,14 @@ public:
         // Reference: Direction.Axis.getRandom(random) -> Util.getRandom(VALUES, random)
         // CRITICAL: This MUST consume nextInt(3) for random state parity
         int axisIndex = random.nextInt(3);  // 0=X, 1=Y, 2=Z
-        Axis axis = static_cast<Axis>(axisIndex);
+        if (!m_state) {
+            return nullptr;
+        }
 
-        // TODO: Implement BlockState::setValue() to actually set the axis property
-        // For now, we consume the random to maintain parity, then return base state
-        (void)axis;  // Suppress unused warning - random IS consumed
-
-        return m_state;
+        return m_state->trySetValue(
+            *minecraft::world::level::block::RotatedPillarBlock::AXIS,
+            static_cast<core::Axis>(axisIndex)
+        );
     }
 };
 
@@ -199,23 +205,182 @@ public:
         // Reference: RandomizedIntStateProvider.java getState()
         // First: get base state from source (may consume random if source does)
         BlockState* baseState = m_source->getState(random, pos);
+        if (!baseState) {
+            return nullptr;
+        }
 
         // Second: sample random value for property (CRITICAL - must consume random)
         // This matches UniformInt.sample() behavior: random.nextInt(range) + min
         int range = m_maxValue - m_minValue + 1;
         int value = random.nextInt(range) + m_minValue;
 
-        // TODO: Implement BlockState::setValue() to actually set the property
-        // For now, consume random to maintain parity, then return base state
-        (void)value;  // Suppress unused warning - random IS consumed
+        const auto* propertyBase = baseState->getBlock()->getStateDefinition().getProperty(m_propertyName);
+        if (const auto* property = dynamic_cast<const minecraft::world::level::block::state::properties::Property<int>*>(propertyBase)) {
+            return baseState->trySetValue(*property, value);
+        }
 
         return baseState;
     }
 };
 
+class NoiseBasedStateProvider : public BlockStateProvider {
+protected:
+    int64_t m_seed;
+    NormalNoise::NoiseParameters m_parameters;
+    float m_scale;
+    NormalNoise m_noise;
+
+    NoiseBasedStateProvider(int64_t seed, const NormalNoise::NoiseParameters& parameters, float scale)
+        : m_seed(seed)
+        , m_parameters(parameters)
+        , m_scale(scale)
+        , m_noise([&]() {
+            LegacyRandomSource random(seed);
+            return NormalNoise::create(random, parameters);
+        }()) {}
+
+    double getNoiseValue(const core::BlockPos& pos, double scale) const {
+        return m_noise.getValue(
+            static_cast<double>(pos.getX()) * scale,
+            static_cast<double>(pos.getY()) * scale,
+            static_cast<double>(pos.getZ()) * scale
+        );
+    }
+};
+
+class NoiseProvider : public NoiseBasedStateProvider {
+protected:
+    std::vector<BlockState*> m_states;
+
+    BlockState* getRandomState(const std::vector<BlockState*>& states, const core::BlockPos& pos, double scale) const {
+        return getRandomState(states, getNoiseValue(pos, scale));
+    }
+
+    BlockState* getRandomState(const std::vector<BlockState*>& states, double noiseValue) const {
+        double placementValue = Mth::clamp((1.0 + noiseValue) / 2.0, 0.0, 0.9999);
+        return states[static_cast<size_t>(placementValue * static_cast<double>(states.size()))];
+    }
+
+public:
+    NoiseProvider(
+        int64_t seed,
+        const NormalNoise::NoiseParameters& parameters,
+        float scale,
+        const std::vector<BlockState*>& states
+    )
+        : NoiseBasedStateProvider(seed, parameters, scale)
+        , m_states(states) {}
+
+    BlockState* getState(WorldgenRandom& random, const core::BlockPos& pos) const override {
+        (void)random;
+        return getRandomState(m_states, pos, static_cast<double>(m_scale));
+    }
+};
+
+class NoiseThresholdProvider : public NoiseBasedStateProvider {
+public:
+    NoiseThresholdProvider(
+        int64_t seed,
+        const NormalNoise::NoiseParameters& parameters,
+        float scale,
+        float threshold,
+        float highChance,
+        BlockState* defaultState,
+        const std::vector<BlockState*>& lowStates,
+        const std::vector<BlockState*>& highStates
+    )
+        : NoiseBasedStateProvider(seed, parameters, scale)
+        , m_threshold(threshold)
+        , m_highChance(highChance)
+        , m_defaultState(defaultState)
+        , m_lowStates(lowStates)
+        , m_highStates(highStates) {}
+
+    BlockState* getState(WorldgenRandom& random, const core::BlockPos& pos) const override {
+        double localValue = getNoiseValue(pos, static_cast<double>(m_scale));
+        if (localValue < static_cast<double>(m_threshold)) {
+            return m_lowStates[random.nextInt(static_cast<int32_t>(m_lowStates.size()))];
+        }
+
+        return random.nextFloat() < m_highChance
+            ? m_highStates[random.nextInt(static_cast<int32_t>(m_highStates.size()))]
+            : m_defaultState;
+    }
+
+private:
+    float m_threshold;
+    float m_highChance;
+    BlockState* m_defaultState;
+    std::vector<BlockState*> m_lowStates;
+    std::vector<BlockState*> m_highStates;
+};
+
+class DualNoiseProvider : public NoiseProvider {
+public:
+    DualNoiseProvider(
+        const minecraft::util::InclusiveRange<int>& variety,
+        const NormalNoise::NoiseParameters& slowNoiseParameters,
+        float slowScale,
+        int64_t seed,
+        const NormalNoise::NoiseParameters& parameters,
+        float scale,
+        const std::vector<BlockState*>& states
+    )
+        : NoiseProvider(seed, parameters, scale, states)
+        , m_variety(variety)
+        , m_slowNoiseParameters(slowNoiseParameters)
+        , m_slowScale(slowScale)
+        , m_slowNoise([&]() {
+            LegacyRandomSource random(seed);
+            return NormalNoise::create(random, slowNoiseParameters);
+        }()) {}
+
+    BlockState* getState(WorldgenRandom& random, const core::BlockPos& pos) const override {
+        (void)random;
+
+        double varietyNoise = getSlowNoiseValue(pos);
+        int localVariety = static_cast<int>(Mth::clampedMap(
+            varietyNoise,
+            static_cast<double>(-1.0f),
+            static_cast<double>(1.0f),
+            static_cast<double>(m_variety.minInclusive()),
+            static_cast<double>(m_variety.maxInclusive() + 1)
+        ));
+
+        std::vector<BlockState*> possibleStates;
+        possibleStates.reserve(static_cast<size_t>(localVariety));
+        for (int i = 0; i < localVariety; ++i) {
+            possibleStates.push_back(getRandomState(
+                m_states,
+                getSlowNoiseValue(pos.offset(i * 54545, 0, i * 34234))
+            ));
+        }
+
+        return getRandomState(possibleStates, pos, static_cast<double>(m_scale));
+    }
+
+private:
+    double getSlowNoiseValue(const core::BlockPos& pos) const {
+        return m_slowNoise.getValue(
+            static_cast<double>(static_cast<float>(pos.getX()) * m_slowScale),
+            static_cast<double>(static_cast<float>(pos.getY()) * m_slowScale),
+            static_cast<double>(static_cast<float>(pos.getZ()) * m_slowScale)
+        );
+    }
+
+    minecraft::util::InclusiveRange<int> m_variety;
+    NormalNoise::NoiseParameters m_slowNoiseParameters;
+    float m_slowScale;
+    NormalNoise m_slowNoise;
+};
+
 // Implement static factory methods
 inline std::shared_ptr<BlockStateProvider> BlockStateProvider::simple(BlockState* blockState) {
     return std::make_shared<SimpleStateProvider>(blockState);
+}
+
+inline std::shared_ptr<BlockStateProvider> BlockStateProvider::simple(minecraft::world::level::block::Block* block) {
+    return std::make_shared<SimpleStateProvider>(block ? block->defaultBlockState() : nullptr);
 }
 
 inline std::shared_ptr<BlockStateProvider> BlockStateProvider::simple(const std::string& blockName) {

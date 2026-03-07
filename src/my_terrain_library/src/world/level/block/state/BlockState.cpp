@@ -12,6 +12,7 @@ BlockState::BlockState(Block* owner, const ValueMap& values)
     , m_isAir(false)
     , m_liquid(false)
     , m_blocksMotion(true)
+    , m_isReplaceable(false)
     , m_isLeaves(false)
     , m_isLog(false)
     , m_isReplaceableByTrees(false)
@@ -33,6 +34,7 @@ void BlockState::setCachedValues() {
         m_isAir = props.isAir();
         m_liquid = props.isLiquid();
         m_blocksMotion = props.blocksMotion();
+        m_isReplaceable = props.isReplaceable();
         m_isLeaves = props.isLeaves();
         m_isLog = props.isLog();
         m_isReplaceableByTrees = props.isReplaceableByTrees();
@@ -111,6 +113,25 @@ int BlockState::getLightEmission() const {
     // Simplified - most blocks emit no light
     // TODO: Implement proper light emission based on block type
     return 0;
+}
+
+bool BlockState::canSurvive(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const {
+    return m_owner && m_owner->canSurvive(const_cast<BlockState*>(this), level, pos);
+}
+
+bool BlockState::isCollisionShapeFullBlock(
+    const minecraft::levelgen::WorldGenLevel& /*level*/,
+    const core::BlockPos& /*pos*/
+) const {
+    return isSolidRender();
+}
+
+bool BlockState::isFaceSturdy(
+    const minecraft::levelgen::WorldGenLevel& /*level*/,
+    const core::BlockPos& /*pos*/,
+    core::Direction /*direction*/
+) const {
+    return isSolidRender();
 }
 
 } // namespace state

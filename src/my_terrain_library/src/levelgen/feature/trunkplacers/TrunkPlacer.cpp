@@ -1,5 +1,7 @@
 #include "levelgen/feature/trunkplacers/TrunkPlacer.h"
+#include "levelgen/feature/Feature.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
+#include "world/level/block/blocks/RotatedPillarBlock.h"
 #include "core/Direction.h"
 #include <cmath>
 #include <optional>
@@ -22,9 +24,22 @@ bool TrunkPlacer::placeLog(
     const core::BlockPos& pos,
     std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider
 ) {
+    return placeLog(level, trunkSetter, random, pos, trunkProvider, [](BlockState* state) {
+        return state;
+    });
+}
+
+bool TrunkPlacer::placeLog(
+    LevelReader& level,
+    TrunkSetter trunkSetter,
+    WorldgenRandom& random,
+    const core::BlockPos& pos,
+    std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+    std::function<BlockState*(BlockState*)> stateModifier
+) {
     if (validTreePos(level, pos)) {
         BlockState* state = trunkProvider->getState(random, pos);
-        trunkSetter(pos, state);
+        trunkSetter(pos, stateModifier(state));
         return true;
     }
     return false;
@@ -49,10 +64,12 @@ void TrunkPlacer::setDirtAt(
     // Reference: TrunkPlacer.java setDirtAt() lines 52-57
     bool isDirt = level.isStateAtPosition(pos, [](BlockState* state) {
         if (!state) return false;
-        std::string name = state->getIdentifier();
-        // isDirt but not grass_block or mycelium
-        return (name == "minecraft:dirt" || name == "minecraft:coarse_dirt" || name == "minecraft:podzol") &&
-               name != "minecraft:grass_block" && name != "minecraft:mycelium";
+        if (!::minecraft::levelgen::FeatureHelpers::isDirt(state)) {
+            return false;
+        }
+
+        const std::string& name = state->getIdentifier();
+        return name != "minecraft:grass_block" && name != "minecraft:mycelium";
     });
 
     if (forceDirt || !isDirt) {
@@ -471,11 +488,10 @@ bool FancyTrunkPlacer::makeLimb(
             static_cast<int>(std::floor(0.5f + static_cast<float>(i) * dz)));
 
         if (doPlace) {
-            // Place log with appropriate axis based on direction
-            BlockState* state = trunkProvider->getState(random, blockPos);
             core::Axis axis = getLogAxis(startPos, blockPos);
-            // TODO: state = state->setValue(AXIS, axis);
-            trunkSetter(blockPos, state);
+            placeLog(level, trunkSetter, random, blockPos, trunkProvider, [axis](BlockState* state) {
+                return state->trySetValue(*world::level::block::RotatedPillarBlock::AXIS, axis);
+            });
         } else if (!isFree(level, blockPos)) {
             return false;
         }
@@ -794,7 +810,9 @@ foliageplacers::FoliageAttachment CherryTrunkPlacer::generateBranch(
     for (int i = 0; i < stepsHorizontally; ++i) {
         logPos.move(branchDirection);
         // Reference: Java calls this.placeLog() which checks validTreePos()
-        placeLog(level, trunkSetter, random, logPos, trunkProvider);
+        placeLog(level, trunkSetter, random, logPos, trunkProvider, [branchDirection](BlockState* state) {
+            return state->trySetValue(*world::level::block::RotatedPillarBlock::AXIS, core::getAxis(branchDirection));
+        });
     }
 
     // Reference: line 96
@@ -816,7 +834,13 @@ foliageplacers::FoliageAttachment CherryTrunkPlacer::generateBranch(
         logPos.move(growVertically ? verticalDirection : branchDirection);
 
         // Reference: line 107 - place log with validTreePos check
-        placeLog(level, trunkSetter, random, logPos, trunkProvider);
+        placeLog(level, trunkSetter, random, logPos, trunkProvider, [growVertically, branchDirection](BlockState* state) {
+            if (growVertically) {
+                return state;
+            }
+
+            return state->trySetValue(*world::level::block::RotatedPillarBlock::AXIS, core::getAxis(branchDirection));
+        });
     }
 }
 

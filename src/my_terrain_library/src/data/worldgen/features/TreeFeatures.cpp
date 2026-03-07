@@ -1,5 +1,6 @@
 #include "data/worldgen/features/TreeFeatures.h"
 #include "world/level/block/Blocks.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "util/IntProvider.h"
@@ -38,13 +39,16 @@ using levelgen::feature::featuresize::ThreeLayersFeatureSize;
 using levelgen::feature::featuresize::FeatureSize;
 using levelgen::feature::stateproviders::BlockStateProvider;
 using levelgen::feature::stateproviders::WeightedStateProvider;
+using levelgen::feature::stateproviders::RandomizedIntStateProvider;
 using levelgen::feature::stateproviders::WeightedStateEntry;
 using levelgen::feature::stateproviders::SimpleStateProvider;
 namespace treedecorators = levelgen::feature::treedecorators;
 using levelgen::feature::treedecorators::TreeDecorator;
 using levelgen::feature::treedecorators::PlaceOnGroundDecorator;
 using levelgen::feature::treedecorators::TrunkVineDecorator;
+using levelgen::feature::treedecorators::CocoaDecorator;
 using levelgen::feature::treedecorators::AttachedToLogsDecorator;
+using levelgen::feature::treedecorators::AlterGroundDecorator;
 using levelgen::feature::treedecorators::PaleMossDecorator;
 using levelgen::feature::treedecorators::LeaveVineDecorator;
 using levelgen::feature::treedecorators::AttachedToLeavesDecorator;
@@ -198,6 +202,12 @@ TreeConfigurationBuilder TreeFeatures::createBirch() {
     // Reference: TreeFeatures.java createBirch line 153-154
     // BIRCH: StraightTrunkPlacer(5, 2, 0), BlobFoliagePlacer(2, 0, 3), TwoLayersFeatureSize(1, 0, 1)
     return createStraightBlobTree("minecraft:birch_log", "minecraft:birch_leaves", 5, 2, 0, 2).ignoreVines();
+}
+
+TreeConfigurationBuilder TreeFeatures::createSuperBirch() {
+    // Reference: TreeFeatures.java createSuperBirch line 157-158
+    // SUPER_BIRCH: StraightTrunkPlacer(5, 2, 6), BlobFoliagePlacer(2, 0, 3), TwoLayersFeatureSize(1, 0, 1)
+    return createStraightBlobTree("minecraft:birch_log", "minecraft:birch_leaves", 5, 2, 6, 2).ignoreVines();
 }
 
 TreeConfigurationBuilder TreeFeatures::createJungleTree() {
@@ -431,7 +441,13 @@ void TreeFeatures::bootstrap() {
     // JUNGLE_TREE (with vines)
     {
         auto builder = createJungleTree();
-        builder.ignoreVines();  // For now, skip vine decorators
+        auto cocoaDecorator = std::make_shared<CocoaDecorator>(0.2f);
+        auto trunkVineDecorator = std::make_shared<TrunkVineDecorator>();
+        auto leaveVineDecorator = std::make_shared<LeaveVineDecorator>(0.25f);
+        s_decorators.push_back(cocoaDecorator);
+        s_decorators.push_back(trunkVineDecorator);
+        s_decorators.push_back(leaveVineDecorator);
+        builder.decorators({cocoaDecorator, trunkVineDecorator, leaveVineDecorator}).ignoreVines();
         JUNGLE_TREE = registerTree(builder);
     }
 
@@ -576,6 +592,32 @@ void TreeFeatures::bootstrap() {
         auto leaveVineDecorator = std::make_shared<LeaveVineDecorator>(0.125f);
         s_decorators.push_back(leaveVineDecorator);
 
+        BlockState* hangingPropaguleState = minecraft::world::level::block::Blocks::MANGROVE_PROPAGULE
+            ? minecraft::world::level::block::Blocks::MANGROVE_PROPAGULE->defaultBlockState()
+            : minecraft::world::level::block::Blocks::getDefaultState("minecraft:mangrove_propagule");
+        if (hangingPropaguleState) {
+            hangingPropaguleState = hangingPropaguleState->trySetValue(
+                *minecraft::world::level::block::state::properties::BlockStateProperties::HANGING,
+                true
+            );
+        }
+        auto hangingPropaguleProvider = std::make_shared<RandomizedIntStateProvider>(
+            BlockStateProvider::simple(hangingPropaguleState),
+            "age",
+            0,
+            4
+        );
+        s_providers.push_back(hangingPropaguleProvider);
+        auto attachedToLeavesDecorator = std::make_shared<AttachedToLeavesDecorator>(
+            0.14f,
+            1,
+            0,
+            hangingPropaguleProvider,
+            2,
+            std::vector<core::Direction>{core::Direction::DOWN}
+        );
+        s_decorators.push_back(attachedToLeavesDecorator);
+
         // BeehiveDecorator with 1% chance
         auto beehive001 = std::make_shared<BeehiveDecorator>(0.01f);
         s_decorators.push_back(beehive001);
@@ -588,7 +630,7 @@ void TreeFeatures::bootstrap() {
                 foliagePlacer,
                 rootPlacer,
                 featureSize
-            ).decorators({leaveVineDecorator, beehive001}).ignoreVines().build()
+            ).decorators({leaveVineDecorator, attachedToLeavesDecorator, beehive001}).ignoreVines().build()
         );
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -651,6 +693,32 @@ void TreeFeatures::bootstrap() {
         auto leaveVineDecorator = std::make_shared<LeaveVineDecorator>(0.125f);
         s_decorators.push_back(leaveVineDecorator);
 
+        BlockState* hangingPropaguleState = minecraft::world::level::block::Blocks::MANGROVE_PROPAGULE
+            ? minecraft::world::level::block::Blocks::MANGROVE_PROPAGULE->defaultBlockState()
+            : minecraft::world::level::block::Blocks::getDefaultState("minecraft:mangrove_propagule");
+        if (hangingPropaguleState) {
+            hangingPropaguleState = hangingPropaguleState->trySetValue(
+                *minecraft::world::level::block::state::properties::BlockStateProperties::HANGING,
+                true
+            );
+        }
+        auto hangingPropaguleProvider = std::make_shared<RandomizedIntStateProvider>(
+            BlockStateProvider::simple(hangingPropaguleState),
+            "age",
+            0,
+            4
+        );
+        s_providers.push_back(hangingPropaguleProvider);
+        auto attachedToLeavesDecorator = std::make_shared<AttachedToLeavesDecorator>(
+            0.14f,
+            1,
+            0,
+            hangingPropaguleProvider,
+            2,
+            std::vector<core::Direction>{core::Direction::DOWN}
+        );
+        s_decorators.push_back(attachedToLeavesDecorator);
+
         auto beehive001 = std::make_shared<BeehiveDecorator>(0.01f);
         s_decorators.push_back(beehive001);
 
@@ -662,7 +730,7 @@ void TreeFeatures::bootstrap() {
                 foliagePlacer,
                 rootPlacer,
                 featureSize
-            ).decorators({leaveVineDecorator, beehive001}).ignoreVines().build()
+            ).decorators({leaveVineDecorator, attachedToLeavesDecorator, beehive001}).ignoreVines().build()
         );
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -721,6 +789,11 @@ void TreeFeatures::bootstrap() {
         auto featureSize = std::make_shared<TwoLayersFeatureSize>(1, 1, 2);
         s_featureSizes.push_back(featureSize);
 
+        auto podzolProvider = BlockStateProvider::simple("minecraft:podzol");
+        s_providers.push_back(podzolProvider);
+        auto alterGroundDecorator = std::make_shared<AlterGroundDecorator>(podzolProvider);
+        s_decorators.push_back(alterGroundDecorator);
+
         auto config = std::make_unique<TreeConfiguration>(
             TreeConfigurationBuilder(
                 trunkProvider,
@@ -728,7 +801,7 @@ void TreeFeatures::bootstrap() {
                 foliageProvider,
                 foliagePlacer,
                 featureSize
-            ).build()  // Don't ignore vines - has AlterGroundDecorator
+            ).decorators({alterGroundDecorator}).build()
         );
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -758,6 +831,11 @@ void TreeFeatures::bootstrap() {
         auto featureSize = std::make_shared<TwoLayersFeatureSize>(1, 1, 2);
         s_featureSizes.push_back(featureSize);
 
+        auto podzolProvider = BlockStateProvider::simple("minecraft:podzol");
+        s_providers.push_back(podzolProvider);
+        auto alterGroundDecorator = std::make_shared<AlterGroundDecorator>(podzolProvider);
+        s_decorators.push_back(alterGroundDecorator);
+
         auto config = std::make_unique<TreeConfiguration>(
             TreeConfigurationBuilder(
                 trunkProvider,
@@ -765,7 +843,7 @@ void TreeFeatures::bootstrap() {
                 foliageProvider,
                 foliagePlacer,
                 featureSize
-            ).build()
+            ).decorators({alterGroundDecorator}).build()
         );
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -795,6 +873,11 @@ void TreeFeatures::bootstrap() {
         auto featureSize = std::make_shared<TwoLayersFeatureSize>(1, 1, 2);
         s_featureSizes.push_back(featureSize);
 
+        auto trunkVineDecorator = std::make_shared<TrunkVineDecorator>();
+        auto leaveVineDecorator = std::make_shared<LeaveVineDecorator>(0.25f);
+        s_decorators.push_back(trunkVineDecorator);
+        s_decorators.push_back(leaveVineDecorator);
+
         auto config = std::make_unique<TreeConfiguration>(
             TreeConfigurationBuilder(
                 trunkProvider,
@@ -802,7 +885,7 @@ void TreeFeatures::bootstrap() {
                 foliageProvider,
                 foliagePlacer,
                 featureSize
-            ).build()
+            ).decorators({trunkVineDecorator, leaveVineDecorator}).build()
         );
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
@@ -820,7 +903,9 @@ void TreeFeatures::bootstrap() {
     // StraightTrunkPlacer(5, 3, 0), BlobFoliagePlacer(3, 0, 3), with vine decorator
     {
         auto builder = createStraightBlobTree("minecraft:oak_log", "minecraft:oak_leaves", 5, 3, 0, 3);
-        // Skip vine decorators for now
+        auto leaveVineDecorator = std::make_shared<LeaveVineDecorator>(0.25f);
+        s_decorators.push_back(leaveVineDecorator);
+        builder.decorators({leaveVineDecorator});
         SWAMP_OAK = registerTree(builder);
     }
 
@@ -1180,9 +1265,7 @@ void TreeFeatures::bootstrap() {
     // SUPER_BIRCH_BEES_0002 - super birch with 0.02% bee chance
     // Reference: createSuperBirch().decorators(List.of(beehive0002))
     {
-        auto builder = createBirch();
-        // Super birch is just taller birch (height 5 + 2 + 6 vs normal 5 + 2)
-        // For now use regular birch as base
+        auto builder = createSuperBirch();
         builder.decorators({beehive0002});
         auto config = std::make_unique<TreeConfiguration>(builder.build());
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
@@ -1195,7 +1278,7 @@ void TreeFeatures::bootstrap() {
     // SUPER_BIRCH_BEES - super birch with 5% bee chance
     // Reference: createSuperBirch().decorators(List.of(beehive005))
     {
-        auto builder = createBirch();
+        auto builder = createSuperBirch();
         builder.decorators({beehive005});
         auto config = std::make_unique<TreeConfiguration>(builder.build());
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(

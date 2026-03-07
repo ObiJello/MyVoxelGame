@@ -94,16 +94,10 @@ public:
         int maxStep = 0;
 
         // Process each feature source (biome)
-        bool firstBiome = true;
-        int biomeIdx = 0;
         for (const T& featureSource : featureSources) {
             std::vector<FeatureData> featureList;
             auto featuresForStep = featureGetter(featureSource);
             maxStep = std::max(maxStep, static_cast<int>(featuresForStep.size()));
-
-            if (firstBiome) {
-                firstBiome = false;
-            }
 
             // Collect all features with their indices
             for (size_t stepIdx = 0; stepIdx < featuresForStep.size(); ++stepIdx) {
@@ -125,7 +119,6 @@ public:
                     edges[featureList[i]].insert(featureList[i + 1]);
                 }
             }
-            biomeIdx++;
         }
 
         // DFS topological sort
@@ -171,12 +164,23 @@ private:
         std::vector<FeatureData>& result,
         const FeatureData& node
     ) {
+        static int cycleCount = 0;
+
         if (currentlyVisiting.find(node) != currentlyVisiting.end()) {
             // Cycle detected
+            cycleCount++;
+            if (cycleCount == 1) {
+                std::cerr << "  DFS CYCLE at (s" << node.step << ",i" << node.featureIndex
+                          << ") feature ptr=" << (void*)node.feature << std::endl;
+                std::cerr << "  Currently visiting: ";
+                for (const auto& cv : currentlyVisiting) {
+                    std::cerr << "(s" << cv.step << ",i" << cv.featureIndex << ") ";
+                }
+                std::cerr << std::endl;
+            }
             return true;
         }
         if (discovered.find(node) != discovered.end()) {
-            // Already processed
             return false;
         }
 

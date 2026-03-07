@@ -448,8 +448,6 @@ void MiscOverworldPlacements::bootstrap() {
     }
 
     s_initialized = true;
-
-    // Debug: verify pointers at end of bootstrap
 }
 
 } // namespace placement

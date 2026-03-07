@@ -1,29 +1,97 @@
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/feature/Feature.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/ChunkGenerator.h"
-#include <iostream>
+#include <cstdlib>
 #include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <typeinfo>
+#include <utility>
+#include <vector>
+#if __has_include(<cxxabi.h>)
+#include <cxxabi.h>
+#endif
 
 // Reference: net/minecraft/world/level/levelgen/placement/PlacedFeature.java
-
-// Debug flag - set to true to trace tree placement
-static bool s_debugTreePlacement = false;
 
 // Feature logging state
 static bool s_loggingEnabled = false;
 static std::ostream* s_logStream = &std::cerr;
-static int s_currentStep = -1;
-static int s_currentIndex = -1;
+static thread_local int s_currentStep = -1;
+static thread_local int s_currentIndex = -1;
 
-// Detailed logging mode: 0=basic, 1=positions, 2=verbose (all modifiers)
+// Detailed logging mode: 0=basic, 1=positions, 2=verbose
 static int s_detailLevel = 0;
 
-// Modifier tracing mode: when true, logs per-modifier position transformations
+// Modifier tracing mode: when true, logs the real lazy placement path
 static bool s_modifierTracingEnabled = false;
 
 namespace minecraft {
 namespace levelgen {
 namespace placement {
+namespace {
+
+struct ModifierTraceCall {
+    size_t callIndex = 0;
+    size_t modifierIndex = 0;
+    std::string typeName;
+    core::BlockPos inputPos;
+    std::vector<core::BlockPos> outputPositions;
+    std::string detail;
+    WorldgenRandom::DebugStateSnapshot randomBefore{};
+    WorldgenRandom::DebugStateSnapshot randomAfter{};
+};
+
+struct PlacementTraceCall {
+    size_t callIndex = 0;
+    core::BlockPos position;
+    bool placed = false;
+    std::vector<feature::BlockChangeEvent> blockChanges;
+    WorldgenRandom::DebugStateSnapshot randomBefore{};
+    WorldgenRandom::DebugStateSnapshot randomAfter{};
+};
+
+std::string demangleTypeName(const char* mangledName) {
+    if (!mangledName) {
+        return "(unnamed)";
+    }
+
+#if __has_include(<cxxabi.h>)
+    int status = 0;
+    char* demangled = abi::__cxa_demangle(mangledName, nullptr, nullptr, &status);
+    if (status == 0 && demangled) {
+        std::string result(demangled);
+        std::free(demangled);
+        return result;
+    }
+    if (demangled) {
+        std::free(demangled);
+    }
+#endif
+
+    return mangledName;
+}
+
+std::string formatPos(const core::BlockPos& pos) {
+    return std::to_string(pos.getX()) + "," +
+           std::to_string(pos.getY()) + "," +
+           std::to_string(pos.getZ());
+}
+
+std::string formatRandomState(const WorldgenRandom::DebugStateSnapshot& state) {
+    std::ostringstream out;
+    out << "seed_lo=" << state.seedLo
+        << " seed_hi=" << state.seedHi
+        << " count=" << state.count
+        << " gauss_cached=" << (state.haveNextNextGaussian ? "true" : "false");
+    if (state.haveNextNextGaussian) {
+        out << " gauss_value=" << std::setprecision(17) << state.nextNextGaussian;
+    }
+    return out.str();
+}
+
+} // namespace
 
 //=============================================================================
 // Static Logging Methods
@@ -74,14 +142,22 @@ bool PlacedFeature::isModifierTracingEnabled() {
     return s_modifierTracingEnabled;
 }
 
+std::string PlacedFeature::getDebugName() const {
+    if (!m_name.empty()) {
+        return m_name;
+    }
+    if (m_feature) {
+        return demangleTypeName(typeid(*m_feature).name());
+    }
+    return "(unnamed)";
+}
+
 bool PlacedFeature::place(
     WorldGenLevel* level,
     ChunkGenerator* generator,
     WorldgenRandom& random,
     const core::BlockPos& origin
 ) {
-    // Reference: PlacedFeature.java lines 28-30
-    // return this.placeWithContext(new PlacementContext(level, generator, Optional.empty()), random, origin);
     PlacementContext context(level, generator, std::nullopt);
     return placeWithContext(context, random, origin);
 }
@@ -92,8 +168,6 @@ bool PlacedFeature::placeWithBiomeCheck(
     WorldgenRandom& random,
     const core::BlockPos& origin
 ) {
-    // Reference: PlacedFeature.java lines 32-34
-    // return this.placeWithContext(new PlacementContext(level, generator, Optional.of(this)), random, origin);
     PlacementContext context(level, generator, std::optional<const PlacedFeature*>(this));
     return placeWithContext(context, random, origin);
 }
@@ -103,220 +177,166 @@ bool PlacedFeature::placeWithContext(
     WorldgenRandom& random,
     const core::BlockPos& origin
 ) {
-    // Output STEP header FIRST so trace data appears AFTER the header
-    // (This makes trace output easier to read - trace belongs to the feature above it)
-    std::string featureName = m_name.empty() ? "(unnamed)" : m_name;
-    if (s_loggingEnabled && s_logStream && s_modifierTracingEnabled) {
-        *s_logStream << "FEATURE STEP=" << s_currentStep << " IDX=" << s_currentIndex
-                     << " " << featureName << "\n";
-    }
+    const std::string featureName = getDebugName();
+    const bool traceEnabled = s_loggingEnabled && s_logStream && s_modifierTracingEnabled;
+    const std::string previousBlockTraceFeatureName = feature::BlockChangeTrace::currentFeatureName;
+    feature::BlockChangeTrace::currentFeatureName = featureName;
 
-    // Reference: PlacedFeature.java lines 36-55
-    // Stream<BlockPos> placements = Stream.of(origin);
-    // for(PlacementModifier placementModifier : this.placement) {
-    //     placements = placements.flatMap((p) -> placementModifier.getPositions(context, random, p));
-    // }
-    //
-    // CRITICAL: Java streams are lazily evaluated! This means each position goes through
-    // ALL modifiers before the next position is processed. The random calls must interleave
-    // per-position, not per-modifier.
-
-    // =========================================================================
-    // MODIFIER TRACING PASS (if enabled)
-    // Clone state, trace, then restore for actual placement
-    // =========================================================================
-    if (s_modifierTracingEnabled && s_loggingEnabled && s_logStream) {
-        // Save random state
-        uint64_t savedSeedLo, savedSeedHi;
-        random.getSeedState(savedSeedLo, savedSeedHi);
-
-        // =====================================================================
-        // DIFFABLE OUTPUT FORMAT - designed for easy Java/C++ comparison
-        // =====================================================================
-
-        // Line 1: Feature identification with modifier count
-        *s_logStream << "  MODIFIER_COUNT=" << m_placement.size() << "\n";
-
-        // Line 2: Complete modifier chain as single diffable string
-        // Format: MODIFIER_CHAIN=Type1,Type2,Type3,...
-        std::string modifierChain;
-        for (size_t i = 0; i < m_placement.size(); i++) {
-            if (m_placement[i]) {
-                if (!modifierChain.empty()) modifierChain += ",";
-                modifierChain += m_placement[i]->getTypeName();
-            }
+    if (!m_feature) {
+        if (s_loggingEnabled && s_logStream) {
+            *s_logStream << "STEP=" << s_currentStep << " IDX=" << s_currentIndex
+                         << " " << featureName << " | placed=0 | null_feature=true\n";
         }
-        *s_logStream << "  MODIFIER_CHAIN=" << modifierChain << "\n";
-
-        // Line 3: Seed state before any modifiers run
-        *s_logStream << "  SEED_BEFORE=" << savedSeedLo << "," << savedSeedHi << "\n";
-
-        // Track positions through each modifier level
-        // We process breadth-first per modifier to show modifier-level transformations
-        std::vector<core::BlockPos> currentLevelPositions = {origin};
-
-        for (size_t modIdx = 0; modIdx < m_placement.size(); modIdx++) {
-            PlacementModifier* modifier = m_placement[modIdx];
-            if (!modifier) continue;
-
-            // Capture seed state BEFORE this modifier runs
-            uint64_t beforeLo, beforeHi;
-            random.getSeedState(beforeLo, beforeHi);
-
-            std::vector<core::BlockPos> nextLevelPositions;
-            std::vector<std::pair<core::BlockPos, core::BlockPos>> transformations; // input -> output pairs
-
-            // Process each position through this modifier
-            for (const auto& pos : currentLevelPositions) {
-                auto results = modifier->getPositions(context, random, pos);
-                for (const auto& result : results) {
-                    nextLevelPositions.push_back(result);
-                    if (transformations.size() < 10) { // Store first 10 for logging
-                        transformations.push_back({pos, result});
-                    }
-                }
-            }
-
-            // Capture seed state AFTER this modifier runs
-            uint64_t afterLo, afterHi;
-            random.getSeedState(afterLo, afterHi);
-
-            // Log this modifier with diffable format:
-            // MOD[idx]=TypeName in=N out=M seed_before=lo,hi seed_after=lo,hi
-            *s_logStream << "  MOD[" << modIdx << "]=" << modifier->getTypeName()
-                         << " in=" << currentLevelPositions.size()
-                         << " out=" << nextLevelPositions.size()
-                         << " seed_before=" << beforeLo << "," << beforeHi
-                         << " seed_after=" << afterLo << "," << afterHi << "\n";
-            s_logStream->flush();
-
-            // Show first few position transformations for debugging
-            for (size_t i = 0; i < transformations.size() && i < 5; i++) {
-                const auto& [inPos, outPos] = transformations[i];
-                *s_logStream << "    POS[" << i << "]: "
-                             << inPos.getX() << "," << inPos.getY() << "," << inPos.getZ()
-                             << " -> "
-                             << outPos.getX() << "," << outPos.getY() << "," << outPos.getZ() << "\n";
-            }
-            if (nextLevelPositions.size() > 5) {
-                *s_logStream << "    ... and " << (nextLevelPositions.size() - 5) << " more positions\n";
-            }
-            s_logStream->flush();
-
-            currentLevelPositions = std::move(nextLevelPositions);
-            if (currentLevelPositions.empty()) break;
-        }
-
-        // Final position count after all modifiers
-        *s_logStream << "  FINAL_POSITIONS=" << currentLevelPositions.size() << "\n";
-
-        // RESTORE random state for actual placement
-        random.setSeedState(savedSeedLo, savedSeedHi);
+        feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
+        return false;
     }
-
-    // =========================================================================
-    // ACTUAL PLACEMENT PASS (using correct lazy stream semantics)
-    // =========================================================================
-
-    // Log modifier list if verbose logging enabled (but not tracing)
-    if (s_loggingEnabled && s_logStream && s_detailLevel >= 2 && !s_modifierTracingEnabled) {
-        *s_logStream << "  MODIFIERS=" << m_placement.size() << "\n";
-        for (size_t i = 0; i < m_placement.size(); i++) {
-            auto* mod = m_placement[i];
-            std::string modName = mod ? mod->getTypeName() : "null";
-            *s_logStream << "    [" << i << "] " << modName << "\n";
-        }
-    }
-
-    // CRITICAL FIX: Feature placement must happen INSIDE the lazy stream,
-    // not after collecting all positions. In Java, Stream.forEach() processes
-    // each element through ALL flatMap stages AND the terminal forEach action
-    // before moving to the next element. This means feature.place() for position 1
-    // (which consumes many random calls) happens BEFORE position 2 even enters
-    // the InSquarePlacement modifier.
-    //
-    // Reference: PlacedFeature.java lines 36-54
-    //   Stream<BlockPos> placements = Stream.of(origin);
-    //   for(PlacementModifier mod : this.placement) {
-    //       placements = placements.flatMap((p) -> mod.getPositions(context, random, p));
-    //   }
-    //   placements.forEach((pos) -> { feature.place(..., random, pos); });
 
     bool placedAny = false;
-    if (!m_feature) return false;
-
+    int placedCount = 0;
     WorldGenLevel* level = context.getLevel();
     ChunkGenerator* generator = context.generator();
-    int placedCount = 0;
 
-    // Recursive helper that processes positions through modifiers AND places them
-    // This correctly simulates Java's lazy stream: each position goes through
-    // all modifiers and gets placed before the next position starts.
-    // Debug: track BiomeFilter results for dripstone features
-    bool debugDripstone = s_loggingEnabled && s_logStream &&
-        (m_name.find("DRIPSTONE") != std::string::npos || m_name.find("dripstone") != std::string::npos);
+    std::vector<ModifierTraceCall> modifierTraceCalls;
+    std::vector<PlacementTraceCall> placementTraceCalls;
+    size_t modifierCallIndex = 0;
+    size_t placementCallIndex = 0;
 
-
-    int biomePassCount = 0, biomeFailCount = 0;
+    if (s_loggingEnabled && s_logStream && s_detailLevel >= 2 && !traceEnabled) {
+        *s_logStream << "  MODIFIERS=" << m_placement.size() << "\n";
+        for (size_t i = 0; i < m_placement.size(); ++i) {
+            PlacementModifier* modifier = m_placement[i];
+            *s_logStream << "    [" << i << "] "
+                         << (modifier ? modifier->getTypeName() : "null")
+                         << "\n";
+        }
+    }
 
     std::function<void(const core::BlockPos&, size_t)> processAndPlace;
     processAndPlace = [&](const core::BlockPos& pos, size_t modifierIdx) {
         if (modifierIdx >= m_placement.size()) {
-            // Reached end of modifiers - PLACE the feature here (inside the stream)
+            if (traceEnabled) {
+                PlacementTraceCall traceCall;
+                traceCall.callIndex = placementCallIndex++;
+                traceCall.position = pos;
+                traceCall.randomBefore = random.captureDebugState();
+
+                auto previousCallback = feature::BlockChangeTrace::callback;
+                feature::BlockChangeTrace::setCallback([&traceCall](const feature::BlockChangeEvent& event) {
+                    traceCall.blockChanges.push_back(event);
+                });
+
+                traceCall.placed = m_feature->place(level, generator, random, pos);
+
+                feature::BlockChangeTrace::setCallback(previousCallback);
+                traceCall.randomAfter = random.captureDebugState();
+                placementTraceCalls.push_back(std::move(traceCall));
+
+                if (placementTraceCalls.back().placed) {
+                    placedAny = true;
+                    ++placedCount;
+                }
+                return;
+            }
+
             if (m_feature->place(level, generator, random, pos)) {
                 placedAny = true;
-                placedCount++;
+                ++placedCount;
             }
             return;
         }
 
         PlacementModifier* modifier = m_placement[modifierIdx];
-        if (!modifier) return;
-
-        // Get positions from this modifier
-        auto newPositions = modifier->getPositions(context, random, pos);
-
-        // Debug: log BiomeFilter pass/fail for dripstone
-        if (debugDripstone && modifier->getTypeName() == "BiomeFilter") {
-            if (!newPositions.empty()) {
-                biomePassCount++;
-                const world::biome::Biome* biome = context.getBiome(pos);
-                if (biome && biomePassCount <= 5) {
-                    *s_logStream << "  BIOME_PASS: (" << pos.getX() << "," << pos.getY() << "," << pos.getZ()
-                                 << ") biome=" << biome->getName() << "\n";
-                }
-            } else {
-                biomeFailCount++;
-            }
+        if (!modifier) {
+            return;
         }
 
-        // Recursively process each resulting position through remaining modifiers
-        for (const auto& newPos : newPositions) {
+        WorldgenRandom::DebugStateSnapshot before{};
+        WorldgenRandom::DebugStateSnapshot after{};
+        if (traceEnabled) {
+            before = random.captureDebugState();
+        }
+
+        std::vector<core::BlockPos> newPositions = modifier->getPositions(context, random, pos);
+
+        if (traceEnabled) {
+            after = random.captureDebugState();
+            ModifierTraceCall traceCall;
+            traceCall.callIndex = modifierCallIndex++;
+            traceCall.modifierIndex = modifierIdx;
+            traceCall.typeName = modifier->getTypeName();
+            traceCall.inputPos = pos;
+            traceCall.outputPositions = newPositions;
+            traceCall.detail = modifier->describeTrace(context, pos, newPositions);
+            traceCall.randomBefore = before;
+            traceCall.randomAfter = after;
+            modifierTraceCalls.push_back(std::move(traceCall));
+        }
+
+        for (const core::BlockPos& newPos : newPositions) {
             processAndPlace(newPos, modifierIdx + 1);
         }
     };
 
-    // Process origin through all modifiers with inline placement
     processAndPlace(origin, 0);
 
+    if (traceEnabled) {
+        *s_logStream << "FEATURE STEP=" << s_currentStep << " IDX=" << s_currentIndex
+                     << " " << featureName << "\n";
+        *s_logStream << "  ORIGIN=" << formatPos(origin) << "\n";
+        *s_logStream << "  MODIFIER_COUNT=" << m_placement.size() << "\n";
 
-    // Log dripstone BiomeFilter summary
-    if (debugDripstone && s_logStream) {
-        *s_logStream << "  BIOME_SUMMARY: pass=" << biomePassCount << " fail=" << biomeFailCount
-                     << " total=" << (biomePassCount + biomeFailCount) << "\n";
-    }
-
-    // Log feature placement if logging is enabled
-    if (s_loggingEnabled && s_logStream) {
-        if (s_modifierTracingEnabled) {
-            *s_logStream << "  RESULT: placed=" << placedCount << "\n";
-        } else {
-            *s_logStream << "STEP=" << s_currentStep << " IDX=" << s_currentIndex
-                         << " " << featureName
-                         << " | placed=" << placedCount << "\n";
+        std::string modifierChain;
+        for (size_t i = 0; i < m_placement.size(); ++i) {
+            PlacementModifier* modifier = m_placement[i];
+            if (!modifierChain.empty()) {
+                modifierChain += ",";
+            }
+            modifierChain += modifier ? modifier->getTypeName() : "null";
         }
+        *s_logStream << "  MODIFIER_CHAIN=" << modifierChain << "\n";
+
+        for (const ModifierTraceCall& traceCall : modifierTraceCalls) {
+            *s_logStream << "  MOD_CALL[" << traceCall.callIndex << "]"
+                         << " idx=" << traceCall.modifierIndex
+                         << " type=" << traceCall.typeName
+                         << " input=" << formatPos(traceCall.inputPos)
+                         << " out_count=" << traceCall.outputPositions.size()
+                         << " " << formatRandomState(traceCall.randomBefore)
+                         << " -> " << formatRandomState(traceCall.randomAfter)
+                         << "\n";
+            if (!traceCall.detail.empty()) {
+                *s_logStream << "    DETAIL=" << traceCall.detail << "\n";
+            }
+            for (size_t i = 0; i < traceCall.outputPositions.size(); ++i) {
+                *s_logStream << "    OUT[" << i << "]=" << formatPos(traceCall.outputPositions[i]) << "\n";
+            }
+        }
+
+        for (const PlacementTraceCall& traceCall : placementTraceCalls) {
+            *s_logStream << "  PLACE[" << traceCall.callIndex << "]"
+                         << " pos=" << formatPos(traceCall.position)
+                         << " placed=" << (traceCall.placed ? "true" : "false")
+                         << " block_changes=" << traceCall.blockChanges.size()
+                         << " " << formatRandomState(traceCall.randomBefore)
+                         << " -> " << formatRandomState(traceCall.randomAfter)
+                         << "\n";
+            for (size_t i = 0; i < traceCall.blockChanges.size(); ++i) {
+                const feature::BlockChangeEvent& change = traceCall.blockChanges[i];
+                *s_logStream << "    BLOCK[" << i << "]="
+                             << change.x << "," << change.y << "," << change.z
+                             << " old=" << change.oldBlock
+                             << " new=" << change.newBlock << "\n";
+            }
+        }
+
+        *s_logStream << "  RESULT: placed=" << placedCount << "\n";
+    } else if (s_loggingEnabled && s_logStream) {
+        *s_logStream << "STEP=" << s_currentStep << " IDX=" << s_currentIndex
+                     << " " << featureName
+                     << " | placed=" << placedCount << "\n";
     }
 
+    feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
     return placedAny;
 }
 

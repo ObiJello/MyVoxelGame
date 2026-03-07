@@ -3,6 +3,8 @@
 #include "core/BlockPos.h"
 #include "core/Direction.h"
 #include "world/IChunk.h"
+#include "world/level/block/blocks/DoublePlantBlock.h"
+#include "world/level/block/blocks/SculkVeinBlock.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 #include "levelgen/WorldgenRandom.h"
@@ -10,9 +12,11 @@
 #include "levelgen/structure/templatesystem/RuleTest.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
 #include "util/IntProvider.h"
+#include "util/JavaHashSet.h"
 #include "levelgen/carver/CarverConfiguration.h"
 #include "world/level/block/SculkSpreader.h"
 #include "world/level/chunk/BulkSectionAccess.h"
@@ -29,26 +33,6 @@
 
 // Alias for Direction in the core namespace for backwards compatibility
 namespace minecraft { namespace core { using Direction = levelgen::blockpredicates::Direction; } }
-
-// Global block-change trace for feature placement debugging
-namespace minecraft { namespace levelgen { namespace feature {
-    struct BlockChangeTrace {
-        static inline bool enabled = false;
-        static inline std::ostream* stream = nullptr;
-        static inline std::string currentFeatureName;
-        static inline int currentStep = -1;
-        static inline int currentIndex = -1;
-
-        static void log(int x, int y, int z, const std::string& oldBlock, const std::string& newBlock) {
-            if (enabled && stream && oldBlock != newBlock) {
-                *stream << "BLOCK_SET STEP=" << currentStep << " IDX=" << currentIndex
-                        << " " << currentFeatureName
-                        << " pos=" << x << "," << y << "," << z
-                        << " old=" << oldBlock << " new=" << newBlock << "\n";
-            }
-        }
-    };
-} } }
 
 // Reference: net/minecraft/world/level/levelgen/feature/Feature.java
 // Reference: net/minecraft/world/level/levelgen/feature/ConfiguredFeature.java
@@ -538,19 +522,36 @@ private:
  */
 class SimpleBlockFeature : public Feature<SimpleBlockConfiguration> {
 public:
-    // Reference: SimpleBlockFeature.java place() lines 16-21
+    // Reference: SimpleBlockFeature.java place() lines 16-41
     bool place(FeaturePlaceContext<SimpleBlockConfiguration>& context) override {
         const core::BlockPos& pos = context.origin();
         WorldgenRandom& random = context.random();
 
-        // Get block state from provider or legacy state
         BlockState* state = context.config().getState(random, pos);
         if (!state) {
             return false;
         }
 
-        // Use WorldGenLevel::setBlock which handles coordinate translation
-        context.level()->setBlock(pos, state, 19);
+        if (!state->canSurvive(*context.level(), pos)) {
+            return false;
+        }
+
+        if (auto* doublePlantBlock = dynamic_cast<world::level::block::DoublePlantBlock*>(state->getBlock())) {
+            if (!context.level()->isEmptyBlock(pos.above())) {
+                return false;
+            }
+            doublePlantBlock->placeAt(context.level(), state, pos, 2);
+        } else {
+            context.level()->setBlock(pos, state, 2);
+        }
+
+        if (context.config().scheduleTick) {
+            BlockState* placedState = context.level()->getBlockState(pos);
+            if (placedState && placedState->getBlock()) {
+                context.level()->scheduleTick(pos, placedState->getBlock()->getIdentifier(), 1);
+            }
+        }
+
         return true;
     }
 };
@@ -895,17 +896,19 @@ public:
     int tries;      // Number of placement attempts (default: 128)
     int xzSpread;   // Horizontal spread radius (default: 7)
     int ySpread;    // Vertical spread radius (default: 3)
-    // Feature holder would go here (simplified for now)
+    placement::PlacedFeature* feature;
     std::function<bool(WorldGenLevel*, ChunkGenerator*, WorldgenRandom&, const core::BlockPos&)> featurePlacer;
 
     RandomPatchConfiguration(
         int tries = 128,
         int xzSpread = 7,
-        int ySpread = 3
+        int ySpread = 3,
+        placement::PlacedFeature* feature = nullptr
     )
         : tries(tries)
         , xzSpread(xzSpread)
         , ySpread(ySpread)
+        , feature(feature)
         , featurePlacer(nullptr)
     {}
 };
@@ -939,7 +942,11 @@ public:
             int dz = random.nextInt(xzBound) - random.nextInt(xzBound);
             grassPos.setWithOffset(origin, dx, dy, dz);
 
-            if (config.featurePlacer && config.featurePlacer(level, generator, random, grassPos)) {
+            if (config.feature) {
+                if (config.feature->place(level, generator, random, grassPos)) {
+                    ++placed;
+                }
+            } else if (config.featurePlacer && config.featurePlacer(level, generator, random, grassPos)) {
                 ++placed;
             }
         }
@@ -1242,7 +1249,7 @@ private:
 
 namespace CaveSurfaceHelper {
     inline int getDirection(CaveSurface surface) {
-        return surface == CaveSurface::CEILING ? -1 : 1;
+        return surface == CaveSurface::CEILING ? 1 : -1;
     }
 
     inline core::Direction getDirectionEnum(CaveSurface surface) {
@@ -1258,6 +1265,7 @@ class VegetationPatchConfiguration : public FeatureConfiguration {
 public:
     std::string replaceable;     // Block tag that can be replaced
     std::shared_ptr<feature::stateproviders::BlockStateProvider> groundState;
+    placement::PlacedFeature* vegetationFeature;
     CaveSurface surface;
     std::shared_ptr<util::IntProvider> depth;
     float extraBottomBlockChance;
@@ -1271,6 +1279,7 @@ public:
     VegetationPatchConfiguration(
         const std::string& replaceable,
         std::shared_ptr<feature::stateproviders::BlockStateProvider> groundState,
+        placement::PlacedFeature* vegetationFeature,
         CaveSurface surface,
         std::shared_ptr<util::IntProvider> depth,
         float extraBottomBlockChance,
@@ -1280,13 +1289,38 @@ public:
         float extraEdgeColumnChance
     )
         : replaceable(replaceable)
-        , groundState(groundState)
+        , groundState(std::move(groundState))
+        , vegetationFeature(vegetationFeature)
         , surface(surface)
-        , depth(depth)
+        , depth(std::move(depth))
         , extraBottomBlockChance(extraBottomBlockChance)
         , verticalRange(verticalRange)
         , vegetationChance(vegetationChance)
-        , xzRadius(xzRadius)
+        , xzRadius(std::move(xzRadius))
+        , extraEdgeColumnChance(extraEdgeColumnChance)
+        , vegetationPlacer(nullptr)
+    {}
+
+    VegetationPatchConfiguration(
+        const std::string& replaceable,
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> groundState,
+        CaveSurface surface,
+        std::shared_ptr<util::IntProvider> depth,
+        float extraBottomBlockChance,
+        int verticalRange,
+        float vegetationChance,
+        std::shared_ptr<util::IntProvider> xzRadius,
+        float extraEdgeColumnChance
+    )
+        : replaceable(replaceable)
+        , groundState(std::move(groundState))
+        , vegetationFeature(nullptr)
+        , surface(surface)
+        , depth(std::move(depth))
+        , extraBottomBlockChance(extraBottomBlockChance)
+        , verticalRange(verticalRange)
+        , vegetationChance(vegetationChance)
+        , xzRadius(std::move(xzRadius))
         , extraEdgeColumnChance(extraEdgeColumnChance)
         , vegetationPlacer(nullptr)
     {}
@@ -1307,17 +1341,10 @@ public:
         const VegetationPatchConfiguration& config = context.config();
         WorldgenRandom& random = context.random();
         const core::BlockPos& origin = context.origin();
-
-        // Sample radii
         int xRadius = config.xzRadius->sample(random) + 1;
         int zRadius = config.xzRadius->sample(random) + 1;
-
-        // Place ground patch and collect surface positions
-        std::set<core::BlockPos> surface = placeGroundPatch(level, config, random, origin, xRadius, zRadius);
-
-        // Distribute vegetation
+        util::JavaHashSet<core::BlockPos> surface = placeGroundPatch(level, config, random, origin, xRadius, zRadius);
         distributeVegetation(context, level, config, random, surface, xRadius, zRadius);
-
         return !surface.empty();
     }
 
@@ -1326,7 +1353,7 @@ protected:
      * Place ground patch
      * Reference: VegetationPatchFeature.java placeGroundPatch() lines 35-76
      */
-    std::set<core::BlockPos> placeGroundPatch(
+    virtual util::JavaHashSet<core::BlockPos> placeGroundPatch(
         WorldGenLevel* level,
         const VegetationPatchConfiguration& config,
         WorldgenRandom& random,
@@ -1336,9 +1363,9 @@ protected:
     ) {
         core::BlockPos::MutableBlockPos pos(origin.getX(), origin.getY(), origin.getZ());
         core::BlockPos::MutableBlockPos belowPos(origin.getX(), origin.getY(), origin.getZ());
-        int inwards = CaveSurfaceHelper::getDirection(config.surface);
-        int outwards = -inwards;
-        std::set<core::BlockPos> surface;
+        core::Direction inwards = CaveSurfaceHelper::getDirectionEnum(config.surface);
+        core::Direction outwards = core::getOpposite(inwards);
+        util::JavaHashSet<core::BlockPos> surface;
 
         for (int dx = -xRadius; dx <= xRadius; ++dx) {
             bool isXEdge = dx == -xRadius || dx == xRadius;
@@ -1348,53 +1375,37 @@ protected:
                 bool isEdge = isXEdge || isZEdge;
                 bool isCorner = isXEdge && isZEdge;
                 bool isEdgeButNotCorner = isEdge && !isCorner;
-
-                // Reference: VegetationPatchFeature.java line 50
-                if (isCorner) continue;
-                if (isEdgeButNotCorner && config.extraEdgeColumnChance > 0.0f && random.nextFloat() > config.extraEdgeColumnChance) {
+                if (isCorner) {
+                    continue;
+                }
+                if (isEdgeButNotCorner &&
+                    (config.extraEdgeColumnChance == 0.0f || random.nextFloat() > config.extraEdgeColumnChance)) {
                     continue;
                 }
 
                 pos.setWithOffset(origin, dx, 0, dz);
 
-                // Move through air
-                for (int offset = 0; offset < config.verticalRange; ++offset) {
-                    BlockState* block = level->getBlockState(pos);
-                    if (!block) break;
-                    BlockState* state = static_cast<BlockState*>(block);
-                    if (!state->isAir()) break;
-                    pos.move(0, inwards, 0);
+                for (int offset = 0; offset < config.verticalRange && level->isStateAtPosition(pos, [](BlockState* state) {
+                    return state && state->isAir();
+                }); ++offset) {
+                    pos.move(core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
                 }
 
-                // Move through solid
-                for (int offset = 0; offset < config.verticalRange; ++offset) {
-                    BlockState* block = level->getBlockState(pos);
-                    if (!block) break;
-                    BlockState* state = static_cast<BlockState*>(block);
-                    if (state->isAir()) break;
-                    pos.move(0, outwards, 0);
+                for (int offset = 0; offset < config.verticalRange && level->isStateAtPosition(pos, [](BlockState* state) {
+                    return state && !state->isAir();
+                }); ++offset) {
+                    pos.move(core::getStepX(outwards), core::getStepY(outwards), core::getStepZ(outwards));
                 }
 
-                // Check placement conditions
-                belowPos.setWithOffset(pos, 0, inwards, 0);
-                BlockState* belowBlock = level->getBlockState(belowPos);
-                BlockState* posBlock = level->getBlockState(pos);
-
-                if (posBlock && belowBlock) {
-                    BlockState* posState = static_cast<BlockState*>(posBlock);
-                    BlockState* belowState = static_cast<BlockState*>(belowBlock);
-
-                    if (posState->isAir() && !belowState->isAir()) {
-                        int depth = config.depth->sample(random);
-                        if (config.extraBottomBlockChance > 0.0f && random.nextFloat() < config.extraBottomBlockChance) {
-                            ++depth;
-                        }
-
-                        core::BlockPos groundPos(belowPos.getX(), belowPos.getY(), belowPos.getZ());
-                        bool groundPlaced = placeGround(level, config, random, belowPos, depth);
-                        if (groundPlaced) {
-                            surface.insert(groundPos);
-                        }
+                belowPos.setWithOffset(pos, core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
+                BlockState* belowState = level->getBlockState(belowPos);
+                if (level->isEmptyBlock(pos) && belowState &&
+                    belowState->isFaceSturdy(*level, belowPos, core::getOpposite(inwards))) {
+                    int sampledDepth = config.depth->sample(random) +
+                        ((config.extraBottomBlockChance > 0.0f && random.nextFloat() < config.extraBottomBlockChance) ? 1 : 0);
+                    core::BlockPos groundPos(belowPos.getX(), belowPos.getY(), belowPos.getZ());
+                    if (placeGround(level, config, random, belowPos, sampledDepth)) {
+                        surface.add(groundPos);
                     }
                 }
             }
@@ -1412,7 +1423,7 @@ protected:
         WorldGenLevel* level,
         const VegetationPatchConfiguration& config,
         WorldgenRandom& random,
-        const std::set<core::BlockPos>& surface,
+        const util::JavaHashSet<core::BlockPos>& surface,
         int xRadius,
         int zRadius
     ) {
@@ -1427,16 +1438,19 @@ protected:
      * Place vegetation at position
      * Reference: VegetationPatchFeature.java placeVegetation() lines 87-89
      */
-    bool placeVegetation(
+    virtual bool placeVegetation(
         WorldGenLevel* level,
         const VegetationPatchConfiguration& config,
         ChunkGenerator* generator,
         WorldgenRandom& random,
         const core::BlockPos& vegetationPos
     ) {
-        int outwards = -CaveSurfaceHelper::getDirection(config.surface);
-        core::BlockPos placePos = vegetationPos.offset(0, outwards, 0);
+        core::Direction outwards = core::getOpposite(CaveSurfaceHelper::getDirectionEnum(config.surface));
+        core::BlockPos placePos = vegetationPos.relative(outwards);
 
+        if (config.vegetationFeature) {
+            return config.vegetationFeature->place(level, generator, random, placePos);
+        }
         if (config.vegetationPlacer) {
             return config.vegetationPlacer(level, generator, random, placePos);
         }
@@ -1454,22 +1468,26 @@ protected:
         core::BlockPos::MutableBlockPos& belowPos,
         int depth
     ) {
-        int inwards = CaveSurfaceHelper::getDirection(config.surface);
+        core::Direction inwards = CaveSurfaceHelper::getDirectionEnum(config.surface);
 
         for (int i = 0; i < depth; ++i) {
-            if (config.groundState) {
-                BlockState* stateToPlace = config.groundState->getState(random, belowPos);
-                BlockState* belowBlock = level->getBlockState(belowPos);
+            if (!config.groundState) {
+                continue;
+            }
 
-                if (belowBlock) {
-                    BlockState* belowState = static_cast<BlockState*>(belowBlock);
-                    if (stateToPlace->getIdentifier() != belowState->getIdentifier()) {
-                        // Place the ground block (e.g., moss_block)
-                        // Reference: VegetationPatchFeature.java placeGround() line 100
-                        level->setBlock(belowPos, stateToPlace, 2);
-                    }
-                    belowPos.move(0, inwards, 0);
+            BlockState* stateToPlace = config.groundState->getState(random, belowPos);
+            BlockState* belowState = level->getBlockState(belowPos);
+            if (!stateToPlace || !belowState) {
+                continue;
+            }
+
+            if (!stateToPlace->is(belowState->getBlock())) {
+                if (!blockpredicates::matchesBlockTagName(belowState, config.replaceable)) {
+                    return i != 0;
                 }
+
+                level->setBlock(belowPos, stateToPlace, 2);
+                belowPos.move(core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
             }
         }
 
@@ -1594,13 +1612,6 @@ protected:
                     BlockState* state = config.stateProvider->getState(level, random, pos);
                     // Place the block via WorldGenLevel (handles cross-chunk)
                     if (state) {
-                        if (feature::BlockChangeTrace::enabled) {
-                            BlockState* oldState = level->getBlockState(pos);
-                            if (oldState) {
-                                feature::BlockChangeTrace::log(pos.getX(), pos.getY(), pos.getZ(),
-                                    oldState->getIdentifier(), state->getIdentifier());
-                            }
-                        }
                         level->setBlock(pos, state, 2);
                     }
 
@@ -1674,7 +1685,7 @@ public:
         return BlockColumnConfiguration(
             {layer(height, state)},
             core::Direction::UP,
-            nullptr,
+            blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE,
             false
         );
     }
@@ -3029,21 +3040,39 @@ public:
     bool place(FeaturePlaceContext<NoneFeatureConfiguration>& context) override {
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
+        if (!level->isEmptyBlock(origin)) {
+            return false;
+        }
 
-        core::BlockPos::MutableBlockPos pos(origin.getX(), origin.getY(), origin.getZ());
-        int maxY = std::min(origin.getY() + 50, level->getMaxY());
+        if (!dynamic_cast<world::level::block::VineBlock*>(world::level::block::Blocks::VINE)) {
+            return false;
+        }
 
-        for (pos.setY(origin.getY()); pos.getY() < maxY; pos.move(0, 1, 0)) {
-            BlockState* block = level->getBlockState(pos);
-            if (block) {
-                BlockState* state = static_cast<BlockState*>(block);
-                if (state->isAir()) {
-                    // Would place vines on adjacent solid blocks
+        for (core::Direction direction : {
+                 core::Direction::DOWN,
+                 core::Direction::UP,
+                 core::Direction::NORTH,
+                 core::Direction::SOUTH,
+                 core::Direction::WEST,
+                 core::Direction::EAST
+             }) {
+            if (direction == core::Direction::DOWN) {
+                continue;
+            }
+
+            if (world::level::block::VineBlock::isAcceptableNeighbour(*level, origin.relative(direction), direction)) {
+                if (auto* property = world::level::block::VineBlock::getPropertyForFace(direction)) {
+                    level->setBlock(
+                        origin,
+                        world::level::block::Blocks::VINE->defaultBlockState()->setValue(*property, true),
+                        2
+                    );
+                    return true;
                 }
             }
         }
 
-        return true;
+        return false;
     }
 };
 
@@ -4694,8 +4723,18 @@ public:
 //=============================================================================
 
 struct RandomBooleanFeatureConfiguration {
-    // Would contain featureTrue and featureFalse references
+    placement::PlacedFeature* featureTrue = nullptr;
+    placement::PlacedFeature* featureFalse = nullptr;
+
     RandomBooleanFeatureConfiguration() = default;
+
+    RandomBooleanFeatureConfiguration(
+        placement::PlacedFeature* featureTrue,
+        placement::PlacedFeature* featureFalse
+    )
+        : featureTrue(featureTrue)
+        , featureFalse(featureFalse)
+    {}
 };
 
 //=============================================================================
@@ -4708,9 +4747,13 @@ public:
     // Reference: RandomBooleanSelectorFeature.java place() lines 16-24
     bool place(FeaturePlaceContext<RandomBooleanFeatureConfiguration>& context) override {
         WorldgenRandom& random = context.random();
+        const RandomBooleanFeatureConfiguration& config = context.config();
+        WorldGenLevel* level = context.level();
+        ChunkGenerator* chunkGenerator = context.chunkGenerator();
+        const core::BlockPos& origin = context.origin();
         bool result = random.nextBoolean();
-        // Would place featureTrue or featureFalse based on result
-        return true;
+        placement::PlacedFeature* selected = result ? config.featureTrue : config.featureFalse;
+        return selected && selected->place(level, chunkGenerator, random, origin);
     }
 };
 
@@ -5789,7 +5832,12 @@ public:
                 config.getShuffledDirectionsExcept(random, core::getOpposite(searchDirection));
 
             for (int i = 0; i < config.searchRange; ++i) {
-                pos.move(searchDirection);
+                pos.setWithOffset(
+                    origin,
+                    core::getStepX(searchDirection),
+                    core::getStepY(searchDirection),
+                    core::getStepZ(searchDirection)
+                );
                 BlockState* block = level->getBlockState(pos);
                 if (!block) break;
 
@@ -5842,31 +5890,48 @@ private:
                 }
             }
 
-            if (canPlace) {
-                // Place multiface block (e.g., glow_lichen) at pos
-                // Reference: MultifaceGrowthFeature.java placeGrowthIfPossible() lines 64-72
-                BlockState* placeState = static_cast<BlockState*>(
-                    world::level::block::Blocks::getDefaultState(config.placeBlock));
-                if (placeState) {
-                    level->setBlock(pos, placeState, 2);
-                }
+            if (!canPlace) {
+                continue;
+            }
 
-                // Reference: MultifaceGrowthFeature.java placeGrowthIfPossible() lines 67-69
-                // Consume random for spreading chance + Direction.allShuffled for parity
-                if (random.nextFloat() < config.chanceOfSpreading) {
-                    // Java calls: config.placeBlock.getSpreader()
-                    //   .spreadFromFaceTowardRandomDirection(newState, level, pos, placementDirection, random, true)
-                    // Which calls Direction.allShuffled(random) = Util.shuffledCopy(values(), random)
-                    // This shuffles 6 Direction enum values, consuming 5 nextInt calls
+            Block* placeBlock = world::level::block::Blocks::getBlock(config.placeBlock);
+            BlockState* newState = nullptr;
+            auto* sculkVeinBlock = dynamic_cast<world::level::block::SculkVeinBlock*>(placeBlock);
+            if (sculkVeinBlock) {
+                newState = sculkVeinBlock->getStateForPlacement(oldState, *level, pos, placementDirection);
+            } else {
+                newState = static_cast<BlockState*>(world::level::block::Blocks::getDefaultState(config.placeBlock));
+            }
+
+            if (!newState) {
+                return false;
+            }
+
+            level->setBlock(pos, newState, 3);
+            if (::world::IChunk* chunk = level->getChunk(pos.getX() >> 4, pos.getZ() >> 4)) {
+                chunk->markPosForPostprocessing(pos);
+            }
+
+            if (random.nextFloat() < config.chanceOfSpreading) {
+                if (sculkVeinBlock) {
+                    sculkVeinBlock->spreadFromFaceTowardRandomDirection(
+                        newState,
+                        level,
+                        pos,
+                        placementDirection,
+                        random,
+                        true
+                    );
+                } else {
                     random.nextInt(6);
                     random.nextInt(5);
                     random.nextInt(4);
                     random.nextInt(3);
                     random.nextInt(2);
-                    // Note: actual spreading (placing additional glow_lichen) not implemented
                 }
-                return true;
             }
+
+            return true;
         }
 
         return false;
@@ -5924,11 +5989,8 @@ public:
 
             bool spreadVeins = round < config.spreadRounds;
 
-            // Run spread attempts
-            // Note: SculkSpreader uses XoroshiroRandomSource directly
             for (int i = 0; i < config.spreadAttempts; ++i) {
-                ::world::IChunk* chunk = level->getChunk(origin.getX() >> 4, origin.getZ() >> 4);
-                if (chunk) spreader.updateCursors(chunk, origin, random.getRandomSource(), spreadVeins);
+                spreader.updateCursors(level, origin, random, spreadVeins);
             }
 
             spreader.clear();
@@ -5938,10 +6000,10 @@ public:
         core::BlockPos below = origin.below();
         BlockState* belowBlock = level->getBlockState(below);
         if (random.nextFloat() <= config.catalystChance && belowBlock &&
-            !static_cast<BlockState*>(belowBlock)->isAir()) {
+            static_cast<BlockState*>(belowBlock)->isCollisionShapeFullBlock(*level, below)) {
             level->setBlock(origin,
                 static_cast<BlockState*>(world::level::block::Blocks::getDefaultState("minecraft:sculk_catalyst")),
-                2);
+                3);
         }
 
         // Place extra shrieker growths - Reference: lines 53-60
@@ -5952,10 +6014,17 @@ public:
             core::BlockPos candBelow = candidate.below();
             BlockState* candBelowBlock = level->getBlockState(candBelow);
             if (candBlock && static_cast<BlockState*>(candBlock)->isAir() &&
-                candBelowBlock && !static_cast<BlockState*>(candBelowBlock)->isAir()) {
+                candBelowBlock && static_cast<BlockState*>(candBelowBlock)->isFaceSturdy(*level, candBelow, core::Direction::UP)) {
+                BlockState* shriekerState = static_cast<BlockState*>(
+                    world::level::block::Blocks::getDefaultState("minecraft:sculk_shrieker")
+                );
+                if (shriekerState && BlockStateProperties::CAN_SUMMON &&
+                    shriekerState->hasProperty(BlockStateProperties::CAN_SUMMON)) {
+                    shriekerState = shriekerState->setValue(*BlockStateProperties::CAN_SUMMON, true);
+                }
                 level->setBlock(candidate,
-                    static_cast<BlockState*>(world::level::block::Blocks::getDefaultState("minecraft:sculk_shrieker")),
-                    2);
+                    shriekerState,
+                    3);
             }
         }
 
@@ -5970,9 +6039,7 @@ private:
 
         BlockState* state = static_cast<BlockState*>(block);
 
-        // Check if sculk behavior
-        if (state->getIdentifier() == "minecraft:sculk" || state->getIdentifier() == "minecraft:sculk_catalyst" ||
-            state->getIdentifier() == "minecraft:sculk_vein" || state->getIdentifier() == "minecraft:sculk_shrieker") {
+        if (dynamic_cast<world::level::block::SculkBehaviour*>(state->getBlock()) != nullptr) {
             return true;
         }
 
@@ -5985,7 +6052,8 @@ private:
             core::Direction direction = blockpredicates::fromIndex(dir);
             core::BlockPos neighborPos = origin.relative(direction);
             BlockState* neighborBlock = level->getBlockState(neighborPos);
-            if (neighborBlock && !static_cast<BlockState*>(neighborBlock)->isAir()) {
+            if (neighborBlock &&
+                static_cast<BlockState*>(neighborBlock)->isCollisionShapeFullBlock(*level, neighborPos)) {
                 return true;
             }
         }
@@ -6075,11 +6143,73 @@ private:
 
 class WaterloggedVegetationPatchFeature : public VegetationPatchFeature {
 public:
-    // Reference: WaterloggedVegetationPatchFeature.java
-    // This feature extends VegetationPatchFeature and adds waterlogging
-    bool place(FeaturePlaceContext<VegetationPatchConfiguration>& context) override {
-        // Call parent implementation with waterlogging modifications
-        return VegetationPatchFeature::place(context);
+    util::JavaHashSet<core::BlockPos> placeGroundPatch(
+        WorldGenLevel* level,
+        const VegetationPatchConfiguration& config,
+        WorldgenRandom& random,
+        const core::BlockPos& origin,
+        int xRadius,
+        int zRadius
+    ) override {
+        util::JavaHashSet<core::BlockPos> surface =
+            VegetationPatchFeature::placeGroundPatch(level, config, random, origin, xRadius, zRadius);
+        util::JavaHashSet<core::BlockPos> waterSurface;
+        core::BlockPos::MutableBlockPos testPos(0, 0, 0);
+
+        for (const core::BlockPos& surfacePos : surface) {
+            if (!isExposed(*level, surfacePos, testPos)) {
+                waterSurface.add(surfacePos);
+            }
+        }
+
+        for (const core::BlockPos& surfacePos : waterSurface) {
+            level->setBlock(surfacePos, world::level::block::Blocks::WATER->defaultBlockState(), 2);
+        }
+
+        return waterSurface;
+    }
+
+    bool placeVegetation(
+        WorldGenLevel* level,
+        const VegetationPatchConfiguration& config,
+        ChunkGenerator* generator,
+        WorldgenRandom& random,
+        const core::BlockPos& placementPos
+    ) override {
+        if (VegetationPatchFeature::placeVegetation(level, config, generator, random, placementPos.below())) {
+            BlockState* placed = level->getBlockState(placementPos);
+            if (placed && placed->hasProperty(BlockStateProperties::WATERLOGGED) &&
+                !placed->getValue(*BlockStateProperties::WATERLOGGED)) {
+                level->setBlock(placementPos, placed->setValue(*BlockStateProperties::WATERLOGGED, true), 2);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    static bool isExposed(
+        const WorldGenLevel& level,
+        const core::BlockPos& pos,
+        core::BlockPos::MutableBlockPos& testPos
+    ) {
+        return isExposedDirection(level, pos, testPos, core::Direction::NORTH) ||
+               isExposedDirection(level, pos, testPos, core::Direction::EAST) ||
+               isExposedDirection(level, pos, testPos, core::Direction::SOUTH) ||
+               isExposedDirection(level, pos, testPos, core::Direction::WEST) ||
+               isExposedDirection(level, pos, testPos, core::Direction::DOWN);
+    }
+
+    static bool isExposedDirection(
+        const WorldGenLevel& level,
+        const core::BlockPos& pos,
+        core::BlockPos::MutableBlockPos& testPos,
+        core::Direction direction
+    ) {
+        testPos.setWithOffset(pos, core::getStepX(direction), core::getStepY(direction), core::getStepZ(direction));
+        BlockState* state = level.getBlockState(testPos);
+        return !state || !state->isFaceSturdy(level, testPos, core::getOpposite(direction));
     }
 };
 

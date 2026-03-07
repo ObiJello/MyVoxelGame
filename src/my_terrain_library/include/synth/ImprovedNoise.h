@@ -1,6 +1,7 @@
 #ifndef IMPROVEDNOISE_H
 #define IMPROVEDNOISE_H
 
+#include "random/LegacyRandomSource.h"
 #include "random/XoroshiroRandomSource.h"
 #include <cstdint>
 #include <array>
@@ -45,6 +46,7 @@ public:
      * for terrain to be identical!
      */
     explicit ImprovedNoise(XoroshiroRandomSource& random);
+    explicit ImprovedNoise(LegacyRandomSource& random);
 
     /**
      * Generate 3D Perlin noise at position (x, y, z).

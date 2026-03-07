@@ -1,8 +1,129 @@
 #include "levelgen/blockpredicates/BlockPredicate.h"
+#include "external/json.hpp"
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace minecraft {
 namespace levelgen {
 namespace blockpredicates {
+
+namespace {
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+std::string normalizeNamespacedId(const std::string& id, const std::string& defaultNamespace) {
+    return id.find(':') != std::string::npos ? id : defaultNamespace + ":" + id;
+}
+
+std::optional<fs::path> findTagRoot() {
+    fs::path current = fs::current_path();
+    while (!current.empty()) {
+        fs::path candidate = current / "data";
+        if (fs::exists(candidate) && fs::is_directory(candidate)) {
+            return candidate;
+        }
+
+        if (current == current.root_path()) {
+            break;
+        }
+        current = current.parent_path();
+    }
+
+    return std::nullopt;
+}
+
+class BlockTagRegistry {
+public:
+    const std::unordered_set<std::string>& resolve(const std::string& tag) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return resolveLocked(tag);
+    }
+
+private:
+    std::mutex m_mutex;
+    std::optional<fs::path> m_tagRoot;
+    std::unordered_map<std::string, std::unordered_set<std::string>> m_cache;
+    std::unordered_set<std::string> m_inProgress;
+
+    const std::unordered_set<std::string>& resolveLocked(const std::string& tag) {
+        auto it = m_cache.find(tag);
+        if (it != m_cache.end()) {
+            return it->second;
+        }
+
+        if (m_inProgress.find(tag) != m_inProgress.end()) {
+            return m_cache.emplace(tag, std::unordered_set<std::string>{}).first->second;
+        }
+
+        if (!m_tagRoot.has_value()) {
+            m_tagRoot = findTagRoot();
+        }
+
+        m_inProgress.insert(tag);
+        auto inserted = m_cache.emplace(tag, std::unordered_set<std::string>{});
+        std::unordered_set<std::string>& values = inserted.first->second;
+
+        if (m_tagRoot.has_value()) {
+            loadTagValuesLocked(tag, values);
+        }
+
+        m_inProgress.erase(tag);
+        return values;
+    }
+
+    void loadTagValuesLocked(const std::string& tag, std::unordered_set<std::string>& out) {
+        size_t colon = tag.find(':');
+        std::string nameSpace = colon == std::string::npos ? "minecraft" : tag.substr(0, colon);
+        std::string pathPart = colon == std::string::npos ? tag : tag.substr(colon + 1);
+        fs::path tagPath = *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
+
+        if (!fs::exists(tagPath)) {
+            return;
+        }
+
+        std::ifstream input(tagPath);
+        if (!input.is_open()) {
+            return;
+        }
+
+        json parsed;
+        try {
+            input >> parsed;
+        } catch (...) {
+            return;
+        }
+
+        if (!parsed.contains("values") || !parsed["values"].is_array()) {
+            return;
+        }
+
+        for (const auto& entry : parsed["values"]) {
+            if (!entry.is_string()) {
+                continue;
+            }
+
+            std::string value = entry.get<std::string>();
+            if (!value.empty() && value[0] == '#') {
+                const auto& nested = resolveLocked(normalizeNamespacedId(value.substr(1), nameSpace));
+                out.insert(nested.begin(), nested.end());
+            } else {
+                out.insert(normalizeNamespacedId(value, nameSpace));
+            }
+        }
+    }
+};
+
+BlockTagRegistry& blockTagRegistry() {
+    static BlockTagRegistry registry;
+    return registry;
+}
+
+} // namespace
 
 // Static instance
 TrueBlockPredicate TrueBlockPredicate::INSTANCE;
@@ -169,6 +290,15 @@ std::shared_ptr<BlockPredicate> BlockPredicate::unobstructed(const core::Vec3i& 
 
 std::shared_ptr<BlockPredicate> BlockPredicate::unobstructed() {
     return unobstructed(core::Vec3i::ZERO());
+}
+
+bool matchesBlockTagName(BlockState* state, const std::string& tag) {
+    if (!state) {
+        return false;
+    }
+
+    const auto& values = blockTagRegistry().resolve(tag);
+    return values.find(state->getIdentifier()) != values.end();
 }
 
 } // namespace blockpredicates

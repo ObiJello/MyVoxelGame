@@ -146,6 +146,12 @@ private:
     static TreeConfigurationBuilder createBirch();
 
     /**
+     * Helper: Create super birch configuration
+     * Reference: TreeFeatures.java createSuperBirch
+     */
+    static TreeConfigurationBuilder createSuperBirch();
+
+    /**
      * Helper: Create jungle tree configuration
      * Reference: TreeFeatures.java createJungleTree
      */

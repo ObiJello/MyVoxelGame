@@ -99,6 +99,14 @@ void Block::rebuildStateDefinition() {
     buildStateDefinition();
 }
 
+bool Block::canSurvive(
+    BlockState* /*state*/,
+    const minecraft::levelgen::WorldGenLevel& /*level*/,
+    const core::BlockPos& /*pos*/
+) const {
+    return true;
+}
+
 } // namespace block
 } // namespace level
 } // namespace world

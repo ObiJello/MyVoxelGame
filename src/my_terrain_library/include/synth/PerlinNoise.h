@@ -1,6 +1,7 @@
 #ifndef PERLINNOISE_H
 #define PERLINNOISE_H
 
+#include "random/LegacyRandomSource.h"
 #include "synth/ImprovedNoise.h"
 #include "random/XoroshiroRandomSource.h"
 #include <vector>
@@ -27,6 +28,7 @@ public:
      * @param amplitudes Amplitude for each octave
      */
     static PerlinNoise create(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
+    static PerlinNoise create(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
 
     /**
      * Create PerlinNoise from firstOctave and amplitudes.
@@ -38,6 +40,7 @@ public:
      * @param amplitudes Additional amplitudes (varargs in Java)
      */
     static PerlinNoise create(XoroshiroRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes = {});
+    static PerlinNoise create(LegacyRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes = {});
 
     /**
      * Create PerlinNoise with legacy initialization for Nether biomes (pre-1.18).
@@ -49,6 +52,7 @@ public:
      * @param amplitudes Amplitude for each octave
      */
     static PerlinNoise createLegacyForLegacyNetherBiome(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
+    static PerlinNoise createLegacyForLegacyNetherBiome(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
 
     /**
      * Create PerlinNoise with legacy initialization for BlendedNoise.
@@ -60,6 +64,7 @@ public:
      * @param octaveEnd Last octave (e.g., 0)
      */
     static PerlinNoise createLegacyForBlendedNoise(XoroshiroRandomSource& random, int32_t octaveStart, int32_t octaveEnd);
+    static PerlinNoise createLegacyForBlendedNoise(LegacyRandomSource& random, int32_t octaveStart, int32_t octaveEnd);
 
     /**
      * Get noise value at position (x, y, z).
@@ -116,6 +121,7 @@ private:
      * @param useNewInitialization Use modern (post-1.18) initialization
      */
     PerlinNoise(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization);
+    PerlinNoise(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization);
 
     /**
      * Calculate edge value for max value computation.
@@ -130,6 +136,7 @@ private:
      * Consumes 262 random values to match Java's behavior.
      */
     static void skipOctave(XoroshiroRandomSource& random);
+    static void skipOctave(LegacyRandomSource& random);
 
     // Member variables (Reference: PerlinNoise.java lines 23-29)
     std::vector<ImprovedNoise*> m_noiseLevels;  // Can contain nullptrs

@@ -188,7 +188,7 @@ public:
 };
 
 /**
- * AttachedToLeavesDecorator - Places blocks attached to leaves (cherry petals)
+ * AttachedToLeavesDecorator - Places blocks attached to leaves
  * Reference: AttachedToLeavesDecorator.java
  */
 class AttachedToLeavesDecorator : public TreeDecorator {
@@ -196,8 +196,9 @@ private:
     float m_probability;
     int m_exclusionRadiusXZ;
     int m_exclusionRadiusY;
-    BlockState* m_blockState;
+    std::shared_ptr<feature::stateproviders::BlockStateProvider> m_blockProvider;
     int m_requiredEmptyBlocks;
+    std::vector<core::Direction> m_directions;
 
     bool hasRequiredEmptyBlocks(DecoratorContext& context, const core::BlockPos& leafPos, core::Direction direction) const;
 
@@ -206,14 +207,16 @@ public:
         float probability,
         int exclusionRadiusXZ,
         int exclusionRadiusY,
-        BlockState* blockState,
-        int requiredEmptyBlocks
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> blockProvider,
+        int requiredEmptyBlocks,
+        const std::vector<core::Direction>& directions
     )
         : m_probability(probability)
         , m_exclusionRadiusXZ(exclusionRadiusXZ)
         , m_exclusionRadiusY(exclusionRadiusY)
-        , m_blockState(blockState)
+        , m_blockProvider(blockProvider)
         , m_requiredEmptyBlocks(requiredEmptyBlocks)
+        , m_directions(directions)
     {}
 
     void place(DecoratorContext& context) override;

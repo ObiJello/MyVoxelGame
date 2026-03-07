@@ -24,6 +24,8 @@ void BiomeFilter::setDebugEnabled(bool enabled) {
 }
 
 void BiomeFilter::printDebugStats() {
+    std::cerr << "BiomeFilter stats: " << s_biomeFilterCalls << " calls, "
+              << s_biomeFilterFiltered << " filtered (blocked)" << std::endl;
 }
 
 int BiomeFilter::getFilteredCount() {
@@ -53,6 +55,7 @@ bool BiomeFilter::shouldPlace(
         // "Tried to biome check an unregistered feature, or a feature that should not restrict the biome"
         // For safety in C++, allow placement
         if (s_debugBiomeFilter) {
+            std::cerr << "BiomeFilter: NO TOP FEATURE at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << ") -> ALLOW (no feature)" << std::endl;
         }
         return true;
     }
@@ -63,6 +66,7 @@ bool BiomeFilter::shouldPlace(
     if (!biome) {
         // No biome available - DENY placement (matches Java which throws IllegalStateException)
         if (s_debugBiomeFilter) {
+            std::cerr << "BiomeFilter: NO BIOME at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << ") -> DENY (no biome)" << std::endl;
         }
         s_biomeFilterFiltered++;
         return false;
@@ -76,6 +80,15 @@ bool BiomeFilter::shouldPlace(
 
     if (!result) {
         s_biomeFilterFiltered++;
+        if (s_debugBiomeFilter) {
+            std::string featureName = (*topFeature)->getName();
+            std::cerr << "BiomeFilter: FILTERED " << featureName << " at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ()
+                      << ") biome=" << biomeName << std::endl;
+        }
+    } else if (s_debugBiomeFilter) {
+        std::string featureName = (*topFeature)->getName();
+        std::cerr << "BiomeFilter: ALLOW " << featureName << " at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ()
+                  << ") biome=" << biomeName << std::endl;
     }
 
     return result;

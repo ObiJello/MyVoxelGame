@@ -5,6 +5,7 @@
 #include "core/Direction.h"
 #include "world/level/block/state/BlockState.h"
 #include "levelgen/WorldGenLevel.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include <vector>
 #include <memory>
 #include <string>
@@ -316,6 +317,8 @@ protected:
     }
 };
 
+bool matchesBlockTagName(BlockState* state, const std::string& tag);
+
 //=============================================================================
 // MatchingBlockTagPredicate - Matches blocks by tag
 // Reference: MatchingBlockTagPredicate.java
@@ -334,74 +337,9 @@ protected:
     /**
      * Check if block has tag
      * Reference: MatchingBlockTagPredicate.java lines 20-22
-     *
-     * Note: Tag checking requires registry access. For now, we implement
-     * common tags inline. A full implementation would use a tag registry.
      */
     bool test(BlockState* state) const override {
-        if (!state) return false;
-        const std::string& name = state->getIdentifier();
-
-        // Implement common block tags
-        if (m_tag == "minecraft:replaceable") {
-            return name == "minecraft:air" ||
-                   name == "minecraft:cave_air" ||
-                   name == "minecraft:void_air" ||
-                   name == "minecraft:water" ||
-                   name == "minecraft:lava" ||
-                   name == "minecraft:tall_grass" ||
-                   name == "minecraft:grass" ||
-                   name == "minecraft:fern" ||
-                   name == "minecraft:large_fern" ||
-                   name == "minecraft:seagrass" ||
-                   name == "minecraft:tall_seagrass" ||
-                   name == "minecraft:vine" ||
-                   name == "minecraft:snow";
-        }
-        if (m_tag == "minecraft:base_stone_overworld") {
-            return name == "minecraft:stone" ||
-                   name == "minecraft:granite" ||
-                   name == "minecraft:diorite" ||
-                   name == "minecraft:andesite" ||
-                   name == "minecraft:tuff" ||
-                   name == "minecraft:deepslate";
-        }
-        if (m_tag == "minecraft:dirt") {
-            return name == "minecraft:dirt" ||
-                   name == "minecraft:grass_block" ||
-                   name == "minecraft:podzol" ||
-                   name == "minecraft:coarse_dirt" ||
-                   name == "minecraft:mycelium" ||
-                   name == "minecraft:rooted_dirt" ||
-                   name == "minecraft:mud" ||
-                   name == "minecraft:muddy_mangrove_roots";
-        }
-        if (m_tag == "minecraft:stone_ore_replaceables") {
-            return name == "minecraft:stone" ||
-                   name == "minecraft:granite" ||
-                   name == "minecraft:diorite" ||
-                   name == "minecraft:andesite" ||
-                   name == "minecraft:tuff";
-        }
-        if (m_tag == "minecraft:deepslate_ore_replaceables") {
-            return name == "minecraft:deepslate" ||
-                   name == "minecraft:tuff";
-        }
-        if (m_tag == "minecraft:leaves") {
-            return name.find("_leaves") != std::string::npos;
-        }
-        if (m_tag == "minecraft:logs") {
-            return name.find("_log") != std::string::npos ||
-                   name.find("_wood") != std::string::npos ||
-                   name.find("_stem") != std::string::npos ||
-                   name.find("_hyphae") != std::string::npos;
-        }
-        if (m_tag == "minecraft:sand") {
-            return name == "minecraft:sand" || name == "minecraft:red_sand";
-        }
-
-        // Default: no match for unknown tags
-        return false;
+        return matchesBlockTagName(state, m_tag);
     }
 };
 
@@ -469,39 +407,7 @@ protected:
      * Reference: SolidPredicate.java lines 17-19
      */
     bool test(BlockState* state) const override {
-        if (!state) return false;
-        // A block is solid if it's not air, water, lava, or other non-solid blocks
-        const std::string& name = state->getIdentifier();
-
-        // Non-solid blocks
-        if (name == "minecraft:air" ||
-            name == "minecraft:cave_air" ||
-            name == "minecraft:void_air" ||
-            name == "minecraft:water" ||
-            name == "minecraft:lava" ||
-            name == "minecraft:fire" ||
-            name == "minecraft:soul_fire" ||
-            name == "minecraft:light" ||
-            name == "minecraft:barrier") {
-            return false;
-        }
-
-        // Passthrough blocks
-        if (name == "minecraft:tall_grass" ||
-            name == "minecraft:grass" ||
-            name == "minecraft:fern" ||
-            name == "minecraft:dead_bush" ||
-            name == "minecraft:bush" ||
-            name == "minecraft:seagrass" ||
-            name == "minecraft:tall_seagrass" ||
-            name == "minecraft:kelp" ||
-            name == "minecraft:kelp_plant" ||
-            name == "minecraft:vine" ||
-            name == "minecraft:glow_lichen") {
-            return false;
-        }
-
-        return true;
+        return state && state->isSolid();
     }
 };
 
@@ -567,6 +473,29 @@ private:
     core::Vec3i m_offset;
     BlockState* m_state;
 
+    bool mayPlaceOn(BlockState* stateBelow) const {
+        if (!stateBelow) return false;
+
+        const std::string& name = stateBelow->getIdentifier();
+        bool canPlaceOnDirt = name == "minecraft:grass_block" ||
+                              name == "minecraft:dirt" ||
+                              name == "minecraft:coarse_dirt" ||
+                              name == "minecraft:podzol" ||
+                              name == "minecraft:rooted_dirt" ||
+                              name == "minecraft:mycelium" ||
+                              name == "minecraft:moss_block" ||
+                              name == "minecraft:mud" ||
+                              name == "minecraft:muddy_mangrove_roots" ||
+                              name == "minecraft:farmland";
+        if (canPlaceOnDirt) {
+            return true;
+        }
+
+        return m_state &&
+               m_state->getIdentifier() == "minecraft:mangrove_propagule" &&
+               name == "minecraft:clay";
+    }
+
 public:
     WouldSurvivePredicate(const core::Vec3i& offset, BlockState* state)
         : m_offset(offset)
@@ -576,10 +505,12 @@ public:
      * Check if block would survive
      * Reference: WouldSurvivePredicate.java lines 20-22
      *
-     * Note: Full survival checking requires world context.
-     * For now, we return true for most blocks.
      */
     bool test(const WorldGenLevel& level, const core::BlockPos& pos) const override {
+        if (!m_state) {
+            return false;
+        }
+
         core::BlockPos testPos = pos.offset(m_offset);
 
         // Check if within world bounds
@@ -587,24 +518,8 @@ public:
             return false;
         }
 
-        // Reference: WouldSurvivePredicate.java - checks BlockState.canSurvive()
-        // For saplings, this checks if the block below is in BlockTags.DIRT
-        // (grass_block, dirt, coarse_dirt, podzol, rooted_dirt, moss_block, etc.)
         core::BlockPos belowPos(testPos.getX(), testPos.getY() - 1, testPos.getZ());
-        BlockState* below = level.getBlockState(belowPos);
-        if (!below) return false;
-
-        const std::string& name = below->getIdentifier();
-        return name == "minecraft:grass_block" ||
-               name == "minecraft:dirt" ||
-               name == "minecraft:coarse_dirt" ||
-               name == "minecraft:podzol" ||
-               name == "minecraft:rooted_dirt" ||
-               name == "minecraft:mycelium" ||
-               name == "minecraft:moss_block" ||
-               name == "minecraft:mud" ||
-               name == "minecraft:muddy_mangrove_roots" ||
-               name == "minecraft:farmland";
+        return mayPlaceOn(level.getBlockState(belowPos));
     }
 };
 
@@ -630,46 +545,7 @@ public:
     bool test(const WorldGenLevel& level, const core::BlockPos& pos) const override {
         core::BlockPos testPos = pos.offset(m_offset);
         BlockState* state = level.getBlockState(testPos);
-
-        // Most solid blocks have sturdy faces
-        const std::string& name = state->getIdentifier();
-
-        // Non-sturdy blocks
-        if (name == "minecraft:air" ||
-            name == "minecraft:cave_air" ||
-            name == "minecraft:void_air" ||
-            name == "minecraft:water" ||
-            name == "minecraft:lava") {
-            return false;
-        }
-
-        // Blocks without sturdy faces
-        if (name == "minecraft:soul_sand" && m_direction == Direction::UP) {
-            return false; // Soul sand has no sturdy top face
-        }
-
-        // Transparent blocks typically don't have sturdy faces
-        if (name == "minecraft:glass" ||
-            name.find("_glass") != std::string::npos ||
-            name == "minecraft:ice" ||
-            name == "minecraft:packed_ice" ||
-            name == "minecraft:blue_ice") {
-            return false;
-        }
-
-        // Slabs only have sturdy faces on their solid half
-        if (name.find("_slab") != std::string::npos) {
-            // Would need to check block properties for half=top/bottom
-            // For now, assume full sturdy
-            return true;
-        }
-
-        // Stairs have partial sturdy faces
-        if (name.find("_stairs") != std::string::npos) {
-            return true; // Simplified
-        }
-
-        return true;
+        return state && state->isFaceSturdy(level, testPos, m_direction);
     }
 };
 
@@ -772,7 +648,20 @@ public:
             int localZ = pos.getZ() - (chunkPos.z() * 16);
 
             if (localX >= 0 && localX < 16 && localZ >= 0 && localZ < 16) {
+                BlockState* oldState = nullptr;
+                if (feature::BlockChangeTrace::isEnabled()) {
+                    oldState = m_chunk->getBlockState(localX, pos.getY(), localZ);
+                }
                 m_chunk->setBlockState(localX, pos.getY(), localZ, state, false);
+                if (state && oldState) {
+                    feature::BlockChangeTrace::log(
+                        pos.getX(),
+                        pos.getY(),
+                        pos.getZ(),
+                        oldState->getIdentifier(),
+                        state->getIdentifier()
+                    );
+                }
                 return true;
             }
         }

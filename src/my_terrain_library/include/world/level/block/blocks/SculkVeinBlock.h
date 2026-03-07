@@ -1,9 +1,16 @@
 #pragma once
 
 #include "world/level/block/Block.h"
+#include "world/level/block/SculkSpreader.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 #include "core/Direction.h"
 #include <set>
+
+namespace minecraft {
+namespace levelgen {
+class WorldGenLevel;
+}
+}
 
 namespace minecraft {
 namespace world {
@@ -23,7 +30,7 @@ using core::Direction;
  * Has 6 face properties (DOWN, UP, NORTH, SOUTH, WEST, EAST) + WATERLOGGED
  * Reference: MultifaceBlock.java for face property handling
  */
-class SculkVeinBlock : public Block {
+class SculkVeinBlock : public Block, public SculkBehaviour {
 public:
     // Face properties - one for each direction
     static inline BooleanProperty* FACE_DOWN = nullptr;
@@ -132,6 +139,113 @@ public:
         }
         return faces;
     }
+
+    static bool hasAnyFace(const BlockState* state) {
+        return !availableFaces(state).empty();
+    }
+
+    static bool canAttachTo(
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos,
+        Direction attachDirection
+    ) {
+        core::BlockPos attachPos = pos.relative(attachDirection);
+        BlockState* attachState = level.getBlockState(attachPos);
+        return attachState && attachState->isFaceSturdy(level, attachPos, core::getOpposite(attachDirection));
+    }
+
+    bool isValidStateForPlacement(
+        BlockState* oldState,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& placementPos,
+        Direction placementDirection
+    ) const {
+        if (oldState && oldState->getIdentifier() == "minecraft:sculk_vein" && hasFace(oldState, placementDirection)) {
+            return false;
+        }
+
+        return canAttachTo(level, placementPos, placementDirection);
+    }
+
+    BlockState* getStateForPlacement(
+        BlockState* oldState,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& placementPos,
+        Direction placementDirection
+    ) const {
+        if (!isValidStateForPlacement(oldState, level, placementPos, placementDirection)) {
+            return nullptr;
+        }
+
+        BlockState* placementState = oldState && oldState->getIdentifier() == "minecraft:sculk_vein"
+            ? oldState
+            : defaultBlockState();
+        if (!placementState) {
+            return nullptr;
+        }
+
+        if (placementState->hasProperty(WATERLOGGED)) {
+            bool waterlogged = oldState && (
+                oldState->getIdentifier() == "minecraft:water" ||
+                oldState->getValueOrElse(*WATERLOGGED, false)
+            );
+            placementState = placementState->setValue(*WATERLOGGED, waterlogged);
+        }
+
+        return getStateWithFace(placementState, placementDirection);
+    }
+
+    bool regrow(
+        minecraft::levelgen::WorldGenLevel* level,
+        const core::BlockPos& pos,
+        BlockState* existing,
+        const std::set<Direction>& faces
+    ) const {
+        bool hasAtLeastOneFace = false;
+        BlockState* newState = defaultBlockState();
+        if (!newState) {
+            return false;
+        }
+
+        for (Direction face : faces) {
+            if (canAttachTo(*level, pos, face)) {
+                newState = getStateWithFace(newState, face);
+                hasAtLeastOneFace = true;
+            }
+        }
+
+        if (!hasAtLeastOneFace) {
+            return false;
+        }
+
+        if (existing) {
+            bool waterlogged = existing->getIdentifier() == "minecraft:water" ||
+                (existing->hasProperty(WATERLOGGED) && existing->getValueOrElse(*WATERLOGGED, false));
+            newState = newState->setValue(*WATERLOGGED, waterlogged);
+        }
+
+        return level->setBlock(pos, newState, 3);
+    }
+
+    int attemptUseCharge(ChargeCursor& cursor, minecraft::levelgen::WorldGenLevel* level,
+                         const core::BlockPos& originPos, minecraft::levelgen::WorldgenRandom& random,
+                         SculkSpreader& spreader, bool spreadVeins) const override;
+
+    void onDischarged(minecraft::levelgen::WorldGenLevel* level, BlockState* state, const core::BlockPos& pos,
+                      minecraft::levelgen::WorldgenRandom& random) const override;
+
+    bool spreadAll(BlockState* state, minecraft::levelgen::WorldGenLevel* level,
+                   const core::BlockPos& pos, bool postProcess) const;
+
+    bool spreadFromFaceTowardRandomDirection(BlockState* state, minecraft::levelgen::WorldGenLevel* level,
+                                             const core::BlockPos& pos, Direction startingFace,
+                                             minecraft::levelgen::WorldgenRandom& random, bool postProcess) const;
+
+    bool spreadSameSpace(BlockState* state, minecraft::levelgen::WorldGenLevel* level,
+                         const core::BlockPos& pos, bool postProcess) const;
+
+    static bool hasSubstrateAccess(minecraft::levelgen::WorldGenLevel* level, BlockState* state,
+                                   const core::BlockPos& pos);
 
 protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {

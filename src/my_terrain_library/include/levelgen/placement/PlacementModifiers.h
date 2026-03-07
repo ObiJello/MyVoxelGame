@@ -2,6 +2,8 @@
 
 #include "levelgen/placement/PlacementModifier.h"
 #include "levelgen/placement/PlacementContext.h"
+#include "levelgen/placement/PlacedFeature.h"
+#include "levelgen/blockpredicates/BlockPredicate.h"
 #include "levelgen/Heightmap.h"
 #include "levelgen/carver/CarverConfiguration.h"
 #include "levelgen/ChunkGenerator.h"
@@ -16,6 +18,18 @@
 namespace minecraft {
 namespace levelgen {
 namespace placement {
+
+inline const char* heightmapTypeName(Heightmap::Types type) {
+    switch (type) {
+        case Heightmap::Types::WORLD_SURFACE_WG: return "WORLD_SURFACE_WG";
+        case Heightmap::Types::WORLD_SURFACE: return "WORLD_SURFACE";
+        case Heightmap::Types::OCEAN_FLOOR_WG: return "OCEAN_FLOOR_WG";
+        case Heightmap::Types::OCEAN_FLOOR: return "OCEAN_FLOOR";
+        case Heightmap::Types::MOTION_BLOCKING: return "MOTION_BLOCKING";
+        case Heightmap::Types::MOTION_BLOCKING_NO_LEAVES: return "MOTION_BLOCKING_NO_LEAVES";
+    }
+    return "UNKNOWN";
+}
 
 //=============================================================================
 // CaveSurface - Enum for cave surface placement direction
@@ -78,6 +92,21 @@ public:
     }
 
     std::string getTypeName() const override { return "InSquarePlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        if (results.empty()) {
+            return "offsets=none";
+        }
+
+        const core::BlockPos& result = results.front();
+        return "dx=" + std::to_string(result.getX() - origin.getX()) +
+               " dz=" + std::to_string(result.getZ() - origin.getZ());
+    }
 
 private:
     InSquarePlacement() = default;
@@ -178,6 +207,17 @@ public:
 
     std::string getTypeName() const override { return "HeightmapPlacement"; }
 
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        int32_t height = context.getHeight(m_heightmap, origin.getX(), origin.getZ());
+        return std::string("heightmap=") + heightmapTypeName(m_heightmap) +
+               " height=" + std::to_string(height) +
+               " accepted=" + (results.empty() ? "false" : "true");
+    }
+
 private:
     explicit HeightmapPlacement(Heightmap::Types heightmap) : m_heightmap(heightmap) {}
 };
@@ -246,6 +286,19 @@ public:
 
     std::string getTypeName() const override { return "HeightRangePlacement"; }
 
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        if (results.empty()) {
+            return "selected_y=none";
+        }
+        return "selected_y=" + std::to_string(results.front().getY());
+    }
+
 private:
     explicit HeightRangePlacement(const carver::HeightProvider* height) : m_height(height) {}
 };
@@ -269,6 +322,17 @@ public:
     }
 
     std::string getTypeName() const override { return "RarityFilter"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        return "accepted=" + std::string(results.empty() ? "false" : "true") +
+               " chance=1/" + std::to_string(m_chance);
+    }
 
 protected:
     /**
@@ -312,6 +376,22 @@ public:
     static int getCallCount();
 
     std::string getTypeName() const override { return "BiomeFilter"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        const world::biome::Biome* biome = context.getBiome(origin);
+        std::string biomeName = biome ? biome->getName() : "(null)";
+        auto topFeature = context.topFeature();
+        std::string featureName = topFeature.has_value() && *topFeature
+            ? (*topFeature)->getDebugName()
+            : "(no-top-feature)";
+        return "accepted=" + std::string(results.empty() ? "false" : "true") +
+               " biome=" + biomeName +
+               " top_feature=" + featureName;
+    }
 
 protected:
     /**
@@ -382,6 +462,21 @@ public:
 
     std::string getTypeName() const override { return "RandomOffsetPlacement"; }
 
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        if (results.empty()) {
+            return "offsets=none";
+        }
+        const core::BlockPos& result = results.front();
+        return "dx=" + std::to_string(result.getX() - origin.getX()) +
+               " dy=" + std::to_string(result.getY() - origin.getY()) +
+               " dz=" + std::to_string(result.getZ() - origin.getZ());
+    }
+
 private:
     RandomOffsetPlacement(const carver::IntProvider* xzSpread, const carver::IntProvider* ySpread)
         : m_xzSpread(xzSpread), m_ySpread(ySpread) {}
@@ -406,6 +501,21 @@ public:
     }
 
     std::string getTypeName() const override { return "SurfaceWaterDepthFilter"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        int32_t surfaceY = context.getHeight(Heightmap::Types::OCEAN_FLOOR, origin.getX(), origin.getZ());
+        int32_t waterY = context.getHeight(Heightmap::Types::WORLD_SURFACE, origin.getX(), origin.getZ());
+        int32_t delta = waterY - surfaceY;
+        return "accepted=" + std::string(results.empty() ? "false" : "true") +
+               " ocean_floor=" + std::to_string(surfaceY) +
+               " world_surface=" + std::to_string(waterY) +
+               " delta=" + std::to_string(delta) +
+               " max_depth=" + std::to_string(m_maxWaterDepth);
+    }
 
 protected:
     /**
@@ -447,6 +557,22 @@ public:
     }
 
     std::string getTypeName() const override { return "NoiseBasedCountPlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        double flowerNoise = synth::BiomeInfoNoise::getValue(
+            static_cast<double>(origin.getX()) / m_noiseFactor,
+            static_cast<double>(origin.getZ()) / m_noiseFactor
+        );
+        return "noise=" + std::to_string(flowerNoise) +
+               " count=" + std::to_string(results.size()) +
+               " ratio=" + std::to_string(m_noiseToCountRatio) +
+               " offset=" + std::to_string(m_noiseOffset);
+    }
 
 protected:
     /**
@@ -493,6 +619,23 @@ public:
 
     std::string getTypeName() const override { return "NoiseThresholdCountPlacement"; }
 
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        double flowerNoise = synth::BiomeInfoNoise::getValue(
+            static_cast<double>(origin.getX()) / 200.0,
+            static_cast<double>(origin.getZ()) / 200.0
+        );
+        return "noise=" + std::to_string(flowerNoise) +
+               " threshold=" + std::to_string(m_noiseLevel) +
+               " count=" + std::to_string(results.size()) +
+               " below=" + std::to_string(m_belowNoise) +
+               " above=" + std::to_string(m_aboveNoise);
+    }
+
 protected:
     /**
      * Get count based on biome noise threshold
@@ -538,6 +681,21 @@ public:
 
     std::string getTypeName() const override { return "SurfaceRelativeThresholdFilter"; }
 
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        int64_t surfaceY = static_cast<int64_t>(context.getHeight(m_heightmap, origin.getX(), origin.getZ()));
+        int64_t minY = surfaceY + static_cast<int64_t>(m_minInclusive);
+        int64_t maxY = surfaceY + static_cast<int64_t>(m_maxInclusive);
+        return std::string("accepted=") + (results.empty() ? "false" : "true") +
+               " heightmap=" + heightmapTypeName(m_heightmap) +
+               " y=" + std::to_string(origin.getY()) +
+               " min=" + std::to_string(minY) +
+               " max=" + std::to_string(maxY);
+    }
+
 protected:
     /**
      * Check if Y is within range relative to surface
@@ -576,8 +734,8 @@ public:
 
 private:
     Direction m_directionOfSearch;
-    std::function<bool(BlockState*)> m_targetCondition;
-    std::function<bool(BlockState*)> m_allowedSearchCondition;
+    std::function<bool(PlacementContext&, const core::BlockPos&)> m_targetCondition;
+    std::function<bool(PlacementContext&, const core::BlockPos&)> m_allowedSearchCondition;
     int32_t m_maxSteps;
 
 public:
@@ -587,14 +745,64 @@ public:
      */
     static EnvironmentScanPlacement scanningFor(
         Direction direction,
+        std::shared_ptr<blockpredicates::BlockPredicate> targetCondition,
+        std::shared_ptr<blockpredicates::BlockPredicate> allowedCondition,
+        int32_t maxSteps
+    ) {
+        return EnvironmentScanPlacement(
+            direction,
+            [targetCondition](PlacementContext& context, const core::BlockPos& pos) {
+                return targetCondition && targetCondition->test(*context.getLevel(), pos);
+            },
+            [allowedCondition](PlacementContext& context, const core::BlockPos& pos) {
+                return allowedCondition && allowedCondition->test(*context.getLevel(), pos);
+            },
+            maxSteps
+        );
+    }
+
+    static EnvironmentScanPlacement scanningFor(
+        Direction direction,
+        std::shared_ptr<blockpredicates::BlockPredicate> targetCondition,
+        int32_t maxSteps
+    ) {
+        return scanningFor(direction, targetCondition, blockpredicates::BlockPredicate::alwaysTrue(), maxSteps);
+    }
+
+    static EnvironmentScanPlacement scanningFor(
+        Direction direction,
         std::function<bool(BlockState*)> targetCondition,
         std::function<bool(BlockState*)> allowedCondition,
         int32_t maxSteps
     ) {
-        return EnvironmentScanPlacement(direction, targetCondition, allowedCondition, maxSteps);
+        return EnvironmentScanPlacement(
+            direction,
+            [targetCondition](PlacementContext& context, const core::BlockPos& pos) {
+                return targetCondition(context.getBlockState(pos));
+            },
+            [allowedCondition](PlacementContext& context, const core::BlockPos& pos) {
+                return allowedCondition(context.getBlockState(pos));
+            },
+            maxSteps
+        );
     }
 
     std::string getTypeName() const override { return "EnvironmentScanPlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        std::string direction = (m_directionOfSearch == Direction::UP) ? "UP" : "DOWN";
+        if (results.empty()) {
+            return "direction=" + direction + " found=false max_steps=" + std::to_string(m_maxSteps);
+        }
+        return "direction=" + direction +
+               " found=true max_steps=" + std::to_string(m_maxSteps) +
+               " result_y=" + std::to_string(results.front().getY());
+    }
 
     /**
      * Scan for target position
@@ -608,17 +816,14 @@ public:
     ) override {
         core::BlockPos::MutableBlockPos pos(origin.getX(), origin.getY(), origin.getZ());
 
-        // Check if starting position is allowed
-        BlockState* startState = context.getBlockState(pos);
-        if (!m_allowedSearchCondition(startState)) {
+        if (!m_allowedSearchCondition(context, pos)) {
             return {};
         }
 
         int32_t yDelta = (m_directionOfSearch == Direction::UP) ? 1 : -1;
 
         for (int32_t i = 0; i < m_maxSteps; ++i) {
-            BlockState* state = context.getBlockState(pos);
-            if (m_targetCondition(state)) {
+            if (m_targetCondition(context, pos)) {
                 return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
             }
 
@@ -629,19 +834,15 @@ public:
                 return {};
             }
 
-            BlockState* movedState = context.getBlockState(pos);
-            if (!m_allowedSearchCondition(movedState)) {
-                // Final check at current position
-                if (m_targetCondition(movedState)) {
+            if (!m_allowedSearchCondition(context, pos)) {
+                if (m_targetCondition(context, pos)) {
                     return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
                 }
                 return {};
             }
         }
 
-        // Final check after max steps
-        BlockState* finalState = context.getBlockState(pos);
-        if (m_targetCondition(finalState)) {
+        if (m_targetCondition(context, pos)) {
             return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
         }
 
@@ -651,8 +852,8 @@ public:
 private:
     EnvironmentScanPlacement(
         Direction direction,
-        std::function<bool(BlockState*)> targetCondition,
-        std::function<bool(BlockState*)> allowedCondition,
+        std::function<bool(PlacementContext&, const core::BlockPos&)> targetCondition,
+        std::function<bool(PlacementContext&, const core::BlockPos&)> allowedCondition,
         int32_t maxSteps
     )
         : m_directionOfSearch(direction)
@@ -680,6 +881,16 @@ public:
     }
 
     std::string getTypeName() const override { return "FixedPlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        return "matched_positions=" + std::to_string(results.size()) +
+               " chunk=" + std::to_string(origin.getX() >> 4) + "," + std::to_string(origin.getZ() >> 4);
+    }
 
     /**
      * Return fixed positions in same chunk
@@ -722,6 +933,14 @@ public:
      * Create block predicate filter
      * Reference: BlockPredicateFilter.java of()
      */
+    static BlockPredicateFilter forPredicate(
+        std::shared_ptr<blockpredicates::BlockPredicate> predicate
+    ) {
+        return BlockPredicateFilter([predicate](const PlacementContext& context, const core::BlockPos& origin) {
+            return predicate->test(*context.getLevel(), origin);
+        });
+    }
+
     static BlockPredicateFilter hasSturdyFace(
         std::function<bool(const PlacementContext&, const core::BlockPos&)> predicate
     ) {
@@ -729,6 +948,16 @@ public:
     }
 
     std::string getTypeName() const override { return "BlockPredicateFilter"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        return "accepted=" + std::string(results.empty() ? "false" : "true");
+    }
 
 protected:
     /**
@@ -779,6 +1008,16 @@ public:
     }
 
     std::string getTypeName() const override { return "CountOnEveryLayerPlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        return "count=" + std::to_string(results.size());
+    }
 
     /**
      * Get positions on every layer

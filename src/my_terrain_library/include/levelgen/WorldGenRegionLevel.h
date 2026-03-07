@@ -9,6 +9,7 @@
  */
 
 #include "levelgen/WorldGenLevel.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include "server/level/WorldGenRegion.h"
 #include "core/BlockPos.h"
 #include "world/ChunkPos.h"
@@ -56,7 +57,22 @@ public:
         // WorldGenRegion::ensureCanWrite already handles this, but getChunk can
         // throw for positions outside the cache even after ensureCanWrite passes.
         try {
-            return m_region->setBlock(pos, state, flags, 512);
+            BlockState* oldState = nullptr;
+            if (feature::BlockChangeTrace::isEnabled()) {
+                oldState = getBlockState(pos);
+            }
+
+            bool result = m_region->setBlock(pos, state, flags, 512);
+            if (result && state && oldState) {
+                feature::BlockChangeTrace::log(
+                    pos.getX(),
+                    pos.getY(),
+                    pos.getZ(),
+                    oldState->getIdentifier(),
+                    state->getIdentifier()
+                );
+            }
+            return result;
         } catch (...) {
             return false;
         }

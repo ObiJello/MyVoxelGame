@@ -2,6 +2,7 @@
 #include "data/worldgen/features/TreeFeatures.h"
 #include "data/worldgen/placement/TreePlacements.h"
 #include "levelgen/placement/PlacedFeature.h"
+#include "levelgen/placement/PlacementModifiers.h"
 
 // Reference: net/minecraft/data/worldgen/features/VegetationFeatures.java
 
@@ -18,6 +19,7 @@ using Blocks = ::minecraft::world::level::block::Blocks;
 // Static members
 RandomPatchFeature VegetationFeatures::s_randomPatchFeature;
 SimpleBlockFeature VegetationFeatures::s_simpleBlockFeature;
+VinesFeature VegetationFeatures::s_vinesFeature;
 bool VegetationFeatures::s_initialized = false;
 
 // ConfiguredFeature pointers - Grass patches
@@ -36,8 +38,6 @@ ConfiguredFeature* VegetationFeatures::FLOWER_PLAIN = nullptr;
 ConfiguredFeature* VegetationFeatures::FLOWER_MEADOW = nullptr;
 ConfiguredFeature* VegetationFeatures::FLOWER_CHERRY = nullptr;
 ConfiguredFeature* VegetationFeatures::FLOWER_SWAMP = nullptr;
-ConfiguredFeature* VegetationFeatures::FLOWER_WARM = nullptr;
-ConfiguredFeature* VegetationFeatures::FLOWER_FOREST = nullptr;
 ConfiguredFeature* VegetationFeatures::FLOWER_FLOWER_FOREST = nullptr;
 ConfiguredFeature* VegetationFeatures::FLOWER_PALE_GARDEN = nullptr;
 ConfiguredFeature* VegetationFeatures::WILDFLOWERS = nullptr;
@@ -116,6 +116,8 @@ static std::vector<std::unique_ptr<RandomPatchConfiguration>> s_configs;
 // Storage for RandomSelectorFeature and its configuration
 static std::unique_ptr<RandomSelectorFeature> s_randomSelectorFeature;
 static std::vector<std::unique_ptr<RandomFeatureConfiguration>> s_randomConfigs;
+static std::vector<std::unique_ptr<PlacementModifier>> s_inlinePlacementModifiers;
+static std::vector<std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider>> s_blockStateProviders;
 
 // Storage for HugeMushroomFeature instances and configurations
 static std::unique_ptr<HugeBrownMushroomFeature> s_hugeBrownMushroomFeature;
@@ -124,61 +126,153 @@ static std::vector<std::unique_ptr<HugeMushroomFeatureConfiguration>> s_hugeMush
 
 // Storage for PlacedFeature wrappers (for RandomSelector weighted features)
 static std::vector<std::unique_ptr<PlacedFeature>> s_placedFeatures;
-
-bool VegetationFeatures::canPlaceOnGround(WorldGenLevel* level, const core::BlockPos& pos) {
-    // Check if block below is solid ground (grass_block, dirt, etc.)
-    // Reference: BlockPredicates.java wouldSurvive
-    core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-    BlockState* blockBelow = level->getBlockState(below);
-
-    if (!blockBelow) return false;
-
-    // Check if the target position is air
-    BlockState* targetBlock = level->getBlockState(pos);
-    if (!targetBlock || !targetBlock->isAir()) return false;
-
-    // Check if block below is valid ground
-    std::string id = blockBelow->getIdentifier();
-    return id == "minecraft:grass_block" ||
-           id == "minecraft:dirt" ||
-           id == "minecraft:coarse_dirt" ||
-           id == "minecraft:podzol" ||
-           id == "minecraft:farmland" ||
-           id == "minecraft:rooted_dirt" ||
-           id == "minecraft:moss_block" ||
-           id == "minecraft:mud" ||
-           id == "minecraft:muddy_mangrove_roots";
-}
+static std::unique_ptr<SimpleRandomSelectorFeature> s_simpleRandomSelectorFeature;
+static RandomPatchFeature s_noBonemealFlowerFeature;
 
 std::function<bool(WorldGenLevel*, ChunkGenerator*, WorldgenRandom&, const core::BlockPos&)>
 VegetationFeatures::createGrassPlacer(BlockState* block) {
     return [block](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-        if (!canPlaceOnGround(level, pos)) return false;
+        (void)gen;
+        BlockState* state = block;
+        if (!state || !level->isEmptyBlock(pos) || !state->canSurvive(*level, pos)) {
+            return false;
+        }
 
-        // Place the block
-        level->setBlock(pos, block, 2);
-        return true;
-    };
-}
+        if (auto* doublePlantBlock = dynamic_cast<minecraft::world::level::block::DoublePlantBlock*>(state->getBlock())) {
+            if (!level->isEmptyBlock(pos.above())) {
+                return false;
+            }
 
-std::function<bool(WorldGenLevel*, ChunkGenerator*, WorldgenRandom&, const core::BlockPos&)>
-VegetationFeatures::createFlowerPlacer(const std::vector<BlockState*>& flowers) {
-    return [flowers](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-        if (!canPlaceOnGround(level, pos)) return false;
-        if (flowers.empty()) return false;
-
-        // Pick a random flower
-        int index = random.nextInt(static_cast<int>(flowers.size()));
-        BlockState* flower = flowers[index];
-
-        // Place the flower
-        level->setBlock(pos, flower, 2);
+            doublePlantBlock->placeAt(level, state, pos, 2);
+        } else {
+            level->setBlock(pos, state, 2);
+        }
         return true;
     };
 }
 
 void VegetationFeatures::bootstrap() {
     if (s_initialized) return;
+
+    if (!s_simpleRandomSelectorFeature) {
+        s_simpleRandomSelectorFeature = std::make_unique<SimpleRandomSelectorFeature>();
+    }
+
+    auto storePlacementModifier = [](auto modifier) -> PlacementModifier* {
+        using Modifier = std::decay_t<decltype(modifier)>;
+        auto stored = std::make_unique<Modifier>(std::move(modifier));
+        Modifier* raw = stored.get();
+        s_inlinePlacementModifiers.push_back(std::move(stored));
+        return raw;
+    };
+
+    auto createPlacedFeature = [](ConfiguredFeature* feature, const std::vector<PlacementModifier*>& modifiers, const std::string& name = "") -> PlacedFeature* {
+        auto placed = std::make_unique<PlacedFeature>(feature, modifiers, name);
+        PlacedFeature* raw = placed.get();
+        s_placedFeatures.push_back(std::move(placed));
+        return raw;
+    };
+
+    auto createSimpleBlockConfiguredFeature = [&](std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider> provider, bool scheduleTick = false) -> ConfiguredFeature* {
+        s_blockStateProviders.push_back(std::move(provider));
+        auto* rawProvider = s_blockStateProviders.back().get();
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleBlockConfiguration, SimpleBlockFeature>>(
+            &s_simpleBlockFeature,
+            SimpleBlockConfiguration(rawProvider, scheduleTick)
+        );
+        ConfiguredFeature* raw = feature.get();
+        s_features.push_back(std::move(feature));
+        return raw;
+    };
+
+    auto onlyWhenEmptySimpleBlock = [&](std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider> provider, bool scheduleTick = false, const std::string& name = "") -> PlacedFeature* {
+        return createPlacedFeature(
+            createSimpleBlockConfiguredFeature(std::move(provider), scheduleTick),
+            {storePlacementModifier(BlockPredicateFilter::forPredicate(blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE))},
+            name
+        );
+    };
+
+    auto simplePatchPredicate = [](const std::vector<minecraft::world::level::block::Block*>& allowedOn) -> std::shared_ptr<blockpredicates::BlockPredicate> {
+        if (allowedOn.empty()) {
+            return blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE;
+        }
+
+        std::vector<std::string> allowedOnNames;
+        allowedOnNames.reserve(allowedOn.size());
+        for (const auto* block : allowedOn) {
+            if (block) {
+                allowedOnNames.push_back(block->getIdentifier());
+            }
+        }
+
+        return blockpredicates::BlockPredicate::allOf(
+            blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE,
+            blockpredicates::BlockPredicate::matchesBlocks(core::Vec3i(0, -1, 0), allowedOnNames)
+        );
+    };
+
+    auto simpleRandomPatchConfiguration = [&](int tries, PlacedFeature* feature) -> std::unique_ptr<RandomPatchConfiguration> {
+        return std::make_unique<RandomPatchConfiguration>(tries, 7, 3, feature);
+    };
+
+    auto simplePatchConfiguration = [&](std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider> provider,
+                                        const std::vector<minecraft::world::level::block::Block*>& allowedOn = {},
+                                        int tries = 96,
+                                        bool scheduleTick = false,
+                                        const std::string& name = "") -> std::unique_ptr<RandomPatchConfiguration> {
+        return simpleRandomPatchConfiguration(
+            tries,
+            createPlacedFeature(
+                createSimpleBlockConfiguredFeature(std::move(provider), scheduleTick),
+                {storePlacementModifier(BlockPredicateFilter::forPredicate(simplePatchPredicate(allowedOn)))},
+                name
+            )
+        );
+    };
+
+    auto grassPatch = [&](std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider> provider, int tries) -> std::unique_ptr<RandomPatchConfiguration> {
+        return simplePatchConfiguration(std::move(provider), {}, tries);
+    };
+
+    auto segmentedBlockPatchBuilder = [](minecraft::world::level::block::Block* block,
+                                         int minState,
+                                         int maxState,
+                                         minecraft::world::level::block::state::properties::IntegerProperty* amountProperty,
+                                         minecraft::world::level::block::state::properties::DirectionProperty* directionProperty) {
+        std::vector<levelgen::feature::stateproviders::WeightedStateEntry> states;
+        std::vector<core::Direction> horizontalDirections = {
+            core::Direction::NORTH,
+            core::Direction::EAST,
+            core::Direction::SOUTH,
+            core::Direction::WEST
+        };
+
+        for (int amount = minState; amount <= maxState; ++amount) {
+            for (core::Direction direction : horizontalDirections) {
+                BlockState* state = block ? block->defaultBlockState() : nullptr;
+                if (!state) {
+                    continue;
+                }
+
+                state = state->setValue(*amountProperty, amount);
+                state = state->setValue(*directionProperty, direction);
+                states.emplace_back(state, 1);
+            }
+        }
+
+        return states;
+    };
+
+    auto flowerBedPatchBuilder = [&](minecraft::world::level::block::Block* flowerBedBlock) {
+        return segmentedBlockPatchBuilder(
+            flowerBedBlock,
+            1,
+            4,
+            minecraft::world::level::block::FlowerBedBlock::FLOWER_AMOUNT,
+            minecraft::world::level::block::FlowerBedBlock::FACING
+        );
+    };
 
     // =========================================================================
     // GRASS PATCHES
@@ -240,11 +334,15 @@ void VegetationFeatures::bootstrap() {
 
     // FLOWER_DEFAULT - dandelion and poppy (50/50)
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState()
-        });
+        auto config = grassPatch(
+            std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                std::vector<levelgen::feature::stateproviders::WeightedStateEntry>{
+                    {minecraft::world::level::block::Blocks::POPPY->defaultBlockState(), 2},
+                    {minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(), 1},
+                }
+            ),
+            64
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -255,18 +353,33 @@ void VegetationFeatures::bootstrap() {
 
     // FLOWER_PLAIN - plains flowers (includes tulips, azure bluet, etc.)
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
-            minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
-            minecraft::world::level::block::Blocks::RED_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::ORANGE_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::WHITE_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::PINK_TULIP->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            64,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::NoiseThresholdProvider>(
+                    2345L,
+                    NormalNoise::NoiseParameters(0, static_cast<double>(1.0F), {}),
+                    0.005F,
+                    -0.8F,
+                    0.33333334F,
+                    minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
+                    std::vector<BlockState*>{
+                        minecraft::world::level::block::Blocks::ORANGE_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::RED_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::PINK_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::WHITE_TULIP->defaultBlockState(),
+                    },
+                    std::vector<BlockState*>{
+                        minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
+                    }
+                )
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -475,12 +588,12 @@ void VegetationFeatures::bootstrap() {
         // Build all 12 states: amounts 1-3 * 4 directions
         auto leafLitter = minecraft::world::level::block::Blocks::LEAF_LITTER;
         if (leafLitter) {
-            // Direction::Plane::HORIZONTAL = NORTH, SOUTH, WEST, EAST (Java enum order)
+            // Direction.Plane.HORIZONTAL iteration order = NORTH, EAST, SOUTH, WEST
             std::vector<core::Direction> horizontalDirections = {
                 core::Direction::NORTH,
+                core::Direction::EAST,
                 core::Direction::SOUTH,
-                core::Direction::WEST,
-                core::Direction::EAST
+                core::Direction::WEST
             };
 
             for (int amount = 1; amount <= 3; ++amount) {
@@ -572,18 +685,22 @@ void VegetationFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
-    // Ensure TreeFeatures is bootstrapped (needed for both RandomSelectors)
+    // Ensure TreeFeatures is bootstrapped.
     if (!TreeFeatures::isInitialized()) {
         TreeFeatures::bootstrap();
+    }
+
+    // Ensure TreePlacements is bootstrapped before building tree selectors.
+    if (!placement::TreePlacements::isInitialized()) {
+        placement::TreePlacements::bootstrap();
     }
 
     // Create the RandomSelectorFeature instance (shared by both features)
     s_randomSelectorFeature = std::make_unique<RandomSelectorFeature>();
 
-    // Helper: wrap a ConfiguredFeature in a PlacedFeature with no modifiers
-    // (The placement modifiers are applied at the Placements level)
-    auto wrapAsPlaced = [](ConfiguredFeature* cf) -> PlacedFeature* {
-        s_placedFeatures.push_back(std::make_unique<PlacedFeature>(cf, std::vector<PlacementModifier*>{}));
+    // Reference: PlacementUtils.inlinePlaced(...)
+    auto inlinePlaced = [](ConfiguredFeature* configuredFeature) -> PlacedFeature* {
+        s_placedFeatures.push_back(std::make_unique<PlacedFeature>(configuredFeature, std::vector<PlacementModifier*>{}));
         return s_placedFeatures.back().get();
     };
 
@@ -599,32 +716,27 @@ void VegetationFeatures::bootstrap() {
     // - default: oakBees0002LeafLitter
     // =========================================================================
     {
-        // Create PlacedFeature wrappers for each weighted feature
-        PlacedFeature* fallenBirchPlaced = wrapAsPlaced(TreeFeatures::FALLEN_BIRCH);
-        PlacedFeature* birchBees0002LeafLitterPlaced = wrapAsPlaced(TreeFeatures::BIRCH_BEES_0002_LEAF_LITTER);
-        PlacedFeature* fancyOakBees0002LeafLitterPlaced = wrapAsPlaced(TreeFeatures::FANCY_OAK_BEES_0002_LEAF_LITTER);
-        PlacedFeature* fallenOakPlaced = wrapAsPlaced(TreeFeatures::FALLEN_OAK);
-        PlacedFeature* oakBees0002LeafLitterPlaced = wrapAsPlaced(TreeFeatures::OAK_BEES_0002_LEAF_LITTER);  // Default
+        using TreePl = placement::TreePlacements;
+        if (TreePl::FALLEN_BIRCH_TREE && TreePl::BIRCH_BEES_0002_LEAF_LITTER &&
+            TreePl::FANCY_OAK_BEES_0002_LEAF_LITTER && TreePl::FALLEN_OAK_TREE &&
+            TreePl::OAK_BEES_0002_LEAF_LITTER) {
+            auto config = std::make_unique<RandomFeatureConfiguration>(
+                std::vector<WeightedPlacedFeature>{
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FALLEN_BIRCH_TREE), 0.0025f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::BIRCH_BEES_0002_LEAF_LITTER), 0.2f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FANCY_OAK_BEES_0002_LEAF_LITTER), 0.1f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FALLEN_OAK_TREE), 0.0125f),
+                },
+                const_cast<PlacedFeature*>(TreePl::OAK_BEES_0002_LEAF_LITTER)
+            );
 
-        // Create the RandomFeatureConfiguration with exact Java weights and order
-        auto config = std::make_unique<RandomFeatureConfiguration>(
-            std::vector<WeightedPlacedFeature>{
-                // Order MUST match Java for parity
-                WeightedPlacedFeature(fallenBirchPlaced, 0.0025f),
-                WeightedPlacedFeature(birchBees0002LeafLitterPlaced, 0.2f),
-                WeightedPlacedFeature(fancyOakBees0002LeafLitterPlaced, 0.1f),
-                WeightedPlacedFeature(fallenOakPlaced, 0.0125f),
-            },
-            oakBees0002LeafLitterPlaced  // Default feature
-        );
+            auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
+                s_randomSelectorFeature.get(), *config);
+            TREES_BIRCH_AND_OAK_LEAF_LITTER = feature.get();
 
-        // Create the ConfiguredFeature for TREES_BIRCH_AND_OAK_LEAF_LITTER
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
-            s_randomSelectorFeature.get(), *config);
-        TREES_BIRCH_AND_OAK_LEAF_LITTER = feature.get();
-
-        s_randomConfigs.push_back(std::move(config));
-        s_features.push_back(std::move(feature));
+            s_randomConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+        }
     }
 
     // =========================================================================
@@ -646,52 +758,36 @@ void VegetationFeatures::bootstrap() {
     // - default: oakLeafLitter
     // =========================================================================
     {
+        using TreePl = placement::TreePlacements;
+        if (TreePl::DARK_OAK_LEAF_LITTER && TreePl::FALLEN_BIRCH_TREE &&
+            TreePl::BIRCH_LEAF_LITTER && TreePl::FALLEN_OAK_TREE &&
+            TreePl::FANCY_OAK_LEAF_LITTER && TreePl::OAK_LEAF_LITTER) {
+            auto config = std::make_unique<RandomFeatureConfiguration>(
+                std::vector<WeightedPlacedFeature>{
+                    WeightedPlacedFeature(inlinePlaced(HUGE_BROWN_MUSHROOM), 0.025f),
+                    WeightedPlacedFeature(inlinePlaced(HUGE_RED_MUSHROOM), 0.05f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::DARK_OAK_LEAF_LITTER), 0.6666667f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FALLEN_BIRCH_TREE), 0.0025f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::BIRCH_LEAF_LITTER), 0.2f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FALLEN_OAK_TREE), 0.0125f),
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FANCY_OAK_LEAF_LITTER), 0.1f),
+                },
+                const_cast<PlacedFeature*>(TreePl::OAK_LEAF_LITTER)
+            );
 
-        // Create PlacedFeature wrappers for each weighted feature
-        // Now using real leaf litter and fallen tree features!
-        PlacedFeature* hugeBrownMushroomPlaced = wrapAsPlaced(HUGE_BROWN_MUSHROOM);
-        PlacedFeature* hugeRedMushroomPlaced = wrapAsPlaced(HUGE_RED_MUSHROOM);
-        PlacedFeature* darkOakLeafLitterPlaced = wrapAsPlaced(TreeFeatures::DARK_OAK_LEAF_LITTER);
-        PlacedFeature* fallenBirchPlaced = wrapAsPlaced(TreeFeatures::FALLEN_BIRCH);
-        PlacedFeature* birchLeafLitterPlaced = wrapAsPlaced(TreeFeatures::BIRCH_LEAF_LITTER);
-        PlacedFeature* fallenOakPlaced = wrapAsPlaced(TreeFeatures::FALLEN_OAK);
-        PlacedFeature* fancyOakLeafLitterPlaced = wrapAsPlaced(TreeFeatures::FANCY_OAK_LEAF_LITTER);
-        PlacedFeature* oakLeafLitterPlaced = wrapAsPlaced(TreeFeatures::OAK_LEAF_LITTER);  // Default
+            auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
+                s_randomSelectorFeature.get(), *config);
+            DARK_FOREST_VEGETATION = feature.get();
 
-        // Create the RandomFeatureConfiguration with exact Java weights and order
-        // Reference: VegetationFeatures.java line 197
-        auto config = std::make_unique<RandomFeatureConfiguration>(
-            std::vector<WeightedPlacedFeature>{
-                // Order MUST match Java for parity
-                WeightedPlacedFeature(hugeBrownMushroomPlaced, 0.025f),
-                WeightedPlacedFeature(hugeRedMushroomPlaced, 0.05f),
-                WeightedPlacedFeature(darkOakLeafLitterPlaced, 0.6666667f),
-                WeightedPlacedFeature(fallenBirchPlaced, 0.0025f),
-                WeightedPlacedFeature(birchLeafLitterPlaced, 0.2f),
-                WeightedPlacedFeature(fallenOakPlaced, 0.0125f),
-                WeightedPlacedFeature(fancyOakLeafLitterPlaced, 0.1f),
-            },
-            oakLeafLitterPlaced  // Default feature
-        );
-
-        // Create the ConfiguredFeature for DARK_FOREST_VEGETATION
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
-            s_randomSelectorFeature.get(), *config);
-        DARK_FOREST_VEGETATION = feature.get();
-
-        s_randomConfigs.push_back(std::move(config));
-        s_features.push_back(std::move(feature));
+            s_randomConfigs.push_back(std::move(config));
+            s_features.push_back(std::move(feature));
+        }
     }
 
     // =========================================================================
-    // TREE SELECTOR FEATURES - These require TreePlacements to be bootstrapped
+    // TREE SELECTOR FEATURES
     // Reference: VegetationFeatures.java
     // =========================================================================
-
-    // Ensure TreePlacements is bootstrapped
-    if (!placement::TreePlacements::isInitialized()) {
-        placement::TreePlacements::bootstrap();
-    }
 
     // =========================================================================
     // TREES_PLAINS - RandomSelectorFeature
@@ -1233,23 +1329,11 @@ void VegetationFeatures::bootstrap() {
     // VINES - Feature.VINES
     // Reference: VegetationFeatures.java line 164
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            // Check if there's a solid block adjacent to attach to
-            if (minecraft::world::level::block::Blocks::VINE) {
-                level->setBlock(pos,
-                    minecraft::world::level::block::Blocks::VINE->defaultBlockState(), 2);
-                return true;
-            }
-            return false;
-        };
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        auto feature = std::make_unique<ConfiguredFeatureImpl<NoneFeatureConfiguration, VinesFeature>>(
+            &s_vinesFeature,
+            NoneFeatureConfiguration::INSTANCE
+        );
         VINES = feature.get();
-        s_configs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
@@ -1403,10 +1487,12 @@ void VegetationFeatures::bootstrap() {
     // FLOWER_SWAMP - blue orchid
     // Reference: VegetationFeatures.java line 188
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::BLUE_ORCHID->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            64,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::BLUE_ORCHID))
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         FLOWER_SWAMP = feature.get();
@@ -1417,17 +1503,31 @@ void VegetationFeatures::bootstrap() {
     // FLOWER_MEADOW - various meadow flowers with DualNoiseProvider
     // Reference: VegetationFeatures.java line 190
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(96, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::TALL_GRASS->defaultBlockState(),
-            minecraft::world::level::block::Blocks::ALLIUM->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
-            minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            96,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::DualNoiseProvider>(
+                    minecraft::util::InclusiveRange<int>(1, 3),
+                    NormalNoise::NoiseParameters(-10, static_cast<double>(1.0F), {}),
+                    1.0F,
+                    2345L,
+                    NormalNoise::NoiseParameters(-3, static_cast<double>(1.0F), {}),
+                    1.0F,
+                    std::vector<BlockState*>{
+                        minecraft::world::level::block::Blocks::TALL_GRASS->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::ALLIUM->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(),
+                    }
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         FLOWER_MEADOW = feature.get();
@@ -1438,10 +1538,16 @@ void VegetationFeatures::bootstrap() {
     // FLOWER_CHERRY - pink petals
     // Reference: VegetationFeatures.java line 191
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(96, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState()  // Using poppy as placeholder for pink petals
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            96,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                    flowerBedPatchBuilder(minecraft::world::level::block::Blocks::PINK_PETALS)
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         FLOWER_CHERRY = feature.get();
@@ -1452,12 +1558,16 @@ void VegetationFeatures::bootstrap() {
     // WILDFLOWERS_BIRCH_FOREST - wildflowers
     // Reference: VegetationFeatures.java line 192
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            64,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                    flowerBedPatchBuilder(minecraft::world::level::block::Blocks::WILDFLOWERS)
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         WILDFLOWERS_BIRCH_FOREST = feature.get();
@@ -1468,11 +1578,16 @@ void VegetationFeatures::bootstrap() {
     // WILDFLOWERS_MEADOW - wildflowers (less dense)
     // Reference: VegetationFeatures.java line 193
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(8, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            8,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                    flowerBedPatchBuilder(minecraft::world::level::block::Blocks::WILDFLOWERS)
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         WILDFLOWERS_MEADOW = feature.get();
@@ -1483,10 +1598,15 @@ void VegetationFeatures::bootstrap() {
     // FLOWER_PALE_GARDEN - closed eyeblossom
     // Reference: VegetationFeatures.java line 194
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(1, 0, 0);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState()  // Placeholder for CLOSED_EYEBLOSSOM
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            1,
+            0,
+            0,
+            onlyWhenEmptySimpleBlock(
+                levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::CLOSED_EYEBLOSSOM),
+                true
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         FLOWER_PALE_GARDEN = feature.get();
@@ -1497,27 +1617,52 @@ void VegetationFeatures::bootstrap() {
     // FOREST_FLOWERS - SimpleRandomSelector with lilac, rose_bush, peony, lily_of_the_valley
     // Reference: VegetationFeatures.java line 195
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::LILAC->defaultBlockState(),
-            minecraft::world::level::block::Blocks::ROSE_BUSH->defaultBlockState(),
-            minecraft::world::level::block::Blocks::PEONY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY->defaultBlockState()
-        });
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        auto lilacConfig = simplePatchConfiguration(levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::LILAC));
+        auto lilacFeature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(&s_randomPatchFeature, *lilacConfig);
+        ConfiguredFeature* lilacConfigured = lilacFeature.get();
+        s_configs.push_back(std::move(lilacConfig));
+        s_features.push_back(std::move(lilacFeature));
+
+        auto roseBushConfig = simplePatchConfiguration(levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::ROSE_BUSH));
+        auto roseBushFeature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(&s_randomPatchFeature, *roseBushConfig);
+        ConfiguredFeature* roseBushConfigured = roseBushFeature.get();
+        s_configs.push_back(std::move(roseBushConfig));
+        s_features.push_back(std::move(roseBushFeature));
+
+        auto peonyConfig = simplePatchConfiguration(levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::PEONY));
+        auto peonyFeature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(&s_randomPatchFeature, *peonyConfig);
+        ConfiguredFeature* peonyConfigured = peonyFeature.get();
+        s_configs.push_back(std::move(peonyConfig));
+        s_features.push_back(std::move(peonyFeature));
+
+        auto lilyConfig = simplePatchConfiguration(levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY));
+        auto lilyFeature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(&s_noBonemealFlowerFeature, *lilyConfig);
+        ConfiguredFeature* lilyConfigured = lilyFeature.get();
+        s_configs.push_back(std::move(lilyConfig));
+        s_features.push_back(std::move(lilyFeature));
+
+        auto feature = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
+            s_simpleRandomSelectorFeature.get(),
+            SimpleRandomFeatureConfiguration({
+                createPlacedFeature(lilacConfigured, {}),
+                createPlacedFeature(roseBushConfigured, {}),
+                createPlacedFeature(peonyConfigured, {}),
+                createPlacedFeature(lilyConfigured, {}),
+            })
+        );
         FOREST_FLOWERS = feature.get();
-        s_configs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
     // PALE_FOREST_FLOWERS
     // Reference: VegetationFeatures.java line 196
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState()  // Placeholder for CLOSED_EYEBLOSSOM
-        });
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(minecraft::world::level::block::Blocks::CLOSED_EYEBLOSSOM),
+            {},
+            96,
+            true
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PALE_FOREST_FLOWERS = feature.get();
@@ -1528,20 +1673,31 @@ void VegetationFeatures::bootstrap() {
     // FLOWER_FLOWER_FOREST - NoiseProvider with many flower types
     // Reference: VegetationFeatures.java line 187
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(96, 6, 2);
-        config->featurePlacer = createFlowerPlacer({
-            minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
-            minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::ALLIUM->defaultBlockState(),
-            minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
-            minecraft::world::level::block::Blocks::RED_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::ORANGE_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::WHITE_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::PINK_TULIP->defaultBlockState(),
-            minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
-            minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
-            minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY->defaultBlockState()
-        });
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            96,
+            6,
+            2,
+            onlyWhenEmptySimpleBlock(
+                std::make_shared<levelgen::feature::stateproviders::NoiseProvider>(
+                    2345L,
+                    NormalNoise::NoiseParameters(0, static_cast<double>(1.0F), {}),
+                    0.020833334F,
+                    std::vector<BlockState*>{
+                        minecraft::world::level::block::Blocks::DANDELION->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::POPPY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::ALLIUM->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::AZURE_BLUET->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::RED_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::ORANGE_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::WHITE_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::PINK_TULIP->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::OXEYE_DAISY->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::CORNFLOWER->defaultBlockState(),
+                        minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY->defaultBlockState(),
+                    }
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         FLOWER_FLOWER_FOREST = feature.get();

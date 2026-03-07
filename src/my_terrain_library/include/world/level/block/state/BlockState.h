@@ -2,8 +2,16 @@
 
 #include "StateHolder.h"
 #include "StateDefinition.h"
+#include "core/BlockPos.h"
+#include "core/Direction.h"
 #include <string>
 #include <unordered_map>
+
+namespace minecraft {
+namespace levelgen {
+class WorldGenLevel;
+}
+}
 
 namespace minecraft {
 namespace world {
@@ -31,6 +39,7 @@ private:
     bool m_isAir;
     bool m_liquid;
     bool m_blocksMotion;
+    bool m_isReplaceable;
     bool m_isLeaves;
     bool m_isLog;
     bool m_isReplaceableByTrees;
@@ -135,6 +144,18 @@ public:
      * Reference: BlockBehaviour.BlockStateBase.getLightEmission()
      */
     int getLightEmission() const;
+
+    bool canBeReplaced() const { return m_isReplaceable; }
+
+    bool canSurvive(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const;
+
+    bool isCollisionShapeFullBlock(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const;
+
+    bool isFaceSturdy(
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos,
+        core::Direction direction
+    ) const;
 
 private:
     /**

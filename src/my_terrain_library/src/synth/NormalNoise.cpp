@@ -11,13 +11,25 @@ NormalNoise NormalNoise::create(XoroshiroRandomSource& random, const NoiseParame
     return NormalNoise(random, parameters, true);
 }
 
+NormalNoise NormalNoise::create(LegacyRandomSource& random, const NoiseParameters& parameters) {
+    return NormalNoise(random, parameters, true);
+}
+
 NormalNoise NormalNoise::create(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes) {
     // Reference: NormalNoise.java lines 31-33
     return create(random, NoiseParameters(firstOctave, amplitudes));
 }
 
+NormalNoise NormalNoise::create(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes) {
+    return create(random, NoiseParameters(firstOctave, amplitudes));
+}
+
 NormalNoise NormalNoise::createLegacyNetherBiome(XoroshiroRandomSource& random, const NoiseParameters& parameters) {
     // Reference: NormalNoise.java lines 27-29
+    return NormalNoise(random, parameters, false);
+}
+
+NormalNoise NormalNoise::createLegacyNetherBiome(LegacyRandomSource& random, const NoiseParameters& parameters) {
     return NormalNoise(random, parameters, false);
 }
 
@@ -31,8 +43,26 @@ static PerlinNoise createFirstNoise(XoroshiroRandomSource& random, int32_t first
     }
 }
 
+static PerlinNoise createFirstNoise(LegacyRandomSource& random, int32_t firstOctave,
+                                     const std::vector<double>& amplitudes, bool useNewInitialization) {
+    if (useNewInitialization) {
+        return PerlinNoise::create(random, firstOctave, amplitudes);
+    } else {
+        return PerlinNoise::createLegacyForLegacyNetherBiome(random, firstOctave, amplitudes);
+    }
+}
+
 // Helper to create second PerlinNoise
 static PerlinNoise createSecondNoise(XoroshiroRandomSource& random, int32_t firstOctave,
+                                      const std::vector<double>& amplitudes, bool useNewInitialization) {
+    if (useNewInitialization) {
+        return PerlinNoise::create(random, firstOctave, amplitudes);
+    } else {
+        return PerlinNoise::createLegacyForLegacyNetherBiome(random, firstOctave, amplitudes);
+    }
+}
+
+static PerlinNoise createSecondNoise(LegacyRandomSource& random, int32_t firstOctave,
                                       const std::vector<double>& amplitudes, bool useNewInitialization) {
     if (useNewInitialization) {
         return PerlinNoise::create(random, firstOctave, amplitudes);
@@ -69,6 +99,29 @@ NormalNoise::NormalNoise(XoroshiroRandomSource& random, const NoiseParameters& p
     m_valueFactor = 0.16666666666666666 / expectedDeviation(octaveSpan);
 
     // Calculate max value - Reference: NormalNoise.java line 65
+    m_maxValue = (m_first.maxValue() + m_second.maxValue()) * m_valueFactor;
+}
+
+NormalNoise::NormalNoise(LegacyRandomSource& random, const NoiseParameters& parameters, bool useNewInitialization)
+    : m_first(createFirstNoise(random, parameters.firstOctave, parameters.amplitudes, useNewInitialization))
+    , m_second(createSecondNoise(random, parameters.firstOctave, parameters.amplitudes, useNewInitialization))
+    , m_parameters(parameters)
+{
+    const std::vector<double>& amplitudes = parameters.amplitudes;
+
+    int32_t minOctave = std::numeric_limits<int32_t>::max();
+    int32_t maxOctave = std::numeric_limits<int32_t>::min();
+
+    for (size_t i = 0; i < amplitudes.size(); ++i) {
+        double amplitude = amplitudes[i];
+        if (amplitude != static_cast<double>(0.0F)) {
+            minOctave = std::min(minOctave, static_cast<int32_t>(i));
+            maxOctave = std::max(maxOctave, static_cast<int32_t>(i));
+        }
+    }
+
+    int32_t octaveSpan = maxOctave - minOctave;
+    m_valueFactor = 0.16666666666666666 / expectedDeviation(octaveSpan);
     m_maxValue = (m_first.maxValue() + m_second.maxValue()) * m_valueFactor;
 }
 

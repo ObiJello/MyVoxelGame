@@ -108,6 +108,15 @@ protected:
         std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider
     );
 
+    bool placeLog(
+        LevelReader& level,
+        TrunkSetter trunkSetter,
+        WorldgenRandom& random,
+        const core::BlockPos& pos,
+        std::shared_ptr<stateproviders::BlockStateProvider> trunkProvider,
+        std::function<BlockState*(BlockState*)> stateModifier
+    );
+
     /**
      * Check if position is valid for tree
      * Reference: TrunkPlacer.java lines 79-81

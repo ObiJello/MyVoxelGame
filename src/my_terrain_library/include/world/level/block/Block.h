@@ -7,6 +7,12 @@
 #include <memory>
 
 namespace minecraft {
+namespace levelgen {
+class WorldGenLevel;
+}
+}
+
+namespace minecraft {
 namespace world {
 namespace level {
 namespace block {
@@ -44,6 +50,7 @@ public:
         bool m_isAir = false;
         bool m_liquid = false;
         bool m_blocksMotion = true;
+        bool m_isReplaceable = false;
         bool m_isLeaves = false;
         bool m_isLog = false;
         bool m_isReplaceableByTrees = false;
@@ -65,6 +72,11 @@ public:
 
         Properties& noCollission() {
             m_blocksMotion = false;
+            return *this;
+        }
+
+        Properties& replaceable() {
+            m_isReplaceable = true;
             return *this;
         }
 
@@ -91,6 +103,7 @@ public:
         bool isAir() const { return m_isAir; }
         bool isLiquid() const { return m_liquid; }
         bool blocksMotion() const { return m_blocksMotion; }
+        bool isReplaceable() const { return m_isReplaceable; }
         bool isLeaves() const { return m_isLeaves; }
         bool isLog() const { return m_isLog; }
         bool isReplaceableByTrees() const { return m_isReplaceableByTrees; }
@@ -206,6 +219,12 @@ public:
      * Check if this is replaceable by trees
      */
     bool isReplaceableByTrees() const { return m_properties.isReplaceableByTrees(); }
+
+    virtual bool canSurvive(
+        BlockState* state,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const;
 
 protected:
     /**

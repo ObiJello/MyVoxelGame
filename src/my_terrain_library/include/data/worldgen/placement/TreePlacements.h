@@ -3,6 +3,7 @@
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/placement/PlacementModifiers.h"
 #include "data/worldgen/features/TreeFeatures.h"
+#include "world/level/block/state/BlockState.h"
 #include <vector>
 
 // Reference: net/minecraft/data/worldgen/placement/TreePlacements.java
@@ -120,7 +121,7 @@ public:
      * Helper: filteredByBlockSurvival - creates placement that checks if sapling can survive
      * Reference: PlacementUtils.filteredByBlockSurvival()
      */
-    static std::vector<PlacementModifier*> filteredByBlockSurvival();
+    static std::vector<PlacementModifier*> filteredByBlockSurvival(BlockState* state);
 };
 
 } // namespace placement

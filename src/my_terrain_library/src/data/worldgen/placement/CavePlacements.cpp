@@ -12,6 +12,7 @@ namespace worldgen {
 namespace placement {
 
 using namespace levelgen::placement;
+using namespace levelgen::blockpredicates;
 using namespace features;
 using levelgen::Heightmap;
 using levelgen::carver::UniformHeight;
@@ -94,21 +95,6 @@ static std::deque<levelgen::carver::ConstantInt> s_constantInts;
 
 // Static predicate functions for EnvironmentScanPlacement
 // Reference: BlockPredicate.solid() - returns true for solid blocks
-static bool solidBlockCheck(BlockState* state) {
-    return state && state->isSolid();
-}
-
-// Reference: BlockPredicate.ONLY_IN_AIR_PREDICATE - returns true for air blocks
-static bool airBlockCheck(BlockState* state) {
-    return state && state->isAir();
-}
-
-// Reference: BlockPredicate.hasSturdyFace(Direction.DOWN) - for cave vines
-// C++ doesn't have isFaceSturdy(), so use !isAir() as approximation (matches Feature.h:6020)
-static bool sturdyFaceDownCheck(BlockState* state) {
-    return state && !state->isAir();
-}
-
 void CavePlacements::bootstrap() {
     if (s_initialized) return;
 
@@ -217,8 +203,8 @@ void CavePlacements::bootstrap() {
         // EnvironmentScanPlacement: scan UP for solid block, allow only air, max 12 steps
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::UP,
-            solidBlockCheck,
-            airBlockCheck,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 
@@ -259,8 +245,8 @@ void CavePlacements::bootstrap() {
         // EnvironmentScanPlacement: scan DOWN for solid block, allow only air, max 12 steps
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::DOWN,
-            solidBlockCheck,
-            airBlockCheck,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 
@@ -301,8 +287,8 @@ void CavePlacements::bootstrap() {
         // EnvironmentScanPlacement: scan DOWN for solid block, allow only air, max 12 steps
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::DOWN,
-            solidBlockCheck,
-            airBlockCheck,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 
@@ -319,7 +305,7 @@ void CavePlacements::bootstrap() {
             &BiomeFilter::biome()
         };
 
-        LUSH_CAVES_CLAY = createPlaced(CaveFeatures::CLAY_WITH_DRIPLEAVES, modifiers, "LUSH_CAVES_CLAY");
+        LUSH_CAVES_CLAY = createPlaced(CaveFeatures::LUSH_CAVES_CLAY, modifiers, "LUSH_CAVES_CLAY");
     }
 
     // =========================================================================
@@ -341,11 +327,10 @@ void CavePlacements::bootstrap() {
         s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
 
         // EnvironmentScanPlacement: scan UP for block with sturdy face down, allow only air, max 12 steps
-        // Note: Using sturdyFaceDownCheck which is !isAir() approximation
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::UP,
-            sturdyFaceDownCheck,
-            airBlockCheck,
+            BlockPredicate::hasSturdyFace(core::Direction::DOWN),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 
@@ -692,8 +677,8 @@ void CavePlacements::bootstrap() {
         // EnvironmentScanPlacement: scan UP for solid block, allow only air, max 12 steps
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::UP,
-            solidBlockCheck,
-            airBlockCheck,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 
@@ -734,8 +719,8 @@ void CavePlacements::bootstrap() {
         // EnvironmentScanPlacement: scan UP for solid block, allow only air, max 12 steps
         s_envScanPlacements.push_back(EnvironmentScanPlacement::scanningFor(
             EnvironmentScanPlacement::Direction::UP,
-            solidBlockCheck,
-            airBlockCheck,
+            BlockPredicate::solid(),
+            BlockPredicate::ONLY_IN_AIR_PREDICATE,
             12
         ));
 

@@ -23,6 +23,7 @@ Block* minecraft::world::level::block::Blocks::DEEPSLATE = nullptr;
 Block* minecraft::world::level::block::Blocks::COBBLESTONE = nullptr;
 Block* minecraft::world::level::block::Blocks::MOSSY_COBBLESTONE = nullptr;
 Block* minecraft::world::level::block::Blocks::DIRT = nullptr;
+Block* minecraft::world::level::block::Blocks::ROOTED_DIRT = nullptr;
 Block* minecraft::world::level::block::Blocks::COARSE_DIRT = nullptr;
 Block* minecraft::world::level::block::Blocks::PODZOL = nullptr;
 Block* minecraft::world::level::block::Blocks::GRASS_BLOCK = nullptr;
@@ -57,10 +58,11 @@ Block* minecraft::world::level::block::Blocks::AMETHYST_CLUSTER = nullptr;
 // Clay and mud blocks
 Block* minecraft::world::level::block::Blocks::CLAY = nullptr;
 Block* minecraft::world::level::block::Blocks::MUD = nullptr;
+Block* minecraft::world::level::block::Blocks::MUDDY_MANGROVE_ROOTS = nullptr;
 Block* minecraft::world::level::block::Blocks::MAGMA_BLOCK = nullptr;
 
 // Sculk blocks
-Block* minecraft::world::level::block::Blocks::SCULK = nullptr;
+SculkBlock* minecraft::world::level::block::Blocks::SCULK = nullptr;
 Block* minecraft::world::level::block::Blocks::SCULK_CATALYST = nullptr;
 Block* minecraft::world::level::block::Blocks::SCULK_SENSOR = nullptr;
 Block* minecraft::world::level::block::Blocks::SCULK_SHRIEKER = nullptr;
@@ -102,36 +104,36 @@ Block* minecraft::world::level::block::Blocks::RED_TERRACOTTA = nullptr;
 Block* minecraft::world::level::block::Blocks::LIGHT_GRAY_TERRACOTTA = nullptr;
 
 // Vegetation - small plants
-Block* minecraft::world::level::block::Blocks::SHORT_GRASS = nullptr;
-Block* minecraft::world::level::block::Blocks::TALL_GRASS = nullptr;
-Block* minecraft::world::level::block::Blocks::FERN = nullptr;
-Block* minecraft::world::level::block::Blocks::LARGE_FERN = nullptr;
-Block* minecraft::world::level::block::Blocks::DEAD_BUSH = nullptr;
-Block* minecraft::world::level::block::Blocks::BUSH = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::SHORT_GRASS = nullptr;
+DoublePlantBlock* minecraft::world::level::block::Blocks::TALL_GRASS = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::FERN = nullptr;
+DoublePlantBlock* minecraft::world::level::block::Blocks::LARGE_FERN = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::DEAD_BUSH = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::BUSH = nullptr;
 
 // Flowers
-Block* minecraft::world::level::block::Blocks::DANDELION = nullptr;
-Block* minecraft::world::level::block::Blocks::POPPY = nullptr;
-Block* minecraft::world::level::block::Blocks::BLUE_ORCHID = nullptr;
-Block* minecraft::world::level::block::Blocks::ALLIUM = nullptr;
-Block* minecraft::world::level::block::Blocks::AZURE_BLUET = nullptr;
-Block* minecraft::world::level::block::Blocks::RED_TULIP = nullptr;
-Block* minecraft::world::level::block::Blocks::ORANGE_TULIP = nullptr;
-Block* minecraft::world::level::block::Blocks::WHITE_TULIP = nullptr;
-Block* minecraft::world::level::block::Blocks::PINK_TULIP = nullptr;
-Block* minecraft::world::level::block::Blocks::OXEYE_DAISY = nullptr;
-Block* minecraft::world::level::block::Blocks::CORNFLOWER = nullptr;
-Block* minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::DANDELION = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::POPPY = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::BLUE_ORCHID = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::ALLIUM = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::AZURE_BLUET = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::RED_TULIP = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::ORANGE_TULIP = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::WHITE_TULIP = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::PINK_TULIP = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::OXEYE_DAISY = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::CORNFLOWER = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::LILY_OF_THE_VALLEY = nullptr;
 
 // Tall flowers
-Block* minecraft::world::level::block::Blocks::SUNFLOWER = nullptr;
-Block* minecraft::world::level::block::Blocks::LILAC = nullptr;
-Block* minecraft::world::level::block::Blocks::ROSE_BUSH = nullptr;
-Block* minecraft::world::level::block::Blocks::PEONY = nullptr;
+TallFlowerBlock* minecraft::world::level::block::Blocks::SUNFLOWER = nullptr;
+TallFlowerBlock* minecraft::world::level::block::Blocks::LILAC = nullptr;
+TallFlowerBlock* minecraft::world::level::block::Blocks::ROSE_BUSH = nullptr;
+TallFlowerBlock* minecraft::world::level::block::Blocks::PEONY = nullptr;
 
 // Mushrooms
-Block* minecraft::world::level::block::Blocks::BROWN_MUSHROOM = nullptr;
-Block* minecraft::world::level::block::Blocks::RED_MUSHROOM = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::BROWN_MUSHROOM = nullptr;
+BushBlock* minecraft::world::level::block::Blocks::RED_MUSHROOM = nullptr;
 
 // Huge mushroom blocks
 Block* minecraft::world::level::block::Blocks::BROWN_MUSHROOM_BLOCK = nullptr;
@@ -140,6 +142,8 @@ Block* minecraft::world::level::block::Blocks::MUSHROOM_STEM = nullptr;
 
 // Leaf litter and vines
 LeafLitterBlock* minecraft::world::level::block::Blocks::LEAF_LITTER = nullptr;
+FlowerBedBlock* minecraft::world::level::block::Blocks::PINK_PETALS = nullptr;
+FlowerBedBlock* minecraft::world::level::block::Blocks::WILDFLOWERS = nullptr;
 Block* minecraft::world::level::block::Blocks::VINE = nullptr;
 
 // Moss and lush cave vegetation
@@ -159,6 +163,7 @@ Block* minecraft::world::level::block::Blocks::SMALL_DRIPLEAF = nullptr;
 Block* minecraft::world::level::block::Blocks::PALE_MOSS_BLOCK = nullptr;
 Block* minecraft::world::level::block::Blocks::PALE_MOSS_CARPET = nullptr;
 Block* minecraft::world::level::block::Blocks::PALE_HANGING_MOSS = nullptr;
+EyeblossomBlock* minecraft::world::level::block::Blocks::CLOSED_EYEBLOSSOM = nullptr;
 
 // Ocean vegetation
 Block* minecraft::world::level::block::Blocks::SEAGRASS = nullptr;
@@ -171,10 +176,22 @@ Block* minecraft::world::level::block::Blocks::CACTUS = nullptr;
 Block* minecraft::world::level::block::Blocks::SUGAR_CANE = nullptr;
 Block* minecraft::world::level::block::Blocks::PUMPKIN = nullptr;
 Block* minecraft::world::level::block::Blocks::MELON = nullptr;
+Block* minecraft::world::level::block::Blocks::COCOA = nullptr;
+Block* minecraft::world::level::block::Blocks::MANGROVE_ROOTS = nullptr;
+Block* minecraft::world::level::block::Blocks::OAK_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::SPRUCE_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::BIRCH_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::JUNGLE_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::ACACIA_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::CHERRY_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::DARK_OAK_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::PALE_OAK_SAPLING = nullptr;
+Block* minecraft::world::level::block::Blocks::MANGROVE_PROPAGULE = nullptr;
 
 // Dungeon blocks
 Block* minecraft::world::level::block::Blocks::SPAWNER = nullptr;
 Block* minecraft::world::level::block::Blocks::CHEST = nullptr;
+Block* minecraft::world::level::block::Blocks::BEE_NEST = nullptr;
 
 // =========================================================================
 // Blocks with properties
@@ -257,7 +274,7 @@ Block* minecraft::world::level::block::Blocks::createAirBlock(const std::string&
 
 Block* minecraft::world::level::block::Blocks::createLiquidBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name).liquid().noCollission();
+    props.setId(name).liquid().noCollission().replaceable();
     auto block = new Block(props);
     registerBlock(name, block);
     return block;
@@ -271,9 +288,121 @@ Block* minecraft::world::level::block::Blocks::createPlantBlock(const std::strin
     return block;
 }
 
+Block* minecraft::world::level::block::Blocks::createReplaceablePlantBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).noCollission().replaceable();
+    auto block = new Block(props);
+    registerBlock(name, block);
+    return block;
+}
+
+CarpetBlock* minecraft::world::level::block::Blocks::createCarpetBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new CarpetBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+BushBlock* minecraft::world::level::block::Blocks::createBushBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new BushBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+VineBlock* minecraft::world::level::block::Blocks::createVineBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new VineBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+AzaleaBlock* minecraft::world::level::block::Blocks::createAzaleaBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new AzaleaBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+CaveVinesBlock* minecraft::world::level::block::Blocks::createCaveVinesBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new CaveVinesBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+CaveVinesPlantBlock* minecraft::world::level::block::Blocks::createCaveVinesPlantBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new CaveVinesPlantBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+SmallDripleafBlock* minecraft::world::level::block::Blocks::createSmallDripleafBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new SmallDripleafBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+BigDripleafBlock* minecraft::world::level::block::Blocks::createBigDripleafBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new BigDripleafBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+BigDripleafStemBlock* minecraft::world::level::block::Blocks::createBigDripleafStemBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name);
+    auto block = new BigDripleafStemBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+DoublePlantBlock* minecraft::world::level::block::Blocks::createDoublePlantBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new DoublePlantBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+TallFlowerBlock* minecraft::world::level::block::Blocks::createTallFlowerBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new TallFlowerBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+FlowerBedBlock* minecraft::world::level::block::Blocks::createFlowerBedBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new FlowerBedBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+EyeblossomBlock* minecraft::world::level::block::Blocks::createEyeblossomBlock(const std::string& name, bool open) {
+    Block::Properties props;
+    props.setId(name).replaceable().replaceableByTrees();
+    auto block = new EyeblossomBlock(open, props);
+    registerBlock(name, block);
+    return block;
+}
+
 Block* minecraft::world::level::block::Blocks::createReplaceableByTreesBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name).noCollission().replaceableByTrees();
+    props.setId(name).noCollission().replaceable().replaceableByTrees();
     auto block = new Block(props);
     registerBlock(name, block);
     return block;
@@ -290,13 +419,11 @@ LeavesBlock* minecraft::world::level::block::Blocks::createLeavesBlock(const std
 }
 
 RotatedPillarBlock* minecraft::world::level::block::Blocks::createLogBlock(const std::string& name) {
-    // TEMPORARY: Using simple Block to avoid state system issues
-    // TODO: Fix std::any_cast issue in StateDefinition and use RotatedPillarBlock
     Block::Properties props;
     props.setId(name).log();
-    auto block = new Block(props);
+    auto block = new RotatedPillarBlock(props);
     registerBlock(name, block);
-    return reinterpret_cast<RotatedPillarBlock*>(block);
+    return block;
 }
 
 // =========================================================================
@@ -326,6 +453,7 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     COBBLESTONE = createSimpleBlock("minecraft:cobblestone");
     MOSSY_COBBLESTONE = createSimpleBlock("minecraft:mossy_cobblestone");
     DIRT = createSimpleBlock("minecraft:dirt");
+    ROOTED_DIRT = createSimpleBlock("minecraft:rooted_dirt");
     COARSE_DIRT = createSimpleBlock("minecraft:coarse_dirt");
     PODZOL = createSimpleBlock("minecraft:podzol");
     GRASS_BLOCK = createSimpleBlock("minecraft:grass_block");
@@ -357,14 +485,14 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     ICE = createSimpleBlock("minecraft:ice");
     {
         Block::Properties props;
-        props.setId("minecraft:powder_snow").noCollission();
+        props.setId("minecraft:powder_snow").noCollission().replaceable();
         POWDER_SNOW = new Block(props);
         registerBlock("minecraft:powder_snow", POWDER_SNOW);
     }
     // Snow layer block (1-8 layers)
     {
         Block::Properties props;
-        props.setId("minecraft:snow").noCollission();
+        props.setId("minecraft:snow").noCollission().replaceable();
         SNOW = new Block(props);
         registerBlock("minecraft:snow", SNOW);
     }
@@ -387,21 +515,38 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // =========================================================================
     CLAY = createSimpleBlock("minecraft:clay");
     MUD = createSimpleBlock("minecraft:mud");
+    MUDDY_MANGROVE_ROOTS = createSimpleBlock("minecraft:muddy_mangrove_roots");
     MAGMA_BLOCK = createSimpleBlock("minecraft:magma_block");
 
     // =========================================================================
     // Sculk blocks
     // =========================================================================
-    SCULK = createSimpleBlock("minecraft:sculk");
+    {
+        Block::Properties props;
+        props.setId("minecraft:sculk");
+        SCULK = new SculkBlock(props);
+        registerBlock("minecraft:sculk", SCULK);
+    }
     SCULK_CATALYST = createSimpleBlock("minecraft:sculk_catalyst");
-    SCULK_SENSOR = createSimpleBlock("minecraft:sculk_sensor");
-    SCULK_SHRIEKER = createSimpleBlock("minecraft:sculk_shrieker");
+    {
+        Block::Properties props;
+        props.setId("minecraft:sculk_sensor");
+        SCULK_SENSOR = new SculkSensorBlock(props);
+        registerBlock("minecraft:sculk_sensor", SCULK_SENSOR);
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:sculk_shrieker");
+        SCULK_SHRIEKER = new SculkShriekerBlock(props);
+        registerBlock("minecraft:sculk_shrieker", SCULK_SHRIEKER);
+    }
 
     // SculkVeinBlock with proper multiface properties (6 face directions + waterlogged)
     // Reference: MultifaceBlock.java - each face can be independently enabled
     {
         Block::Properties props;
         props.setId("minecraft:sculk_vein");
+        props.noCollission();
         SCULK_VEIN = new SculkVeinBlock(props);
         registerBlock("minecraft:sculk_vein", SCULK_VEIN);
     }
@@ -453,42 +598,42 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // =========================================================================
     // Vegetation - small plants (no collision)
     // =========================================================================
-    SHORT_GRASS = createReplaceableByTreesBlock("minecraft:short_grass");
-    TALL_GRASS = createReplaceableByTreesBlock("minecraft:tall_grass");
-    FERN = createReplaceableByTreesBlock("minecraft:fern");
-    LARGE_FERN = createReplaceableByTreesBlock("minecraft:large_fern");
-    DEAD_BUSH = createReplaceableByTreesBlock("minecraft:dead_bush");
-    BUSH = createReplaceableByTreesBlock("minecraft:bush");
+    SHORT_GRASS = createBushBlock("minecraft:short_grass");
+    TALL_GRASS = createDoublePlantBlock("minecraft:tall_grass");
+    FERN = createBushBlock("minecraft:fern");
+    LARGE_FERN = createDoublePlantBlock("minecraft:large_fern");
+    DEAD_BUSH = createBushBlock("minecraft:dead_bush");
+    BUSH = createBushBlock("minecraft:bush");
 
     // =========================================================================
     // Flowers (no collision)
     // =========================================================================
-    DANDELION = createReplaceableByTreesBlock("minecraft:dandelion");
-    POPPY = createReplaceableByTreesBlock("minecraft:poppy");
-    BLUE_ORCHID = createReplaceableByTreesBlock("minecraft:blue_orchid");
-    ALLIUM = createReplaceableByTreesBlock("minecraft:allium");
-    AZURE_BLUET = createReplaceableByTreesBlock("minecraft:azure_bluet");
-    RED_TULIP = createReplaceableByTreesBlock("minecraft:red_tulip");
-    ORANGE_TULIP = createReplaceableByTreesBlock("minecraft:orange_tulip");
-    WHITE_TULIP = createReplaceableByTreesBlock("minecraft:white_tulip");
-    PINK_TULIP = createReplaceableByTreesBlock("minecraft:pink_tulip");
-    OXEYE_DAISY = createReplaceableByTreesBlock("minecraft:oxeye_daisy");
-    CORNFLOWER = createReplaceableByTreesBlock("minecraft:cornflower");
-    LILY_OF_THE_VALLEY = createReplaceableByTreesBlock("minecraft:lily_of_the_valley");
+    DANDELION = createBushBlock("minecraft:dandelion");
+    POPPY = createBushBlock("minecraft:poppy");
+    BLUE_ORCHID = createBushBlock("minecraft:blue_orchid");
+    ALLIUM = createBushBlock("minecraft:allium");
+    AZURE_BLUET = createBushBlock("minecraft:azure_bluet");
+    RED_TULIP = createBushBlock("minecraft:red_tulip");
+    ORANGE_TULIP = createBushBlock("minecraft:orange_tulip");
+    WHITE_TULIP = createBushBlock("minecraft:white_tulip");
+    PINK_TULIP = createBushBlock("minecraft:pink_tulip");
+    OXEYE_DAISY = createBushBlock("minecraft:oxeye_daisy");
+    CORNFLOWER = createBushBlock("minecraft:cornflower");
+    LILY_OF_THE_VALLEY = createBushBlock("minecraft:lily_of_the_valley");
 
     // =========================================================================
     // Tall flowers (two-block, no collision)
     // =========================================================================
-    SUNFLOWER = createReplaceableByTreesBlock("minecraft:sunflower");
-    LILAC = createReplaceableByTreesBlock("minecraft:lilac");
-    ROSE_BUSH = createReplaceableByTreesBlock("minecraft:rose_bush");
-    PEONY = createReplaceableByTreesBlock("minecraft:peony");
+    SUNFLOWER = createTallFlowerBlock("minecraft:sunflower");
+    LILAC = createTallFlowerBlock("minecraft:lilac");
+    ROSE_BUSH = createTallFlowerBlock("minecraft:rose_bush");
+    PEONY = createTallFlowerBlock("minecraft:peony");
 
     // =========================================================================
     // Mushrooms (small, no collision)
     // =========================================================================
-    BROWN_MUSHROOM = createPlantBlock("minecraft:brown_mushroom");
-    RED_MUSHROOM = createPlantBlock("minecraft:red_mushroom");
+    BROWN_MUSHROOM = createBushBlock("minecraft:brown_mushroom");
+    RED_MUSHROOM = createBushBlock("minecraft:red_mushroom");
 
     // =========================================================================
     // Huge mushroom blocks (solid)
@@ -505,27 +650,29 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // Reference: LeafLitterBlock.java
     {
         Block::Properties props;
-        props.noCollission().setId("minecraft:leaf_litter").replaceableByTrees();
+        props.noCollission().replaceable().setId("minecraft:leaf_litter").replaceableByTrees();
         LEAF_LITTER = new LeafLitterBlock(props);
         registerBlock("minecraft:leaf_litter", LEAF_LITTER);
     }
-    VINE = createReplaceableByTreesBlock("minecraft:vine");
+    PINK_PETALS = createFlowerBedBlock("minecraft:pink_petals");
+    WILDFLOWERS = createFlowerBedBlock("minecraft:wildflowers");
+    VINE = createVineBlock("minecraft:vine");
 
     // =========================================================================
     // Moss and lush cave vegetation
     // Reference: Used in lush caves biome features
     // =========================================================================
     MOSS_BLOCK = createSimpleBlock("minecraft:moss_block");
-    MOSS_CARPET = createPlantBlock("minecraft:moss_carpet");
-    CAVE_VINES = createPlantBlock("minecraft:cave_vines");
-    CAVE_VINES_PLANT = createPlantBlock("minecraft:cave_vines_plant");
+    MOSS_CARPET = createCarpetBlock("minecraft:moss_carpet");
+    CAVE_VINES = createCaveVinesBlock("minecraft:cave_vines");
+    CAVE_VINES_PLANT = createCaveVinesPlantBlock("minecraft:cave_vines_plant");
     GLOW_LICHEN = createReplaceableByTreesBlock("minecraft:glow_lichen");
-    AZALEA = createPlantBlock("minecraft:azalea");
-    FLOWERING_AZALEA = createPlantBlock("minecraft:flowering_azalea");
-    SPORE_BLOSSOM = createPlantBlock("minecraft:spore_blossom");
-    BIG_DRIPLEAF = createPlantBlock("minecraft:big_dripleaf");
-    BIG_DRIPLEAF_STEM = createPlantBlock("minecraft:big_dripleaf_stem");
-    SMALL_DRIPLEAF = createPlantBlock("minecraft:small_dripleaf");
+    AZALEA = createAzaleaBlock("minecraft:azalea");
+    FLOWERING_AZALEA = createAzaleaBlock("minecraft:flowering_azalea");
+    SPORE_BLOSSOM = createReplaceablePlantBlock("minecraft:spore_blossom");
+    BIG_DRIPLEAF = createBigDripleafBlock("minecraft:big_dripleaf");
+    BIG_DRIPLEAF_STEM = createBigDripleafStemBlock("minecraft:big_dripleaf_stem");
+    SMALL_DRIPLEAF = createSmallDripleafBlock("minecraft:small_dripleaf");
 
     // =========================================================================
     // Pale garden vegetation
@@ -533,7 +680,8 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // =========================================================================
     PALE_MOSS_BLOCK = createSimpleBlock("minecraft:pale_moss_block");
     PALE_MOSS_CARPET = createReplaceableByTreesBlock("minecraft:pale_moss_carpet");
-    PALE_HANGING_MOSS = createPlantBlock("minecraft:pale_hanging_moss");
+    PALE_HANGING_MOSS = createReplaceablePlantBlock("minecraft:pale_hanging_moss");
+    CLOSED_EYEBLOSSOM = createEyeblossomBlock("minecraft:closed_eyeblossom", false);
 
     // =========================================================================
     // Ocean vegetation
@@ -541,22 +689,34 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // =========================================================================
     SEAGRASS = createReplaceableByTreesBlock("minecraft:seagrass");
     TALL_SEAGRASS = createReplaceableByTreesBlock("minecraft:tall_seagrass");
-    KELP = createPlantBlock("minecraft:kelp");
-    KELP_PLANT = createPlantBlock("minecraft:kelp_plant");
+    KELP = createReplaceablePlantBlock("minecraft:kelp");
+    KELP_PLANT = createReplaceablePlantBlock("minecraft:kelp_plant");
 
     // =========================================================================
     // Other vegetation
     // =========================================================================
     CACTUS = createSimpleBlock("minecraft:cactus");
-    SUGAR_CANE = createPlantBlock("minecraft:sugar_cane");
+    SUGAR_CANE = createReplaceablePlantBlock("minecraft:sugar_cane");
     PUMPKIN = createSimpleBlock("minecraft:pumpkin");
     MELON = createSimpleBlock("minecraft:melon");
+    COCOA = createReplaceablePlantBlock("minecraft:cocoa");
+    MANGROVE_ROOTS = createSimpleBlock("minecraft:mangrove_roots");
+    OAK_SAPLING = createReplaceablePlantBlock("minecraft:oak_sapling");
+    SPRUCE_SAPLING = createReplaceablePlantBlock("minecraft:spruce_sapling");
+    BIRCH_SAPLING = createReplaceablePlantBlock("minecraft:birch_sapling");
+    JUNGLE_SAPLING = createReplaceablePlantBlock("minecraft:jungle_sapling");
+    ACACIA_SAPLING = createReplaceablePlantBlock("minecraft:acacia_sapling");
+    CHERRY_SAPLING = createReplaceablePlantBlock("minecraft:cherry_sapling");
+    DARK_OAK_SAPLING = createReplaceablePlantBlock("minecraft:dark_oak_sapling");
+    PALE_OAK_SAPLING = createReplaceablePlantBlock("minecraft:pale_oak_sapling");
+    MANGROVE_PROPAGULE = createReplaceablePlantBlock("minecraft:mangrove_propagule");
 
     // =========================================================================
     // Dungeon blocks
     // =========================================================================
     SPAWNER = createSimpleBlock("minecraft:spawner");
     CHEST = createSimpleBlock("minecraft:chest");
+    BEE_NEST = createSimpleBlock("minecraft:bee_nest");
 
     // =========================================================================
     // Stairs - TEMPORARY: Using simple Block to avoid state system issues

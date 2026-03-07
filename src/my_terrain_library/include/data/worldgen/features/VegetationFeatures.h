@@ -26,6 +26,7 @@ private:
     // Static feature instances
     static levelgen::RandomPatchFeature s_randomPatchFeature;
     static levelgen::SimpleBlockFeature s_simpleBlockFeature;
+    static levelgen::VinesFeature s_vinesFeature;
 
     static bool s_initialized;
 
@@ -50,8 +51,6 @@ public:
     static levelgen::ConfiguredFeature* FLOWER_MEADOW;    // Meadow flowers
     static levelgen::ConfiguredFeature* FLOWER_CHERRY;    // Cherry pink petals
     static levelgen::ConfiguredFeature* FLOWER_SWAMP;     // Blue orchid
-    static levelgen::ConfiguredFeature* FLOWER_WARM;      // Warm biome flowers
-    static levelgen::ConfiguredFeature* FLOWER_FOREST;    // Forest flowers
     static levelgen::ConfiguredFeature* FLOWER_FLOWER_FOREST;  // Flower forest flowers
     static levelgen::ConfiguredFeature* FLOWER_PALE_GARDEN;    // Pale garden eyeblossom
     static levelgen::ConfiguredFeature* WILDFLOWERS;      // Wildflowers
@@ -152,22 +151,10 @@ public:
 
 private:
     /**
-     * Helper to check if a block can support grass/flowers
-     * Reference: BlockPredicates.java - canSurvive checks
-     */
-    static bool canPlaceOnGround(levelgen::WorldGenLevel* level, const core::BlockPos& pos);
-
-    /**
      * Helper to create a simple grass placer function
      */
     static std::function<bool(levelgen::WorldGenLevel*, levelgen::ChunkGenerator*, levelgen::WorldgenRandom&, const core::BlockPos&)>
     createGrassPlacer(BlockState* block);
-
-    /**
-     * Helper to create a flower placer that randomly picks from options
-     */
-    static std::function<bool(levelgen::WorldGenLevel*, levelgen::ChunkGenerator*, levelgen::WorldgenRandom&, const core::BlockPos&)>
-    createFlowerPlacer(const std::vector<BlockState*>& flowers);
 };
 
 } // namespace features

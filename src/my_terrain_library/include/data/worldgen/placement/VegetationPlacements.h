@@ -3,6 +3,7 @@
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/placement/PlacementModifiers.h"
 #include "data/worldgen/features/VegetationFeatures.h"
+#include "world/level/block/state/BlockState.h"
 #include <vector>
 
 // Reference: net/minecraft/data/worldgen/placement/VegetationPlacements.java
@@ -229,7 +230,7 @@ public:
      * Helper for tree placements with sapling survival check
      * Reference: VegetationPlacements.java treePlacement(PlacementModifier, Block)
      */
-    static std::vector<PlacementModifier*> treePlacementWithSapling(PlacementModifier* frequency);
+    static std::vector<PlacementModifier*> treePlacementWithSapling(PlacementModifier* frequency, BlockState* sapling);
 
 private:
     /**

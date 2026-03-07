@@ -3,6 +3,7 @@
 #include "data/worldgen/features/TreeFeatures.h"
 #include "levelgen/carver/CarverConfiguration.h"
 #include "levelgen/blockpredicates/BlockPredicate.h"
+#include "world/level/block/Blocks.h"
 #include <deque>
 
 // Reference: net/minecraft/data/worldgen/placement/VegetationPlacements.java
@@ -242,18 +243,14 @@ std::vector<PlacementModifier*> VegetationPlacements::treePlacement(PlacementMod
     return treePlacementBase(frequency);
 }
 
-std::vector<PlacementModifier*> VegetationPlacements::treePlacementWithSapling(PlacementModifier* frequency) {
+std::vector<PlacementModifier*> VegetationPlacements::treePlacementWithSapling(PlacementModifier* frequency, BlockState* sapling) {
     // Reference: VegetationPlacements.java lines 153-157
     // treePlacement(PlacementModifier, Block) adds BlockPredicateFilter.forPredicate(wouldSurvive)
     using namespace levelgen::blockpredicates;
     auto result = treePlacementBase(frequency);
-    auto wouldSurvive = BlockPredicate::wouldSurvive(nullptr, {0, 0, 0});
+    auto wouldSurvive = BlockPredicate::wouldSurvive(sapling, {0, 0, 0});
     s_blockPredicates.push_back(wouldSurvive);
-    s_blockPredicateFilters.push_back(BlockPredicateFilter::hasSturdyFace(
-        [wouldSurvive](const PlacementContext& ctx, const core::BlockPos& pos) {
-            return wouldSurvive->test(*ctx.getLevel(), pos);
-        }
-    ));
+    s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(wouldSurvive));
     result.push_back(&s_blockPredicateFilters.back());
     return result;
 }
@@ -975,14 +972,9 @@ void VegetationPlacements::bootstrap() {
         s_surfaceWaterDepthFilters.push_back(SurfaceWaterDepthFilter::forMaxDepth(0));
 
         // BlockPredicateFilter for wouldSurvive(OAK_SAPLING)
-        // Note: WouldSurvivePredicate is simplified to return true for in-bounds positions
-        auto wouldSurvive = BlockPredicate::wouldSurvive(nullptr, {0, 0, 0});
+        auto wouldSurvive = BlockPredicate::wouldSurvive(world::level::block::Blocks::getDefaultState("minecraft:oak_sapling"), {0, 0, 0});
         s_blockPredicates.push_back(wouldSurvive);
-        s_blockPredicateFilters.push_back(BlockPredicateFilter::hasSturdyFace(
-            [wouldSurvive](const PlacementContext& ctx, const core::BlockPos& pos) {
-                return wouldSurvive->test(*ctx.getLevel(), pos);
-            }
-        ));
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(wouldSurvive));
 
         TREES_PLAINS = createPlaced(
             VegetationFeatures::TREES_PLAINS,
@@ -1104,7 +1096,7 @@ void VegetationPlacements::bootstrap() {
         s_countPlacements.push_back(CountPlacement::countExtra(10, 0.1f, 1));
         TREES_CHERRY = createPlaced(
             features::TreeFeatures::CHERRY_BEES_005,
-            treePlacementWithSapling(&s_countPlacements.back()),
+            treePlacementWithSapling(&s_countPlacements.back(), world::level::block::Blocks::getDefaultState("minecraft:cherry_sapling")),
             "TREES_CHERRY"
         );
     }
@@ -1143,7 +1135,7 @@ void VegetationPlacements::bootstrap() {
         s_countPlacements.push_back(CountPlacement::countExtra(5, 0.1f, 1));
         TREES_BADLANDS = createPlaced(
             VegetationFeatures::TREES_BADLANDS,
-            treePlacementWithSapling(&s_countPlacements.back()),
+            treePlacementWithSapling(&s_countPlacements.back(), world::level::block::Blocks::getDefaultState("minecraft:oak_sapling")),
             "TREES_BADLANDS"
         );
     }
@@ -1156,7 +1148,7 @@ void VegetationPlacements::bootstrap() {
         s_countPlacements.push_back(CountPlacement::countExtra(0, 0.1f, 1));
         TREES_SNOWY = createPlaced(
             VegetationFeatures::TREES_SNOWY,
-            treePlacementWithSapling(&s_countPlacements.back()),
+            treePlacementWithSapling(&s_countPlacements.back(), world::level::block::Blocks::getDefaultState("minecraft:spruce_sapling")),
             "TREES_SNOWY"
         );
     }
@@ -1222,7 +1214,7 @@ void VegetationPlacements::bootstrap() {
         s_countPlacements.push_back(CountPlacement::countExtra(10, 0.1f, 1));
         TREES_BIRCH = createPlaced(
             VegetationFeatures::TREES_BIRCH,
-            treePlacementWithSapling(&s_countPlacements.back()),
+            treePlacementWithSapling(&s_countPlacements.back(), world::level::block::Blocks::getDefaultState("minecraft:birch_sapling")),
             "TREES_BIRCH"
         );
     }

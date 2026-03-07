@@ -8,6 +8,7 @@
 #include "levelgen/SurfaceRules.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/Blocks.h"
+#include "data/worldgen/BiomeFeatureRegistry.h"
 #include "levelgen/NoiseChunk.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/Blender.h"
@@ -149,11 +150,10 @@ void ChunkGenerator::applyBiomeDecoration(
 
         for (const world::biome::Biome* biome : possibleBiomes) {
             if (!biome) continue;
-            // Get features for this biome at this step
-            // In Java: featuresInBiome = biome.getGenerationSettings().features()
-            // We check if each feature in stepFeatureData is valid for this biome
-            for (placement::PlacedFeature* feature : stepFeatureData.features) {
-                int idx = stepFeatureData.getIndex(feature);
+            const auto& featuresInBiomeThisStep =
+                data::worldgen::BiomeFeatureRegistry::getFeaturesForStep(biome->getName(), stepIndex);
+            for (const placement::PlacedFeature* feature : featuresInBiomeThisStep) {
+                int idx = stepFeatureData.getIndex(const_cast<placement::PlacedFeature*>(feature));
                 if (idx >= 0) {
                     possibleFeatureIndices.insert(idx);
                 }
@@ -179,12 +179,11 @@ void ChunkGenerator::applyBiomeDecoration(
             placement::PlacedFeature* feature = stepFeatureData.features[globalIndex];
             if (!feature) continue;
 
-
             // Set current step/index for logging and block-change tracing
             placement::PlacedFeature::setCurrentStepIndex(stepIndex, globalIndex);
             feature::BlockChangeTrace::currentStep = stepIndex;
             feature::BlockChangeTrace::currentIndex = globalIndex;
-            feature::BlockChangeTrace::currentFeatureName = feature->getName();
+            feature::BlockChangeTrace::currentFeatureName = feature->getDebugName();
 
             // Set feature seed using GLOBAL index (critical for parity)
             // Reference: random.setFeatureSeed(decorationSeed, globalIndexOfFeature, stepIndex);
@@ -195,14 +194,14 @@ void ChunkGenerator::applyBiomeDecoration(
                 uint64_t seedLo, seedHi;
                 random.getSeedState(seedLo, seedHi);
                 *feature::BlockChangeTrace::stream << "FEATURE STEP=" << stepIndex << " IDX=" << globalIndex
-                    << " " << feature->getName()
+                    << " " << feature->getDebugName()
                     << " seed_lo=" << seedLo << " seed_hi=" << seedHi
                     << " gauss_cached=" << random.hasNextGaussian() << "\n";
             }
 
             // Log feature info with random state if enabled
             if (s_featureLoggingEnabled && s_featureLogStream && s_logLevel >= 2) {
-                const std::string& featureName = feature->getName();
+                const std::string featureName = feature->getDebugName();
                 *s_featureLogStream << "FEATURE STEP=" << stepIndex << " IDX=" << globalIndex
                                     << " " << (featureName.empty() ? "(unnamed)" : featureName) << "\n";
 

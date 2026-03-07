@@ -90,6 +90,11 @@ public:
     const std::string& getName() const { return m_name; }
 
     /**
+     * Get the best available debug name for logging.
+     */
+    std::string getDebugName() const;
+
+    /**
      * Set feature name
      */
     void setName(const std::string& name) { m_name = name; }

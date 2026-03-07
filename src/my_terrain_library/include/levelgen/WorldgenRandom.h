@@ -6,6 +6,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 
 // Forward declare for return type
 namespace minecraft {
@@ -45,6 +46,14 @@ private:
     bool m_haveNextNextGaussian = false;
 
 public:
+    struct DebugStateSnapshot {
+        uint64_t seedLo;
+        uint64_t seedHi;
+        int32_t count;
+        double nextNextGaussian;
+        bool haveNextNextGaussian;
+    };
+
     /**
      * Constructor
      * Reference: WorldgenRandom.java lines 10-13
@@ -198,18 +207,28 @@ public:
      * Reference: BitRandomSource.java nextInt(bound)
      */
     int32_t nextInt(int32_t bound) {
-        if (bound <= 0) return 0;
+        if (bound <= 0) {
+            throw std::invalid_argument("Bound must be positive");
+        }
         if ((bound & (bound - 1)) == 0) {
             // Power of 2 - fast path
             return static_cast<int32_t>((static_cast<int64_t>(bound) * static_cast<int64_t>(next(31))) >> 31);
         }
-        // General case
-        int32_t bits, val;
+
+        // Java's BitRandomSource.nextInt(int) relies on 32-bit signed wraparound
+        // in the rejection check: sample - modulo + (bound - 1) < 0.
+        int32_t sample;
+        int32_t modulo;
         do {
-            bits = next(31);
-            val = bits % bound;
-        } while (bits - val + (bound - 1) < 0);
-        return val;
+            sample = next(31);
+            modulo = sample % bound;
+        } while (static_cast<int32_t>(
+            static_cast<uint32_t>(sample)
+            - static_cast<uint32_t>(modulo)
+            + static_cast<uint32_t>(bound - 1)
+        ) < 0);
+
+        return modulo;
     }
 
     /**
@@ -330,14 +349,32 @@ public:
         seedHi = gen.getSeedHi();
     }
 
+    DebugStateSnapshot captureDebugState() const {
+        uint64_t seedLo = 0;
+        uint64_t seedHi = 0;
+        getSeedState(seedLo, seedHi);
+        return DebugStateSnapshot{
+            seedLo,
+            seedHi,
+            m_count,
+            m_nextNextGaussian,
+            m_haveNextNextGaussian
+        };
+    }
+
+    void restoreDebugState(const DebugStateSnapshot& snapshot) {
+        m_randomSource.setStateDirectly(snapshot.seedLo, snapshot.seedHi);
+        m_count = snapshot.count;
+        m_nextNextGaussian = snapshot.nextNextGaussian;
+        m_haveNextNextGaussian = snapshot.haveNextNextGaussian;
+    }
+
     /**
-     * Set seed state for restoring random state after tracing.
-     * Updates the underlying generator state without replacing the XoroshiroRandomSource
-     * (which would invalidate the gaussianSource's pointer to its parent).
+     * Set only the xoroshiro state directly.
+     * This exists for low-level debugging; use restoreDebugState() when exact replay matters.
      */
     void setSeedState(uint64_t seedLo, uint64_t seedHi) {
         m_randomSource.setStateDirectly(seedLo, seedHi);
-        m_count = 0;
     }
 };
 

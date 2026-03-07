@@ -396,50 +396,12 @@ public:
                 // Get ALL biome keys in bootstrap order (matches Java's biomeSource.possibleBiomes())
                 const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
 
-
-                // Check for features appearing at multiple steps
-                std::map<const levelgen::placement::PlacedFeature*, std::set<int>> featureSteps;
-                for (size_t i = 0; i < allBiomeKeys.size(); ++i) {
-                    const auto& biomeKey = allBiomeKeys[i];
-                    const auto& feats = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
-                    if (i == 0) {
-                        for (size_t s = 0; s < feats.size(); ++s) {
-                            if (!feats[s].empty()) {
-                            }
-                        }
-                    }
-                    for (size_t step = 0; step < feats.size(); ++step) {
-                        for (const auto* f : feats[step]) {
-                            featureSteps[f].insert(step);
-                        }
-                    }
-                }
-                int multiStepFeatures = 0;
-                for (const auto& [f, steps] : featureSteps) {
-                    if (steps.size() > 1) {
-                        if (multiStepFeatures < 5) {
-                        }
-                        multiStepFeatures++;
-                    }
-                }
-
                 // Use FeatureSorter to build global feature order
                 // Reference: FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.possibleBiomes()), ...)
-                static bool debugLambda = true;
                 s_cachedFeaturesPerStep = levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
                     allBiomeKeys,
                     [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
                         const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
-                        static int lambdaCalls = 0;
-                        if (lambdaCalls < 1) {
-                            int totalFeatures = 0;
-                            for (const auto& sv : features) totalFeatures += sv.size();
-                            // Also check directly
-                            const auto& directFeatures = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome("minecraft:mushroom_fields");
-                            int directTotal = 0;
-                            for (const auto& sv : directFeatures) directTotal += sv.size();
-                            lambdaCalls++;
-                        }
                         // Convert const PlacedFeature* to PlacedFeature* (FeatureSorter needs non-const)
                         std::vector<std::vector<levelgen::placement::PlacedFeature*>> result;
                         result.reserve(features.size());
@@ -457,9 +419,6 @@ public:
                 );
 
                 s_featuresPerStepBuilt = true;
-
-                for (size_t i = 0; i < s_cachedFeaturesPerStep.size(); ++i) {
-                }
             }
 
             // Use the cached/memoized features for this chunk

@@ -4,13 +4,29 @@
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/blocks/StairBlock.h"
 #include "world/level/block/blocks/SlabBlock.h"
+#include "world/level/block/blocks/BushBlock.h"
+#include "world/level/block/blocks/DoublePlantBlock.h"
+#include "world/level/block/blocks/EyeblossomBlock.h"
 #include "world/level/block/blocks/FenceBlock.h"
 #include "world/level/block/blocks/DoorBlock.h"
 #include "world/level/block/blocks/WallBlock.h"
 #include "world/level/block/blocks/LeavesBlock.h"
 #include "world/level/block/blocks/LeafLitterBlock.h"
+#include "world/level/block/blocks/FlowerBedBlock.h"
+#include "world/level/block/blocks/CarpetBlock.h"
 #include "world/level/block/blocks/RotatedPillarBlock.h"
+#include "world/level/block/blocks/VineBlock.h"
+#include "world/level/block/blocks/AzaleaBlock.h"
+#include "world/level/block/blocks/CaveVinesBlock.h"
+#include "world/level/block/blocks/CaveVinesPlantBlock.h"
+#include "world/level/block/blocks/SmallDripleafBlock.h"
+#include "world/level/block/blocks/BigDripleafBlock.h"
+#include "world/level/block/blocks/BigDripleafStemBlock.h"
+#include "world/level/block/blocks/SculkBlock.h"
+#include "world/level/block/blocks/SculkSensorBlock.h"
+#include "world/level/block/blocks/SculkShriekerBlock.h"
 #include "world/level/block/blocks/SculkVeinBlock.h"
+#include "world/level/block/blocks/TallFlowerBlock.h"
 #include <memory>
 #include <unordered_map>
 #include <string>
@@ -44,6 +60,7 @@ public:
     static Block* COBBLESTONE;
     static Block* MOSSY_COBBLESTONE;
     static Block* DIRT;
+    static Block* ROOTED_DIRT;
     static Block* COARSE_DIRT;
     static Block* PODZOL;
     static Block* GRASS_BLOCK;
@@ -85,13 +102,14 @@ public:
     // =========================================================================
     static Block* CLAY;
     static Block* MUD;
+    static Block* MUDDY_MANGROVE_ROOTS;
     static Block* MAGMA_BLOCK;
 
     // =========================================================================
     // Sculk blocks (deep dark biome)
     // Reference: Used in sculk patch feature
     // =========================================================================
-    static Block* SCULK;
+    static SculkBlock* SCULK;
     static Block* SCULK_CATALYST;
     static Block* SCULK_SENSOR;
     static Block* SCULK_SHRIEKER;
@@ -144,42 +162,42 @@ public:
     // =========================================================================
     // Vegetation - Small plants (no collision)
     // =========================================================================
-    static Block* SHORT_GRASS;
-    static Block* TALL_GRASS;
-    static Block* FERN;
-    static Block* LARGE_FERN;
-    static Block* DEAD_BUSH;
-    static Block* BUSH;
+    static BushBlock* SHORT_GRASS;
+    static DoublePlantBlock* TALL_GRASS;
+    static BushBlock* FERN;
+    static DoublePlantBlock* LARGE_FERN;
+    static BushBlock* DEAD_BUSH;
+    static BushBlock* BUSH;
 
     // =========================================================================
     // Flowers (no collision)
     // =========================================================================
-    static Block* DANDELION;
-    static Block* POPPY;
-    static Block* BLUE_ORCHID;
-    static Block* ALLIUM;
-    static Block* AZURE_BLUET;
-    static Block* RED_TULIP;
-    static Block* ORANGE_TULIP;
-    static Block* WHITE_TULIP;
-    static Block* PINK_TULIP;
-    static Block* OXEYE_DAISY;
-    static Block* CORNFLOWER;
-    static Block* LILY_OF_THE_VALLEY;
+    static BushBlock* DANDELION;
+    static BushBlock* POPPY;
+    static BushBlock* BLUE_ORCHID;
+    static BushBlock* ALLIUM;
+    static BushBlock* AZURE_BLUET;
+    static BushBlock* RED_TULIP;
+    static BushBlock* ORANGE_TULIP;
+    static BushBlock* WHITE_TULIP;
+    static BushBlock* PINK_TULIP;
+    static BushBlock* OXEYE_DAISY;
+    static BushBlock* CORNFLOWER;
+    static BushBlock* LILY_OF_THE_VALLEY;
 
     // =========================================================================
     // Tall flowers (two-block, no collision)
     // =========================================================================
-    static Block* SUNFLOWER;
-    static Block* LILAC;
-    static Block* ROSE_BUSH;
-    static Block* PEONY;
+    static TallFlowerBlock* SUNFLOWER;
+    static TallFlowerBlock* LILAC;
+    static TallFlowerBlock* ROSE_BUSH;
+    static TallFlowerBlock* PEONY;
 
     // =========================================================================
     // Mushrooms (small, no collision)
     // =========================================================================
-    static Block* BROWN_MUSHROOM;
-    static Block* RED_MUSHROOM;
+    static BushBlock* BROWN_MUSHROOM;
+    static BushBlock* RED_MUSHROOM;
 
     // =========================================================================
     // Huge mushroom blocks (solid)
@@ -194,6 +212,8 @@ public:
     // Leaf litter and vines
     // =========================================================================
     static LeafLitterBlock* LEAF_LITTER;
+    static FlowerBedBlock* PINK_PETALS;
+    static FlowerBedBlock* WILDFLOWERS;
     static Block* VINE;
 
     // =========================================================================
@@ -219,6 +239,7 @@ public:
     static Block* PALE_MOSS_BLOCK;
     static Block* PALE_MOSS_CARPET;
     static Block* PALE_HANGING_MOSS;
+    static EyeblossomBlock* CLOSED_EYEBLOSSOM;
 
     // =========================================================================
     // Ocean vegetation
@@ -236,6 +257,22 @@ public:
     static Block* SUGAR_CANE;
     static Block* PUMPKIN;
     static Block* MELON;
+    static Block* COCOA;
+    static Block* MANGROVE_ROOTS;
+
+    // =========================================================================
+    // Tree saplings and propagules
+    // Reference: Blocks.java lines 1339-1347
+    // =========================================================================
+    static Block* OAK_SAPLING;
+    static Block* SPRUCE_SAPLING;
+    static Block* BIRCH_SAPLING;
+    static Block* JUNGLE_SAPLING;
+    static Block* ACACIA_SAPLING;
+    static Block* CHERRY_SAPLING;
+    static Block* DARK_OAK_SAPLING;
+    static Block* PALE_OAK_SAPLING;
+    static Block* MANGROVE_PROPAGULE;
 
     // =========================================================================
     // Dungeon blocks
@@ -243,6 +280,7 @@ public:
     // =========================================================================
     static Block* SPAWNER;
     static Block* CHEST;
+    static Block* BEE_NEST;
 
     // =========================================================================
     // Blocks with properties - Stairs
@@ -372,6 +410,20 @@ private:
      * Helper to create a non-solid vegetation block (grass, flowers)
      */
     static Block* createPlantBlock(const std::string& name);
+    static Block* createReplaceablePlantBlock(const std::string& name);
+    static CarpetBlock* createCarpetBlock(const std::string& name);
+    static BushBlock* createBushBlock(const std::string& name);
+    static VineBlock* createVineBlock(const std::string& name);
+    static AzaleaBlock* createAzaleaBlock(const std::string& name);
+    static CaveVinesBlock* createCaveVinesBlock(const std::string& name);
+    static CaveVinesPlantBlock* createCaveVinesPlantBlock(const std::string& name);
+    static SmallDripleafBlock* createSmallDripleafBlock(const std::string& name);
+    static BigDripleafBlock* createBigDripleafBlock(const std::string& name);
+    static BigDripleafStemBlock* createBigDripleafStemBlock(const std::string& name);
+    static DoublePlantBlock* createDoublePlantBlock(const std::string& name);
+    static TallFlowerBlock* createTallFlowerBlock(const std::string& name);
+    static FlowerBedBlock* createFlowerBedBlock(const std::string& name);
+    static EyeblossomBlock* createEyeblossomBlock(const std::string& name, bool open);
 
     /**
      * Helper to create a non-solid vegetation block replaceable by trees

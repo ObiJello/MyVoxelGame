@@ -5,6 +5,7 @@
 #include "levelgen/feature/foliageplacers/FoliagePlacer.h"
 #include "levelgen/feature/trunkplacers/TrunkPlacer.h"
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/WorldGenLevel.h"
 #include "core/BlockPos.h"
 #include "world/level/block/state/BlockState.h"
@@ -42,7 +43,20 @@ public:
 
     bool setBlock(const core::BlockPos& pos, BlockState* state, int flags) override {
         if (m_chunk && state) {
+            BlockState* oldState = nullptr;
+            if (feature::BlockChangeTrace::isEnabled()) {
+                oldState = m_chunk->getBlockState(pos.getX() & 15, pos.getY(), pos.getZ() & 15);
+            }
             m_chunk->setBlockState(pos.getX() & 15, pos.getY(), pos.getZ() & 15, state, false);
+            if (oldState) {
+                feature::BlockChangeTrace::log(
+                    pos.getX(),
+                    pos.getY(),
+                    pos.getZ(),
+                    oldState->getIdentifier(),
+                    state->getIdentifier()
+                );
+            }
             return true;
         }
         return false;

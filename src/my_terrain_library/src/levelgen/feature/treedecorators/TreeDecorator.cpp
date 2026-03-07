@@ -1,6 +1,8 @@
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
+#include "levelgen/feature/Feature.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "core/Direction.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 #include <algorithm>
 #include <random>
 
@@ -10,6 +12,22 @@ namespace minecraft {
 namespace levelgen {
 namespace feature {
 namespace treedecorators {
+
+namespace {
+
+const minecraft::world::level::block::state::properties::BooleanProperty* getVineFaceProperty(core::Direction direction) {
+    using minecraft::world::level::block::state::properties::BlockStateProperties;
+
+    switch (direction) {
+        case core::Direction::NORTH: return BlockStateProperties::NORTH;
+        case core::Direction::EAST: return BlockStateProperties::EAST;
+        case core::Direction::SOUTH: return BlockStateProperties::SOUTH;
+        case core::Direction::WEST: return BlockStateProperties::WEST;
+        default: return nullptr;
+    }
+}
+
+}  // namespace
 
 // ============================================================================
 // LeaveVineDecorator
@@ -73,9 +91,17 @@ void LeaveVineDecorator::placeVine(
     const core::BlockPos& pos,
     core::Direction direction
 ) {
-    // Create vine state with the direction property set
-    BlockState* vineState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:vine"));
-    
+    BlockState* vineState = minecraft::world::level::block::Blocks::VINE
+        ? minecraft::world::level::block::Blocks::VINE->defaultBlockState()
+        : static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:vine"));
+    if (!vineState) {
+        return;
+    }
+
+    if (const auto* property = getVineFaceProperty(direction)) {
+        vineState = vineState->trySetValue(*property, true);
+    }
+
     context.setBlock(pos, vineState);
 }
 
@@ -124,8 +150,17 @@ void TrunkVineDecorator::placeVine(
     const core::BlockPos& pos,
     core::Direction direction
 ) {
-    BlockState* vineState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:vine"));
-    
+    BlockState* vineState = minecraft::world::level::block::Blocks::VINE
+        ? minecraft::world::level::block::Blocks::VINE->defaultBlockState()
+        : static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:vine"));
+    if (!vineState) {
+        return;
+    }
+
+    if (const auto* property = getVineFaceProperty(direction)) {
+        vineState = vineState->trySetValue(*property, true);
+    }
+
     context.setBlock(pos, vineState);
 }
 
@@ -167,9 +202,22 @@ void CocoaDecorator::place(DecoratorContext& context) {
                 );
 
                 if (context.isAir(cocoaPos)) {
-                    BlockState* cocoaState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:cocoa"));
-                    
-                    
+                    BlockState* cocoaState = minecraft::world::level::block::Blocks::COCOA
+                        ? minecraft::world::level::block::Blocks::COCOA->defaultBlockState()
+                        : static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:cocoa"));
+                    if (!cocoaState) {
+                        continue;
+                    }
+
+                    cocoaState = cocoaState->trySetValue(
+                        *minecraft::world::level::block::state::properties::BlockStateProperties::AGE_2,
+                        random.nextInt(3)
+                    );
+                    cocoaState = cocoaState->trySetValue(
+                        *minecraft::world::level::block::state::properties::BlockStateProperties::HORIZONTAL_FACING,
+                        direction
+                    );
+
                     context.setBlock(cocoaPos, cocoaState);
                 }
             }
@@ -196,7 +244,6 @@ void BeehiveDecorator::place(DecoratorContext& context) {
         return;
     }
 
-    // Calculate hive Y position
     int hiveY;
     if (!leaves.empty()) {
         hiveY = std::max(leaves[0].getY() - 1, logs[0].getY() + 1);
@@ -205,18 +252,18 @@ void BeehiveDecorator::place(DecoratorContext& context) {
                         logs[logs.size() - 1].getY());
     }
 
-    // Find valid placement positions
     std::vector<core::BlockPos> hivePlacements;
     core::Direction worldgenFacing = core::Direction::SOUTH;
+    static const core::Direction spawnDirections[] = {
+        core::Direction::EAST,
+        core::Direction::SOUTH,
+        core::Direction::WEST
+    };
 
     for (const auto& pos : logs) {
         if (pos.getY() == hiveY) {
-            // Check horizontal directions (except opposite of worldgen facing)
-            for (int dirIdx = 0; dirIdx < 4; ++dirIdx) {
-                core::Direction dir = core::fromHorizontalIndex(dirIdx);
-                if (dir != core::opposite(worldgenFacing)) {
-                    hivePlacements.push_back(pos.relative(dir));
-                }
+            for (core::Direction dir : spawnDirections) {
+                hivePlacements.push_back(pos.relative(dir));
             }
         }
     }
@@ -226,9 +273,11 @@ void BeehiveDecorator::place(DecoratorContext& context) {
     }
 
     // Shuffle placements
-    for (size_t i = hivePlacements.size() - 1; i > 0; --i) {
-        size_t j = random.nextInt(static_cast<int>(i + 1));
-        std::swap(hivePlacements[i], hivePlacements[j]);
+    if (hivePlacements.size() > 1) {
+        for (size_t i = hivePlacements.size() - 1; i > 0; --i) {
+            size_t j = random.nextInt(static_cast<int>(i + 1));
+            std::swap(hivePlacements[i], hivePlacements[j]);
+        }
     }
 
     // Find first valid position
@@ -238,6 +287,11 @@ void BeehiveDecorator::place(DecoratorContext& context) {
             if (!hiveState) return;
 
             context.setBlock(pos, hiveState);
+
+            int numBees = 2 + random.nextInt(2);
+            for (int count = 0; count < numBees; ++count) {
+                random.nextInt(599);
+            }
             return;
         }
     }
@@ -309,7 +363,7 @@ void AlterGroundDecorator::placeBlockAt(DecoratorContext& context, const core::B
         core::BlockPos blockPos = pos.above(dy);
         BlockState* state = context.getBlockState(blockPos);
 
-        if (state->getIdentifier() == "minecraft:dirt" || state->getIdentifier() == "minecraft:grass_block") {
+        if (::minecraft::levelgen::FeatureHelpers::isDirt(state)) {
             context.setBlock(blockPos, m_provider->getState(context.random(), pos));
             break;
         }
@@ -329,20 +383,21 @@ void AttachedToLeavesDecorator::place(DecoratorContext& context) {
     // Reference: AttachedToLeavesDecorator.java place() lines 34-52
     std::set<core::BlockPos> blacklist;
     WorldgenRandom& random = context.random();
+    if (m_directions.empty() || !m_blockProvider) {
+        return;
+    }
 
     // Get shuffled copy of leaves
     std::vector<core::BlockPos> shuffledLeaves = context.leaves();
-    for (size_t i = shuffledLeaves.size() - 1; i > 0; --i) {
-        size_t j = random.nextInt(static_cast<int>(i + 1));
-        std::swap(shuffledLeaves[i], shuffledLeaves[j]);
+    if (shuffledLeaves.size() > 1) {
+        for (size_t i = shuffledLeaves.size() - 1; i > 0; --i) {
+            size_t j = random.nextInt(static_cast<int>(i + 1));
+            std::swap(shuffledLeaves[i], shuffledLeaves[j]);
+        }
     }
 
-    // Get available directions (simplified - use DOWN for now)
-    std::vector<core::Direction> directions = {core::Direction::DOWN};
-
     for (const auto& leafPos : shuffledLeaves) {
-        // Pick random direction
-        core::Direction direction = directions[random.nextInt(static_cast<int>(directions.size()))];
+        core::Direction direction = m_directions[random.nextInt(static_cast<int>(m_directions.size()))];
         core::BlockPos placementPos = leafPos.relative(direction);
 
         if (blacklist.count(placementPos) > 0) {
@@ -366,7 +421,9 @@ void AttachedToLeavesDecorator::place(DecoratorContext& context) {
             }
         }
 
-        context.setBlock(placementPos, m_blockState);
+        if (BlockState* blockState = m_blockProvider->getState(random, placementPos)) {
+            context.setBlock(placementPos, blockState);
+        }
     }
 }
 
@@ -405,9 +462,11 @@ void CreakingHeartDecorator::place(DecoratorContext& context) {
 
     // Shuffle logs - Reference: line 35-36
     std::vector<core::BlockPos> heartPlacements = logs;
-    for (size_t i = heartPlacements.size() - 1; i > 0; --i) {
-        size_t j = random.nextInt(static_cast<int>(i + 1));
-        std::swap(heartPlacements[i], heartPlacements[j]);
+    if (heartPlacements.size() > 1) {
+        for (size_t i = heartPlacements.size() - 1; i > 0; --i) {
+            size_t j = random.nextInt(static_cast<int>(i + 1));
+            std::swap(heartPlacements[i], heartPlacements[j]);
+        }
     }
 
     // Find a log that has logs on all 6 sides - Reference: lines 37-45
@@ -461,9 +520,11 @@ void PaleMossDecorator::place(DecoratorContext& context) {
 
     // Shuffle logs - Reference: line 40
     std::vector<core::BlockPos> shuffledLogs = logs;
-    for (size_t i = shuffledLogs.size() - 1; i > 0; --i) {
-        size_t j = random.nextInt(static_cast<int>(i + 1));
-        std::swap(shuffledLogs[i], shuffledLogs[j]);
+    if (shuffledLogs.size() > 1) {
+        for (size_t i = shuffledLogs.size() - 1; i > 0; --i) {
+            size_t j = random.nextInt(static_cast<int>(i + 1));
+            std::swap(shuffledLogs[i], shuffledLogs[j]);
+        }
     }
 
     // Find minimum Y position - Reference: line 42
@@ -627,9 +688,11 @@ void AttachedToLogsDecorator::place(DecoratorContext& context) {
 
     // Shuffle logs - Reference: line 29
     std::vector<core::BlockPos> shuffledLogs = context.logs();
-    for (size_t i = shuffledLogs.size() - 1; i > 0; --i) {
-        size_t j = random.nextInt(static_cast<int>(i + 1));
-        std::swap(shuffledLogs[i], shuffledLogs[j]);
+    if (shuffledLogs.size() > 1) {
+        for (size_t i = shuffledLogs.size() - 1; i > 0; --i) {
+            size_t j = random.nextInt(static_cast<int>(i + 1));
+            std::swap(shuffledLogs[i], shuffledLogs[j]);
+        }
     }
 
     for (const auto& logsPos : shuffledLogs) {

@@ -11,6 +11,10 @@ PerlinNoise PerlinNoise::create(XoroshiroRandomSource& random, int32_t firstOcta
     return PerlinNoise(random, firstOctave, amplitudes, true);
 }
 
+PerlinNoise PerlinNoise::create(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes) {
+    return PerlinNoise(random, firstOctave, amplitudes, true);
+}
+
 PerlinNoise PerlinNoise::create(XoroshiroRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes) {
     // Reference: PerlinNoise.java lines 51-55
     std::vector<double> amplitudes;
@@ -19,8 +23,19 @@ PerlinNoise PerlinNoise::create(XoroshiroRandomSource& random, int32_t firstOcta
     return PerlinNoise(random, firstOctave, amplitudes, true);
 }
 
+PerlinNoise PerlinNoise::create(LegacyRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes) {
+    std::vector<double> amplitudes;
+    amplitudes.push_back(firstAmplitude);
+    amplitudes.insert(amplitudes.end(), additionalAmplitudes.begin(), additionalAmplitudes.end());
+    return PerlinNoise(random, firstOctave, amplitudes, true);
+}
+
 PerlinNoise PerlinNoise::createLegacyForLegacyNetherBiome(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes) {
     // Reference: PerlinNoise.java lines 39-41
+    return PerlinNoise(random, firstOctave, amplitudes, false);
+}
+
+PerlinNoise PerlinNoise::createLegacyForLegacyNetherBiome(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes) {
     return PerlinNoise(random, firstOctave, amplitudes, false);
 }
 
@@ -37,6 +52,16 @@ PerlinNoise PerlinNoise::createLegacyForBlendedNoise(XoroshiroRandomSource& rand
     std::vector<double> amplitudes(numOctaves, 1.0);
 
     // firstOctave is the negation of octaveStart
+    return PerlinNoise(random, octaveStart, amplitudes, false);
+}
+
+PerlinNoise PerlinNoise::createLegacyForBlendedNoise(LegacyRandomSource& random, int32_t octaveStart, int32_t octaveEnd) {
+    if (octaveStart > octaveEnd) {
+        throw std::invalid_argument("octaveStart must be <= octaveEnd");
+    }
+
+    int32_t numOctaves = octaveEnd - octaveStart + 1;
+    std::vector<double> amplitudes(numOctaves, 1.0);
     return PerlinNoise(random, octaveStart, amplitudes, false);
 }
 
@@ -116,6 +141,77 @@ PerlinNoise::PerlinNoise(XoroshiroRandomSource& random, int32_t firstOctave, con
 
     // Calculate scaling factors
     // Reference: PerlinNoise.java lines 130-132
+    m_lowestFreqInputFactor = std::pow(static_cast<double>(2.0F), static_cast<double>(-zeroOctaveIndex));
+    m_lowestFreqValueFactor = std::pow(static_cast<double>(2.0F), static_cast<double>(octaves - 1)) /
+                              (std::pow(static_cast<double>(2.0F), static_cast<double>(octaves)) - static_cast<double>(1.0F));
+    m_maxValue = edgeValue(static_cast<double>(2.0F));
+}
+
+PerlinNoise::PerlinNoise(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization)
+    : m_firstOctave(firstOctave)
+    , m_amplitudes(amplitudes)
+{
+    int32_t octaves = static_cast<int32_t>(m_amplitudes.size());
+    int32_t zeroOctaveIndex = -m_firstOctave;
+    m_noiseLevels.resize(octaves, nullptr);
+
+    if (useNewInitialization) {
+        LegacyPositionalRandomFactory positional = random.forkPositional();
+
+        for (int32_t i = 0; i < octaves; ++i) {
+            if (m_amplitudes[i] != static_cast<double>(0.0F)) {
+                int32_t octave = m_firstOctave + i;
+                std::stringstream ss;
+                ss << "octave_" << octave;
+
+                LegacyRandomSource octaveRandom = positional.fromHashOf(ss.str());
+                m_noiseLevels[i] = new ImprovedNoise(octaveRandom);
+            }
+        }
+    } else {
+        ImprovedNoise* zeroOctave = new ImprovedNoise(random);
+
+        if (zeroOctaveIndex >= 0 && zeroOctaveIndex < octaves) {
+            double zeroOctaveAmplitude = m_amplitudes[zeroOctaveIndex];
+            if (zeroOctaveAmplitude != static_cast<double>(0.0F)) {
+                m_noiseLevels[zeroOctaveIndex] = zeroOctave;
+            } else {
+                delete zeroOctave;
+                zeroOctave = nullptr;
+            }
+        } else {
+            delete zeroOctave;
+            zeroOctave = nullptr;
+        }
+
+        for (int32_t i = zeroOctaveIndex - 1; i >= 0; --i) {
+            if (i < octaves) {
+                double amplitude = m_amplitudes[i];
+                if (amplitude != static_cast<double>(0.0F)) {
+                    m_noiseLevels[i] = new ImprovedNoise(random);
+                } else {
+                    skipOctave(random);
+                }
+            } else {
+                skipOctave(random);
+            }
+        }
+
+        int32_t nonNullCount = 0;
+        int32_t nonZeroAmpCount = 0;
+        for (size_t i = 0; i < m_noiseLevels.size(); ++i) {
+            if (m_noiseLevels[i] != nullptr) nonNullCount++;
+            if (m_amplitudes[i] != static_cast<double>(0.0F)) nonZeroAmpCount++;
+        }
+        if (nonNullCount != nonZeroAmpCount) {
+            throw std::runtime_error("Failed to create correct number of noise levels for given non-zero amplitudes");
+        }
+
+        if (zeroOctaveIndex < octaves - 1) {
+            throw std::invalid_argument("Positive octaves are temporarily disabled");
+        }
+    }
+
     m_lowestFreqInputFactor = std::pow(static_cast<double>(2.0F), static_cast<double>(-zeroOctaveIndex));
     m_lowestFreqValueFactor = std::pow(static_cast<double>(2.0F), static_cast<double>(octaves - 1)) /
                               (std::pow(static_cast<double>(2.0F), static_cast<double>(octaves)) - static_cast<double>(1.0F));
@@ -202,6 +298,10 @@ void PerlinNoise::skipOctave(XoroshiroRandomSource& random) {
     for (int i = 0; i < 262; ++i) {
         random.nextLong();
     }
+}
+
+void PerlinNoise::skipOctave(LegacyRandomSource& random) {
+    random.consumeCount(262);
 }
 
 } // namespace minecraft

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/BlockPos.h"
+#include "levelgen/placement/PlacementContext.h"
 #include "levelgen/WorldgenRandom.h"
 #include <vector>
 #include <cstdint>
@@ -13,9 +14,6 @@
 namespace minecraft {
 namespace levelgen {
 namespace placement {
-
-// Forward declaration
-class PlacementContext;
 
 /**
  * PlacementModifier - Base class for feature placement modifiers
@@ -40,6 +38,21 @@ public:
         WorldgenRandom& random,
         const core::BlockPos& origin
     ) = 0;
+
+    /**
+     * Optional trace details for logging/debugging.
+     * This runs after getPositions() and must not mutate state.
+     */
+    virtual std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const {
+        (void)context;
+        (void)origin;
+        (void)results;
+        return "";
+    }
 
     /**
      * Get type name for debugging/logging
@@ -71,6 +84,16 @@ public:
     }
 
     std::string getTypeName() const override { return "PlacementFilter"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        return std::string("accepted=") + (results.empty() ? "false" : "true");
+    }
 
 protected:
     /**
@@ -107,6 +130,16 @@ public:
     }
 
     std::string getTypeName() const override { return "RepeatingPlacement"; }
+
+    std::string describeTrace(
+        PlacementContext& context,
+        const core::BlockPos& origin,
+        const std::vector<core::BlockPos>& results
+    ) const override {
+        (void)context;
+        (void)origin;
+        return "count=" + std::to_string(results.size());
+    }
 
 protected:
     /**

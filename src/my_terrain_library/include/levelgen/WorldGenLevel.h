@@ -44,6 +44,11 @@ public:
      */
     virtual BlockState* getBlockState(const core::BlockPos& pos) const = 0;
 
+    virtual bool isEmptyBlock(const core::BlockPos& pos) const {
+        BlockState* state = getBlockState(pos);
+        return state && state->isAir();
+    }
+
     /**
      * Set block at position with update flags
      * Reference: LevelWriter.setBlock(BlockPos, BlockState, int)
@@ -152,6 +157,12 @@ public:
      */
     virtual void setCurrentlyGenerating(const std::string& description) {
         // No-op by default
+    }
+
+    virtual void scheduleTick(const core::BlockPos& pos, const std::string& blockName, int delay) {
+        (void)pos;
+        (void)blockName;
+        (void)delay;
     }
 };
 

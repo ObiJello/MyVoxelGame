@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IChunk.h"
+#include "MinecraftBlockType.h"
 #include <vector>
 #include <unordered_set>
 

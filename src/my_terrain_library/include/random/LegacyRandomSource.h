@@ -1,9 +1,14 @@
 #pragma once
 
+#include "math/Mth.h"
 #include <cstdint>
 #include <cmath>
+#include <string>
+#include <stdexcept>
 
 namespace minecraft {
+
+class LegacyPositionalRandomFactory;
 
 /**
  * LegacyRandomSource - Java LCG Random implementation
@@ -62,20 +67,27 @@ public:
      * Generate bounded int [0, bound)
      */
     int32_t nextInt(int32_t bound) {
-        if (bound <= 0) return 0;
+        if (bound <= 0) {
+            throw std::invalid_argument("Bound must be positive");
+        }
 
         // Handle power of 2 bounds more efficiently
         if ((bound & (bound - 1)) == 0) {
             return static_cast<int32_t>((static_cast<int64_t>(bound) * static_cast<int64_t>(next(31))) >> 31);
         }
 
-        int32_t bits, val;
+        int32_t sample;
+        int32_t modulo;
         do {
-            bits = next(31);
-            val = bits % bound;
-        } while (bits - val + (bound - 1) < 0);
+            sample = next(31);
+            modulo = sample % bound;
+        } while (static_cast<int32_t>(
+            static_cast<uint32_t>(sample)
+            - static_cast<uint32_t>(modulo)
+            + static_cast<uint32_t>(bound - 1)
+        ) < 0);
 
-        return val;
+        return modulo;
     }
 
     /**
@@ -105,7 +117,7 @@ public:
      */
     void consumeCount(int count) {
         for (int i = 0; i < count; ++i) {
-            next(1);
+            nextInt();
         }
     }
 
@@ -115,6 +127,8 @@ public:
     LegacyRandomSource fork() {
         return LegacyRandomSource(nextLong());
     }
+
+    LegacyPositionalRandomFactory forkPositional();
 
     /**
      * Generate next gaussian-distributed double
@@ -160,5 +174,40 @@ private:
     double m_nextNextGaussian = 0.0;
     bool m_haveNextNextGaussian = false;
 };
+
+class LegacyPositionalRandomFactory {
+public:
+    explicit LegacyPositionalRandomFactory(int64_t seed)
+        : m_seed(seed) {}
+
+    LegacyRandomSource at(int32_t x, int32_t y, int32_t z) const {
+        int64_t positionalSeed = Mth::getSeed(x, y, z);
+        int64_t randomSeed = positionalSeed ^ m_seed;
+        return LegacyRandomSource(randomSeed);
+    }
+
+    LegacyRandomSource fromHashOf(const std::string& name) const {
+        return LegacyRandomSource(static_cast<int64_t>(javaStringHash(name)) ^ m_seed);
+    }
+
+    LegacyRandomSource fromSeed(int64_t seed) const {
+        return LegacyRandomSource(seed);
+    }
+
+private:
+    static int32_t javaStringHash(const std::string& value) {
+        int32_t hash = 0;
+        for (unsigned char ch : value) {
+            hash = 31 * hash + static_cast<int32_t>(ch);
+        }
+        return hash;
+    }
+
+    int64_t m_seed;
+};
+
+inline LegacyPositionalRandomFactory LegacyRandomSource::forkPositional() {
+    return LegacyPositionalRandomFactory(nextLong());
+}
 
 } // namespace minecraft
