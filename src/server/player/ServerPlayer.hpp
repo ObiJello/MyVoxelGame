@@ -30,7 +30,7 @@ namespace Server {
         FIRE,
         DROWNING,
         STARVATION,
-        VOID,
+        VOID_DAMAGE,
         EXPLOSION,
         ENTITY_ATTACK,
         MAGIC

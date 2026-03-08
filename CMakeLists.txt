@@ -3,7 +3,11 @@ project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
 
 # ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    add_compile_options(-g)
+    if(MSVC)
+        add_compile_options(/Zi)
+    else()
+        add_compile_options(-g)
+    endif()
 endif()
 
 # ── On macOS, build universal (arm64 + x86_64) libraries by default.
@@ -191,8 +195,15 @@ add_library(terrain_library STATIC ${TERRAIN_LIBRARY_SOURCES})
 target_include_directories(terrain_library PUBLIC
         src/my_terrain_library/include
         ${PROJECT_SOURCE_DIR}/ext/md5  # MD5 wrapper (uses CommonCrypto on macOS, OpenSSL elsewhere)
+        ${PROJECT_SOURCE_DIR}/ext/zlib  # zlib headers for NBT compression
 )
+target_link_libraries(terrain_library PUBLIC zlibstatic)
 target_compile_features(terrain_library PUBLIC cxx_std_20)
+
+# MSVC doesn't define M_PI by default
+if(MSVC)
+    target_compile_definitions(terrain_library PUBLIC _USE_MATH_DEFINES)
+endif()
 
 # MD5 hashing: macOS uses CommonCrypto (built-in), other platforms use
 # self-contained implementation in ext/md5/ - no OpenSSL needed

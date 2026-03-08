@@ -40,3 +40,19 @@ compile_commands.json
 depreciated/
 decompiled_net/
 decompiled_com/
+
+# Boost download artifacts (from CMake FetchContent/system Boost)
+libs/
+more/
+sdadas
+tools/auto_index/
+tools/bcp/
+tools/boost_install/
+tools/boostbook/
+tools/boostdep/
+tools/check_build/
+tools/cmake/
+tools/docca/
+tools/inspect/
+tools/litre/
+tools/quickbook/
