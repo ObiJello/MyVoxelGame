@@ -339,7 +339,7 @@ namespace PlatformMain {
         sentry_options_t *sentryOptions = sentry_options_new();
         sentry_options_set_dsn(sentryOptions, "https://685865d2f16184d804534ac7e262e818@o4511006654791680.ingest.us.sentry.io/4511006665539584");
         sentry_options_set_database_path(sentryOptions, ".sentry-native");
-        sentry_options_set_release(sentryOptions, "myvoxelgame@0.1.0");
+        sentry_options_set_release(sentryOptions, "myvoxelgame@" GAME_VERSION);
         sentry_options_set_debug(sentryOptions, 0);
 #ifdef __APPLE__
         // On macOS, crashpad_handler is bundled next to the executable in the .app

@@ -128,3 +128,72 @@ Manual testing with debug UI (ImGui integration). No formal unit test framework 
 - Block models: JSON format in `assets/models/block/`
 - Textures: Atlas generation from individual images
 - Shaders: GLSL in `shaders/` directory
+
+## ObeyCraft Launcher & Distribution
+
+### Automatic Release System (Zero Manual Steps)
+
+Building in the right configuration automatically handles everything:
+
+| Build | What happens automatically |
+|-------|--------------------------|
+| Game **Debug** | Normal build, nothing extra |
+| Game **Universal Release** (`cmake-build-universal`, `-DJALIN=ON`) | Version bumps, zips, uploads to GitHub, uploads dSYMs to Sentry |
+| Launcher **Debug** | Normal build, nothing extra |
+| Launcher **Release** (`cmake-build-release`) | Version bumps, zips, uploads to GitHub |
+
+**Just build in CLion and everything happens.** No scripts to run.
+
+### How the Auto-Release Works
+
+1. **Version bump**: Build number files (`tools/game_build_number`, `tools/launcher_build_number`) store an integer that auto-increments on each qualifying build. A generated header (`GameBuildVersion.hpp` / `LauncherBuildVersion.hpp`) is created with the version string.
+2. **Compile**: The binary picks up the new version from the generated header.
+3. **Post-build**: The app is zipped (stays in the build dir, e.g., `cmake-build-universal/bin/`) and uploaded to GitHub via `gh` CLI. Non-fatal — if offline or `gh` isn't authenticated, the build still succeeds.
+
+Version format: `{major}.{minor}.{build_number}` — game uses `0.1.X`, launcher uses `1.0.X`.
+
+### Sentry Debug Symbols (Game Only)
+
+On Universal Release builds (with `-DJALIN=ON`, which is the default for `cmake-build-universal`):
+1. `dsymutil` generates a `.dSYM` bundle from the game binary
+2. The binary is stripped of debug symbols (smaller download for users)
+3. `sentry-cli debug-files upload` sends the dSYM to Sentry for crash symbolication
+4. Requires `sentry-cli` to be installed (`brew install getsentry/tools/sentry-cli`)
+5. Sentry release string uses the auto-incremented version: `myvoxelgame@0.1.X`
+
+### GitHub Release Tag Convention
+
+- **Game releases**: `v0.1.1`, `v0.1.2`, ... (auto-created on Universal Release build)
+- **Launcher releases**: `launcher-v1.0.1`, `launcher-v1.0.2`, ... (auto-created on Release build)
+- Both coexist in the same repo: `ObiJello/MyVoxelGame-Download`
+- The launcher knows which is which by the `launcher-v` prefix
+
+### How the Launcher Update System Works
+
+- **GitHub repo**: `ObiJello/MyVoxelGame-Download`
+- **Game updates**: Launcher queries `/releases` and picks the latest tag NOT prefixed with `launcher-v`
+- **Launcher self-updates**: Launcher queries `/releases` and picks the latest `launcher-v*` tag, compares against its compiled-in version, silently downloads/installs, shows "Restart to update launcher"
+- **Version tracking**: `~/Library/Application Support/obeycraft/launcher.json`
+- **Game install location**: `~/Library/Application Support/obeycraft/game/`
+- **Asset name matching**: Zip filenames must contain a platform tag (`macos-universal`, `macos-arm64`, `windows-x64`) for the launcher to pick the right one
+
+### Creating a DMG for First-Time Distribution
+```bash
+./tools/create_dmg.sh    # Creates ~/Downloads/ObeyCraftLauncher.dmg
+```
+This is only needed once to distribute the launcher to new users. After that, the launcher updates itself.
+
+### Manual Release Scripts (Optional)
+These still exist if you ever need manual control:
+```bash
+./tools/release_launcher.sh          # Bump patch, rebuild, upload
+./tools/release_launcher.sh minor    # Bump minor
+./tools/release_game.sh              # Same for game
+```
+
+### Key Files
+- **Launcher source**: `src/launcher/` — config in `LauncherConfig.hpp`
+- **Build numbers**: `tools/game_build_number`, `tools/launcher_build_number`
+- **Auto-release scripts**: `tools/bump_version.sh`, `tools/auto_release.sh`, `tools/update_plist_version.sh`
+- **Launcher app icon**: `assets/launcher/logo.png` (converted to `AppIcon.icns` via `iconutil`)
+- **DMG builder**: `tools/create_dmg.sh`

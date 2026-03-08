@@ -34,7 +34,9 @@ namespace Launcher {
     // ── Launcher Config (stored in launcher.json) ──
     struct LauncherPersistentConfig {
         std::string installedVersion;
+        std::string launcherVersion;
         bool autoUpdate = true;
+        bool useVulkan = false;
 
         void Load(const std::string& path) {
             try {
@@ -42,7 +44,9 @@ namespace Launcher {
                 if (!file.is_open()) return;
                 auto json = nlohmann::json::parse(file);
                 installedVersion = json.value("installed_version", "");
+                launcherVersion = json.value("launcher_version", "");
                 autoUpdate = json.value("auto_update", true);
+                useVulkan = json.value("use_vulkan", false);
             } catch (...) {
                 Log::Warning("Failed to load launcher config");
             }
@@ -52,7 +56,9 @@ namespace Launcher {
             try {
                 nlohmann::json json;
                 json["installed_version"] = installedVersion;
+                json["launcher_version"] = launcherVersion;
                 json["auto_update"] = autoUpdate;
+                json["use_vulkan"] = useVulkan;
                 std::ofstream file(path);
                 file << json.dump(2);
             } catch (...) {
@@ -194,6 +200,7 @@ namespace Launcher {
 #endif
 
         uiState.gameInstalled = std::filesystem::exists(gameExePath);
+        uiState.useVulkan = config.useVulkan;
         if (!config.installedVersion.empty()) {
             uiState.installedVersion = config.installedVersion;
         }
@@ -216,13 +223,62 @@ namespace Launcher {
         std::atomic<bool> installComplete{false};
         std::atomic<bool> installSuccess{false};
 
-        // ── Start version check ──
+        // Launcher self-update state
+        std::atomic<bool> launcherUpdateReady{false};
+        std::string currentLauncherPath = GetCurrentLauncherPath();
+        std::string updaterScriptPath; // Windows only
+
+        // ── Start version check (launcher update + game update in one thread) ──
         uiState.state = LauncherState::CheckingForUpdates;
         uiState.statusText = "Checking for updates...";
+        Log::Info("[SELFUPDATE] My compiled version: %s", LauncherVersion);
+        Log::Info("[SELFUPDATE] My path: %s", currentLauncherPath.c_str());
 
         std::thread checkThread([&]() {
             workerRunning = true;
             GitHubAPI api(GitHubOwner, GitHubRepo);
+
+            // Phase 1: Check for launcher self-update
+            {
+                ReleaseInfo launcherRelease;
+                if (api.FetchLatestLauncherRelease(launcherRelease)) {
+                    std::string tagPrefix(LauncherReleaseTagPrefix);
+                    std::string versionStr = launcherRelease.tagName;
+                    if (versionStr.find(tagPrefix) == 0) {
+                        versionStr = versionStr.substr(tagPrefix.length());
+                    }
+                    Version latestLauncher = Version::Parse(versionStr);
+                    Version currentLauncher = Version::Parse(LauncherVersion);
+
+                    Log::Info("[SELFUPDATE] GitHub latest: %s (tag: %s)", latestLauncher.ToString().c_str(), launcherRelease.tagName.c_str());
+                    Log::Info("[SELFUPDATE] Compiled: %s", currentLauncher.ToString().c_str());
+                    Log::Info("[SELFUPDATE] Is newer: %d", (latestLauncher > currentLauncher) ? 1 : 0);
+
+                    if (latestLauncher > currentLauncher && launcherRelease.hasPlatformAsset) {
+                        Log::Info("[SELFUPDATE] UPDATE NEEDED: %s -> %s",
+                                  currentLauncher.ToString().c_str(), latestLauncher.ToString().c_str());
+
+                        Downloader launcherDl;
+                        std::string dlPath = installDir + "/_launcher_dl.zip";
+                        if (launcherDl.Download(launcherRelease.platformAsset.downloadUrl, dlPath)) {
+                            Installer launcherInstaller;
+                            std::string stagingDir = installDir + "/_launcher_update";
+                            if (launcherInstaller.InstallLauncher(dlPath, currentLauncherPath, stagingDir)) {
+                                updaterScriptPath = launcherInstaller.GetUpdaterScriptPath();
+                                config.launcherVersion = latestLauncher.ToString();
+                                config.Save(configPath);
+                                launcherUpdateReady = true;
+                                Log::Info("Launcher update ready - restart to apply");
+                            }
+                        }
+                    } else {
+                        Log::Info("[SELFUPDATE] NO UPDATE NEEDED - compiled=%s github=%s",
+                                  currentLauncher.ToString().c_str(), latestLauncher.ToString().c_str());
+                    }
+                }
+            }
+
+            // Phase 2: Check for game update
             ReleaseInfo info;
             bool success = api.FetchLatestRelease(info);
 
@@ -241,10 +297,17 @@ namespace Launcher {
         Downloader downloader;
         Installer installer;
 
+        ui.SetOnRestartClicked([&]() {
+            Log::Info("User requested launcher restart for self-update");
+            config.Save(configPath);
+            RelaunchSelf(currentLauncherPath, updaterScriptPath);
+            // RelaunchSelf calls _exit(0), so we never get here
+        });
+
         ui.SetOnPlayClicked([&]() {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Launching game...";
-            if (LaunchGame(gameExePath)) {
+            if (LaunchGame(gameExePath, uiState.useVulkan)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -395,6 +458,9 @@ namespace Launcher {
             glClearColor(0.071f, 0.071f, 0.094f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
 
+            // Update launcher update flag for UI
+            uiState.launcherUpdateReady = launcherUpdateReady.load();
+
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -408,6 +474,7 @@ namespace Launcher {
         }
 
         // ── Cleanup ──
+        config.useVulkan = uiState.useVulkan;
         config.Save(configPath);
 
         if (logoTexture != 0) {

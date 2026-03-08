@@ -1,11 +1,13 @@
 // File: src/common/core/Config.hpp
 #pragma once
 
+#define GAME_VERSION "0.1.7"
+
 namespace Config {
     // Window settings
     inline constexpr int  WindowWidth  = 1280;
     inline constexpr int  WindowHeight = 720;
-    inline constexpr const char* WindowTitle = "Obey's Game v0.1";
+    inline constexpr const char* WindowTitle = "Obey's Game v" GAME_VERSION;
 
     // OpenGL version
     inline constexpr int OpenGLMajor = 3;

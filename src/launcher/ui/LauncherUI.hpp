@@ -31,6 +31,8 @@ namespace Launcher {
         std::atomic<float> downloadProgress{0.0f};
         std::string downloadSizeText;
         bool gameInstalled = false;
+        bool launcherUpdateReady = false;  // true when a launcher update has been installed
+        bool useVulkan = false;            // launch game with --vulkan
     };
 
     class LauncherUI {
@@ -40,6 +42,7 @@ namespace Launcher {
         void SetOnPlayClicked(ActionCallback cb) { m_onPlay = cb; }
         void SetOnUpdateClicked(ActionCallback cb) { m_onUpdate = cb; }
         void SetOnRetryClicked(ActionCallback cb) { m_onRetry = cb; }
+        void SetOnRestartClicked(ActionCallback cb) { m_onRestart = cb; }
 
         void SetLogoTexture(GLuint textureId, int width, int height);
 
@@ -48,8 +51,8 @@ namespace Launcher {
 
     private:
         void DrawLogo();
-        void DrawChangelog(const std::string& changelog);
         void DrawProgressBar(float progress, const std::string& sizeText);
+        void DrawRestartButton();
         void DrawPlayButton(LauncherUIState& state);
         void DrawStatusBar(const LauncherUIState& state);
         void DrawSettingsPopup();
@@ -57,6 +60,7 @@ namespace Launcher {
         ActionCallback m_onPlay;
         ActionCallback m_onUpdate;
         ActionCallback m_onRetry;
+        ActionCallback m_onRestart;
 
         GLuint m_logoTexture = 0;
         int m_logoWidth = 0;

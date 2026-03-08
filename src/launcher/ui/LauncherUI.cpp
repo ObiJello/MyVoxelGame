@@ -2,8 +2,8 @@
 #include "LauncherUI.hpp"
 #include "LauncherTheme.hpp"
 #include "launcher/LauncherConfig.hpp"
+#include "platform/GameDirectory.hpp"
 #include <imgui.h>
-#include <cmath>
 #include <sstream>
 
 namespace Launcher {
@@ -25,40 +25,44 @@ namespace Launcher {
 
         ImGui::Begin("##launcher", nullptr, flags);
 
-        float windowWidth = ImGui::GetWindowWidth();
-        float contentWidth = windowWidth - 40.0f; // margins
+        float winW = ImGui::GetWindowWidth();
+        float winH = ImGui::GetWindowHeight();
 
-        // ── Logo / Title Area ──
-        ImGui::Spacing();
-        DrawLogo();
-        ImGui::Spacing();
-        ImGui::Spacing();
-
-        // ── Changelog Card ──
-        if (!state.changelog.empty()) {
-            DrawChangelog(state.changelog);
-            ImGui::Spacing();
-        } else {
-            // Spacer when no changelog
-            ImGui::Dummy(ImVec2(0, 60));
+        // ── Launcher version (top right, small grey text) ──
+        {
+            if (g_fontSmall) ImGui::PushFont(g_fontSmall);
+            char versionLabel[32];
+            snprintf(versionLabel, sizeof(versionLabel), "v%s", LauncherVersion);
+            float versionW = ImGui::CalcTextSize(versionLabel).x;
+            ImGui::SetCursorPos(ImVec2(winW - versionW - 15.0f, 10.0f));
+            ImGui::TextDisabled("%s", versionLabel);
+            if (g_fontSmall) ImGui::PopFont();
         }
+
+        // ── Logo (top, centered) ──
+        ImGui::SetCursorPosY(winH * 0.15f);
+        DrawLogo();
 
         // ── Progress Bar (when downloading/installing) ──
         if (state.state == LauncherState::Downloading || state.state == LauncherState::Installing) {
+            ImGui::SetCursorPosY(winH * 0.55f);
             DrawProgressBar(state.downloadProgress.load(), state.downloadSizeText);
-            ImGui::Spacing();
         }
 
-        // ── Status Text ──
+        // ── Status Text (centered, above button) ──
         {
+            ImGui::SetCursorPosY(winH - 130.0f);
             if (g_fontSmall) ImGui::PushFont(g_fontSmall);
 
             std::string statusStr = state.statusText;
-            float textWidth = ImGui::CalcTextSize(statusStr.c_str()).x;
-            ImGui::SetCursorPosX((windowWidth - textWidth) * 0.5f);
+            if (state.launcherUpdateReady) {
+                statusStr = "Launcher update ready - restart to apply";
+            }
 
-            // Color based on state
-            if (state.state == LauncherState::Error) {
+            float textWidth = ImGui::CalcTextSize(statusStr.c_str()).x;
+            ImGui::SetCursorPosX((winW - textWidth) * 0.5f);
+
+            if (state.state == LauncherState::Error && !state.launcherUpdateReady) {
                 ImGui::TextColored(ImVec4(0.957f, 0.263f, 0.212f, 1.0f), "%s", statusStr.c_str());
             } else {
                 ImGui::TextDisabled("%s", statusStr.c_str());
@@ -67,10 +71,13 @@ namespace Launcher {
             if (g_fontSmall) ImGui::PopFont();
         }
 
-        ImGui::Spacing();
-
-        // ── Play / Update / Retry Button ──
-        DrawPlayButton(state);
+        // ── Main Button (pinned above status bar) ──
+        ImGui::SetCursorPosY(winH - 105.0f);
+        if (state.launcherUpdateReady) {
+            DrawRestartButton();
+        } else {
+            DrawPlayButton(state);
+        }
 
         // ── Bottom Status Bar ──
         DrawStatusBar(state);
@@ -87,7 +94,6 @@ namespace Launcher {
         float windowWidth = ImGui::GetWindowWidth();
 
         if (m_logoTexture != 0) {
-            // Draw logo texture centered
             float maxWidth = 300.0f;
             float scale = maxWidth / static_cast<float>(m_logoWidth);
             if (scale > 1.0f) scale = 1.0f;
@@ -98,17 +104,13 @@ namespace Launcher {
             ImGui::Image(static_cast<ImTextureID>(static_cast<uintptr_t>(m_logoTexture)),
                          ImVec2(drawW, drawH));
         } else {
-            // Text fallback
             if (g_fontTitle) ImGui::PushFont(g_fontTitle);
-
             const char* title = "ObeyCraft";
             float textWidth = ImGui::CalcTextSize(title).x;
             ImGui::SetCursorPosX((windowWidth - textWidth) * 0.5f);
             ImGui::Text("%s", title);
-
             if (g_fontTitle) ImGui::PopFont();
 
-            // Subtitle
             if (g_fontSmall) ImGui::PushFont(g_fontSmall);
             const char* subtitle = "A Minecraft-compatible voxel engine";
             float subWidth = ImGui::CalcTextSize(subtitle).x;
@@ -116,50 +118,6 @@ namespace Launcher {
             ImGui::TextDisabled("%s", subtitle);
             if (g_fontSmall) ImGui::PopFont();
         }
-    }
-
-    void LauncherUI::DrawChangelog(const std::string& changelog) {
-        float windowWidth = ImGui::GetWindowWidth();
-        float cardWidth = windowWidth - 60.0f;
-        float cardX = (windowWidth - cardWidth) * 0.5f;
-
-        ImGui::SetCursorPosX(cardX);
-
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.110f, 0.110f, 0.149f, 1.00f));
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 8.0f);
-
-        ImGui::BeginChild("##changelog", ImVec2(cardWidth, 120), true);
-
-        if (g_fontSmall) ImGui::PushFont(g_fontSmall);
-
-        // Render changelog text (basic markdown-ish rendering)
-        std::string line;
-        std::istringstream stream(changelog);
-        while (std::getline(stream, line)) {
-            if (line.empty()) {
-                ImGui::Spacing();
-                continue;
-            }
-            // Bold headings starting with ##
-            if (line.size() >= 2 && line[0] == '#' && line[1] == '#') {
-                if (g_fontSmall) ImGui::PopFont();
-                if (g_fontBody) ImGui::PushFont(g_fontBody);
-                std::string heading = line.substr(line.find_first_not_of("# "));
-                ImGui::TextColored(ImVec4(0.298f, 0.686f, 0.314f, 1.0f), "%s", heading.c_str());
-                if (g_fontBody) ImGui::PopFont();
-                if (g_fontSmall) ImGui::PushFont(g_fontSmall);
-            } else if (line[0] == '-' || line[0] == '*') {
-                ImGui::TextWrapped("  %s", line.c_str());
-            } else {
-                ImGui::TextWrapped("%s", line.c_str());
-            }
-        }
-
-        if (g_fontSmall) ImGui::PopFont();
-
-        ImGui::EndChild();
-        ImGui::PopStyleVar();
-        ImGui::PopStyleColor();
     }
 
     void LauncherUI::DrawProgressBar(float progress, const std::string& sizeText) {
@@ -185,6 +143,22 @@ namespace Launcher {
             ImGui::TextDisabled("%s", sizeText.c_str());
             if (g_fontSmall) ImGui::PopFont();
         }
+    }
+
+    void LauncherUI::DrawRestartButton() {
+        float windowWidth = ImGui::GetWindowWidth();
+        float buttonWidth = 240.0f;
+        float buttonHeight = 50.0f;
+
+        ImGui::SetCursorPosX((windowWidth - buttonWidth) * 0.5f);
+
+        if (g_fontButton) ImGui::PushFont(g_fontButton);
+
+        if (ImGui::Button("RESTART", ImVec2(buttonWidth, buttonHeight))) {
+            if (m_onRestart) m_onRestart();
+        }
+
+        if (g_fontButton) ImGui::PopFont();
     }
 
     void LauncherUI::DrawPlayButton(LauncherUIState& state) {
@@ -258,36 +232,63 @@ namespace Launcher {
         }
 
         if (g_fontButton) ImGui::PopFont();
+
+        // Vulkan checkbox to the right of the button
+        ImGui::SameLine(0, 20.0f);
+        if (g_fontSmall) ImGui::PushFont(g_fontSmall);
+        float checkY = ImGui::GetCursorPosY() + (buttonHeight - ImGui::GetFrameHeight()) * 0.5f;
+        ImGui::SetCursorPosY(checkY);
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImVec4(0.298f, 0.686f, 0.314f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.18f, 0.18f, 0.24f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.25f, 0.25f, 0.33f, 1.0f));
+        ImGui::Checkbox("Vulkan", &state.useVulkan);
+        ImGui::PopStyleColor(3);
+        if (g_fontSmall) ImGui::PopFont();
     }
 
     void LauncherUI::DrawStatusBar(const LauncherUIState& state) {
-        float windowWidth = ImGui::GetWindowWidth();
-        float windowHeight = static_cast<float>(WindowHeight);
+        float winW = ImGui::GetWindowWidth();
+        float winH = ImGui::GetWindowHeight();
 
-        // Position at bottom
-        ImGui::SetCursorPosY(windowHeight - 40.0f);
+        // Consistent margin used for all edges
+        const float margin = 20.0f;
 
         if (g_fontSmall) ImGui::PushFont(g_fontSmall);
 
-        // Installed version (left side)
-        ImGui::SetCursorPosX(20.0f);
+        // Calculate button size first so we can align everything
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(16, 6));
+        ImVec2 btnSize = ImGui::CalcTextSize("Settings");
+        btnSize.x += 32.0f; // padding * 2
+        btnSize.y += 12.0f; // padding * 2
+
+        // Bottom Y: anchor both elements from the bottom using the same margin
+        float btnY = winH - margin - btnSize.y;
+        float textY = btnY + (btnSize.y - ImGui::GetTextLineHeight()) * 0.5f;
+
+        // Installed version (left, vertically centered with button)
+        ImGui::SetCursorPos(ImVec2(margin, textY));
         if (state.gameInstalled) {
             ImGui::TextDisabled("Installed: v%s", state.installedVersion.c_str());
         } else {
             ImGui::TextDisabled("Not installed");
         }
 
-        // Settings gear (right side)
-        ImGui::SameLine(windowWidth - 100.0f);
-        if (ImGui::SmallButton("Settings")) {
+        // Settings button (right, same margin from edge)
+        ImGui::SetCursorPos(ImVec2(winW - margin - btnSize.x, btnY));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.18f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.25f, 0.38f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.18f, 0.20f, 0.32f, 1.0f));
+        if (ImGui::Button("Settings", btnSize)) {
             m_showSettings = !m_showSettings;
         }
+        ImGui::PopStyleColor(3);
+        ImGui::PopStyleVar();
 
         if (g_fontSmall) ImGui::PopFont();
     }
 
     void LauncherUI::DrawSettingsPopup() {
-        ImGui::SetNextWindowSize(ImVec2(350, 200), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(400, 250), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(
             ImVec2(static_cast<float>(WindowWidth) * 0.5f, static_cast<float>(WindowHeight) * 0.5f),
             ImGuiCond_FirstUseEver,
@@ -305,8 +306,20 @@ namespace Launcher {
             if (g_fontSmall) ImGui::PushFont(g_fontSmall);
 
             ImGui::TextDisabled("Launcher v%s", LauncherVersion);
+            ImGui::Spacing();
             ImGui::TextDisabled("Game directory:");
-            ImGui::TextWrapped("  (Set automatically based on platform)");
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.24f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.33f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.40f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6, 5));
+
+            std::string gameDir = Platform::g_gameDirectory.GetGameDirectory();
+            if (ImGui::SmallButton(gameDir.c_str())) {
+                ImGui::SetClipboardText(gameDir.c_str());
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Click to copy");
+            }
 
             ImGui::Spacing();
             ImGui::Separator();
@@ -315,6 +328,9 @@ namespace Launcher {
             if (ImGui::Button("Close", ImVec2(100, 0))) {
                 m_showSettings = false;
             }
+
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(3);
 
             if (g_fontSmall) ImGui::PopFont();
         }

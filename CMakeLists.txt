@@ -6,27 +6,27 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(-g)
 endif()
 
-# ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices,
-#     and force a minimum deployment target ─────────────────────────────────
+# ── On macOS, build universal (arm64 + x86_64) libraries by default.
+#     The game executable may be restricted to arm64-only when using Homebrew Vulkan,
+#     but all shared libraries and the launcher are always universal. ───────────
 if(APPLE)
     option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.7.6" CACHE STRING "Minimum macOS version" FORCE)
 
-    # Architecture must be set BEFORE add_subdirectory() calls.
-    # Determine early based on VULKAN_SDK env var presence.
-    if(NOT CMAKE_OSX_ARCHITECTURES)
-        if(ENABLE_VULKAN AND DEFINED ENV{VULKAN_SDK} AND NOT "$ENV{VULKAN_SDK}" STREQUAL "")
-            set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
-            message(STATUS "Vulkan SDK detected - building universal binary (arm64 + x86_64)")
-        elseif(ENABLE_VULKAN)
-            set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "macOS architectures" FORCE)
-            message(STATUS "Vulkan (Homebrew) - building arm64 only")
-        else()
-            set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
-            message(STATUS "No Vulkan - building universal binary (arm64 + x86_64)")
-        endif()
+    # Always build libraries as universal so the launcher (and anything else
+    # that doesn't depend on Vulkan) works on both Intel and Apple Silicon.
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+
+    # Track whether the game target needs to be restricted to arm64
+    # (only when using Homebrew MoltenVK which is arm64-only)
+    set(GAME_OSX_ARM64_ONLY FALSE)
+    if(ENABLE_VULKAN AND (NOT DEFINED ENV{VULKAN_SDK} OR "$ENV{VULKAN_SDK}" STREQUAL ""))
+        set(GAME_OSX_ARM64_ONLY TRUE)
+        message(STATUS "Vulkan (Homebrew) - game will be arm64 only, launcher universal")
+    else()
+        message(STATUS "Building universal binaries (arm64 + x86_64)")
     endif()
-    message(STATUS "macOS Architectures: ${CMAKE_OSX_ARCHITECTURES}")
+    message(STATUS "macOS Library Architectures: ${CMAKE_OSX_ARCHITECTURES}")
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -388,6 +388,11 @@ if(APPLE)
     set_target_properties(MyVoxelGame PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
     )
+    # Restrict game to arm64-only when using Homebrew Vulkan (arm64-only MoltenVK).
+    # Libraries are still universal so the launcher can link against them.
+    if(GAME_OSX_ARM64_ONLY)
+        set_target_properties(MyVoxelGame PROPERTIES OSX_ARCHITECTURES "arm64")
+    endif()
 else()
     add_executable(MyVoxelGame
             src/main.cpp
@@ -650,6 +655,7 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
+        ${CMAKE_BINARY_DIR}/generated
         ${Boost_INCLUDE_DIRS}
         # ========================================================================
         # CUSTOM TERRAIN LIBRARY
@@ -874,6 +880,40 @@ else()
     target_link_libraries(MyVoxelGame PRIVATE X11::X11 OpenGL::GL)
 endif()
 
+# ── Auto version bump + release for game (Universal/JALIN builds only) ──
+if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
+        # Auto-increment game build number before compiling (edits Config.hpp directly)
+        add_custom_target(bump_game_version ALL
+            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
+                game
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "0" "1"
+                "${PROJECT_SOURCE_DIR}"
+            COMMENT "Auto-incrementing game version"
+        )
+        add_dependencies(MyVoxelGame bump_game_version)
+
+        # POST_BUILD: zip + upload
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
+                game
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "0" "1"
+                "MyVoxelGame.app"
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+                "ObiJello/MyVoxelGame-Download"
+            COMMENT "Auto-releasing game"
+        )
+        # Update Info.plist version in bundle
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/update_plist_version.sh"
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Info.plist"
+                "0" "1"
+            COMMENT "Updating bundle version in Info.plist"
+        )
+endif()
+
 # ── Optional: Install targets ──────────────────────────────────────────────
 install(TARGETS MyVoxelGame DESTINATION bin)
 # ────────────────────────────────────────────────────────────────────────────
@@ -912,17 +952,55 @@ else()
     target_link_libraries(imgui_launcher PRIVATE glfw glad X11::X11 OpenGL::GL)
 endif()
 
-# Find libcurl
+# Find or build libcurl for the launcher
+# - macOS: system curl (always available)
+# - Windows: try system first, then build from source with Schannel (native TLS)
+# - Linux: try system first
 find_package(CURL QUIET)
 if(NOT CURL_FOUND)
-    # On macOS, curl is always available as a system framework
     if(APPLE)
+        # macOS always has curl as a system library
         find_library(CURL_LIBRARY curl)
         if(CURL_LIBRARY)
             set(CURL_FOUND TRUE)
             add_library(CURL::libcurl UNKNOWN IMPORTED)
             set_target_properties(CURL::libcurl PROPERTIES IMPORTED_LOCATION "${CURL_LIBRARY}")
+            message(STATUS "Found macOS system curl")
         endif()
+    elseif(WIN32)
+        # Build curl from source with Schannel (Windows native TLS) - no OpenSSL needed
+        message(STATUS "System curl not found - building from source with Schannel...")
+        set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+        set(CURL_USE_SCHANNEL ON CACHE BOOL "" FORCE)  # Windows native TLS
+        set(CURL_USE_OPENSSL OFF CACHE BOOL "" FORCE)
+        set(CURL_ZLIB OFF CACHE BOOL "" FORCE)          # We don't need zlib in curl
+        set(CURL_DISABLE_LDAP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_LDAPS ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_TELNET ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_DICT ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_FILE ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_TFTP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_RTSP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_POP3 ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_IMAP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_SMTP ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_GOPHER ON CACHE BOOL "" FORCE)
+        set(CURL_DISABLE_MQTT ON CACHE BOOL "" FORCE)
+        set(HTTP_ONLY ON CACHE BOOL "" FORCE)             # We only need HTTP/HTTPS
+        FetchContent_Declare(
+            curl
+            GIT_REPOSITORY https://github.com/curl/curl.git
+            GIT_TAG curl-8_7_1
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_MakeAvailable(curl)
+        set(CURL_FOUND TRUE)
+        # Create the CURL::libcurl alias that our target expects
+        if(NOT TARGET CURL::libcurl)
+            add_library(CURL::libcurl ALIAS libcurl_static)
+        endif()
+        message(STATUS "Built curl from source (static, Schannel TLS)")
     endif()
 endif()
 
@@ -978,6 +1056,20 @@ if(CURL_FOUND)
 
     target_compile_features(ObeyCraftLauncher PRIVATE cxx_std_20)
 
+    # Auto-increment launcher version (Release builds only, NOT universal/JALIN)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
+        # Auto-increment launcher version before compiling (edits LauncherConfig.hpp directly)
+        add_custom_target(bump_launcher_version ALL
+            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
+                launcher
+                "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                "1" "0"
+                "${PROJECT_SOURCE_DIR}"
+            COMMENT "Auto-incrementing launcher version"
+        )
+        add_dependencies(ObeyCraftLauncher bump_launcher_version)
+    endif()
+
     target_link_libraries(ObeyCraftLauncher PRIVATE
         glfw glad stb_image zlibstatic
         imgui_launcher
@@ -1009,7 +1101,38 @@ if(CURL_FOUND)
                 COMMENT "Copying launcher assets"
             )
         endif()
+        # Copy app icon into bundle Resources
+        if(EXISTS "${PROJECT_SOURCE_DIR}/assets/launcher/AppIcon.icns")
+            add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${PROJECT_SOURCE_DIR}/assets/launcher/AppIcon.icns"
+                    "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/AppIcon.icns"
+                COMMENT "Copying launcher app icon"
+            )
+        endif()
+        # Ad-hoc sign the launcher so macOS doesn't flag it as damaged
+        add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+            COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>"
+            COMMENT "Ad-hoc signing ObeyCraftLauncher.app"
+        )
+        # Auto version bump + release for launcher (Release only, NOT universal/JALIN)
+        if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
+            add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+                COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
+                    launcher
+                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    "1" "0"
+                    "ObeyCraftLauncher.app"
+                    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+                    "ObiJello/MyVoxelGame-Download"
+                COMMENT "Auto-releasing launcher"
+            )
+        endif()
     elseif(WIN32)
+        # Windows system libraries needed for curl/networking
+        target_link_libraries(ObeyCraftLauncher PRIVATE ws2_32 crypt32)
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(ObeyCraftLauncher PRIVATE OpenGL::GL)
         # Copy font next to executable on Windows
         add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory
@@ -1019,11 +1142,20 @@ if(CURL_FOUND)
                 "$<TARGET_FILE_DIR:ObeyCraftLauncher>/fonts/Roboto-Medium.ttf"
             COMMENT "Copying launcher fonts"
         )
+        # Copy launcher assets on Windows if they exist
+        if(EXISTS "${PROJECT_SOURCE_DIR}/assets/launcher")
+            add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${PROJECT_SOURCE_DIR}/assets/launcher"
+                    "$<TARGET_FILE_DIR:ObeyCraftLauncher>/launcher"
+                COMMENT "Copying launcher assets"
+            )
+        endif()
     endif()
 
     install(TARGETS ObeyCraftLauncher DESTINATION bin)
 else()
-    message(STATUS "curl not found - ObeyCraft Launcher will NOT be built")
+    message(STATUS "curl not found - ObeyCraft Launcher will NOT be built (install curl or build on macOS/Windows)")
 endif()
 
 # ── Optional: Print configuration summary ──────────────────────────────────────

@@ -16,8 +16,18 @@ namespace Launcher {
     inline constexpr const char* GitHubAPIBase = "https://api.github.com";
     inline constexpr const char* UserAgent = "ObeyCraftLauncher/1.0";
 
-    // Launcher version
-    inline constexpr const char* LauncherVersion = "1.0.0";
+    // Launcher version (auto-updated by tools/bump_version.sh on Release builds)
+    inline constexpr const char* LauncherVersion = "1.0.47";
+
+    // Launcher self-update
+    inline constexpr const char* LauncherReleaseTagPrefix = "launcher-v";
+#ifdef __APPLE__
+    inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher.app";
+#elif _WIN32
+    inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher.exe";
+#else
+    inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher";
+#endif
 
     // File names
     inline constexpr const char* LauncherConfigFile = "launcher.json";
