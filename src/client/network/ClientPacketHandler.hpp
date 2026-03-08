@@ -4,6 +4,8 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/network/IPacketListener.hpp"
 #include <memory>
+#include <chrono>
+#include <algorithm>
 
 namespace Client {
 
@@ -30,6 +32,8 @@ namespace Client {
         void onPlayerUpdateS2C(const Network::PlayerUpdateS2CPacket& packet) override { handlePlayerUpdate(packet); }
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
+        void onChunkBatchStart() override { handleChunkBatchStart(); }
+        void onChunkBatchFinished(int batchSize) override { handleChunkBatchFinished(batchSize); }
 
         // ========================================================================
         // PACKET HANDLERS (called via IPacket::apply on main thread)
@@ -63,6 +67,10 @@ namespace Client {
         // Chat
         void handleChatMessage(const std::string& message, uint8_t position);
 
+        // Chunk batch (adaptive rate control)
+        void handleChunkBatchStart();
+        void handleChunkBatchFinished(int batchSize);
+
         // ========================================================================
         // STATISTICS
         // ========================================================================
@@ -85,10 +93,43 @@ namespace Client {
 
     private:
         HandlerStats m_stats;
-        
+
         // Cached references (set during initialization)
         ClientChunkManager* m_chunkManager = nullptr;
         // Note: NetworkClient is accessed via g_networkClient global
+
+        // Chunk batch rate calculator (Minecraft's ChunkBatchSizeCalculator)
+        struct ChunkBatchSizeCalculator {
+            double aggregatedNanosPerChunk = 2000000.0; // 2ms initial estimate
+            int oldSamplesWeight = 1;
+            std::chrono::steady_clock::time_point batchStartTime;
+
+            void onBatchStart() {
+                batchStartTime = std::chrono::steady_clock::now();
+            }
+
+            void onBatchFinished(int batchSize) {
+                if (batchSize <= 0) return;
+                auto elapsed = std::chrono::steady_clock::now() - batchStartTime;
+                double batchNanos = std::chrono::duration<double, std::nano>(elapsed).count();
+                double nanosPerChunk = batchNanos / batchSize;
+
+                // Clamp to 3x range of current average (reject outliers)
+                double lo = aggregatedNanosPerChunk / 3.0;
+                double hi = aggregatedNanosPerChunk * 3.0;
+                double clamped = std::clamp(nanosPerChunk, lo, hi);
+
+                // Weighted moving average (up to 49 old samples)
+                aggregatedNanosPerChunk =
+                    (aggregatedNanosPerChunk * oldSamplesWeight + clamped) / (oldSamplesWeight + 1);
+                oldSamplesWeight = std::min(49, oldSamplesWeight + 1);
+            }
+
+            float getDesiredChunksPerTick() const {
+                return static_cast<float>(7000000.0 / aggregatedNanosPerChunk); // 7ms budget
+            }
+        };
+        ChunkBatchSizeCalculator m_batchCalculator;
     };
 
 } // namespace Client

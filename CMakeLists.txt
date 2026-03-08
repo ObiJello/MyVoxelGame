@@ -70,6 +70,19 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 # ────────────────────────────────────────────────────────────────────────────
 
+# ── Add Sentry Native SDK for crash reporting ────────────────────────────────
+set(SENTRY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SENTRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(SENTRY_BACKEND "crashpad" CACHE STRING "" FORCE)
+FetchContent_Declare(
+        sentry
+        GIT_REPOSITORY https://github.com/getsentry/sentry-native.git
+        GIT_TAG 0.7.17
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(sentry)
+# ────────────────────────────────────────────────────────────────────────────
+
 # ── Add Boost.Asio for networking (header-only) ────────────────────────────
 # Try to find system Boost first
 find_package(Boost 1.70 QUIET)
@@ -616,6 +629,10 @@ endif()
 
 # 7) PCH
 target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
+# Ensure SPIR-V shaders are compiled before MyVoxelGame links (so post-build copy gets fresh .spv)
+if(TARGET compile_shaders)
+    add_dependencies(MyVoxelGame compile_shaders)
+endif()
 
 # 8) Includes
 target_include_directories(MyVoxelGame PRIVATE
@@ -650,6 +667,7 @@ target_link_libraries(MyVoxelGame PRIVATE
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
         terrain_library  # Custom terrain generation library
+        sentry::sentry  # Crash reporting
 )
 
 # Link with Asio if using standalone
@@ -753,10 +771,10 @@ if(HAS_VULKAN)
         # Copy SPIR-V shaders to bundle
         add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${PROJECT_SOURCE_DIR}/shaders/block_vk.vert.spv"
+                "${CMAKE_BINARY_DIR}/shaders/block_vk.vert.spv"
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.vert.spv"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${PROJECT_SOURCE_DIR}/shaders/block_vk.frag.spv"
+                "${CMAKE_BINARY_DIR}/shaders/block_vk.frag.spv"
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/block_vk.frag.spv"
         )
 
@@ -767,6 +785,16 @@ if(HAS_VULKAN)
     message(STATUS "Vulkan backend: ENABLED")
 else()
     message(STATUS "Vulkan backend: DISABLED")
+endif()
+
+# ── Bundle crashpad handler into .app on macOS ────────────────────────────────
+if(APPLE AND TARGET crashpad_handler)
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:crashpad_handler>"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/crashpad_handler"
+        COMMENT "Bundling crashpad_handler into app"
+    )
 endif()
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────

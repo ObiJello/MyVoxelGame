@@ -21,6 +21,7 @@
 #include "world/storage/SectionDataUnpacker.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
+#include <cmath>
 #include <thread>
 
 namespace Server {
@@ -427,28 +428,15 @@ namespace Server {
         ProcessAsyncChunkResults();
         
         // === 2. RUN WORLD SIMULATION ===
-        // Call World's unified tick loop with chunk send throttling
+        // Minecraft runs runDistanceManagerUpdates + runGenerationTasks unconditionally
+        // every tick with zero budget. haveTime is only used for unloading/saving.
         if (m_world) {
-            // Use time budget for chunk processing
-            auto chunkStartTime = std::chrono::steady_clock::now();
-            int chunksProcessed = 0;
-            
-            // Process up to maxChunksPerTick or until time budget exceeded
-            while (chunksProcessed < m_config.maxChunksPerTick) {
-                auto currentTime = std::chrono::steady_clock::now();
-                float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - chunkStartTime).count();
-                
-                if (elapsedMs >= m_config.chunkProcessBudgetMs) {
-                    break; // Time budget exceeded
-                }
-                
-                // Process one chunk worth of work
-                // For now, just call WorldLoop with the remaining chunk budget
-                m_world->WorldLoop(deltaTime, m_config.maxChunksPerTick - chunksProcessed);
-                break; // WorldLoop handles its own batching
-            }
+            m_world->WorldLoop(deltaTime, m_config.maxChunksPerTick);
         }
         
+        // Send chunks to player with adaptive rate control (after WorldLoop, like Minecraft's tickChildren)
+        SendChunksToPlayer();
+
         // Increment tick counter
         m_stats.ticksProcessed.fetch_add(1, std::memory_order_relaxed);
 
@@ -518,12 +506,46 @@ namespace Server {
             return;
         }
         
-        // Create and send ChunkDataS2CPacket
+        // Build ChunkDataS2CPacket with full section data
         Network::ChunkDataS2CPacket packet;
         packet.chunkX = chunkPos.x;
         packet.chunkZ = chunkPos.z;
         packet.groundUpContinuous = true;
-        // TODO: Properly serialize chunk data into sections
+        packet.primaryBitmask = 0;
+
+        // Serialize non-empty sections (same logic as World::ChunkEntityPacketDispatch)
+        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+            const auto* section = chunk->GetSection(sectionY);
+            if (!section) continue;
+
+            uint16_t nonAirCount = 0;
+            for (size_t i = 0; i < section->blocks.size(); ++i) {
+                if (section->blocks[i] != static_cast<uint16_t>(Game::BlockID::Air)) {
+                    nonAirCount++;
+                }
+            }
+            if (nonAirCount == 0) continue;
+
+            packet.primaryBitmask |= (1 << sectionY);
+
+            Network::ChunkDataS2CPacket::SectionData sectionData;
+            sectionData.blockCount = nonAirCount;
+            sectionData.bitsPerEntry = 16; // Direct block IDs
+
+            const size_t blocksPerSection = 16 * 16 * 16;
+            const size_t blocksPerLong = 64 / 16; // 4 blocks per uint64_t
+            sectionData.dataArray.resize((blocksPerSection + blocksPerLong - 1) / blocksPerLong, 0);
+
+            for (size_t i = 0; i < blocksPerSection; ++i) {
+                uint16_t blockId = section->blocks[i];
+                size_t longIndex = i / blocksPerLong;
+                size_t bitOffset = (i % blocksPerLong) * 16;
+                sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
+            }
+
+            packet.sections.push_back(std::move(sectionData));
+        }
+
         SendChunkDataS2CPacket(std::move(packet));
         
         // Update send state
@@ -549,45 +571,157 @@ namespace Server {
         Log::Debug("Sent chunk (%d, %d) to client", chunkPos.x, chunkPos.z);
     }
     
+    void IntegratedServer::QueueChunkForSending(Game::Math::ChunkPos chunkPos) {
+        m_chunkSender.pendingChunks.insert(chunkPos);
+    }
+
+    void IntegratedServer::SendChunksToPlayer() {
+        if (m_chunkSender.pendingChunks.empty()) return;
+
+        // Back-pressure: don't send if too many unacknowledged batches
+        if (m_chunkSender.unacknowledgedBatches >= m_chunkSender.maxUnacknowledgedBatches) {
+            return;
+        }
+
+        // Accumulate fractional budget
+        float maxBatchSize = std::max(1.0f, m_chunkSender.desiredChunksPerTick);
+        m_chunkSender.batchQuota = std::min(
+            m_chunkSender.batchQuota + m_chunkSender.desiredChunksPerTick,
+            maxBatchSize
+        );
+
+        if (m_chunkSender.batchQuota < 1.0f) return;
+
+        int maxBatch = static_cast<int>(m_chunkSender.batchQuota);
+
+        // Collect closest chunks using partial sort when pending > maxBatch
+        // Matches Minecraft's Comparators.least(maxBatchSize, comparator)
+        struct ChunkDist {
+            Game::Math::ChunkPos pos;
+            int distSq;
+        };
+        std::vector<ChunkDist> candidates;
+        candidates.reserve(m_chunkSender.pendingChunks.size());
+
+        for (const auto& pos : m_chunkSender.pendingChunks) {
+            int dx = pos.x - m_playerState.currentChunk.x;
+            int dz = pos.z - m_playerState.currentChunk.z;
+            candidates.push_back({pos, dx * dx + dz * dz});
+        }
+
+        size_t toSend = std::min(static_cast<size_t>(maxBatch), candidates.size());
+        if (toSend == 0) return;
+
+        if (candidates.size() > toSend) {
+            std::partial_sort(candidates.begin(), candidates.begin() + toSend, candidates.end(),
+                              [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+        } else {
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+        }
+
+        // Build the batch — look up chunk data from cache at send time
+        std::vector<std::pair<Game::Math::ChunkPos, std::shared_ptr<Game::Chunk>>> batch;
+        for (size_t i = 0; i < toSend; ++i) {
+            auto chunk = m_world->GetChunkProvider()->GetChunk(candidates[i].pos);
+            if (chunk) {
+                batch.push_back({candidates[i].pos, chunk});
+            }
+        }
+
+        if (batch.empty()) return;
+
+        // Send batch start
+        {
+            auto data = Network::Serialization::Serialize(Network::ChunkBatchStartS2CPacket{});
+            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchStartS2C), data);
+        }
+
+        // Send each chunk
+        for (const auto& [pos, chunk] : batch) {
+            SendChunkToClient(pos, chunk);
+            m_chunkSender.pendingChunks.erase(pos);
+        }
+
+        // Send batch finished
+        {
+            Network::ChunkBatchFinishedS2CPacket finishPacket(static_cast<int32_t>(batch.size()));
+            auto data = Network::Serialization::Serialize(finishPacket);
+            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchFinishedS2C), data);
+        }
+
+        m_chunkSender.batchQuota -= static_cast<float>(batch.size());
+        m_chunkSender.unacknowledgedBatches++;
+
+        Log::Debug("Sent chunk batch: %zu chunks (quota=%.1f, unacked=%d, rate=%.1f)",
+                  batch.size(), m_chunkSender.batchQuota,
+                  m_chunkSender.unacknowledgedBatches, m_chunkSender.desiredChunksPerTick);
+    }
+
+    void IntegratedServer::OnChunkBatchAck(float desiredRate) {
+        m_chunkSender.unacknowledgedBatches--;
+        m_chunkSender.desiredChunksPerTick = std::isnan(desiredRate)
+            ? ChunkSenderState::MIN_RATE
+            : std::clamp(desiredRate, ChunkSenderState::MIN_RATE, ChunkSenderState::MAX_RATE);
+        if (m_chunkSender.unacknowledgedBatches == 0) {
+            m_chunkSender.batchQuota = 1.0f;
+        }
+        m_chunkSender.maxUnacknowledgedBatches = ChunkSenderState::MAX_UNACKED_BATCHES;
+
+        Log::Debug("Chunk batch ack: desiredRate=%.2f, unacked=%d, maxUnacked=%d",
+                  m_chunkSender.desiredChunksPerTick, m_chunkSender.unacknowledgedBatches,
+                  m_chunkSender.maxUnacknowledgedBatches);
+    }
+
     void IntegratedServer::ProcessAsyncChunkResults() {
         // Only process if async chunk loading is enabled
         if (!m_config.enableAsyncChunkLoading) {
             return;
         }
-        
-        // Get the chunk generation result queue from ServerWorkerPool
+
         auto& resultQueue = Threading::ServerWorkerPool::GetChunkGenResultQueue();
-        
-        // Process up to a limited number of results per tick to avoid stalling
-        const int maxResultsPerTick = 10;
+
+        // Use time budget instead of fixed count — process results until budget exhausted
+        auto startTime = std::chrono::steady_clock::now();
+        const float budgetMs = 5.0f;
         int resultsProcessed = 0;
-        
+
         Network::ChunkGenResult result;
-        while (resultsProcessed < maxResultsPerTick && resultQueue.try_pop(result)) {
-            // Check if chunk is still in pending list
-            if (m_pendingChunkLoads.find(result.position) != m_pendingChunkLoads.end()) {
-                if (result.success && result.chunk) {
-                    // Send the chunk to the client
-                    SendChunkToClient(result.position, result.chunk);
-                    
-                    // The chunk is already stored in the world by the worker thread
-                    // No need to store it again
-                    
-                    Log::Debug("Processed async chunk load for (%d, %d) - success", 
-                             result.position.x, result.position.z);
-                } else {
-                    Log::Warning("Async chunk load failed for (%d, %d): %s", 
-                               result.position.x, result.position.z, 
-                               result.errorMessage.c_str());
-                }
-                
-                // Remove from pending list
-                m_pendingChunkLoads.erase(result.position);
+        while (resultQueue.try_pop(result)) {
+            // Check time budget
+            if (resultsProcessed > 0) {
+                auto now = std::chrono::steady_clock::now();
+                float elapsedMs = std::chrono::duration<float, std::milli>(now - startTime).count();
+                if (elapsedMs >= budgetMs) break;
             }
-            
+
+            if (result.success && result.chunk) {
+                // Chunk is already in ChunkProvider cache (worker called GetChunk -> CompleteChunkLoad)
+                // Update status tracking
+                if (m_statusManager) {
+                    m_statusManager->MarkChunkReady(result.position);
+                }
+
+                // Send to client
+                SendChunkToClient(result.position, result.chunk);
+
+                Log::Debug("Processed async chunk load for (%d, %d) - success",
+                         result.position.x, result.position.z);
+            } else {
+                // Mark as failed so it can be retried
+                if (m_statusManager) {
+                    m_statusManager->SetChunkStatus(result.position, Server::ChunkStatus::EMPTY);
+                }
+                Log::Warning("Async chunk load failed for (%d, %d): %s",
+                           result.position.x, result.position.z,
+                           result.errorMessage.c_str());
+            }
+
+            // Remove from pending list
+            m_pendingChunkLoads.erase(result.position);
             resultsProcessed++;
         }
-        
+
         if (resultsProcessed > 0) {
             Log::Debug("Processed %d async chunk results this tick", resultsProcessed);
         }

@@ -9,6 +9,29 @@
 
 namespace Render {
 
+    // Minecraft directional face shading for fluids (same values as solid blocks)
+    static float GetFluidDirectionalShade(BlockFace face) {
+        switch (face) {
+            case BlockFace::PositiveY: return 1.0f;
+            case BlockFace::NegativeY: return 0.5f;
+            case BlockFace::PositiveZ: return 0.8f;
+            case BlockFace::NegativeZ: return 0.8f;
+            case BlockFace::PositiveX: return 0.6f;
+            case BlockFace::NegativeX: return 0.6f;
+            default: return 1.0f;
+        }
+    }
+
+    // Apply directional shade to a set of 4 vertices (gamma-space multiply like Minecraft)
+    static void ApplyDirectionalShade(std::vector<Vertex>& verts, BlockFace face) {
+        float shade = GetFluidDirectionalShade(face);
+        for (auto& v : verts) {
+            v.color.r *= shade;
+            v.color.g *= shade;
+            v.color.b *= shade;
+        }
+    }
+
     FluidMeshBuilder::FluidMeshBuilder(const FluidMeshConfig& config) : m_config(config) {
     }
 
@@ -109,6 +132,9 @@ namespace Render {
             surfaceVerts = CreateFluidQuad(blockPos, BlockFace::PositiveY, height, uvRect, tint);
         }
 
+        // Apply Minecraft directional face shading
+        ApplyDirectionalShade(surfaceVerts, BlockFace::PositiveY);
+
         // Add to translucent mesh (fluids are always translucent)
         if (surfaceVerts.size() == 4) {
             uint32_t baseIndex = static_cast<uint32_t>(mesh.translucentVerts.size());
@@ -144,6 +170,9 @@ namespace Render {
 
         // Create face quad
         std::vector<Vertex> faceVerts = CreateFluidQuad(blockPos, face, height, uvRect, tint);
+
+        // Apply Minecraft directional face shading
+        ApplyDirectionalShade(faceVerts, face);
 
         if (faceVerts.size() == 4) {
             uint32_t baseIndex = static_cast<uint32_t>(mesh.translucentVerts.size());

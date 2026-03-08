@@ -46,6 +46,8 @@
             ChunkDataS2C        = 0x20,  // New Minecraft-compatible chunk data packet
             UnloadChunkS2C      = 0x21,  // New Minecraft-compatible chunk unload packet
             ClientboundSectionBlocksUpdate = 0x22,  // Minecraft-style section block updates packet
+            ChunkBatchStartS2C    = 0x23,  // Signals start of a chunk batch
+            ChunkBatchFinishedS2C = 0x24,  // Signals end of batch (includes chunk count)
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -67,6 +69,7 @@
             Animation           = 0x8D,
             EntityAction        = 0x8E,
             SteerVehicle        = 0x8F,
+            ChunkBatchAckC2S    = 0x90,  // Client acknowledges batch with desired send rate
         };
 
         // Convert PacketId to string for logging
@@ -101,6 +104,8 @@
                 case PacketId::ChunkDataS2C: return "ChunkDataS2C";
                 case PacketId::UnloadChunkS2C: return "UnloadChunkS2C";
                 case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
+                case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
+                case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";
@@ -120,6 +125,7 @@
                 case PacketId::Animation: return "Animation";
                 case PacketId::EntityAction: return "EntityAction";
                 case PacketId::SteerVehicle: return "SteerVehicle";
+                case PacketId::ChunkBatchAckC2S: return "ChunkBatchAckC2S";
 
                 default: return "Unknown";
             }

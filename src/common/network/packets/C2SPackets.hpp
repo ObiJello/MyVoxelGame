@@ -111,5 +111,25 @@ namespace Packets {
     };
 
 
+    // ========================================================================
+    // CHUNK BATCH ACK PACKET
+    // ========================================================================
+
+    class ChunkBatchAckC2SPacketImpl : public IC2SPacket {
+    private:
+        float m_desiredRate;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ChunkBatchAckC2SPacketImpl(float desiredRate)
+            : m_desiredRate(desiredRate)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onChunkBatchAck(m_desiredRate);
+        }
+        float getDesiredRate() const { return m_desiredRate; }
+        PacketId getId() const override { return PacketId::ChunkBatchAckC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network

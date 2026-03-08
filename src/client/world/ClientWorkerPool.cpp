@@ -293,7 +293,7 @@ namespace Threading {
             {
                 std::unique_lock<std::mutex> lock(m_jobQueueMutex);
                 
-                if (m_jobCondition.wait_for(lock, std::chrono::milliseconds(100), 
+                if (m_jobCondition.wait_for(lock, std::chrono::milliseconds(5),
                                            [this] { return !m_jobQueue.empty() || !m_running.load(); })) {
                     if (!m_jobQueue.empty()) {
                         jobOpt = std::move(const_cast<MeshJob&>(m_jobQueue.top()));

@@ -6,6 +6,7 @@
 #include "common/core/Assert.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/PacketTypes.hpp"
+#include "server/IntegratedServer.hpp"
 
 namespace Server {
     
@@ -61,5 +62,12 @@ namespace Server {
         Log::Debug("[ServerPlayPacketListener] Received ChatMessageC2S: %s", packet.message.c_str());
         // TODO: Implement chat message handling
     }
-    
+
+    void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
+        // Forward to IntegratedServer for adaptive rate control
+        if (Server::g_integratedServer) {
+            Server::g_integratedServer->OnChunkBatchAck(desiredChunksPerTick);
+        }
+    }
+
 } // namespace Server

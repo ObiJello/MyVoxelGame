@@ -7,7 +7,7 @@ namespace Game {
     // Define the static array
     std::array<Block, BlockRegistry::Size> BlockRegistry::blockDefinitions{};
 
-    void BlockRegistry::RegisterModelBlock(BlockID id, const std::string& name, bool opaque,
+    void BlockRegistry::RegisterModelBlock(BlockID id, const std::string& name, RenderLayer layer,
                                               const std::string& modelName) {
         size_t index = static_cast<size_t>(id);
         if (index >= blockDefinitions.size()) {
@@ -15,13 +15,15 @@ namespace Game {
             return;
         }
 
+        bool opaque = (layer == RenderLayer::Opaque);
         blockDefinitions[index] = Block{
             .name = name,
             .opaque = opaque,
             .modelName = modelName,
             .legacyTexIdx = {0, 0, 0, 0, 0, 0},
             .useLegacyTextures = false,
-            .isTransparent = !opaque
+            .isTransparent = !opaque,
+            .renderLayer = layer
         };
 
         Log::Info("Registered model-based block ID %u as \"%s\" (model=%s, opaque=%s)",
@@ -44,7 +46,8 @@ namespace Game {
             .legacyTexIdx = texIndices,
             .useLegacyTextures = true,
             .enableBiomeTinting = false,
-            .isTransparent = !opaque
+            .isTransparent = !opaque,
+            .renderLayer = opaque ? RenderLayer::Opaque : RenderLayer::Cutout
         };
 
         Log::Info("Registered legacy block ID %u as \"%s\" (legacy_textures=%s)",
@@ -58,16 +61,16 @@ namespace Game {
         RegisterLegacyBlock(BlockID::Air, "Air", false, {1008, 1008, 1008, 1008, 1008, 1008});
 
         // All blocks from BlockDefs.inc (single source of truth)
-        #define BLOCK_DEF(e, m, d, o) RegisterModelBlock(BlockID::e, d, o, m);
+        #define BLOCK_DEF(e, m, d, r) RegisterModelBlock(BlockID::e, d, Game::RenderLayer::r, m);
         #include "BlockDefs.inc"
         #undef BLOCK_DEF
 
         // Manual entries not in all_blocks.txt
-        RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", true, "grass_block_snow");
+        RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", RenderLayer::Opaque, "grass_block_snow");
 
         // Override model names for blocks where minecraft ID != model file name
-        RegisterModelBlock(BlockID::Water, "Water", false, "water_still");
-        RegisterModelBlock(BlockID::Lava, "Lava", true, "lava_still");
+        RegisterModelBlock(BlockID::Water, "Water", RenderLayer::Translucent, "water_still");
+        RegisterModelBlock(BlockID::Lava, "Lava", RenderLayer::Translucent, "lava_still");
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));

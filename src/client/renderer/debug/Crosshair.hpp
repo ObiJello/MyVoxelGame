@@ -15,6 +15,9 @@ namespace Render {
         // Initialize the crosshair renderer (call once)
         bool Initialize(const std::string& texturePath = "assets/textures/gui/sprites/hud/crosshair.png");
 
+        // Release GPU resources (safe to call multiple times)
+        void Shutdown();
+
         // Render the crosshair at screen center with proper Retina support
         void Render(int windowWidth, int windowHeight, int framebufferWidth, int framebufferHeight);
 

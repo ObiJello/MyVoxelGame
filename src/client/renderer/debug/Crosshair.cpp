@@ -55,13 +55,18 @@ void main() {
     }
 
     Crosshair::~Crosshair() {
+        Shutdown();
+    }
+
+    void Crosshair::Shutdown() {
         if (g_renderBackend) {
-            if (m_mesh != INVALID_MESH)       g_renderBackend->DestroyMesh(m_mesh);
-            if (m_vb != INVALID_BUFFER)       g_renderBackend->DestroyBuffer(m_vb);
-            if (m_ib != INVALID_BUFFER)       g_renderBackend->DestroyBuffer(m_ib);
-            if (m_texture != INVALID_TEXTURE) g_renderBackend->DestroyTexture(m_texture);
-            if (m_shader != INVALID_SHADER)   g_renderBackend->DestroyShader(m_shader);
+            if (m_mesh != INVALID_MESH)       { g_renderBackend->DestroyMesh(m_mesh);       m_mesh = INVALID_MESH; }
+            if (m_vb != INVALID_BUFFER)       { g_renderBackend->DestroyBuffer(m_vb);       m_vb = INVALID_BUFFER; }
+            if (m_ib != INVALID_BUFFER)       { g_renderBackend->DestroyBuffer(m_ib);       m_ib = INVALID_BUFFER; }
+            if (m_texture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_texture); m_texture = INVALID_TEXTURE; }
+            if (m_shader != INVALID_SHADER)   { g_renderBackend->DestroyShader(m_shader);   m_shader = INVALID_SHADER; }
         }
+        isInitialized = false;
     }
 
     bool Crosshair::Initialize(const std::string& texturePath) {

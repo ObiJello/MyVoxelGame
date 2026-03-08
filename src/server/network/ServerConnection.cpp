@@ -662,11 +662,18 @@ namespace Server {
                 }
                 break;
             
+            case PacketId::ChunkBatchAckC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeChunkBatchAckC2S(payload);
+                    return std::make_unique<Network::Packets::ChunkBatchAckC2SPacketImpl>(data.desiredChunksPerTick);
+                }
+                break;
+
             // TODO: Add more packet types as we implement them
             // case PacketId::BlockActionC2S:
             // case PacketId::PlayerMoveC2S:
             // case PacketId::ChatMessageC2S:
-            
+
             default:
                 // For packets we haven't converted yet, return nullptr to fall back to legacy
                 return nullptr;

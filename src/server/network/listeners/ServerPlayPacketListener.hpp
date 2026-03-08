@@ -38,6 +38,9 @@ namespace Server {
         
         // Chat
         void onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) override;
+
+        // Chunk batch acknowledgment
+        void onChunkBatchAck(float desiredChunksPerTick) override;
     };
     
 } // namespace Server

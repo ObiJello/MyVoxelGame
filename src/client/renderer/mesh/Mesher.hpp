@@ -10,6 +10,7 @@
 #include "common/world/math/WorldCoordinates.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include <glm/glm.hpp>
+#include <array>
 #include <memory>
 
 // **NEW**: Forward declaration to avoid circular dependency
@@ -87,18 +88,22 @@ namespace Render {
         Game::World* m_world;  // **NEW**: World reference for cross-chunk access
         std::unique_ptr<FluidMeshBuilder> m_fluidBuilder;  // Fluid mesh builder
 
+        // UV cache: keyed by FaceDef pointer (stable in static BlockModel data)
+        // Avoids ResolveTexture string alloc + atlas hash lookup per face
+        std::unordered_map<const Game::FaceDef*, glm::vec4> m_faceUVCache;
+
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                          int localX, int localY, int localZ,
                          int sectionY, SectionMesh& mesh);
 
-        // **UPDATED**: Now includes world coordinates for biome tinting
-        void AddBlockFace(const Game::BlockModel& model, const Game::Element& element,
+        void AddBlockFace(const Game::IBlockAccess& blocks,
+                         const Game::BlockModel& model, const Game::Element& element,
                          Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                          glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
-                         int worldX, int worldY, int worldZ, SectionMesh& mesh);
+                         int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
 
-        void GenerateQuad(const std::vector<Vertex>& quadVerts,
+        void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
                          std::vector<Vertex>& outVerts, std::vector<uint32_t>& outIndices);
 
         // Culling and optimization
@@ -117,14 +122,18 @@ namespace Render {
         glm::vec4 CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateBiomeTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
 
-        RenderLayer GetRenderLayer(Game::BlockID blockId);
-
         // Geometry helpers
-        std::vector<Vertex> CreateFaceVertices(glm::vec3 blockPos, BlockFace face,
+        std::array<Vertex, 4> CreateFaceVertices(glm::vec3 blockPos, BlockFace face,
                                               const glm::vec4& uvRect, const glm::vec4& tint);
         glm::vec3 GetFaceNormal(BlockFace face);
-        uint8_t CalculateAmbientOcclusion(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
-                                         BlockFace face, int vertexIndex);
+
+        // Minecraft-style per-vertex ambient occlusion
+        // Returns a shade value 0.0-1.0 for a vertex corner based on 3 neighbor blocks
+        float CalculateVertexAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
+                                BlockFace face, int vertexIndex);
+
+        // Minecraft directional face shading multiplier
+        static float GetDirectionalShade(BlockFace face);
 
         // **REMOVED**: WorldYToChunkY() - use Game::Math::WorldCoordinates instead
 

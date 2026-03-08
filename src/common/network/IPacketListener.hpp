@@ -40,6 +40,8 @@ namespace Network {
         // Chunk management
         virtual void onChunkDataS2C(const ChunkDataS2CPacket& packet) {}
         virtual void onUnloadChunkS2C(const UnloadChunkS2CPacket& packet) {}
+        virtual void onChunkBatchStart() {}
+        virtual void onChunkBatchFinished(int batchSize) {}
         
         // Block updates
         virtual void onBlockChangeS2C(const BlockChangeS2CPacket& packet) {}
@@ -74,6 +76,9 @@ namespace Network {
         
         // Play phase - Keep alive
         virtual void onKeepAliveResponse(const KeepAliveC2SPacket& packet) {}
+
+        // Play phase - Chunk batch acknowledgment
+        virtual void onChunkBatchAck(float desiredChunksPerTick) {}
     };
 
 } // namespace Network

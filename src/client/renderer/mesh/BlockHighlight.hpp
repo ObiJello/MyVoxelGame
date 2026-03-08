@@ -18,6 +18,9 @@ namespace Render {
         // Initialize the highlight renderer (call once)
         bool Initialize();
 
+        // Release GPU resources (safe to call multiple times)
+        void Shutdown();
+
         // Render the highlight for the given block position
         void Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix);
 

@@ -158,6 +158,12 @@ namespace Game {
         void LogPerformanceStats() const;
         bool ValidateState() const;
 
+        // Get the underlying generator (for async API access)
+        IChunkGenerator* GetGenerator() const { return m_chunkGenerator.get(); }
+
+        // Store a loaded/generated chunk in cache (validates + caches)
+        std::shared_ptr<Chunk> StoreChunkInCache(std::shared_ptr<Chunk> chunk);
+
     private:
         // Configuration
         ChunkProviderConfig m_config;

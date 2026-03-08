@@ -158,6 +158,9 @@ namespace Game {
         // Track chunks already sent to client (reset when player moves significantly)
         std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_sentChunks;
 
+        // Track chunks already requested for async generation (prevents duplicate requests)
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_requestedChunks;
+
         // Stop flag for early termination of long-running loops
         std::atomic<bool> m_stopRequested{false};
     };

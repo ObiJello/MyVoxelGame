@@ -162,10 +162,10 @@ namespace Game {
 
         Log::Info("[MyTerrainGenerator] Shutting down...");
 
-        // Destroy in reverse order
-        m_chunkCache.reset();
+        // Stop worker threads FIRST so no tasks reference destroyed objects
         m_backgroundExecutor.reset();
         m_mainThreadExecutor.reset();
+        m_chunkCache.reset();
 
         delete m_generator;   m_generator = nullptr;
         m_biomeSource.reset();
@@ -280,6 +280,87 @@ namespace Game {
         gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
 
         return gameState.resolvedId;
+    }
+
+    // === Non-blocking async API ===
+
+    bool MyTerrainGenerator::RequestChunkGeneration(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache) return false;
+
+        // getChunkFuture dispatches to the main thread executor internally.
+        // Since we're calling from the server thread (which IS the main thread
+        // for the terrain library), this calls getChunkFutureMainThread directly,
+        // which adds a ticket and schedules generation — but does NOT block.
+        m_chunkCache->getChunkFuture(
+            position.x, position.z, *m_targetStatus, true
+        );
+        return true;
+    }
+
+    void MyTerrainGenerator::PumpAsyncTasks() {
+        if (!m_initialized || !m_chunkCache) return;
+
+        // Minecraft pattern: loop until no more work to do.
+        // Reference: ServerChunkCache.MainThreadExecutor.pollTask() calls
+        // runDistanceManagerUpdates() each iteration, which can schedule more
+        // work that feeds into the next iteration.
+        bool didWork = true;
+        int iterations = 0;
+        const int MAX_ITERATIONS = 256; // safety cap
+
+        while (didWork && iterations < MAX_ITERATIONS) {
+            didWork = false;
+
+            // runDistanceManagerUpdates calls runGenerationTasks internally
+            if (m_chunkCache->runDistanceManagerUpdates()) {
+                didWork = true;
+            }
+
+            // Pump main thread executor tasks (generation callbacks)
+            if (m_mainThreadExecutor && m_mainThreadExecutor->hasPendingTasks()) {
+                m_mainThreadExecutor->runPendingTasks();
+                didWork = true;
+            }
+
+            iterations++;
+        }
+    }
+
+    bool MyTerrainGenerator::IsChunkReady(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache) return false;
+        // getChunkNow returns non-null only if chunk is at FULL status
+        return m_chunkCache->getChunkNow(position.x, position.z) != nullptr;
+    }
+
+    std::shared_ptr<Chunk> MyTerrainGenerator::GetCompletedChunk(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache) return nullptr;
+
+        auto* chunk = m_chunkCache->getChunkNow(position.x, position.z);
+        if (!chunk) return nullptr;
+
+        // Convert from terrain library chunk to game chunk format
+        auto gameChunk = std::make_shared<Chunk>();
+        gameChunk->pos = position;
+
+        minecraft::world::ChunkPos chunkPos = chunk->getPos();
+        int worldMinX = chunkPos.getMinBlockX();
+        int worldMinZ = chunkPos.getMinBlockZ();
+
+        for (int y = MIN_Y; y < MAX_Y; y++) {
+            for (int localX = 0; localX < 16; localX++) {
+                for (int localZ = 0; localZ < 16; localZ++) {
+                    minecraft::core::BlockPos blockPos(
+                        worldMinX + localX, y, worldMinZ + localZ
+                    );
+                    auto* blockState = chunk->getBlockState(blockPos);
+                    BlockID gameBlockId = MapBlockType(blockState);
+                    gameChunk->SetBlock(localX, y, localZ, gameBlockId);
+                }
+            }
+        }
+
+        m_stats.chunksGenerated++;
+        return gameChunk;
     }
 
     // === Configuration methods ===

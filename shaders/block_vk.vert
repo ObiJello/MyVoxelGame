@@ -7,9 +7,12 @@ layout (location = 1) in vec3 aNormal;    // Face normal
 layout (location = 2) in vec2 aTexCoord;  // Texture coordinates from atlas
 layout (location = 3) in vec4 aColor;     // Vertex color/tint
 
-// Push constant for MVP matrix (efficient for per-draw data)
+// Push constants (must match C++ PushConstantBlock layout exactly)
 layout (push_constant) uniform PushConstants {
-    mat4 uMVP;
+    mat4 uMVP;          // 64 bytes
+    vec2 uScreenSize;   // 8 bytes
+    float uLineWidth;   // 4 bytes
+    float uAlphaTest;   // 4 bytes
 } pc;
 
 // Output to fragment shader

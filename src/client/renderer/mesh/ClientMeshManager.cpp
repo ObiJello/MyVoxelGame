@@ -111,36 +111,16 @@ namespace Render {
 
     void ClientMeshManager::ScheduleMeshBuilds(const glm::vec3& playerPosition) {
         if (!m_chunkManager) return;
-        
+
         SetPlayerPosition(playerPosition);
-        
-        // Throttle scheduling to prevent overwhelming the queue
-        static std::chrono::steady_clock::time_point lastScheduleTime;
-        auto now = std::chrono::steady_clock::now();
-        const auto SCHEDULE_INTERVAL = std::chrono::milliseconds(100); // Schedule every 100ms max
-        
-        if (now - lastScheduleTime < SCHEDULE_INTERVAL) {
-            return; // Skip this frame
-        }
-        lastScheduleTime = now;
-        
+
+        // No timer — run every frame. Buffer pool backpressure in
+        // ScheduleMeshBuildsWithSnapshots limits submissions naturally.
         auto startTime = std::chrono::steady_clock::now();
-        
-        // Delegate to ClientChunkManager to schedule mesh builds for dirty sections
-        // This will create snapshots and submit them to the worker pool
-        // The ClientChunkManager now enforces time budgets internally
         m_chunkManager->ScheduleMeshBuildsWithSnapshots(playerPosition);
-        
-        // Record timing
+
         auto endTime = std::chrono::steady_clock::now();
-        float schedulingTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.meshSchedulingTimeMs = schedulingTime;
-        
-        // Warn if we exceed budget
-        if (schedulingTime > m_config.meshBuildBudgetMs) {
-            Log::Debug("Mesh scheduling exceeded budget: %.2fms > %.2fms", 
-                      schedulingTime, m_config.meshBuildBudgetMs);
-        }
+        m_stats.meshSchedulingTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     void ClientMeshManager::PerformGPUUploads() {
@@ -210,18 +190,6 @@ namespace Render {
         Log::Info("  Completed Results: %zu", GetCompletedResultCount());
     }
 
-    void ClientMeshManager::UpdateStats(const std::string& operation, bool success) {
-        // Update statistics based on operation
-        if (operation == "mesh_scheduled") {
-            if (success) m_stats.meshBuildsScheduled.fetch_add(1, std::memory_order_relaxed);
-        } else if (operation == "mesh_completed") {
-            if (success) m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
-        } else if (operation == "mesh_uploaded") {
-            if (success) m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
-        } else if (operation == "mesh_cancelled") {
-            m_stats.meshBuildsCancelled.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
 
     void ClientMeshManager::LogMeshActivity(const std::string& activity, ::Game::Math::ChunkPos chunkPos, int sectionY) {
         if (sectionY >= 0) {
@@ -303,7 +271,6 @@ namespace Render {
                 
                 // Update statistics
                 m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
-                UpdateStats("mesh_completed", true);
                 
                 LogMeshActivity("Uploaded mesh", result.chunkPos, result.sectionY);
                 break;

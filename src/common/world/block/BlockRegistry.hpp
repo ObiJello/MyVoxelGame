@@ -8,6 +8,13 @@
 
 namespace Game {
 
+    // Render layer classification — determines which rendering pass a block uses
+    enum class RenderLayer : uint8_t {
+        Opaque = 0,      // Solid blocks (stone, dirt, wood)
+        Cutout = 1,      // Alpha-test blocks (leaves, grass, flowers)
+        Translucent = 2  // Blended blocks (glass, water, ice)
+    };
+
     struct Block {
         std::string name;
         bool opaque;
@@ -20,6 +27,7 @@ namespace Game {
         // Rendering hints
         bool enableBiomeTinting = false;  // Whether this block uses biome coloring
         bool isTransparent = false;       // Whether this block has transparent parts
+        RenderLayer renderLayer = RenderLayer::Opaque;
     };
 
     class BlockRegistry {
@@ -45,7 +53,7 @@ namespace Game {
         BlockRegistry() = delete;
 
         // Helper to register a block with model-based rendering
-        static void RegisterModelBlock(BlockID id, const std::string& name, bool opaque,
+        static void RegisterModelBlock(BlockID id, const std::string& name, RenderLayer layer,
                                      const std::string& modelName);
 
         // Helper to register a block with legacy texture indices

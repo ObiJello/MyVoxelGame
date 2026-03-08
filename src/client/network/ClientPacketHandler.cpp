@@ -230,4 +230,32 @@ namespace Client {
         Log::Info("[CHAT] %s", message.c_str());
     }
 
+    // ========================================================================
+    // CHUNK BATCH (Adaptive Rate Control)
+    // ========================================================================
+
+    void ClientPacketHandler::handleChunkBatchStart() {
+        m_batchCalculator.onBatchStart();
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleChunkBatchFinished(int batchSize) {
+        m_batchCalculator.onBatchFinished(batchSize);
+        float desiredRate = m_batchCalculator.getDesiredChunksPerTick();
+        desiredRate = std::clamp(desiredRate, 0.01f, 64.0f);
+
+        // Send ack back to server
+        if (g_networkClient && g_networkClient->IsConnected()) {
+            auto connection = g_networkClient->GetConnection();
+            if (connection) {
+                Network::ChunkBatchAckC2SPacket ackPacket(desiredRate);
+                auto data = Network::Serialization::Serialize(ackPacket);
+                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchAckC2S), data);
+                Log::Debug("[ClientPacketHandler] Sent batch ack: rate=%.2f (batch=%d)", desiredRate, batchSize);
+            }
+        }
+
+        m_stats.packetsProcessed++;
+    }
+
 } // namespace Client

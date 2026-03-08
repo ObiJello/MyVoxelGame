@@ -632,8 +632,9 @@ namespace Render {
         }
 
         // Create new texture via backend
-        Render::TextureFormat format = useMinecraftStyle ?
-            Render::TextureFormat::SRGB8_A8 : Render::TextureFormat::RGBA8;
+        // Use RGBA8 — all rendering is done in gamma space like Minecraft.
+        // No sRGB decode on sample; shade values are direct gamma-space multipliers.
+        Render::TextureFormat format = Render::TextureFormat::RGBA8;
         m_atlasTexture = Render::g_renderBackend->CreateTexture2D(
             atlasWidth, atlasHeight, format, uploadData);
 

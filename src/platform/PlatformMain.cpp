@@ -3,6 +3,7 @@
 #include "Time.hpp"
 #include "client/input/Input.hpp"
 #include "common/core/Log.hpp"
+#include <sentry.h>
 #include "common/core/Config.hpp"
 #include "common/core/ThreadAllocator.hpp"
 #include "client/renderer/debug/DebugSystem.hpp"
@@ -330,6 +331,27 @@ namespace PlatformMain {
             }
         }
 
+        // Initialize crash reporting (must be first — catches crashes during all other init)
+        sentry_options_t *sentryOptions = sentry_options_new();
+        sentry_options_set_dsn(sentryOptions, "https://685865d2f16184d804534ac7e262e818@o4511006654791680.ingest.us.sentry.io/4511006665539584");
+        sentry_options_set_database_path(sentryOptions, ".sentry-native");
+        sentry_options_set_release(sentryOptions, "myvoxelgame@0.1.0");
+#ifdef __APPLE__
+        // On macOS, crashpad_handler is bundled next to the executable in the .app
+        {
+            std::string exeDir = std::string(argv[0]);
+            exeDir = exeDir.substr(0, exeDir.find_last_of('/'));
+            std::string handlerPath = exeDir + "/crashpad_handler";
+            sentry_options_set_handler_path(sentryOptions, handlerPath.c_str());
+        }
+#endif
+        int sentryResult = sentry_init(sentryOptions);
+        if (sentryResult == 0) {
+            Log::Info("Sentry crash reporting initialized");
+        } else {
+            Log::Error("Sentry initialization failed (error %d)", sentryResult);
+        }
+
         // Initialize systems
         Log::Info("Starting Voxel Engine");
 
@@ -482,7 +504,7 @@ namespace PlatformMain {
         // 1. Initialize server-side systems (server creates and owns the world)
         Server::IntegratedServerConfig serverConfig;
         serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
-        serverConfig.enableAsyncChunkLoading = false;    // Use ServerWorkerPool
+        serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
         
         // Automatically use local save directory if available (temporary feature)
         if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
@@ -733,10 +755,11 @@ namespace PlatformMain {
 
             // Clear framebuffer via render backend
             if (Render::g_renderBackend) {
-                Render::g_renderBackend->SetClearColor(0.5f, 0.7f, 1.0f, 1.0f);
+                // Sky color RGB(120, 167, 255)
+                Render::g_renderBackend->SetClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
                 Render::g_renderBackend->Clear(true, true);
             } else {
-                glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
+                glClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             }
 
@@ -745,7 +768,8 @@ namespace PlatformMain {
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
-            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.01f, 800.0f);
+            float farPlane = static_cast<float>(Platform::g_gameSettings.GetRenderDistance()) * 16.0f * 4.0f;
+            glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             Frustum frustum = Frustum::FromMatrix(viewProj);
@@ -901,10 +925,8 @@ namespace PlatformMain {
         Render::ShutdownChunkRenderer();
 
         // 8a. Destroy resources that depend on the render backend BEFORE destroying it
-        Render::g_crosshair.~Crosshair();
-        new (&Render::g_crosshair) Render::Crosshair(); // Reinit to safe empty state
-        Render::g_blockHighlight.~BlockHighlight();
-        new (&Render::g_blockHighlight) Render::BlockHighlight();
+        Render::g_crosshair.Shutdown();
+        Render::g_blockHighlight.Shutdown();
         if (Render::g_atlasBuilder) {
             Render::g_atlasBuilder.reset();
         }
@@ -963,6 +985,10 @@ namespace PlatformMain {
         }
 
         Log::Info("=== MINECRAFT JAVA EDITION ARCHITECTURE SHUTDOWN COMPLETE ===");
+
+        // Flush and close crash reporting (must be last)
+        sentry_close();
+
         return 0;
     }
 

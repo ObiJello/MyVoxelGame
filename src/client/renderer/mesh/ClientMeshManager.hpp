@@ -35,9 +35,10 @@ namespace Render {
 
         struct SectionKeyHash {
             std::size_t operator()(const SectionKey& key) const {
-                return std::hash<int32_t>{}(key.chunkPos.x) ^
-                       (std::hash<int32_t>{}(key.chunkPos.z) << 1) ^
-                       (std::hash<int>{}(key.sectionY) << 2);
+                size_t h = std::hash<int32_t>{}(key.chunkPos.x);
+                h ^= std::hash<int32_t>{}(key.chunkPos.z) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>{}(key.sectionY) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
             }
         };
     
@@ -101,11 +102,17 @@ namespace Render {
         // Get GPU data for rendering (used by ChunkRenderer)
         const GPUSectionData* GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const;
         
-        // Get set of all active sections (sections with GPU data)
-        // Returns a copy under shared lock for thread safety
-        std::unordered_set<SectionKey, SectionKeyHash> GetActiveSections() const {
+        // Iterate all active sections under shared lock (zero-copy, zero-alloc)
+        // Callback receives (const SectionKey&, const GPUSectionData*)
+        template<typename Func>
+        void ForEachActiveSection(Func&& fn) const {
             std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
-            return m_activeSections;
+            for (const auto& key : m_activeSections) {
+                auto it = m_gpuData.find(key);
+                if (it != m_gpuData.end()) {
+                    fn(key, &it->second);
+                }
+            }
         }
         
         // Remove GPU data for chunk section
@@ -249,9 +256,6 @@ namespace Render {
 
         // Validate mesh build result
         static bool ValidateMeshBuildResult(const Network::MeshBuildResult& result);
-
-        // Update statistics
-        void UpdateStats(const std::string& operation, bool success = true);
 
         // Log mesh build activity
         static void LogMeshActivity(const std::string& activity, ::Game::Math::ChunkPos chunkPos, int sectionY = -1);

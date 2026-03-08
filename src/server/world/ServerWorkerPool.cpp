@@ -273,20 +273,15 @@ namespace Threading {
         Log::Debug("Generating chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
         try {
-            // Get chunk provider from world
             auto* chunkProvider = m_world->GetChunkProvider();
             if (!chunkProvider) {
                 SendChunkGenResult(chunkPos, nullptr, false, "No chunk provider available");
                 return;
             }
 
-            // Note: In a real implementation, this would use the procedural generator
-            // For now, we'll simulate chunk generation
-            auto chunk = std::make_shared<Game::Chunk>();
-            
-            // TODO: Use actual procedural generation here
-            // chunk = proceduralGenerator->GenerateChunk(chunkPos);
-            
+            // GetChunk routes through cache -> disk -> MyTerrainGenerator (all thread-safe)
+            auto chunk = chunkProvider->GetChunk(chunkPos);
+
             if (chunk) {
                 SendChunkGenResult(chunkPos, chunk, true);
                 m_stats.chunksGenerated.fetch_add(1, std::memory_order_relaxed);
@@ -306,27 +301,24 @@ namespace Threading {
             return;
         }
 
-        Log::Debug("Loading chunk (%d, %d) from disk", chunkPos.x, chunkPos.z);
+        Log::Debug("Loading chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
         try {
-            // Get chunk provider from world
             auto* chunkProvider = m_world->GetChunkProvider();
             if (!chunkProvider) {
                 SendChunkGenResult(chunkPos, nullptr, false, "No chunk provider available");
                 return;
             }
 
-            // TODO: Use actual chunk loader here
-            // For now, we'll try to load from the chunk provider
+            // GetChunk routes through cache -> disk -> MyTerrainGenerator (all thread-safe)
             auto chunk = chunkProvider->GetChunk(chunkPos);
-            
+
             if (chunk) {
                 SendChunkGenResult(chunkPos, chunk, true);
                 m_stats.chunksLoaded.fetch_add(1, std::memory_order_relaxed);
                 Log::Debug("Successfully loaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
             } else {
-                // Chunk not found on disk, trigger generation instead
-                ProcessChunkGeneration(chunkPos);
+                SendChunkGenResult(chunkPos, nullptr, false, "Failed to load/generate chunk");
             }
         }
         catch (const std::exception& e) {

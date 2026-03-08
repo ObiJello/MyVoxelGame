@@ -291,7 +291,16 @@ namespace Client {
                 uint64_t id = reader.ReadLong();
                 return std::make_unique<KeepAliveS2CPacketImpl>(id);
             }
-            
+
+            case PacketId::ChunkBatchStartS2C: {
+                return std::make_unique<ChunkBatchStartS2CPacketImpl>();
+            }
+
+            case PacketId::ChunkBatchFinishedS2C: {
+                auto data = Serialization::DeserializeChunkBatchFinishedS2C(payload);
+                return std::make_unique<ChunkBatchFinishedS2CPacketImpl>(data.batchSize);
+            }
+
             default:
                 // Return nullptr for unhandled packets - will fall back to legacy OnPacketReceived
                 return nullptr;

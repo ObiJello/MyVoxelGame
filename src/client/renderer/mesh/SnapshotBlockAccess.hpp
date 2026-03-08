@@ -82,55 +82,63 @@ namespace Render {
         }
 
     private:
-        // Get block from neighbor sections (for face culling)
+        // Get block from neighbor sections for face culling and AO.
+        // Handles diagonal lookups (2-axis offsets like corner AO samples) by
+        // picking the dominant axis neighbor and clamping the other coordinates.
+        // This avoids bright seams at chunk borders where diagonal data is unavailable.
         Game::BlockID GetNeighborBlock(int worldX, int worldY, int worldZ) const {
-            // Determine which neighbor face to check
             int localX = worldX - m_worldMinX;
             int localY = worldY - m_worldMinY;
             int localZ = worldZ - m_worldMinZ;
 
-            // Check each neighbor direction
-            if (localX < 0 && localX >= -1) {
-                // West neighbor (negative X)
-                int nx = 15; // Get east edge of west neighbor
-                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
-                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
-                return m_sectionData.GetNeighborBlock(3, nx, ny, nz); // West = index 3
+            // Determine which axes are out of bounds
+            bool outX = localX < 0 || localX > 15;
+            bool outY = localY < 0 || localY > 15;
+            bool outZ = localZ < 0 || localZ > 15;
+
+            if (!outX && !outY && !outZ) {
+                // Shouldn't reach here — within section bounds
+                return m_sectionData.GetBlock(localX, localY, localZ);
             }
-            else if (localX > 15 && localX <= 16) {
-                // East neighbor (positive X)
-                int nx = 0; // Get west edge of east neighbor
-                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
-                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
-                return m_sectionData.GetNeighborBlock(2, nx, ny, nz); // East = index 2
+
+            // For diagonal lookups (multiple axes out of bounds), pick one neighbor
+            // and clamp the other coordinates. This matches Minecraft's behavior of
+            // using the closest available data rather than returning Air.
+            // Priority: Y neighbors (up/down) > X neighbors (east/west) > Z neighbors (north/south)
+
+            int face = -1;
+            int nx = std::clamp(localX, 0, 15);
+            int ny = std::clamp(localY, 0, 15);
+            int nz = std::clamp(localZ, 0, 15);
+
+            if (outY) {
+                if (localY < 0) {
+                    face = 5; // Down
+                    ny = 15;
+                } else {
+                    face = 4; // Up
+                    ny = 0;
+                }
+            } else if (outX) {
+                if (localX < 0) {
+                    face = 3; // West
+                    nx = 15;
+                } else {
+                    face = 2; // East
+                    nx = 0;
+                }
+            } else if (outZ) {
+                if (localZ < 0) {
+                    face = 0; // North
+                    nz = 15;
+                } else {
+                    face = 1; // South
+                    nz = 0;
+                }
             }
-            else if (localZ < 0 && localZ >= -1) {
-                // North neighbor (negative Z)
-                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
-                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
-                int nz = 15; // Get south edge of north neighbor
-                return m_sectionData.GetNeighborBlock(0, nx, ny, nz); // North = index 0
-            }
-            else if (localZ > 15 && localZ <= 16) {
-                // South neighbor (positive Z)
-                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
-                int ny = std::min(std::max(localY, 0), 15); // Clamp Y to valid range
-                int nz = 0; // Get north edge of south neighbor
-                return m_sectionData.GetNeighborBlock(1, nx, ny, nz); // South = index 1
-            }
-            else if (localY < 0 && localY >= -1) {
-                // Down neighbor (negative Y)
-                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
-                int ny = 15; // Get top edge of neighbor below
-                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
-                return m_sectionData.GetNeighborBlock(5, nx, ny, nz); // Down = index 5
-            }
-            else if (localY > 15 && localY <= 16) {
-                // Up neighbor (positive Y)
-                int nx = std::min(std::max(localX, 0), 15); // Clamp X to valid range
-                int ny = 0; // Get bottom edge of neighbor above
-                int nz = std::min(std::max(localZ, 0), 15); // Clamp Z to valid range
-                return m_sectionData.GetNeighborBlock(4, nx, ny, nz); // Up = index 4
+
+            if (face >= 0) {
+                return m_sectionData.GetNeighborBlock(face, nx, ny, nz);
             }
 
             return Game::BlockID::Air;

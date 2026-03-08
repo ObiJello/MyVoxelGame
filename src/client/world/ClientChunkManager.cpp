@@ -806,171 +806,109 @@ namespace Client {
     // Schedule mesh builds for dirty sections (Minecraft-style per-section)
     void ClientChunkManager::ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition) {
         ASSERT_MAIN_THREAD();
-        
-        // Check if worker pool is available
+
         auto workerPool = Threading::g_clientWorkerPool.get();
-        if (!workerPool) {
-            Log::Warning("SCHEDULE: No worker pool available for mesh builds");
-            return;
-        }
-        
-        // Step 1: Collect sections that need meshing
+        if (!workerPool) return;
+
+        // Buffer pool backpressure: only submit when pipeline has room
+        // POOL_SIZE = workerCount * 8 (keeps workers fed between frames)
+        size_t activeAndPending = workerPool->GetActiveJobCount() + workerPool->GetPendingJobCount();
+        const size_t POOL_SIZE = std::max(size_t(16), workerPool->GetWorkerCount() * 8);
+        if (activeAndPending >= POOL_SIZE) return;
+        size_t slotsAvailable = POOL_SIZE - activeAndPending;
+
+        // Collect dirty sections that need meshing
         struct SectionCandidate {
             Game::Math::ChunkPos chunkPos;
             int sectionY;
-            float priority;
+            float effectiveDistance; // initials get 0.5x bonus (sorts ahead of recompiles)
         };
-        std::vector<SectionCandidate> sectionCandidates;
+        std::vector<SectionCandidate> candidates;
 
         for (auto& [chunkPos, chunk] : m_chunks) {
-            if (!chunk || !chunk->chunkData) {
-                continue;
-            }
-            
-            // Calculate chunk center distance for priority
+            if (!chunk || !chunk->chunkData) continue;
+
             float centerX = chunkPos.x * 16.0f + 8.0f;
             float centerZ = chunkPos.z * 16.0f + 8.0f;
-            
-            // Check each section
+
             for (int sectionY = 0; sectionY < 24; ++sectionY) {
-                auto& sectionInfo = chunk->sectionInfos[sectionY];
-                
-                // Minecraft-style: use per-section dirty flag as source of truth
-                // dirtySections set is just an index for iteration
-                bool isDirty = sectionInfo.dirty;
-                bool notInFlight = (sectionInfo.meshingVersion != sectionInfo.version);
-                
-                if (isDirty && notInFlight) {
-                    // Determine if we need to process this section
-                    bool needsProcessing = false;
-                    
-                    if (sectionInfo.isAllAir) {
-                        // Empty section - only process if never built or neighbors might have changed
-                        if (!sectionInfo.builtOnce || sectionInfo.dirty) {
-                            needsProcessing = true;  // Will use BorderOnly job type
-                        }
-                    } else {
-                        // Non-empty section always needs processing when dirty
-                        needsProcessing = true;
-                    }
-                    
-                    if (!needsProcessing) {
-                        // Clear dirty flag for empty sections that don't need processing
-                        sectionInfo.dirty = false;
-                        chunk->dirtySections.erase(sectionY);
-                        continue;
-                    }
-                    // Calculate section-specific priority using XZ distance only
-                    // We don't filter by distance - if the chunk is loaded, all sections should be processed
-                    float xzDistance = std::sqrt((centerX - playerPosition.x) * (centerX - playerPosition.x) + 
-                                                 (centerZ - playerPosition.z) * (centerZ - playerPosition.z));
-                    
-                    // Add Y distance as secondary priority factor (for sorting only, not filtering)
-                    float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
-                    float yDistance = std::abs(sectionCenterY - playerPosition.y);
-                    
-                    // Combined priority: XZ distance is primary, Y distance is secondary
-                    // This ensures chunks are processed in square pattern but sections within
-                    // a chunk are prioritized by proximity
-                    float priority = xzDistance + yDistance * 0.1f;  // Y has less weight
-                    
-                    sectionCandidates.push_back({chunkPos, sectionY, priority});
+                auto& si = chunk->sectionInfos[sectionY];
+                if (!si.dirty) continue;
+                if (si.meshingVersion == si.version) continue; // in flight
+
+                bool needsProcessing = !si.isAllAir || !si.builtOnce || si.dirty;
+                if (!needsProcessing) {
+                    si.dirty = false;
+                    chunk->dirtySections.erase(sectionY);
+                    continue;
                 }
+
+                float xzDist = std::sqrt((centerX - playerPosition.x) * (centerX - playerPosition.x) +
+                                         (centerZ - playerPosition.z) * (centerZ - playerPosition.z));
+                float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
+                float yDist = std::abs(sectionCenterY - playerPosition.y);
+                float distance = xzDist + yDist * 0.1f;
+
+                // Initial compiles (never built) get 2x priority boost
+                // Matches Minecraft's CompileTaskDynamicQueue: initials beat recompiles
+                float effectiveDist = (!si.builtOnce && !si.isAllAir) ? distance * 0.5f : distance;
+
+                candidates.push_back({chunkPos, sectionY, effectiveDist});
             }
         }
-        
-        // Step 2: Sort sections by priority (closer = higher priority)
-        std::sort(sectionCandidates.begin(), sectionCandidates.end(), 
-                  [](const auto& a, const auto& b) { return a.priority < b.priority; });
-        
-        // Step 3: Process sections with budget and queue limits
-        const size_t SECTION_SAFETY_CAP = 256;  // Max sections per frame
+
+        // Sort by effective distance (initials float to top due to 0.5x bonus)
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto& a, const auto& b) { return a.effectiveDistance < b.effectiveDistance; });
+
+        // Submit up to min(slotsAvailable, 64) — fixed cap prevents pathological snapshot cost
+        const size_t MAX_SNAPSHOTS_PER_FRAME = 64;
+        size_t maxToSubmit = std::min(slotsAvailable, MAX_SNAPSHOTS_PER_FRAME);
         size_t sectionsSubmitted = 0;
-        auto startTime = std::chrono::steady_clock::now();
-        const float budgetMs = 50.0f;  // Time budget for scheduling
-        
-        // Step 4: Build section snapshots and submit
-        for (const auto& candidate : sectionCandidates) {
-            // Check safety cap
-            if (sectionsSubmitted >= SECTION_SAFETY_CAP) {
-                Log::Debug("SCHEDULE: Hit safety cap of %zu sections", SECTION_SAFETY_CAP);
-                break;
-            }
-            
-            // Check time budget
-            auto currentTime = std::chrono::steady_clock::now();
-            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
-            if (elapsedMs >= budgetMs) {
-                Log::Debug("SCHEDULE: Hit time budget of %.1fms", budgetMs);
-                break;
-            }
-            
-            // Check queue capacity BEFORE building expensive snapshot
-            size_t queueSize = workerPool->GetPendingJobCount();
-            const size_t maxQueueSize = workerPool->GetMaxQueueSize();
-            if (queueSize >= maxQueueSize * 0.8) {  // Stop at 80% capacity
-                Log::Debug("SCHEDULE: Queue nearly full (%zu/%zu), stopping submission", 
-                         queueSize, maxQueueSize);
-                break;
-            }
-            
-            // Get chunk and section
+
+        for (const auto& candidate : candidates) {
+            if (sectionsSubmitted >= maxToSubmit) break;
+
             auto it = m_chunks.find(candidate.chunkPos);
             if (it == m_chunks.end()) continue;
-            
+
             auto& chunk = it->second;
             auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
-            
-            // Double-check section is still dirty and not in flight
-            if (!sectionInfo.dirty || sectionInfo.meshingVersion == sectionInfo.version) {
-                continue; // Not dirty or already being processed
-            }
-            
-            // Read version optimistically (Minecraft-style)
+
+            if (!sectionInfo.dirty || sectionInfo.meshingVersion == sectionInfo.version) continue;
+
             const uint32_t expectedVersion = sectionInfo.version;
-            
-            // Build snapshot (no state checks inside)
+
             std::shared_ptr<Render::MeshJobData> snapshot;
             if (!BuildSectionSnapshot(candidate.chunkPos, candidate.sectionY, expectedVersion, snapshot)) {
-                // Version changed or data missing, retry next frame
                 continue;
             }
-            
-            // Set job type based on section content
+
+            // Set job type: Initial (never built) > Full (recompile) > BorderOnly (empty)
             if (sectionInfo.isAllAir) {
                 snapshot->jobType = Render::MeshJobType::BorderOnly;
+            } else if (!sectionInfo.builtOnce) {
+                snapshot->jobType = Render::MeshJobType::Initial;
             } else {
                 snapshot->jobType = Render::MeshJobType::Full;
             }
-            
-            // Set priority metadata
-            snapshot->distanceToPlayer = candidate.priority;
-            snapshot->isHighPriority = (candidate.priority < 128.0f);
+
+            snapshot->distanceToPlayer = candidate.effectiveDistance;
+            snapshot->isHighPriority = (candidate.effectiveDistance < 128.0f);
             snapshot->submitTime = std::chrono::steady_clock::now();
-            
-            // Submit section job to worker
-            Log::Debug("  Scheduling mesh: chunk(%d,%d) sy=%d ver=%u type=%s neighborMask=0x%X",
-                      candidate.chunkPos.x, candidate.chunkPos.z, candidate.sectionY,
-                      expectedVersion,
-                      sectionInfo.isAllAir ? "BorderOnly" : "Full",
-                      snapshot->neighborMask);
-            
-            // Only update state if submission succeeds (Minecraft-style)
+
             if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
-                // Now claim the work after successful submission
                 sectionInfo.meshingVersion = expectedVersion;
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
                 chunk->dirtySections.erase(candidate.sectionY);
                 sectionsSubmitted++;
-            } else {
-                // Keep dirty, will retry next frame
-                Log::Debug("  Failed to submit mesh job - queue full, will retry");
             }
         }
-        
+
         if (sectionsSubmitted > 0) {
-            Log::Debug("SCHEDULE: Submitted %zu section mesh jobs", sectionsSubmitted);
+            Log::Debug("SCHEDULE: Submitted %zu mesh jobs (%zu slots, %zu candidates)",
+                      sectionsSubmitted, slotsAvailable, candidates.size());
         }
     }
     

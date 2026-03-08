@@ -13,6 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cstdlib>
+
+#ifdef __APPLE__
+#include <MoltenVK/mvk_private_api.h>
+#include <MoltenVK/mvk_deprecated_api.h>
+#endif
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -64,6 +70,32 @@ namespace Render {
         }
         if (!CreateSurface(window)) return false;
         if (!PickPhysicalDevice()) return false;
+
+#ifdef __APPLE__
+        // On Intel GPUs, disable Metal heaps and argument buffers to avoid
+        // assertion failures in the Intel Metal driver (e.g. HD 6000 / Broadwell)
+        {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+            if (props.vendorID == 0x8086) {
+                Log::Info("VKBackend: Intel GPU detected (%s), configuring MoltenVK for compatibility", props.deviceName);
+                auto getMVKConfig = (PFN_vkGetMoltenVKConfigurationMVK)
+                    vkGetInstanceProcAddr(m_instance, "vkGetMoltenVKConfigurationMVK");
+                auto setMVKConfig = (PFN_vkSetMoltenVKConfigurationMVK)
+                    vkGetInstanceProcAddr(m_instance, "vkSetMoltenVKConfigurationMVK");
+                if (getMVKConfig && setMVKConfig) {
+                    MVKConfiguration mvkConfig{};
+                    size_t configSize = sizeof(mvkConfig);
+                    getMVKConfig(m_instance, &mvkConfig, &configSize);
+                    mvkConfig.useMTLHeap = MVK_CONFIG_USE_MTLHEAP_NEVER;
+                    mvkConfig.useMetalArgumentBuffers = VK_FALSE;
+                    setMVKConfig(m_instance, &mvkConfig, &configSize);
+                    Log::Info("VKBackend: Disabled Metal heaps and argument buffers for Intel compatibility");
+                }
+            }
+        }
+#endif
+
         if (!CreateLogicalDevice()) return false;
         if (!CreateSwapchain(window)) return false;
         if (!CreateImageViews()) return false;
@@ -629,6 +661,8 @@ namespace Render {
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
         if (name == "uLineWidth") {
             m_pushConstants.uLineWidth = value;
+        } else if (name == "uAlphaTest") {
+            m_pushConstants.uAlphaTest = value;
         }
     }
     void VKBackend::SetUniformInt(ShaderHandle, const std::string&, int) { /* Push constants or UBO */ }
@@ -688,7 +722,7 @@ namespace Render {
         }
 
         // Push MVP matrix
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
 
         // Bind texture descriptor set (required by pipeline layout)
@@ -731,7 +765,7 @@ namespace Render {
             m_currentPipeline = pipeline;
         }
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
@@ -1070,12 +1104,15 @@ namespace Render {
 
     bool VKBackend::CreateDepthResources() {
         m_depthFormat = FindDepthFormat();
-        CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
+        if (!CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
                      m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthMemory);
+                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthMemory)) {
+            Log::Error("VKBackend: Failed to create depth image");
+            return false;
+        }
         m_depthImageView = CreateImageView(m_depthImage, m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
-        return true;
+        return m_depthImageView != VK_NULL_HANDLE;
     }
 
     bool VKBackend::CreateRenderPass() {
@@ -1219,7 +1256,7 @@ namespace Render {
 
     bool VKBackend::CreatePipelineLayout() {
         VkPushConstantRange pushConstant{};
-        pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pushConstant.offset = 0;
         pushConstant.size = sizeof(PushConstantBlock);
 
@@ -1323,12 +1360,12 @@ namespace Render {
     }
 
     VkSurfaceFormatKHR VKBackend::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const {
-        // Prefer UNORM to avoid double-gamma: our shaders and ImGui already output sRGB colors
+        // Use UNORM — all rendering is in gamma space like Minecraft.
+        // macOS color management is disabled separately via CAMetalLayer.colorspace = nil.
         for (const auto& f : formats) {
             if (f.format == VK_FORMAT_B8G8R8A8_UNORM && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
                 return f;
         }
-        // Fallback to any UNORM format
         for (const auto& f : formats) {
             if (f.format == VK_FORMAT_B8G8R8A8_UNORM || f.format == VK_FORMAT_R8G8B8A8_UNORM)
                 return f;

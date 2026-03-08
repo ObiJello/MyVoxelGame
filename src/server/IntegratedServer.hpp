@@ -125,8 +125,23 @@ namespace Server {
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
 
+        // Get status manager for chunk generation tracking
+        ChunkStatusManager* GetStatusManager() const { return m_statusManager.get(); }
+
         // Send ChunkDataS2CPacket to client (new Minecraft-compatible format)
         void SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet);
+
+        // Send chunk data to client (builds packet with section data and sends)
+        void SendChunkToClient(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
+
+        // Queue a chunk position for adaptive-rate sending (Minecraft's PlayerChunkSender pattern)
+        void QueueChunkForSending(Game::Math::ChunkPos chunkPos);
+
+        // Send queued chunks with adaptive rate control (called end of tick)
+        void SendChunksToPlayer();
+
+        // Handle client batch acknowledgment (updates send rate)
+        void OnChunkBatchAck(float desiredChunksPerTick);
         
         // Send block change packets to client
         void SendBlockChangeS2CPacket(const Network::BlockChangeS2CPacket& packet);
@@ -218,6 +233,23 @@ namespace Server {
         std::unordered_map<Game::Math::ChunkPos, ChunkSendState, Game::Math::ChunkPosHash> m_chunkSendStates;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunkLoads;
 
+        // Adaptive chunk send rate (Minecraft's PlayerChunkSender)
+        struct ChunkSenderState {
+            static constexpr float MIN_RATE = 0.01f;
+            static constexpr float MAX_RATE = 64.0f;
+            static constexpr float START_RATE = 9.0f;
+            static constexpr int MAX_UNACKED_BATCHES = 10;
+
+            float desiredChunksPerTick = START_RATE;
+            float batchQuota = 0.0f;
+            int unacknowledgedBatches = 0;
+            int maxUnacknowledgedBatches = 1; // starts at 1, bumped to 10 after first ack
+
+            // Pending chunk positions (just keys — chunk data looked up at send time)
+            std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> pendingChunks;
+        };
+        ChunkSenderState m_chunkSender;
+
         // Statistics
         ServerStats m_stats;
 
@@ -260,9 +292,6 @@ namespace Server {
         // Check if chunk should be sent to client
         bool ShouldSendChunk(Game::Math::ChunkPos chunkPos) const;
 
-        // Send chunk data packet to client
-        void SendChunkToClient(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
-        
         // Process async chunk load results from ServerWorkerPool
         void ProcessAsyncChunkResults();
 

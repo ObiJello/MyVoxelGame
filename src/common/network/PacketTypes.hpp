@@ -80,6 +80,23 @@ namespace Network {
             : chunkX(x), chunkZ(z), timestamp(std::chrono::steady_clock::now()) {}
     };
 
+    // Chunk batch start marker (empty, like Minecraft's ClientboundChunkBatchStartPacket.INSTANCE)
+    struct ChunkBatchStartS2CPacket {};
+
+    // Chunk batch finished (tells client how many chunks were in this batch)
+    struct ChunkBatchFinishedS2CPacket {
+        int32_t batchSize = 0;
+        ChunkBatchFinishedS2CPacket() = default;
+        explicit ChunkBatchFinishedS2CPacket(int32_t size) : batchSize(size) {}
+    };
+
+    // Client acknowledges chunk batch with desired send rate
+    struct ChunkBatchAckC2SPacket {
+        float desiredChunksPerTick = 9.0f;
+        ChunkBatchAckC2SPacket() = default;
+        explicit ChunkBatchAckC2SPacket(float rate) : desiredChunksPerTick(rate) {}
+    };
+
     // Individual block changes broadcast by server (mirrors Minecraft's BlockUpdateS2CPacket)
     struct BlockChangeS2CPacket {
         int worldX, worldY, worldZ;  // Use individual coordinates instead of WorldCoordinates
@@ -724,6 +741,38 @@ namespace Network {
             packet.chunkX = reader.ReadInt();
             packet.chunkZ = reader.ReadInt();
             packet.timestamp = std::chrono::steady_clock::now();
+            return packet;
+        }
+
+        // ---- Chunk batch packets ----
+
+        inline std::vector<uint8_t> Serialize(const ChunkBatchStartS2CPacket&) {
+            return {}; // Empty marker packet
+        }
+
+        inline std::vector<uint8_t> Serialize(const ChunkBatchFinishedS2CPacket& packet) {
+            Network::PacketBuffer buffer;
+            buffer.WriteInt(packet.batchSize);
+            return buffer.GetData();
+        }
+
+        inline ChunkBatchFinishedS2CPacket DeserializeChunkBatchFinishedS2C(const std::vector<uint8_t>& data) {
+            Network::PacketReader reader(data);
+            ChunkBatchFinishedS2CPacket packet;
+            packet.batchSize = reader.ReadInt();
+            return packet;
+        }
+
+        inline std::vector<uint8_t> Serialize(const ChunkBatchAckC2SPacket& packet) {
+            Network::PacketBuffer buffer;
+            buffer.WriteFloat(packet.desiredChunksPerTick);
+            return buffer.GetData();
+        }
+
+        inline ChunkBatchAckC2SPacket DeserializeChunkBatchAckC2S(const std::vector<uint8_t>& data) {
+            Network::PacketReader reader(data);
+            ChunkBatchAckC2SPacket packet;
+            packet.desiredChunksPerTick = reader.ReadFloat();
             return packet;
         }
 

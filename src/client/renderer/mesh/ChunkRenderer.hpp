@@ -33,6 +33,13 @@ namespace Render {
                                   // Will be set to false for translucent (back to front)
     };
 
+    // Layer presence bitmask flags
+    enum LayerFlag : uint8_t {
+        LayerOpaque      = 1 << 0,
+        LayerCutout      = 1 << 1,
+        LayerTranslucent = 1 << 2,
+    };
+
     // Section render data for sorting and culling
     struct SectionRenderData {
         ::Game::Math::ChunkPos chunkPos;
@@ -40,9 +47,10 @@ namespace Render {
         const GPUSectionData* gpuData;
         float distanceToCamera;
         bool inFrustum;
+        uint8_t layerMask;  // Bitmask of LayerFlag values
 
         SectionRenderData(::Game::Math::ChunkPos pos, int secY, const GPUSectionData* gpu, float dist)
-            : chunkPos(pos), sectionY(secY), gpuData(gpu), distanceToCamera(dist), inFrustum(true) {}
+            : chunkPos(pos), sectionY(secY), gpuData(gpu), distanceToCamera(dist), inFrustum(true), layerMask(0) {}
     };
 
     // Render statistics for debugging
@@ -167,7 +175,7 @@ namespace Render {
         void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
         
         // Render helpers
-        void RenderLayerPass(RenderLayer layer, const Camera& camera, const std::vector<SectionRenderData>& sections);
+        void RenderLayerPass(RenderLayer layer, const Camera& camera, uint8_t layerBit, bool reverseOrder = false);
         void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
         void RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections);
         float CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY);

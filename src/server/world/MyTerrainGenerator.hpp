@@ -198,6 +198,22 @@ namespace Game {
         std::string GetLastError() const override;
         void ClearErrors() override;
 
+        // === Non-blocking async API (must be called from server thread) ===
+
+        // Request chunk generation without blocking. Returns true if request was queued.
+        bool RequestChunkGeneration(Math::ChunkPos position);
+
+        // Pump the internal task pipeline (call every server tick).
+        // Runs distance manager updates and main-thread executor tasks.
+        void PumpAsyncTasks();
+
+        // Check if a chunk is ready (fully generated). Non-blocking. Must call from server thread.
+        bool IsChunkReady(Math::ChunkPos position);
+
+        // Get a completed chunk without blocking. Returns nullptr if not ready.
+        // Converts from terrain library format to Game::Chunk.
+        std::shared_ptr<Chunk> GetCompletedChunk(Math::ChunkPos position);
+
     private:
         GenerationConfig m_config;
         GeneratorStats m_stats;

@@ -57,7 +57,8 @@ namespace Render {
 
     // Job type for mesh processing
     enum class MeshJobType {
-        Full,        // Normal meshing for non-empty sections
+        Initial,     // First compile for a newly loaded section (highest priority)
+        Full,        // Recompile after block change
         BorderOnly   // Fast path for empty sections - only compute neighbor mask
     };
     

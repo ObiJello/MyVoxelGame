@@ -6,6 +6,9 @@
 #include "platform/GameDirectory.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
+#include "server/world/status/ChunkStatusManager.hpp"
+#include "server/world/ServerWorkerPool.hpp"
+#include "server/world/MyTerrainGenerator.hpp"
 #include "../../physics/RayCast.hpp"
 #include <algorithm>
 #include <cmath>
@@ -601,20 +604,103 @@ namespace Game {
         }
 
         // Get player position from integrated server
-        // In multiplayer, this would iterate through all connected players
         int playerChunkX = 0;
         int playerChunkZ = 0;
-        
+
         if (Server::g_integratedServer) {
             const auto& playerState = Server::g_integratedServer->GetPlayerState();
             playerChunkX = playerState.currentChunk.x;
             playerChunkZ = playerState.currentChunk.z;
         }
-        
-        // Load chunks around player(s) synchronously
-        UpdateLoadedChunks(playerChunkX, playerChunkZ, m_renderDistance);
-        
-        // Unload distant chunks
+
+        // Async path: use terrain library's own async pipeline (non-blocking)
+        // Mirrors Minecraft's ServerChunkCache.tick() pattern:
+        //   1. Pump tasks (runDistanceManagerUpdates + pollTask loop)
+        //   2. Submit ALL needed chunks (just ticket + queue post, non-blocking)
+        //   3. Harvest ALL completed chunks (getChunkNow + convert + send)
+        if (Server::g_integratedServer &&
+            Server::g_integratedServer->GetConfig().enableAsyncChunkLoading) {
+
+            auto* generator = dynamic_cast<MyTerrainGenerator*>(m_chunkProvider->GetGenerator());
+            if (!generator) {
+                UpdateLoadedChunks(playerChunkX, playerChunkZ, m_renderDistance);
+                UnloadDistantChunks(playerChunkX, playerChunkZ, m_renderDistance + 2);
+                return;
+            }
+
+            // 1. Pump the terrain library's async pipeline (recursive pollTask loop)
+            generator->PumpAsyncTasks();
+
+            // 2. Submit ALL unloaded chunks — no cap, just ticket + queue posts
+            // Minecraft's runGenerationTasks() processes ALL pending tasks uncapped.
+            for (int dx = -m_renderDistance; dx <= m_renderDistance; ++dx) {
+                for (int dz = -m_renderDistance; dz <= m_renderDistance; ++dz) {
+                    Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
+
+                    if (m_chunkProvider->IsChunkLoaded(chunkPos)) continue;
+                    if (m_requestedChunks.count(chunkPos)) continue;
+
+                    if (generator->RequestChunkGeneration(chunkPos)) {
+                        m_requestedChunks.insert(chunkPos);
+                    }
+                }
+            }
+
+            // 3. Harvest ALL completed chunks — no cap
+            // Sort nearest-first so player sees nearby world first.
+            struct ReadyChunk {
+                Math::ChunkPos pos;
+                int distanceSq;
+            };
+            std::vector<ReadyChunk> readyChunks;
+
+            for (int dx = -m_renderDistance; dx <= m_renderDistance; ++dx) {
+                for (int dz = -m_renderDistance; dz <= m_renderDistance; ++dz) {
+                    Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
+                    if (!m_chunkProvider->IsChunkLoaded(chunkPos) &&
+                        generator->IsChunkReady(chunkPos)) {
+                        int distSq = dx * dx + dz * dz;
+                        readyChunks.push_back({chunkPos, distSq});
+                    }
+                }
+            }
+
+            std::sort(readyChunks.begin(), readyChunks.end(),
+                      [](const ReadyChunk& a, const ReadyChunk& b) {
+                          return a.distanceSq < b.distanceSq;
+                      });
+
+            int chunksDelivered = 0;
+            for (const auto& entry : readyChunks) {
+                auto gameChunk = generator->GetCompletedChunk(entry.pos);
+                if (gameChunk) {
+                    m_chunkProvider->StoreChunkInCache(gameChunk);
+                    Server::g_integratedServer->QueueChunkForSending(entry.pos);
+                    m_requestedChunks.erase(entry.pos);
+                    chunksDelivered++;
+                }
+            }
+
+            if (chunksDelivered > 0) {
+                Log::Debug("Async: %d chunks delivered this tick", chunksDelivered);
+            }
+
+            // Clean up requests for chunks that moved out of range
+            for (auto it = m_requestedChunks.begin(); it != m_requestedChunks.end(); ) {
+                int dx = it->x - playerChunkX;
+                int dz = it->z - playerChunkZ;
+                if (std::abs(dx) > m_renderDistance + 2 || std::abs(dz) > m_renderDistance + 2) {
+                    it = m_requestedChunks.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        } else {
+            // Sync fallback: load all chunks in a blocking loop
+            UpdateLoadedChunks(playerChunkX, playerChunkZ, m_renderDistance);
+        }
+
+        // Unload distant chunks (always non-blocking)
         UnloadDistantChunks(playerChunkX, playerChunkZ, m_renderDistance + 2);
     }
 
@@ -706,6 +792,12 @@ namespace Game {
             return;
         }
         
+        // When async chunk loading is enabled, ProcessAsyncChunkResults handles sending.
+        // Only use this sync scan-and-send path as a fallback.
+        if (Server::g_integratedServer->GetConfig().enableAsyncChunkLoading) {
+            return;
+        }
+
         // Get player position to determine which chunks to send
         const auto& playerState = Server::g_integratedServer->GetPlayerState();
         int playerChunkX = playerState.currentChunk.x;

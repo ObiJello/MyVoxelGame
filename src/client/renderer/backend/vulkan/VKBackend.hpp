@@ -223,7 +223,7 @@ namespace Render {
             glm::mat4 uMVP = glm::mat4(1.0f);   // 64 bytes
             glm::vec2 uScreenSize = {0, 0};       // 8 bytes
             float uLineWidth = 0.0f;              // 4 bytes
-            float _pad = 0.0f;                    // 4 bytes (alignment)
+            float uAlphaTest = 0.0f;              // 4 bytes (cutout threshold)
         } m_pushConstants;                        // 80 bytes total
 
         // Clear color

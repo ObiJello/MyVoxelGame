@@ -129,6 +129,39 @@ namespace Packets {
     };
 
     // ========================================================================
+    // CHUNK BATCH START PACKET (empty marker)
+    // ========================================================================
+
+    class ChunkBatchStartS2CPacketImpl : public IS2CPacket {
+    private:
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        ChunkBatchStartS2CPacketImpl()
+            : m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onChunkBatchStart(); }
+        PacketId getId() const override { return PacketId::ChunkBatchStartS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
+    // CHUNK BATCH FINISHED PACKET
+    // ========================================================================
+
+    class ChunkBatchFinishedS2CPacketImpl : public IS2CPacket {
+    private:
+        int m_batchSize;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ChunkBatchFinishedS2CPacketImpl(int batchSize)
+            : m_batchSize(batchSize)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onChunkBatchFinished(m_batchSize); }
+        int getBatchSize() const { return m_batchSize; }
+        PacketId getId() const override { return PacketId::ChunkBatchFinishedS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // MULTI BLOCK CHANGE PACKET
     // ========================================================================
     

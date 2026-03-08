@@ -693,6 +693,10 @@ namespace Game {
         return chunk;
     }
 
+    std::shared_ptr<Chunk> ChunkProvider::StoreChunkInCache(std::shared_ptr<Chunk> chunk) {
+        return CompleteChunkLoad(chunk);
+    }
+
     // === COORDINATION ===
 
     void ChunkProvider::SetupComponentDependencies() {
