@@ -18,6 +18,7 @@
 #ifdef __APPLE__
 #include <MoltenVK/mvk_private_api.h>
 #include <MoltenVK/mvk_deprecated_api.h>
+#include <sys/sysctl.h>
 #endif
 
 #include "imgui.h"
@@ -64,38 +65,32 @@ namespace Render {
         Log::Info("VKBackend: Initializing Vulkan backend");
         m_window = window;
 
+#ifdef __APPLE__
+        // On Intel Macs, disable Metal heaps and argument buffers via environment
+        // variables BEFORE instance creation. MoltenVK reads these during vkCreateInstance()
+        // and the deprecated vkSetMoltenVKConfigurationMVK() ignores the VkInstance param,
+        // so it cannot update the config after instance creation.
+        // Intel Mac Metal drivers (e.g. HD 6000 / Broadwell) crash on MTLHeap validation.
+#if defined(__x86_64__) || defined(__i386__)
+        {
+            int isTranslated = 0;
+            size_t sz = sizeof(isTranslated);
+            bool isRosetta = (sysctlbyname("sysctl.proc_translated", &isTranslated, &sz, NULL, 0) == 0 && isTranslated);
+            if (!isRosetta) {
+                setenv("MVK_CONFIG_USE_METAL_HEAP", "0", 0);
+                setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
+                Log::Info("VKBackend: Intel Mac detected, disabled Metal heaps for driver compatibility");
+            }
+        }
+#endif
+#endif
+
         if (!CreateInstance()) return false;
         if (s_enableValidation && !SetupDebugMessenger()) {
             Log::Warning("VKBackend: Debug messenger setup failed, continuing without validation");
         }
         if (!CreateSurface(window)) return false;
         if (!PickPhysicalDevice()) return false;
-
-#ifdef __APPLE__
-        // On Intel GPUs, disable Metal heaps and argument buffers to avoid
-        // assertion failures in the Intel Metal driver (e.g. HD 6000 / Broadwell)
-        {
-            VkPhysicalDeviceProperties props;
-            vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
-            if (props.vendorID == 0x8086) {
-                Log::Info("VKBackend: Intel GPU detected (%s), configuring MoltenVK for compatibility", props.deviceName);
-                auto getMVKConfig = (PFN_vkGetMoltenVKConfigurationMVK)
-                    vkGetInstanceProcAddr(m_instance, "vkGetMoltenVKConfigurationMVK");
-                auto setMVKConfig = (PFN_vkSetMoltenVKConfigurationMVK)
-                    vkGetInstanceProcAddr(m_instance, "vkSetMoltenVKConfigurationMVK");
-                if (getMVKConfig && setMVKConfig) {
-                    MVKConfiguration mvkConfig{};
-                    size_t configSize = sizeof(mvkConfig);
-                    getMVKConfig(m_instance, &mvkConfig, &configSize);
-                    mvkConfig.useMTLHeap = MVK_CONFIG_USE_MTLHEAP_NEVER;
-                    mvkConfig.useMetalArgumentBuffers = VK_FALSE;
-                    setMVKConfig(m_instance, &mvkConfig, &configSize);
-                    Log::Info("VKBackend: Disabled Metal heaps and argument buffers for Intel compatibility");
-                }
-            }
-        }
-#endif
-
         if (!CreateLogicalDevice()) return false;
         if (!CreateSwapchain(window)) return false;
         if (!CreateImageViews()) return false;

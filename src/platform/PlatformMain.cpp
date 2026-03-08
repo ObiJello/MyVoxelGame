@@ -324,10 +324,14 @@ namespace PlatformMain {
     int Run(int argc, char** argv) {
         // Parse command-line arguments
         bool useVulkan = false;
+        bool crashTest = false;
         for (int i = 1; i < argc; ++i) {
             if (std::string(argv[i]) == "--vulkan") {
                 useVulkan = true;
                 Log::Info("Vulkan backend requested via --vulkan flag");
+            }
+            if (std::string(argv[i]) == "--crash-test") {
+                crashTest = true;
             }
         }
 
@@ -336,6 +340,7 @@ namespace PlatformMain {
         sentry_options_set_dsn(sentryOptions, "https://685865d2f16184d804534ac7e262e818@o4511006654791680.ingest.us.sentry.io/4511006665539584");
         sentry_options_set_database_path(sentryOptions, ".sentry-native");
         sentry_options_set_release(sentryOptions, "myvoxelgame@0.1.0");
+        sentry_options_set_debug(sentryOptions, 0);
 #ifdef __APPLE__
         // On macOS, crashpad_handler is bundled next to the executable in the .app
         {
@@ -348,8 +353,18 @@ namespace PlatformMain {
         int sentryResult = sentry_init(sentryOptions);
         if (sentryResult == 0) {
             Log::Info("Sentry crash reporting initialized");
+            // Ensure sentry_close() runs on ALL exit paths (early returns, crashes, etc.)
+            std::atexit([]() { sentry_close(); });
         } else {
             Log::Error("Sentry initialization failed (error %d)", sentryResult);
+        }
+
+        // Intentional crash for testing Sentry (run with --crash-test)
+        if (crashTest) {
+            Log::Info("Crash test requested — crashing in 3 seconds...");
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            volatile int* p = nullptr;
+            *p = 42;  // SIGSEGV
         }
 
         // Initialize systems
@@ -985,9 +1000,6 @@ namespace PlatformMain {
         }
 
         Log::Info("=== MINECRAFT JAVA EDITION ARCHITECTURE SHUTDOWN COMPLETE ===");
-
-        // Flush and close crash reporting (must be last)
-        sentry_close();
 
         return 0;
     }

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.19)
 project(MyVoxelGame LANGUAGES CXX VERSION 0.1.0)
 
+# ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options(-g)
+endif()
+
 # ── On macOS, build both Apple Silicon (arm64) and Intel (x86_64) slices,
 #     and force a minimum deployment target ─────────────────────────────────
 if(APPLE)
@@ -785,6 +790,33 @@ if(HAS_VULKAN)
     message(STATUS "Vulkan backend: ENABLED")
 else()
     message(STATUS "Vulkan backend: DISABLED")
+endif()
+
+# ── Generate dSYM and strip binary for Sentry symbolication (Release only) ────
+if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+        COMMAND dsymutil "$<TARGET_FILE:MyVoxelGame>"
+            -o "$<TARGET_BUNDLE_DIR:MyVoxelGame>.dSYM"
+        COMMENT "Generating dSYM for Sentry symbolication"
+    )
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+        COMMAND strip -x "$<TARGET_FILE:MyVoxelGame>"
+        COMMENT "Stripping debug symbols from release binary"
+    )
+    # Upload dSYM to Sentry only when distributing (configure with -DJALIN=ON)
+    option(JALIN "Upload dSYM to Sentry for distribution builds" OFF)
+    if(JALIN)
+        find_program(SENTRY_CLI sentry-cli)
+        if(SENTRY_CLI)
+            add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${SENTRY_CLI} debug-files upload "$<TARGET_BUNDLE_DIR:MyVoxelGame>.dSYM"
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                COMMENT "Uploading dSYM to Sentry"
+            )
+        else()
+            message(WARNING "sentry-cli not found — dSYM will not be uploaded automatically")
+        endif()
+    endif()
 endif()
 
 # ── Bundle crashpad handler into .app on macOS ────────────────────────────────

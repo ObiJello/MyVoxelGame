@@ -1,3 +1,6 @@
+# Sentry auth (contains secret token)
+.sentryclirc
+
 # Ignore CMake build folders
 build/
 build-*/

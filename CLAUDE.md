@@ -4,26 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Build Commands
 
-The project uses CMake with multiple build configurations:
+The project uses CMake with Ninja (CLion is the primary IDE).
 
 ### Quick Build Commands
 ```bash
-# Configure the build (first time)
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+# Build (debug, CLion-style)
+cmake --build cmake-build-debug --target MyVoxelGame -j$(sysctl -n hw.ncpu)
+
+# Build (release)
+cmake --build cmake-build-release --target MyVoxelGame -j$(sysctl -n hw.ncpu)
+
+# Configure from scratch (if needed)
 cmake -B cmake-build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug
-
-# Build main game executable
-cd build && make MyVoxelGame -j$(nproc)
-
-# Build using debug configuration with ninja (faster)
-cd cmake-build-debug && ninja MyVoxelGame
-
-# Build all targets
-cd build && make all -j$(nproc)
-
-# Clean and rebuild
-cd build && make clean && make -j$(nproc)
+cmake -B cmake-build-release -G Ninja -DCMAKE_BUILD_TYPE=Release
 ```
+
+### Distribution Build
+For distributing to users (uploads dSYMs to Sentry, builds universal binary):
+- CLion profile: add `-DJALIN=ON` to CMake options
+- Environment: `VULKAN_SDK=/Users/obey/VulkanSDK/1.4.341.1/macOS`
+- Setting `VULKAN_SDK` enables universal binary (arm64 + x86_64) with Vulkan support
+
+### Vulkan SDK
+- Location: `/Users/obey/VulkanSDK/1.4.341.1/macOS`
+- Homebrew MoltenVK is arm64-only; use the Vulkan SDK for universal builds
 
 ### Running the Game
 ```bash
