@@ -7,6 +7,10 @@
 #include <chrono>
 #include <algorithm>
 
+namespace Game {
+    class ClientPlayer;
+}
+
 namespace Client {
 
     // Forward declarations
@@ -19,6 +23,9 @@ namespace Client {
     public:
         ClientPacketHandler();
         ~ClientPacketHandler();
+
+        // Set client player reference for inventory sync
+        void SetPlayer(Game::ClientPlayer* player) { m_player = player; }
         
         // IPacketListener interface
         const char* getName() const override { return "ClientPacketHandler"; }
@@ -34,6 +41,7 @@ namespace Client {
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
         void onChunkBatchStart() override { handleChunkBatchStart(); }
         void onChunkBatchFinished(int batchSize) override { handleChunkBatchFinished(batchSize); }
+        void onHotbarSyncS2C(const Network::HotbarSyncS2CPacket& packet) override { handleHotbarSync(packet); }
 
         // ========================================================================
         // PACKET HANDLERS (called via IPacket::apply on main thread)
@@ -71,6 +79,9 @@ namespace Client {
         void handleChunkBatchStart();
         void handleChunkBatchFinished(int batchSize);
 
+        // Inventory sync
+        void handleHotbarSync(const Network::HotbarSyncS2CPacket& packet);
+
         // ========================================================================
         // STATISTICS
         // ========================================================================
@@ -96,6 +107,7 @@ namespace Client {
 
         // Cached references (set during initialization)
         ClientChunkManager* m_chunkManager = nullptr;
+        Game::ClientPlayer* m_player = nullptr;
         // Note: NetworkClient is accessed via g_networkClient global
 
         // Chunk batch rate calculator (Minecraft's ChunkBatchSizeCalculator)

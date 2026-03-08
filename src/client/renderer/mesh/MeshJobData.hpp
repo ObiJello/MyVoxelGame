@@ -4,6 +4,7 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
 #include <array>
+#include <atomic>
 #include <memory>
 #include <chrono>
 
@@ -89,7 +90,12 @@ namespace Render {
         // Neighbor chunk presence mask (PX=1, NX=2, PZ=4, NZ=8)
         // Computed on main thread where we know which chunks exist
         uint8_t neighborMask = 0;
-        
+
+        // Per-task cancellation flag (Minecraft-style AtomicBoolean isCancelled)
+        std::atomic<bool> cancelled{false};
+        void Cancel() { cancelled.store(true, std::memory_order_release); }
+        bool IsCancelled() const { return cancelled.load(std::memory_order_acquire); }
+
         MeshJobData() : submitTime(std::chrono::steady_clock::now()) {}
         
         MeshJobData(Game::Math::ChunkPos pos, int secY) 

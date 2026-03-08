@@ -96,6 +96,9 @@ namespace Threading {
         // Cancel mesh jobs for a specific chunk section
         void CancelMeshJob(Game::Math::ChunkPos chunkPos, int sectionY);
 
+        // Remove chunk from cancelled set (call when chunk is reloaded)
+        void UncancelChunk(Game::Math::ChunkPos chunkPos);
+
         // Cancel all pending jobs
         void CancelAllJobs();
 
@@ -262,6 +265,7 @@ namespace Threading {
     // Job cancellation
     void CancelClientMeshJob(Game::Math::ChunkPos chunkPos);
     void CancelClientMeshJob(Game::Math::ChunkPos chunkPos, int sectionY);
+    void UncancelClientMeshChunk(Game::Math::ChunkPos chunkPos);
 
     // World reference management  
     void SetClientWorkerWorld(Game::World* world);

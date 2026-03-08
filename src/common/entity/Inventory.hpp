@@ -55,6 +55,9 @@ namespace Game {
         // Get total count of a specific block type across all slots
         int GetBlockCount(BlockID blockId) const;
 
+        // Set a slot from server data (server-authoritative sync)
+        void SetSlot(int index, BlockID blockId, int count = 64);
+
         // Clear all slots
         void Clear();
 

@@ -94,30 +94,35 @@ namespace Client {
             return;
         }
         
-        Log::Debug("PIPELINE: Chunk data deserialized successfully for (%d, %d), %zu sections created", 
+        Log::Debug("PIPELINE: Chunk data deserialized successfully for (%d, %d), %zu sections created",
                   chunkPos.x, chunkPos.z, chunk->chunkData->GetSectionCount());
-        
+
         // Initialize ALL 24 sections for proper neighbor culling (Minecraft-style)
         for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
             auto& sectionInfo = chunk->sectionInfos[sectionY];
-            
+            sectionInfo.lastMeshJob.reset(); // Clear any old task reference
+
             if (chunk->chunkData->HasSection(sectionY)) {
-                // Section has data
+                // Section has data — reset all state for fresh meshing
                 sectionInfo.hasCpuData = true;
-                sectionInfo.isAllAir = false;  // Assume non-empty if it has a section
+                sectionInfo.isAllAir = false;
                 sectionInfo.state = SectionState::LOADED;
                 sectionInfo.version++;
-                sectionInfo.dirty = true;  // Needs meshing
+                sectionInfo.meshingVersion = 0;
+                sectionInfo.builtOnce = false;
+                sectionInfo.dirty = true;
                 
                 // Also update legacy dirty set for compatibility
                 chunk->dirtySections.insert(sectionY);
             } else {
-                // Section is empty (all air)
-                sectionInfo.hasCpuData = true;  // We know it's air
+                // Section is empty (all air) — reset state
+                sectionInfo.hasCpuData = true;
                 sectionInfo.isAllAir = true;
                 sectionInfo.state = SectionState::LOADED;
                 sectionInfo.version++;
-                sectionInfo.dirty = false;  // No need to mesh empty sections
+                sectionInfo.meshingVersion = 0;
+                sectionInfo.builtOnce = false;
+                sectionInfo.dirty = false;
             }
         }
         
@@ -142,18 +147,36 @@ namespace Client {
 
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
         ASSERT_MAIN_THREAD();
-        
+        Log::Info("CLIENT UNLOAD: chunk (%d, %d)", chunkPos.x, chunkPos.z);
+
         // Mark neighbor chunks' sections as dirty BEFORE unloading
         // This ensures they rebuild their meshes to show previously culled faces
         MarkNeighborSectionsDirty(chunkPos);
         
-        // Cancel mesh jobs for this chunk
-        Threading::CancelClientMeshJob(chunkPos);
+        // Cancel in-flight mesh tasks per-section (Minecraft-style per-task cancellation)
+        {
+            auto chunkIt = m_chunks.find(chunkPos);
+            if (chunkIt != m_chunks.end()) {
+                for (int sy = 0; sy < 24; ++sy) {
+                    auto& si = chunkIt->second->sectionInfos[sy];
+                    if (si.lastMeshJob) {
+                        si.lastMeshJob->Cancel();
+                        si.lastMeshJob.reset();
+                    }
+                }
+            }
+        }
         
         // Drop any pending diffs for this chunk
         if (m_pendingDiffs) {
             m_pendingDiffs->DropChunkDiffs(chunkPos);
         }
+
+        // Clean up GPU resources (vertex/index buffers) before erasing chunk data
+        if (::Render::g_clientMeshManager) {
+            ::Render::g_clientMeshManager->RemoveChunkGPUData(chunkPos);
+        }
+
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end()) {
             m_chunks.erase(it);
@@ -897,7 +920,13 @@ namespace Client {
             snapshot->isHighPriority = (candidate.effectiveDistance < 128.0f);
             snapshot->submitTime = std::chrono::steady_clock::now();
 
+            // Cancel previous in-flight task for this section (Minecraft-style)
+            if (sectionInfo.lastMeshJob) {
+                sectionInfo.lastMeshJob->Cancel();
+            }
+
             if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
+                sectionInfo.lastMeshJob = snapshot; // Track for cancellation
                 sectionInfo.meshingVersion = expectedVersion;
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
@@ -1227,37 +1256,8 @@ namespace Client {
         
         auto& sectionInfo = chunk->sectionInfos[result.sectionY];
         
-        // Check if this result is stale (version mismatch)
-        if (result.generation != sectionInfo.meshingVersion) {
-            // Stale result - section was modified while meshing
-            // Log::Debug("[mesh] drop STALE cx=%d cz=%d sy=%d resVer=%u curVer=%u",
-            //           result.chunkPos.x, result.chunkPos.z, result.sectionY,
-            //           result.generation, sectionInfo.meshingVersion);
-            
-            // Reset meshingVersion to allow rescheduling with new version
-            sectionInfo.meshingVersion = 0;
-            // Explicitly set dirty flag to ensure reschedule (Minecraft-style)
-            sectionInfo.dirty = true;
-            chunk->dirtySections.insert(result.sectionY);
-            
-            return { MeshApplyAction::Drop_StaleVersion };
-        }
-        
-        // Check if section was modified after mesh was scheduled
-        if (sectionInfo.meshingVersion != sectionInfo.version) {
-            // Section changed while mesh was in flight (e.g., another neighbor loaded)
-            Log::Debug("[mesh] DROP STALE: chunk(%d,%d) sy=%d meshVer=%u curVer=%u neighborMask=0x%X (modified after scheduling)",
-                      result.chunkPos.x, result.chunkPos.z, result.sectionY,
-                      sectionInfo.meshingVersion, sectionInfo.version, result.neighborMask);
-            
-            // Reset meshingVersion to allow rescheduling with new version
-            sectionInfo.meshingVersion = 0;
-            // Explicitly set dirty flag to ensure reschedule (Minecraft-style)
-            sectionInfo.dirty = true;
-            chunk->dirtySections.insert(result.sectionY);
-            
-            return { MeshApplyAction::Drop_StaleVersion };
-        }
+        // Accept any result for a loaded chunk — better to show something than nothing.
+        // FinalizeSectionUpload will mark it dirty for re-mesh if the version changed.
         
         // Version matches - good to upload!
         // Keep meshingVersion at the current version to prevent duplicate scheduling
@@ -1287,20 +1287,20 @@ namespace Client {
         uint8_t prevMask = sectionInfo.lastNeighborMask;
         sectionInfo.lastNeighborMask = neighborMask;  // Update neighbor presence mask
         
-        // Double-check version hasn't changed (extremely rare race)
-        if (sectionInfo.version != sectionInfo.meshingVersion) {
-            Log::Warning("Version changed during upload for chunk (%d, %d) section %d",
-                        chunkPos.x, chunkPos.z, sectionY);
-            return;
-        }
-        
-        // Mark section as ready and clear dirty flag
+        // Mark section as ready
         sectionInfo.state = SectionState::READY;
-        sectionInfo.dirty = false;
-        sectionInfo.builtOnce = true;  // Mark as built at least once
-        
-        // Clear from legacy dirty set if present
-        chunk->dirtySections.erase(sectionY);
+        sectionInfo.builtOnce = true;
+
+        // If version changed while meshing (neighbor loaded/unloaded), keep dirty for re-mesh
+        // but still show this mesh result so the player sees something
+        if (sectionInfo.version != sectionInfo.meshingVersion) {
+            sectionInfo.meshingVersion = 0; // Allow rescheduling
+            sectionInfo.dirty = true;
+            chunk->dirtySections.insert(sectionY);
+        } else {
+            sectionInfo.dirty = false;
+            chunk->dirtySections.erase(sectionY);
+        }
         
         Log::Debug("[mesh] FINALIZED: chunk(%d,%d) sy=%d neighborMask: 0x%X -> 0x%X (changed=%s)",
                   chunkPos.x, chunkPos.z, sectionY, 

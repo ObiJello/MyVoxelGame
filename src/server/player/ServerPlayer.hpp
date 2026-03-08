@@ -96,6 +96,12 @@ namespace Server {
         
         // Get currently held block/item
         Game::BlockID getHeldBlock() const;
+
+        // Get block in specific hotbar slot
+        Game::BlockID getHotbarBlock(int slot) const {
+            if (slot >= 0 && slot < 9) return m_hotbarBlocks[slot];
+            return Game::BlockID::Air;
+        }
         
         // Set block in hotbar slot
         void setHotbarBlock(int slot, Game::BlockID block);
@@ -205,12 +211,12 @@ namespace Server {
             Game::BlockID::Stone,
             Game::BlockID::Dirt,
             Game::BlockID::Grass,
-            Game::BlockID::Cobblestone,
-            Game::BlockID::OakPlanks,
-            Game::BlockID::OakLog,
+            Game::BlockID::Lava,
             Game::BlockID::Glass,
             Game::BlockID::Sand,
-            Game::BlockID::Air
+            Game::BlockID::OakLeaves,
+            Game::BlockID::Water,
+            Game::BlockID::Bedrock
         };
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;

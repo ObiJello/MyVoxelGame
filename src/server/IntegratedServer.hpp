@@ -55,17 +55,6 @@ namespace Server {
         std::chrono::steady_clock::time_point sendTime;
     };
 
-    // Player state tracking (legacy, being phased out)
-    struct ServerPlayerState {
-        uint32_t playerId = 0;
-        glm::vec3 position{0.0f};
-        glm::vec2 rotation{0.0f};
-        Game::Math::ChunkPos currentChunk{0, 0};
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> loadedChunks;
-        uint32_t lastMoveSequenceNumber = 0;
-        std::chrono::steady_clock::time_point lastUpdateTime;
-    };
-
     // Integrated server class (mirrors MinecraftServer + IntegratedServer from Minecraft)
     class IntegratedServer {
     public:
@@ -112,12 +101,10 @@ namespace Server {
         // Set player (for integrated server)
         void SetPlayer(Game::ClientPlayer* player);
         
-        // Update player state from client packets
-        void UpdatePlayerState(const Network::PlayerMoveC2SPacket& packet);
+        // Get player position/chunk from active session (single source of truth)
+        Game::Math::ChunkPos GetPlayerChunkPosition() const;
+        glm::vec3 GetPlayerPosition() const;
 
-        // Get current player state (legacy, being phased out)
-        const ServerPlayerState& GetPlayerState() const { return m_playerState; }
-        
         // Get player session for network/view management
         // NOTE: Delegates to SessionManager now instead of using m_playerSession
         PlayerSession* GetPlayerSession() const;
@@ -153,9 +140,6 @@ namespace Server {
         
         // Process incoming block action packet
         void ProcessBlockAction(const Network::BlockActionC2SPacket& packet);
-        
-        // Process incoming player move packet
-        void ProcessPlayerMove(const Network::PlayerMoveC2SPacket& packet);
         
         // Process incoming chat message
         void ProcessChatMessage(const Network::ChatMessageC2SPacket& packet);
@@ -221,9 +205,6 @@ namespace Server {
         std::unique_ptr<std::thread> m_serverThread;
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_shouldStop{false};
-
-        // Player state (legacy, being replaced)
-        ServerPlayerState m_playerState;
 
         // New player architecture
         std::unique_ptr<ServerPlayer> m_serverPlayer;     // Authoritative gameplay entity
@@ -309,12 +290,6 @@ namespace Server {
         // PLAYER UPDATE PROCESSING (Private implementation details)
         // ========================================================================
 
-        // Validate player movement
-        bool ValidatePlayerMove(const Network::PlayerMoveC2SPacket& packet) const;
-
-        // Update player chunk position
-        void UpdatePlayerChunkPosition(const glm::vec3& newPosition);
-        
         // Update view distance watchers
         void UpdateViewDistanceWatchers();
 

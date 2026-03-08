@@ -51,6 +51,8 @@ namespace Server {
                                          [this](const std::vector<uint8_t>& p) { HandleKeepAliveResponse(p); });
         m_packetRegistry.RegisterHandler(PacketId::ClientConfigC2S,
                                          [this](const std::vector<uint8_t>& p) { HandleClientSettings(p); });
+        m_packetRegistry.RegisterHandler(PacketId::HeldItemChange,
+                                         [this](const std::vector<uint8_t>& p) { HandleHeldItemChange(p); });
     }
 
     ServerConnection::~ServerConnection() {
@@ -481,19 +483,12 @@ namespace Server {
         if (m_phase != ConnectionPhase::PLAY || !m_authenticated) {
             return;
         }
-        
+
         auto packet = Network::Serialization::DeserializePlayerMoveC2S(payload);
-        
-        // Log every 20th move to reduce spam
-        if (packet.sequenceNumber % 20 == 0) {
-            /*Log::Debug("[Server#%u] RECEIVED PlayerMoveC2S (ID: 0x%02X) - Pos: (%.2f, %.2f, %.2f)",
-                       GetConnectionId(), static_cast<uint8_t>(Network::PacketId::PlayerMoveC2S),
-                       packet.position.x, packet.position.y, packet.position.z);*/
-        }
-        
-        // Forward to IntegratedServer for processing
-        if (g_integratedServer) {
-            g_integratedServer->ProcessPlayerMove(packet);
+
+        // Route through packet listener → PlayerSession::HandlePlayerMove()
+        if (m_listener) {
+            m_listener->onPlayerMoveC2S(packet);
         }
     }
 
@@ -554,6 +549,15 @@ namespace Server {
         } else {
             Log::Warning("[ServerConnection %u] Unexpected keep-alive response (ID: %llu, expected: %llu)", 
                         GetConnectionId(), id, m_lastKeepAliveId);
+        }
+    }
+
+    void ServerConnection::HandleHeldItemChange(const std::vector<uint8_t>& payload) {
+        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+
+        auto packet = Network::Serialization::DeserializeHeldItemChangeC2S(payload);
+        if (m_listener) {
+            m_listener->onHeldItemChangeC2S(packet);
         }
     }
 

@@ -608,9 +608,9 @@ namespace Game {
         int playerChunkZ = 0;
 
         if (Server::g_integratedServer) {
-            const auto& playerState = Server::g_integratedServer->GetPlayerState();
-            playerChunkX = playerState.currentChunk.x;
-            playerChunkZ = playerState.currentChunk.z;
+            auto playerChunk = Server::g_integratedServer->GetPlayerChunkPosition();
+            playerChunkX = playerChunk.x;
+            playerChunkZ = playerChunk.z;
         }
 
         // Async path: use terrain library's own async pipeline (non-blocking)
@@ -799,9 +799,9 @@ namespace Game {
         }
 
         // Get player position to determine which chunks to send
-        const auto& playerState = Server::g_integratedServer->GetPlayerState();
-        int playerChunkX = playerState.currentChunk.x;
-        int playerChunkZ = playerState.currentChunk.z;
+        auto playerChunk = Server::g_integratedServer->GetPlayerChunkPosition();
+        int playerChunkX = playerChunk.x;
+        int playerChunkZ = playerChunk.z;
         
         // Check if player moved significantly (more than render distance)
         // If so, clear the sent chunks cache as we need to resend for new area

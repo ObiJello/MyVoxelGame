@@ -745,23 +745,18 @@ namespace Debug {
             }
         }
 
-        // GPU Data Pool
-        if (ImGui::CollapsingHeader("GPU Data Pool")) {
-            if (Render::g_gpuDataPool) {
-                size_t poolSize = Render::g_gpuDataPool->getPoolSize();
-                size_t inUse = Render::g_gpuDataPool->getInUseCount();
-                size_t deferred = Render::g_gpuDataPool->getDeferredCount();
-                size_t total = poolSize + inUse;
+        // GPU Data
+        if (ImGui::CollapsingHeader("GPU Data")) {
+            if (Render::g_clientMeshManager) {
+                size_t gpuDataCount = Render::g_clientMeshManager->GetGPUDataCount();
+                size_t activeSections = Render::g_clientMeshManager->GetActiveSectionCount();
+                size_t pendingResults = Render::g_clientMeshManager->GetCompletedResultCount();
 
-                ImGui::Text("In Use:   %zu / %zu", inUse, total);
-                if (total > 0) {
-                    float utilization = (float)inUse / (float)total;
-                    ImGui::ProgressBar(utilization, ImVec2(-1, 0),
-                        (std::to_string(inUse) + "/" + std::to_string(total)).c_str());
-                }
-                ImGui::Text("Available: %zu  Deferred: %zu", poolSize, deferred);
+                ImGui::Text("GPU Entries:     %zu", gpuDataCount);
+                ImGui::Text("Active Sections: %zu", activeSections);
+                ImGui::Text("Pending Results: %zu", pendingResults);
             } else {
-                ImGui::TextDisabled("GPUDataPool unavailable");
+                ImGui::TextDisabled("ClientMeshManager unavailable");
             }
         }
 
@@ -804,11 +799,11 @@ namespace Debug {
 
         ImGui::Separator();
 
-        // GPU Pool
-        if (Render::g_gpuDataPool) {
-            size_t inUse = Render::g_gpuDataPool->getInUseCount();
-            size_t poolSz = Render::g_gpuDataPool->getPoolSize();
-            ImGui::Text("GPU Pool: %zu in use, %zu available", inUse, poolSz);
+        // GPU Data
+        if (Render::g_clientMeshManager) {
+            size_t gpuEntries = Render::g_clientMeshManager->GetGPUDataCount();
+            size_t activeSections = Render::g_clientMeshManager->GetActiveSectionCount();
+            ImGui::Text("GPU Data: %zu entries, %zu active", gpuEntries, activeSections);
         }
 
         ImGui::Separator();

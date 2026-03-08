@@ -12,15 +12,15 @@ namespace Render {
     // Implementation of GPUSectionData::DestroyAllResources (declared in SectionMesh.hpp)
     void GPUSectionData::DestroyAllResources(RenderBackend* backend) {
         if (!backend) return;
-        if (opaqueMesh != INVALID_MESH)       { backend->DestroyMesh(opaqueMesh);       opaqueMesh = INVALID_MESH; }
-        if (opaqueVB != INVALID_BUFFER)       { backend->DestroyBuffer(opaqueVB);       opaqueVB = INVALID_BUFFER; }
-        if (opaqueIB != INVALID_BUFFER)       { backend->DestroyBuffer(opaqueIB);       opaqueIB = INVALID_BUFFER; }
-        if (cutoutMesh != INVALID_MESH)       { backend->DestroyMesh(cutoutMesh);       cutoutMesh = INVALID_MESH; }
-        if (cutoutVB != INVALID_BUFFER)       { backend->DestroyBuffer(cutoutVB);       cutoutVB = INVALID_BUFFER; }
-        if (cutoutIB != INVALID_BUFFER)       { backend->DestroyBuffer(cutoutIB);       cutoutIB = INVALID_BUFFER; }
-        if (translucentMesh != INVALID_MESH)  { backend->DestroyMesh(translucentMesh);  translucentMesh = INVALID_MESH; }
-        if (translucentVB != INVALID_BUFFER)  { backend->DestroyBuffer(translucentVB);  translucentVB = INVALID_BUFFER; }
-        if (translucentIB != INVALID_BUFFER)  { backend->DestroyBuffer(translucentIB);  translucentIB = INVALID_BUFFER; }
+        if (opaqueMesh != INVALID_MESH)       { backend->DeferredDestroyMesh(opaqueMesh);       opaqueMesh = INVALID_MESH; }
+        if (opaqueVB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(opaqueVB);       opaqueVB = INVALID_BUFFER; }
+        if (opaqueIB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(opaqueIB);       opaqueIB = INVALID_BUFFER; }
+        if (cutoutMesh != INVALID_MESH)       { backend->DeferredDestroyMesh(cutoutMesh);       cutoutMesh = INVALID_MESH; }
+        if (cutoutVB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(cutoutVB);       cutoutVB = INVALID_BUFFER; }
+        if (cutoutIB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(cutoutIB);       cutoutIB = INVALID_BUFFER; }
+        if (translucentMesh != INVALID_MESH)  { backend->DeferredDestroyMesh(translucentMesh);  translucentMesh = INVALID_MESH; }
+        if (translucentVB != INVALID_BUFFER)  { backend->DeferredDestroyBuffer(translucentVB);  translucentVB = INVALID_BUFFER; }
+        if (translucentIB != INVALID_BUFFER)  { backend->DeferredDestroyBuffer(translucentIB);  translucentIB = INVALID_BUFFER; }
         opaqueIndexCount = cutoutIndexCount = translucentIndexCount = 0;
         opaqueVertexCount = cutoutVertexCount = translucentVertexCount = 0;
     }
@@ -277,15 +277,15 @@ namespace Render {
             }
             
             case Client::MeshApplyAction::Drop_StaleVersion:
-                // Version mismatch - will be rescheduled
                 m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
-                LogMeshActivity("Dropped stale mesh", result.chunkPos, result.sectionY);
+                Log::Info("MESH DROPPED STALE: chunk (%d,%d) section %d gen=%u",
+                         result.chunkPos.x, result.chunkPos.z, result.sectionY, result.generation);
                 break;
-                
+
             case Client::MeshApplyAction::Drop_Unloaded:
-                // Chunk/section is gone
                 m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
-                LogMeshActivity("Dropped mesh (unloaded)", result.chunkPos, result.sectionY);
+                Log::Info("MESH DROPPED UNLOADED: chunk (%d,%d) section %d",
+                         result.chunkPos.x, result.chunkPos.z, result.sectionY);
                 break;
                 
             case Client::MeshApplyAction::Drop_Replaced:

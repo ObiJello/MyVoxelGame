@@ -13,31 +13,9 @@ namespace Game {
     }
 
     void Inventory::InitializeDefaults() {
-        // Clear all slots first
         Clear();
-
-        //Add some default blocks for testing
-        slots[0] = { BlockID::Stone, 64 };
-        slots[1] = { BlockID::Dirt, 64 };
-        slots[2] = { BlockID::Grass, 64 };
-        slots[3] = { BlockID::Lava, 32 };
-        slots[4] = { BlockID::Glass, 32 };
-        slots[5] = { BlockID::Sand, 64 };
-        slots[6] = { BlockID::OakLeaves, 32 };
-        slots[7] = { BlockID::Water, 16 };
-        slots[8] = { BlockID::Bedrock, 8 };
-
-        /*slots[0] = { BlockID::Water, 64 };
-        slots[1] = { BlockID::Lava, 64 };
-        slots[2] = { BlockID::GoldOre, 64 };
-        slots[3] = { BlockID::EmeraldOre, 64 };
-        slots[4] = { BlockID::DiamondOre, 64 };
-        slots[5] = { BlockID::Gravel, 64 };
-        slots[6] = { BlockID::Mycelium, 64 };
-        slots[7] = { BlockID::CoalOre, 64 };
-        slots[8] = { BlockID::RedstoneOre,64 };*/
-
-        Log::Info("Inventory initialized with default blocks");
+        // Server sends authoritative hotbar contents via HotbarSyncS2C on join
+        Log::Info("Inventory cleared, awaiting server hotbar sync");
     }
 
     void Inventory::SetSelectedSlot(int slot) {
@@ -127,6 +105,12 @@ namespace Game {
             }
         }
         return total;
+    }
+
+    void Inventory::SetSlot(int index, BlockID blockId, int count) {
+        if (index >= 0 && index < HOTBAR_SIZE) {
+            slots[index] = {blockId, count};
+        }
     }
 
     void Inventory::Clear() {

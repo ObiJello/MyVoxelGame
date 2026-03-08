@@ -3,6 +3,7 @@
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
 #include "common/core/Log.hpp"
+#include "platform/GameDirectory.hpp"
 #include <algorithm>
 
 namespace Server {
@@ -83,7 +84,8 @@ namespace Server {
         
         // Create new session
         auto session = std::make_shared<PlayerSession>(playerId, connectionId);
-        
+        session->SetSendScheduler(m_sendScheduler);
+
         // Store session
         m_sessions[playerId] = session;
         m_connectionToPlayer[connectionId] = playerId;
@@ -196,10 +198,12 @@ namespace Server {
         // Get spawn position
         glm::vec3 spawnPos = GetPlayerSpawn(playerId);
         
-        // Initialize session
+        // Initialize session — view distance must match render distance
+        // so the session's watch set covers the same area as World::ChunkLoadUnload()
+        int renderDistance = Platform::g_gameSettings.GetRenderDistance();
         PlayerSession::Config sessionConfig;
-        sessionConfig.simulationDistance = m_config.defaultSimulationDistance;
-        sessionConfig.viewDistance = m_config.defaultViewDistance;
+        sessionConfig.simulationDistance = renderDistance;
+        sessionConfig.viewDistance = renderDistance;
         sessionConfig.maxChunksPerTick = m_config.maxChunksPerPlayerPerTick;
         sessionConfig.maxBytesPerTick = m_config.maxBytesPerPlayerPerTick;
         sessionConfig.maxDiffBytesPerTick = m_config.maxDiffBytesPerPlayerPerTick;

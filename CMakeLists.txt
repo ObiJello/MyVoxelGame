@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(MyVoxelGame LANGUAGES CXX VERSION 0.1.0)
+project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
 
 # ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
@@ -878,6 +878,154 @@ endif()
 install(TARGETS MyVoxelGame DESTINATION bin)
 # ────────────────────────────────────────────────────────────────────────────
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── ObeyCraft Launcher (auto-updater) ─────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ImGui library for launcher (no game-specific code like DebugSystem)
+add_library(imgui_launcher STATIC
+    ext/imgui/imgui.cpp
+    ext/imgui/imgui_draw.cpp
+    ext/imgui/imgui_tables.cpp
+    ext/imgui/imgui_widgets.cpp
+    ext/imgui/backends/imgui_impl_glfw.cpp
+    ext/imgui/backends/imgui_impl_opengl3.cpp
+)
+target_include_directories(imgui_launcher PUBLIC
+    ext/imgui
+    ext/imgui/backends
+)
+target_compile_features(imgui_launcher PUBLIC cxx_std_20)
+
+# Platform linking for imgui_launcher
+if(WIN32)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui_launcher PRIVATE glfw glad OpenGL::GL)
+elseif(APPLE)
+    target_link_libraries(imgui_launcher PRIVATE
+        glfw glad
+        ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK} ${COREVIDEO_FRAMEWORK} ${OpenGL_FRAMEWORK}
+    )
+else()
+    find_package(X11 REQUIRED)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui_launcher PRIVATE glfw glad X11::X11 OpenGL::GL)
+endif()
+
+# Find libcurl
+find_package(CURL QUIET)
+if(NOT CURL_FOUND)
+    # On macOS, curl is always available as a system framework
+    if(APPLE)
+        find_library(CURL_LIBRARY curl)
+        if(CURL_LIBRARY)
+            set(CURL_FOUND TRUE)
+            add_library(CURL::libcurl UNKNOWN IMPORTED)
+            set_target_properties(CURL::libcurl PROPERTIES IMPORTED_LOCATION "${CURL_LIBRARY}")
+        endif()
+    endif()
+endif()
+
+if(CURL_FOUND)
+    message(STATUS "Found curl - building ObeyCraft Launcher")
+
+    # Minizip sources for zip extraction
+    set(MINIZIP_SOURCES
+        ext/zlib/contrib/minizip/unzip.c
+        ext/zlib/contrib/minizip/ioapi.c
+    )
+    if(WIN32)
+        list(APPEND MINIZIP_SOURCES ext/zlib/contrib/minizip/iowin32.c)
+    endif()
+
+    # Launcher sources
+    set(LAUNCHER_SOURCES
+        src/launcher/main.cpp
+        src/launcher/LauncherApp.cpp
+        src/launcher/ui/LauncherUI.cpp
+        src/launcher/ui/LauncherTheme.cpp
+        src/launcher/updater/VersionInfo.cpp
+        src/launcher/updater/GitHubAPI.cpp
+        src/launcher/updater/Downloader.cpp
+        src/launcher/updater/Installer.cpp
+        src/launcher/platform/ProcessLauncher.cpp
+        # Shared code compiled into launcher
+        src/common/core/Log.cpp
+        src/platform/GameDirectory.cpp
+        ${MINIZIP_SOURCES}
+    )
+
+    if(APPLE)
+        add_executable(ObeyCraftLauncher MACOSX_BUNDLE ${LAUNCHER_SOURCES})
+        set_target_properties(ObeyCraftLauncher PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/LauncherInfo.plist"
+        )
+    else()
+        add_executable(ObeyCraftLauncher ${LAUNCHER_SOURCES})
+    endif()
+
+    target_include_directories(ObeyCraftLauncher PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+        ${PROJECT_SOURCE_DIR}/ext/glfw/include
+        ${PROJECT_SOURCE_DIR}/ext/glad/include
+        ${PROJECT_SOURCE_DIR}/ext/glm
+        ${PROJECT_SOURCE_DIR}/ext/stb_image
+        ${PROJECT_SOURCE_DIR}/ext/zlib
+        ${PROJECT_SOURCE_DIR}/ext/zlib/contrib/minizip
+        ${PROJECT_SOURCE_DIR}/ext/imgui
+        ${PROJECT_SOURCE_DIR}/ext/imgui/backends
+    )
+
+    target_compile_features(ObeyCraftLauncher PRIVATE cxx_std_20)
+
+    target_link_libraries(ObeyCraftLauncher PRIVATE
+        glfw glad stb_image zlibstatic
+        imgui_launcher
+        nlohmann_json::nlohmann_json
+        CURL::libcurl
+    )
+
+    if(APPLE)
+        find_library(CF_FRAMEWORK CoreFoundation)
+        target_link_libraries(ObeyCraftLauncher PRIVATE
+            ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK} ${COREVIDEO_FRAMEWORK} ${OpenGL_FRAMEWORK}
+            ${CF_FRAMEWORK}
+        )
+        # Copy font into bundle Resources
+        add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/fonts"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/ext/imgui/misc/fonts/Roboto-Medium.ttf"
+                "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/fonts/Roboto-Medium.ttf"
+            COMMENT "Copying launcher fonts"
+        )
+        # Copy launcher assets if they exist
+        if(EXISTS "${PROJECT_SOURCE_DIR}/assets/launcher")
+            add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${PROJECT_SOURCE_DIR}/assets/launcher"
+                    "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/launcher"
+                COMMENT "Copying launcher assets"
+            )
+        endif()
+    elseif(WIN32)
+        # Copy font next to executable on Windows
+        add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:ObeyCraftLauncher>/fonts"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PROJECT_SOURCE_DIR}/ext/imgui/misc/fonts/Roboto-Medium.ttf"
+                "$<TARGET_FILE_DIR:ObeyCraftLauncher>/fonts/Roboto-Medium.ttf"
+            COMMENT "Copying launcher fonts"
+        )
+    endif()
+
+    install(TARGETS ObeyCraftLauncher DESTINATION bin)
+else()
+    message(STATUS "curl not found - ObeyCraft Launcher will NOT be built")
+endif()
+
 # ── Optional: Print configuration summary ──────────────────────────────────────
 message(STATUS "")
 message(STATUS "═══════════════════════════════════════════════════════════════")
@@ -898,6 +1046,9 @@ endif()
 message(STATUS "")
 message(STATUS "Executables:")
 message(STATUS "  MyVoxelGame:        Main game executable")
+if(CURL_FOUND)
+message(STATUS "  ObeyCraftLauncher:  Auto-update launcher")
+endif()
 message(STATUS "  RegionDumper:       Minecraft region file parser")
 message(STATUS "  TestRegionDumper:   Region parser test suite")
 message(STATUS "")

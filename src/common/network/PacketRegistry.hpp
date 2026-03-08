@@ -48,6 +48,7 @@
             ClientboundSectionBlocksUpdate = 0x22,  // Minecraft-style section block updates packet
             ChunkBatchStartS2C    = 0x23,  // Signals start of a chunk batch
             ChunkBatchFinishedS2C = 0x24,  // Signals end of batch (includes chunk count)
+            HotbarSyncS2C         = 0x25,  // Server-authoritative hotbar contents
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -106,6 +107,7 @@
                 case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
                 case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
+                case PacketId::HotbarSyncS2C: return "HotbarSyncS2C";
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";

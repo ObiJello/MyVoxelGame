@@ -64,12 +64,6 @@ namespace Server {
         // Initialize the new session management system
         InitializeSessionSystem();
 
-        // Initialize player state (for compatibility)
-        m_playerState.playerId = 1; // Single player ID for integrated server
-        m_playerState.position = glm::vec3(0.0f, 67.0f, 0.0f);
-        m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(0, 0);
-        m_playerState.lastUpdateTime = std::chrono::steady_clock::now();
-        
         // Create ServerPlayer instance (PlayerSession will be created when player joins)
         glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
         m_serverPlayer = std::make_unique<ServerPlayer>(1, "Player");
@@ -228,16 +222,7 @@ namespace Server {
 
     void IntegratedServer::SetPlayer(Game::ClientPlayer* player) {
         m_player = player;
-
-        if (player) {
-            // Update player state from player
-            const auto& physics = player->physics;
-            m_playerState.position = physics.position;
-            m_playerState.currentChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-                static_cast<int>(physics.position.x),
-                static_cast<int>(physics.position.z)
-            );
-        }
+        // Session position will be set when the first move packet arrives
     }
 
     PlayerSession* IntegratedServer::GetPlayerSession() const {
@@ -249,21 +234,16 @@ namespace Server {
         return nullptr;
     }
 
-    void IntegratedServer::UpdatePlayerState(const Network::PlayerMoveC2SPacket& packet) {
-        m_playerState.position = packet.position;
-        m_playerState.rotation = packet.rotation;
-        m_playerState.lastMoveSequenceNumber = packet.sequenceNumber;
-        m_playerState.lastUpdateTime = std::chrono::steady_clock::now();
-        
-        // Update current chunk
-        auto newChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-            static_cast<int>(packet.position.x), 
-            static_cast<int>(packet.position.z)
-        );
-        
-        if (newChunk.x != m_playerState.currentChunk.x || newChunk.z != m_playerState.currentChunk.z) {
-            UpdatePlayerChunkPosition(packet.position);
-        }
+    Game::Math::ChunkPos IntegratedServer::GetPlayerChunkPosition() const {
+        auto* session = GetPlayerSession();
+        if (session) return session->GetChunkPosition();
+        return {0, 0};
+    }
+
+    glm::vec3 IntegratedServer::GetPlayerPosition() const {
+        auto* session = GetPlayerSession();
+        if (session) return session->GetPosition();
+        return glm::vec3(0.0f, 67.0f, 0.0f);
     }
 
     void IntegratedServer::LogStats() const {
@@ -499,9 +479,10 @@ namespace Server {
         if (!chunk) {
             return;
         }
-        
+
         // Check if chunk is already loaded by the client
-        if (m_playerState.loadedChunks.find(chunkPos) != m_playerState.loadedChunks.end()) {
+        auto* session = GetPlayerSession();
+        if (session && session->HasSentChunk(chunkPos)) {
             Log::Debug("Chunk (%d, %d) already loaded by client, skipping send", chunkPos.x, chunkPos.z);
             return;
         }
@@ -556,7 +537,7 @@ namespace Server {
         sendState.sendTime = std::chrono::steady_clock::now();
         
         // Mark chunk as loaded by the client
-        m_playerState.loadedChunks.insert(chunkPos);
+        if (session) session->MarkChunkSent(chunkPos);
         
         // Register player as watcher for this chunk
         // This is critical for block change tracking to work!
@@ -603,9 +584,10 @@ namespace Server {
         std::vector<ChunkDist> candidates;
         candidates.reserve(m_chunkSender.pendingChunks.size());
 
+        auto playerChunk = GetPlayerChunkPosition();
         for (const auto& pos : m_chunkSender.pendingChunks) {
-            int dx = pos.x - m_playerState.currentChunk.x;
-            int dz = pos.z - m_playerState.currentChunk.z;
+            int dx = pos.x - playerChunk.x;
+            int dz = pos.z - playerChunk.z;
             candidates.push_back({pos, dx * dx + dz * dz});
         }
 
@@ -762,7 +744,7 @@ namespace Server {
         // Check if position is within reasonable distance from player
         float distance = glm::distance(
             glm::vec3(packet.worldX, packet.worldY, packet.worldZ),
-            m_playerState.position
+            GetPlayerPosition()
         );
         
         if (distance > 10.0f) { // Max reach distance
@@ -799,16 +781,6 @@ namespace Server {
     // PLAYER UPDATE PROCESSING
     // ========================================================================
 
-    void IntegratedServer::ProcessPlayerMove(const Network::PlayerMoveC2SPacket& packet) {
-        if (!ValidatePlayerMove(packet)) {
-            Log::Warning("Invalid player move received");
-            return;
-        }
-        
-        UpdatePlayerState(packet);
-        m_stats.packetsReceived.fetch_add(1, std::memory_order_relaxed);
-    }
-    
     void IntegratedServer::ProcessChatMessage(const Network::ChatMessageC2SPacket& packet) {
         // Process chat message or command
         if (packet.isCommand) {
@@ -844,8 +816,20 @@ namespace Server {
             auto session = m_sessionManager->GetSession(playerId);
             if (session) {
                 session->AttachPlayer(m_serverPlayer.get());
+                session->SetConnection(connection.get());
                 Log::Info("[IntegratedServer] Player session created and wired to connection %u",
                           connection->GetConnectionId());
+
+                // Send server-authoritative hotbar to client (Minecraft-style inventory sync)
+                {
+                    Network::HotbarSyncS2CPacket hotbarPacket;
+                    for (int i = 0; i < 9; i++) {
+                        hotbarPacket.slots[i] = static_cast<uint16_t>(m_serverPlayer->getHotbarBlock(i));
+                    }
+                    auto hotbarData = Network::Serialization::Serialize(hotbarPacket);
+                    connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HotbarSyncS2C), hotbarData);
+                    Log::Info("[IntegratedServer] Sent hotbar sync to client");
+                }
             } else {
                 Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin");
             }
@@ -875,7 +859,7 @@ namespace Server {
             Log::Warning("[IntegratedServer] Session manager not available, using legacy chunk sending");
             
             // Get spawn position (player's initial position)
-            glm::vec3 spawnPos = m_playerState.position;
+            glm::vec3 spawnPos = GetPlayerPosition();
             if (spawnPos.x == 0.0f && spawnPos.z == 0.0f) {
                 spawnPos = glm::vec3(0.0f, 67.0f, 0.0f); // Default spawn
             }
@@ -908,47 +892,7 @@ namespace Server {
             }
             
             Log::Info("[IntegratedServer] Requested %d chunks for new player", chunksSent);
-            
-            // Clear loaded chunks - they will be added as chunks are actually sent
-            m_playerState.loadedChunks.clear();
         }  // End of else block for legacy chunk sending
-    }
-
-    bool IntegratedServer::ValidatePlayerMove(const Network::PlayerMoveC2SPacket& packet) const {
-        // Basic validation - check for reasonable movement speed
-        float distance = glm::distance(packet.position, m_playerState.position);
-        auto timeDiff = packet.timestamp - 
-                       std::chrono::time_point_cast<std::chrono::steady_clock::duration>(
-                           std::chrono::steady_clock::time_point{} + 
-                           std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                               m_playerState.lastUpdateTime.time_since_epoch()));
-        
-        float timeDiffSeconds = std::chrono::duration<float>(timeDiff).count();
-        if (timeDiffSeconds > 0.0f) {
-            float speed = distance / timeDiffSeconds;
-            if (speed > 100.0f) { // Max reasonable speed
-                return false;
-            }
-        }
-        
-        return true;
-    }
-
-    void IntegratedServer::UpdatePlayerChunkPosition(const glm::vec3& newPosition) {
-        auto newChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-            static_cast<int>(newPosition.x), 
-            static_cast<int>(newPosition.z)
-        );
-        
-        if (newChunk.x != m_playerState.currentChunk.x || newChunk.z != m_playerState.currentChunk.z) {
-            m_playerState.currentChunk = newChunk;
-            Log::Debug("Player moved to chunk (%d, %d)", newChunk.x, newChunk.z);
-            
-            // Update view distance watchers when player moves to new chunk
-            UpdateViewDistanceWatchers();
-            
-            // Chunk loading is now handled by World::WorldLoop()
-        }
     }
 
     // ========================================================================
@@ -1009,9 +953,10 @@ namespace Server {
     float IntegratedServer::CalculateChunkDistance(Game::Math::ChunkPos chunkPos) const {
         // Calculate Chebyshev distance (square pattern like Minecraft)
         // This creates a square loading pattern instead of circular
+        auto pos = GetPlayerPosition();
         auto playerChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-            static_cast<int>(m_playerState.position.x),
-            static_cast<int>(m_playerState.position.z)
+            static_cast<int>(pos.x),
+            static_cast<int>(pos.z)
         );
         
         int dx = std::abs(chunkPos.x - playerChunk.x);
@@ -1025,7 +970,7 @@ namespace Server {
     std::vector<Game::Math::ChunkPos> IntegratedServer::GetRequiredChunks() const {
         std::vector<Game::Math::ChunkPos> chunks;
         
-        auto playerChunk = m_playerState.currentChunk;
+        auto playerChunk = GetPlayerChunkPosition();
         int renderDistance = Platform::g_gameSettings.GetRenderDistance();
         
         // Generate square pattern around player
@@ -1055,18 +1000,17 @@ namespace Server {
             requiredChunks.begin(), requiredChunks.end()
         );
         
-        // Find chunks to remove (in loaded but not in required)
+        // Find chunks to remove (in sent states but not in required)
         std::vector<Game::Math::ChunkPos> toRemove;
-        for (const auto& chunk : m_playerState.loadedChunks) {
+        for (const auto& [chunk, state] : m_chunkSendStates) {
             if (requiredSet.find(chunk) == requiredSet.end()) {
                 toRemove.push_back(chunk);
             }
         }
-        
+
         // Remove watchers for chunks going out of view
         for (const auto& chunk : toRemove) {
             m_watchIndex->RemoveWatcher(1, chunk);  // playerId=1 for integrated server
-            m_playerState.loadedChunks.erase(chunk);
             m_chunkSendStates.erase(chunk);
             Log::Debug("Removed watcher for chunk (%d, %d) - out of view distance", chunk.x, chunk.z);
         }
@@ -1093,9 +1037,11 @@ namespace Server {
     }
 
     void IntegratedServer::LogServerState() const {
+        auto* session = GetPlayerSession();
+        size_t sentChunks = session ? session->GetSentChunkCount() : 0;
         Log::Info("Server State: TPS=%.1f, TickTime=%.2fms, LoadedChunks=%zu, PendingLoads=%zu",
                  m_stats.averageTPS.load(), m_stats.averageTickTime.load(),
-                 m_playerState.loadedChunks.size(), m_pendingChunkLoads.size());
+                 sentChunks, m_pendingChunkLoads.size());
     }
 
     // ========================================================================

@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 #include <optional>
+#include <array>
 
 namespace Render {
 
@@ -40,6 +41,7 @@ namespace Render {
         void UpdateBuffer(BufferHandle handle, size_t offset,
                          size_t size, const void* data) override;
         void DestroyBuffer(BufferHandle handle) override;
+        void DeferredDestroyBuffer(BufferHandle handle) override;
 
         // Textures
         TextureHandle CreateTexture2D(int width, int height, TextureFormat format,
@@ -70,6 +72,7 @@ namespace Render {
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
                              const VertexLayout& layout) override;
         void DestroyMesh(MeshHandle handle) override;
+        void DeferredDestroyMesh(MeshHandle handle) override;
 
         // Pipeline state
         void SetPipelineState(const PipelineState& state) override;
@@ -149,6 +152,14 @@ namespace Render {
         uint32_t m_currentFrame = 0;
         uint32_t m_currentImageIndex = 0;
         bool m_framebufferResized = false;
+        bool m_frameActive = false;
+
+        // Deferred deletion queue — resources destroyed after GPU is done with them
+        struct DeferredDeletion {
+            BufferHandle buffer = INVALID_BUFFER;
+            MeshHandle mesh = INVALID_MESH;
+        };
+        std::array<std::vector<DeferredDeletion>, MAX_FRAMES_IN_FLIGHT> m_deletionQueues;
 
         // ====================================================================
         // DESCRIPTOR POOL & LAYOUT

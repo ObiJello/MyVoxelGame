@@ -114,6 +114,15 @@ namespace Render {
 
         vkDeviceWaitIdle(m_device);
 
+        // Flush all deferred deletion queues before destroying resources
+        for (auto& queue : m_deletionQueues) {
+            for (auto& del : queue) {
+                if (del.buffer != INVALID_BUFFER) DestroyBuffer(del.buffer);
+                if (del.mesh != INVALID_MESH) DestroyMesh(del.mesh);
+            }
+            queue.clear();
+        }
+
         // Destroy all user resources
         for (auto& [h, mesh] : m_meshes) { /* No VK objects to destroy */ }
         m_meshes.clear();
@@ -181,15 +190,34 @@ namespace Render {
     // ========================================================================
 
     void VKBackend::BeginFrame() {
-        // Wait for the previous frame with this index to finish
-        vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, UINT64_MAX);
+        m_frameActive = false; // Only set true at end if everything succeeds
 
-        // Acquire swapchain image
-        VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, UINT64_MAX,
+        // Wait for the previous frame with this index to finish (1 second timeout)
+        VkResult fenceResult = vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, 1'000'000'000);
+        if (fenceResult == VK_TIMEOUT) {
+            Log::Error("VKBackend: Fence wait timed out (1s) — possible GPU hang");
+            // Reset the fence and try to continue rather than blocking forever
+            vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
+        }
+
+        // Flush deferred deletions for this frame slot — GPU is done with these resources
+        for (auto& del : m_deletionQueues[m_currentFrame]) {
+            if (del.buffer != INVALID_BUFFER) DestroyBuffer(del.buffer);
+            if (del.mesh != INVALID_MESH) DestroyMesh(del.mesh);
+        }
+        m_deletionQueues[m_currentFrame].clear();
+
+        // Acquire swapchain image (1 second timeout)
+        VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, 1'000'000'000,
             m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &m_currentImageIndex);
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             RecreateSwapchain(m_window);
+            return;
+        }
+
+        if (result == VK_TIMEOUT) {
+            Log::Error("VKBackend: Swapchain image acquire timed out (1s)");
             return;
         }
 
@@ -238,9 +266,14 @@ namespace Render {
         scissor.offset = {0, 0};
         scissor.extent = m_swapchainExtent;
         vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &scissor);
+
+        m_frameActive = true; // All setup succeeded — safe to call EndFrame
     }
 
     void VKBackend::EndFrame(GLFWwindow* window) {
+        if (!m_frameActive) return; // BeginFrame failed — skip submit/present
+        m_frameActive = false;
+
         // End render pass
         vkCmdEndRenderPass(m_commandBuffers[m_currentFrame]);
         vkEndCommandBuffer(m_commandBuffers[m_currentFrame]);
@@ -392,6 +425,16 @@ namespace Render {
         m_memStats.totalAllocated -= it->second.size;
         m_memStats.bufferCount--;
         m_buffers.erase(it);
+    }
+
+    void VKBackend::DeferredDestroyBuffer(BufferHandle handle) {
+        if (handle == INVALID_BUFFER) return;
+        m_deletionQueues[m_currentFrame].push_back({handle, INVALID_MESH});
+    }
+
+    void VKBackend::DeferredDestroyMesh(MeshHandle handle) {
+        if (handle == INVALID_MESH) return;
+        m_deletionQueues[m_currentFrame].push_back({INVALID_BUFFER, handle});
     }
 
     // ========================================================================

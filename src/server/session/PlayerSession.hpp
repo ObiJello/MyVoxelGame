@@ -118,6 +118,9 @@ namespace Server {
         
         // Update connection ID (for integrated server late binding)
         void SetConnectionId(uint32_t connectionId) { m_connectionId = connectionId; }
+
+        // Set send scheduler for packet delivery
+        void SetSendScheduler(SendScheduler* scheduler) { m_sendScheduler = scheduler; }
         
         // Detach player entity (on disconnect)
         void DetachPlayer();
@@ -164,6 +167,12 @@ namespace Server {
         // Check if chunk has been sent
         bool HasSentChunk(Game::Math::ChunkPos chunk) const;
 
+        // Get count of sent chunks
+        size_t GetSentChunkCount() const { return m_sentChunks.size(); }
+
+        // Mark a chunk as sent (for legacy IntegratedServer path)
+        void MarkChunkSent(Game::Math::ChunkPos pos) { m_sentChunks.insert(pos); }
+
         // === CHUNK STREAMING ===
 
         // Queue chunk for sending
@@ -193,6 +202,7 @@ namespace Server {
         void HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet);
         void HandleBlockAction(const Network::BlockActionC2SPacket& packet);
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
+        void HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet);
         void HandleKeepAlive(const Network::KeepAliveC2SPacket& packet);
         
         // Helper for resyncing on placement failure
@@ -274,6 +284,7 @@ namespace Server {
         // === REFERENCES ===
         ServerPlayer* m_player = nullptr;        // Non-owning pointer to player entity
         ServerConnection* m_connection = nullptr; // Non-owning pointer to network connection
+        SendScheduler* m_sendScheduler = nullptr; // For sending packets (set by PlayerSessionManager)
         
         // === STATE ===
         std::atomic<State> m_state{State::CONNECTING};

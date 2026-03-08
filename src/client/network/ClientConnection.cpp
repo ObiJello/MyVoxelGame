@@ -301,6 +301,11 @@ namespace Client {
                 return std::make_unique<ChunkBatchFinishedS2CPacketImpl>(data.batchSize);
             }
 
+            case PacketId::HotbarSyncS2C: {
+                auto data = Serialization::DeserializeHotbarSyncS2C(payload);
+                return std::make_unique<HotbarSyncS2CPacketImpl>(std::move(data));
+            }
+
             default:
                 // Return nullptr for unhandled packets - will fall back to legacy OnPacketReceived
                 return nullptr;

@@ -196,6 +196,10 @@ namespace Render {
         // Get number of completed results waiting for upload
         static size_t GetCompletedResultCount();
 
+        // Get GPU data counts for debug UI
+        size_t GetGPUDataCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_gpuData.size(); }
+        size_t GetActiveSectionCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_activeSections.size(); }
+
         // Force mesh rebuild for debugging
         void ForceMeshRebuild(::Game::Math::ChunkPos chunkPos);
 

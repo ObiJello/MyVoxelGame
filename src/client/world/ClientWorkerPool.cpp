@@ -206,6 +206,11 @@ namespace Threading {
         Log::Debug("Cancelled all mesh jobs for chunk (%d, %d)", chunkPos.x, chunkPos.z);
     }
 
+    void ClientWorkerPool::UncancelChunk(Game::Math::ChunkPos chunkPos) {
+        std::lock_guard<std::mutex> lock(m_cancelMutex);
+        m_cancelledChunks.erase(chunkPos);
+    }
+
     void ClientWorkerPool::CancelMeshJob(Game::Math::ChunkPos chunkPos, int sectionY) {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
         SectionKey key{chunkPos, sectionY};
@@ -321,8 +326,14 @@ namespace Threading {
 
     void ClientWorkerPool::ProcessMeshJob(const MeshJob& job) {
         // Check if job should be cancelled
-        if (ShouldCancelJob(job)) {
+        // Per-task cancellation check (Minecraft-style)
+        if (job.snapshot && job.snapshot->IsCancelled()) {
             m_stats.meshJobsCancelled.fetch_add(1, std::memory_order_relaxed);
+            // Send failed result so section doesn't stay stuck in MESHING
+            Network::MeshBuildResult failedResult(job.chunkPos, job.sectionY);
+            failedResult.success = false;
+            failedResult.generation = job.snapshot->generation;
+            SendMeshResult(std::move(failedResult));
             return;
         }
 
@@ -481,9 +492,9 @@ namespace Threading {
     }
 
     void ClientWorkerPool::SendMeshResult(Network::MeshBuildResult&& result) {
-        // Send to MeshResultQueue for client render thread consumption
-        Render::ClientMeshManager::GetMeshResultQueue().try_push(std::move(result));
-        Render::ClientMeshManager::GetMeshResultQueue().IncrementProcessed();
+        auto& queue = Render::ClientMeshManager::GetMeshResultQueue();
+        queue.try_push(std::move(result));
+        queue.IncrementProcessed();
     }
 
     Network::MeshBuildResult ClientWorkerPool::ConvertSectionMeshToResult(const Render::SectionMesh& sectionMesh,
@@ -624,6 +635,12 @@ namespace Threading {
     void CancelClientMeshJob(Game::Math::ChunkPos chunkPos, int sectionY) {
         if (g_clientWorkerPool) {
             g_clientWorkerPool->CancelMeshJob(chunkPos, sectionY);
+        }
+    }
+
+    void UncancelClientMeshChunk(Game::Math::ChunkPos chunkPos) {
+        if (g_clientWorkerPool) {
+            g_clientWorkerPool->UncancelChunk(chunkPos);
         }
     }
 

@@ -2,10 +2,12 @@
 #include "PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
+#include "../network/SendScheduler.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Assert.hpp"
+#include "common/network/PacketTypes.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
@@ -47,23 +49,22 @@ namespace Server {
         m_anchorChunk = m_currentChunk;
         m_lastKnownChunk = m_currentChunk;
         
-        // Compute initial watch set
-        auto initialWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
-        
-        // Queue all initial chunks for sending
-        for (const auto& chunk : initialWatch) {
-            int priority = CalculateChunkPriority(chunk);
-            m_pendingAdd.Push(chunk, priority);
-        }
-        
-        // Clear any existing state
+        // Clear any existing state first
         ClearWatchSets();
         ClearQueues();
         ClearDiffs();
-        
+
+        // Compute initial watch set and populate m_watchSet
+        auto initialWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
+        for (const auto& chunk : initialWatch) {
+            m_watchSet.insert(chunk);
+            int priority = CalculateChunkPriority(chunk);
+            m_pendingAdd.Push(chunk, priority);
+        }
+
         // Set state to joining
         m_state = State::JOINING;
-        m_needsWatchUpdate = true;
+        m_needsWatchUpdate = false; // Already computed above
         
         Log::Info("PlayerSession: Initialized session for player %u in dimension %d",
                  m_playerId, dimensionId);
@@ -167,8 +168,8 @@ namespace Server {
         m_anchorChunk = newChunk;
         m_needsWatchUpdate = true;
         
-        Log::Debug("PlayerSession: Player %u moved to chunk (%d, %d)", 
-                  m_playerId, newChunk.x, newChunk.z);
+        Log::Info("SESSION CHUNK MOVE: player %u from (%d,%d) to (%d,%d)",
+                  m_playerId, m_lastKnownChunk.x, m_lastKnownChunk.z, newChunk.x, newChunk.z);
     }
 
     void PlayerSession::ChangeDimension(int newDimensionId, const glm::vec3& targetPos) {
@@ -269,6 +270,12 @@ namespace Server {
         std::vector<Game::Math::ChunkPos> toAdd, toRemove;
         ComputeWatchDeltas(newWatch, toAdd, toRemove);
 
+        if (!toRemove.empty() || !toAdd.empty()) {
+            Log::Info("UpdateWatchSet: anchor=(%d,%d) viewDist=%d watchSet=%zu newWatch=%zu toAdd=%zu toRemove=%zu",
+                     m_anchorChunk.x, m_anchorChunk.z, m_viewDistance,
+                     m_watchSet.size(), newWatch.size(), toAdd.size(), toRemove.size());
+        }
+
         // Apply removals first
         for (const auto& chunk : toRemove) {
             m_pendingRemove.push_back(chunk);
@@ -354,8 +361,15 @@ namespace Server {
     }
 
     void PlayerSession::SendChunkUnload(Game::Math::ChunkPos chunk) {
-        // TODO: Send UnloadChunkS2CPacket via SendScheduler
-        
+        // Send UnloadChunkS2CPacket directly through the connection
+        // (SendScheduler's sendCallback is not implemented, so bypass it)
+        if (m_connection) {
+            Network::UnloadChunkS2CPacket packet(chunk.x, chunk.z);
+            auto data = Network::Serialization::Serialize(packet);
+            m_connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::UnloadChunkS2C), data);
+        }
+
         // Remove from sets
         m_watchSet.erase(chunk);
         m_sentChunks.erase(chunk);
@@ -364,7 +378,7 @@ namespace Server {
         // Clear any pending diffs for this chunk
         m_pendingDiffs.erase(chunk);
         
-        Log::Debug("PlayerSession: Sent chunk unload for (%d, %d) to player %u", 
+        Log::Info("UNLOAD SENT: chunk (%d, %d) to player %u",
                   chunk.x, chunk.z, m_playerId);
     }
 
@@ -481,9 +495,6 @@ namespace Server {
 
     void PlayerSession::HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet) {
         UpdatePosition(packet.position, packet.rotation);
-        
-        // TODO: Validate movement (anti-cheat)
-        // TODO: Update last move sequence number
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
@@ -758,6 +769,13 @@ namespace Server {
         AckInteraction(sequence, false);
     }
 
+    void PlayerSession::HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet) {
+        if (!m_player) return;
+        if (packet.slot >= 0 && packet.slot < 9) {
+            m_player->selectHotbarSlot(packet.slot);
+        }
+    }
+
     void PlayerSession::HandleKeepAlive(const Network::KeepAliveC2SPacket& packet) {
         m_lastKeepAliveRx = std::chrono::steady_clock::now();
         
@@ -901,10 +919,14 @@ namespace Server {
     std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>
     PlayerSession::ComputeWatchSet(Game::Math::ChunkPos anchor, int viewDistance) const {
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> watchSet;
-        
+
+        // Add +2 buffer like Minecraft's chunkRadius = viewRange + 3
+        // This prevents thrashing at the boundary when moving
+        int radius = viewDistance + 2;
+
         // Use Chebyshev distance (square pattern)
-        for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
-            for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
                 watchSet.emplace(anchor.x + dx, anchor.z + dz);
             }
         }

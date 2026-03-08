@@ -168,6 +168,12 @@ namespace Network {
         }
     };
 
+    // Server-authoritative hotbar sync (sent on join)
+    struct HotbarSyncS2CPacket {
+        std::array<uint16_t, 9> slots;
+        HotbarSyncS2CPacket() { slots.fill(0); }
+    };
+
     // Player position updates from server (for multiplayer support later)
     struct PlayerUpdateS2CPacket {
         uint32_t playerId;
@@ -234,6 +240,13 @@ namespace Network {
         PlayerMoveC2SPacket() = default;
         PlayerMoveC2SPacket(const glm::vec3& pos, const glm::vec2& rot)
             : position(pos), rotation(rot), timestamp(std::chrono::steady_clock::now()) {}
+    };
+
+    // Held item (hotbar slot) change from client to server
+    struct HeldItemChangeC2SPacket {
+        int16_t slot = 0;
+        HeldItemChangeC2SPacket() = default;
+        HeldItemChangeC2SPacket(int16_t s) : slot(s) {}
     };
 
     // Chat messages and commands
@@ -773,6 +786,32 @@ namespace Network {
             Network::PacketReader reader(data);
             ChunkBatchAckC2SPacket packet;
             packet.desiredChunksPerTick = reader.ReadFloat();
+            return packet;
+        }
+
+        // ---- HeldItemChangeC2SPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const HeldItemChangeC2SPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteShort(packet.slot);
+            return buffer.GetData();
+        }
+        inline HeldItemChangeC2SPacket DeserializeHeldItemChangeC2S(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            HeldItemChangeC2SPacket packet;
+            packet.slot = reader.ReadShort();
+            return packet;
+        }
+
+        // ---- HotbarSyncS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const HotbarSyncS2CPacket& packet) {
+            PacketBuffer buffer;
+            for (int i = 0; i < 9; i++) buffer.WriteShort(packet.slots[i]);
+            return buffer.GetData();
+        }
+        inline HotbarSyncS2CPacket DeserializeHotbarSyncS2C(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            HotbarSyncS2CPacket packet;
+            for (int i = 0; i < 9; i++) packet.slots[i] = static_cast<uint16_t>(reader.ReadShort());
             return packet;
         }
 

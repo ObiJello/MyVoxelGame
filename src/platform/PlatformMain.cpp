@@ -203,9 +203,9 @@ namespace PlatformMain {
         // Mouse wheel for inventory scrolling
         auto [scrollX, scrollY] = Input::GetScrollOffset();
         if (scrollY > 0) {
-            player.SelectPreviousSlot();
+            controller.OnHotbarChanged((player.GetSelectedSlot() - 1 + 9) % 9);
         } else if (scrollY < 0) {
-            player.SelectNextSlot();
+            controller.OnHotbarChanged((player.GetSelectedSlot() + 1) % 9);
         }
 
         // Debug noclip toggle
@@ -577,7 +577,12 @@ namespace PlatformMain {
         // 11. Create NetworkClient and connect to localhost server
         auto networkClient = std::make_unique<Client::NetworkClient>(Client::g_networkIOService->GetIOContext());
         Client::g_networkClient = networkClient.get();  // Set global pointer for legacy systems
-        
+
+        // Wire up player reference for server-authoritative hotbar sync
+        if (auto handler = networkClient->GetPacketHandler()) {
+            handler->SetPlayer(&player);
+        }
+
         // Use async connect with callback (Minecraft/Netty style)
         // Use shared_ptr to ensure atomics remain valid for async callbacks
         auto connected = std::make_shared<std::atomic<bool>>(false);

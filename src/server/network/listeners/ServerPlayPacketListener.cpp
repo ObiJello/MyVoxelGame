@@ -54,13 +54,16 @@ namespace Server {
     }
     
     void ServerPlayPacketListener::onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) {
-        Log::Debug("[ServerPlayPacketListener] Received PlayerMoveC2S - not implemented yet");
-        // TODO: Implement player movement handling
+        m_session.HandlePlayerMove(packet);
     }
     
     void ServerPlayPacketListener::onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) {
         Log::Debug("[ServerPlayPacketListener] Received ChatMessageC2S: %s", packet.message.c_str());
         // TODO: Implement chat message handling
+    }
+
+    void ServerPlayPacketListener::onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) {
+        m_session.HandleHeldItemChange(packet);
     }
 
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {

@@ -133,6 +133,9 @@ namespace Server {
         // Handle client settings
         void HandleClientSettings(const std::vector<uint8_t>& payload);
 
+        // Handle held item change
+        void HandleHeldItemChange(const std::vector<uint8_t>& payload);
+
         // ========================================================================
         // INTERNAL HELPERS
         // ========================================================================

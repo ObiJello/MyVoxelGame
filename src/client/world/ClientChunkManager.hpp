@@ -76,6 +76,9 @@ namespace Client {
         uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
         bool builtOnce = false;       // True after first successful build
         
+        // Per-task cancellation: reference to last submitted mesh job
+        std::shared_ptr<::Client::Render::MeshJobData> lastMeshJob;
+
         // NEW: Direct GPU data ownership (render thread only)
         std::atomic<::Render::GPUSectionData*> gpuData{nullptr};
         

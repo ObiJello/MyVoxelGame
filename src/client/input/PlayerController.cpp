@@ -214,11 +214,17 @@ namespace Game {
 
     void ClientPlayerController::OnHotbarChanged(int slot) {
         if (!player) return;
-        
+
         player->SelectSlot(slot);
-        
-        // TODO: Send held item change packet
-        // net->SendHeldItemSlot(slot);
+
+        if (networkClient && networkClient->IsConnected()) {
+            Network::HeldItemChangeC2SPacket packet(static_cast<int16_t>(slot));
+            auto data = Network::Serialization::Serialize(packet);
+            auto connection = networkClient->GetConnection();
+            if (connection) {
+                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HeldItemChange), data);
+            }
+        }
     }
 
     void ClientPlayerController::OnRespawnRequest() {

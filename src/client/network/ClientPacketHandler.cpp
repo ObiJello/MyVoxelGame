@@ -1,6 +1,7 @@
 // File: src/client/network/ClientPacketHandler.cpp
 #include "ClientPacketHandler.hpp"
 #include "../world/ClientChunkManager.hpp"
+#include "../entity/Player.hpp"
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
@@ -253,6 +254,27 @@ namespace Client {
                 connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchAckC2S), data);
                 Log::Debug("[ClientPacketHandler] Sent batch ack: rate=%.2f (batch=%d)", desiredRate, batchSize);
             }
+        }
+
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
+    // INVENTORY SYNC
+    // ========================================================================
+
+    void ClientPacketHandler::handleHotbarSync(const Network::HotbarSyncS2CPacket& packet) {
+        Log::Info("[ClientPacketHandler] Received hotbar sync from server");
+
+        if (!m_player) {
+            Log::Warning("[ClientPacketHandler] Player not available for hotbar sync");
+            return;
+        }
+
+        for (int i = 0; i < 9; i++) {
+            auto blockId = static_cast<Game::BlockID>(packet.slots[i]);
+            m_player->inventory.SetSlot(i, blockId, 64);
+            Log::Debug("[ClientPacketHandler] Hotbar slot %d = block %d", i, packet.slots[i]);
         }
 
         m_stats.packetsProcessed++;

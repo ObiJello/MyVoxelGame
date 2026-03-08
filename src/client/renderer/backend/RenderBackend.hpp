@@ -46,6 +46,10 @@ namespace Render {
                                  size_t size, const void* data) = 0;
         virtual void DestroyBuffer(BufferHandle handle) = 0;
 
+        // Deferred destroy — delays destruction until GPU is done with the resource.
+        // Default implementation calls immediate destroy (correct for OpenGL).
+        virtual void DeferredDestroyBuffer(BufferHandle handle) { DestroyBuffer(handle); }
+
         // ====================================================================
         // TEXTURE MANAGEMENT
         // ====================================================================
@@ -101,6 +105,7 @@ namespace Render {
                                      BufferHandle indexBuffer,
                                      const VertexLayout& layout) = 0;
         virtual void DestroyMesh(MeshHandle handle) = 0;
+        virtual void DeferredDestroyMesh(MeshHandle handle) { DestroyMesh(handle); }
 
         // ====================================================================
         // PIPELINE STATE

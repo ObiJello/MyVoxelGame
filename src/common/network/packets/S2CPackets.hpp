@@ -254,5 +254,29 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // ========================================================================
+    // HOTBAR SYNC PACKET
+    // ========================================================================
+
+    class HotbarSyncS2CPacketImpl : public IS2CPacket {
+    private:
+        HotbarSyncS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit HotbarSyncS2CPacketImpl(HotbarSyncS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onHotbarSyncS2C(m_data);
+        }
+
+        const HotbarSyncS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::HotbarSyncS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network
