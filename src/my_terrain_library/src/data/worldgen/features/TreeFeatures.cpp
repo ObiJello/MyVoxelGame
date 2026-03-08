@@ -24,6 +24,7 @@ using levelgen::feature::trunkplacers::DarkOakTrunkPlacer;
 using levelgen::feature::trunkplacers::GiantTrunkPlacer;
 using levelgen::feature::trunkplacers::MegaJungleTrunkPlacer;
 using levelgen::feature::trunkplacers::CherryTrunkPlacer;
+using levelgen::feature::trunkplacers::BendingTrunkPlacer;
 using levelgen::feature::foliageplacers::BlobFoliagePlacer;
 using levelgen::feature::foliageplacers::SpruceFoliagePlacer;
 using levelgen::feature::foliageplacers::PineFoliagePlacer;
@@ -90,6 +91,7 @@ ConfiguredFeature* TreeFeatures::MEGA_JUNGLE_TREE = nullptr;
 // ConfiguredFeature pointers - Special trees
 ConfiguredFeature* TreeFeatures::SWAMP_OAK = nullptr;
 ConfiguredFeature* TreeFeatures::JUNGLE_BUSH = nullptr;
+ConfiguredFeature* TreeFeatures::AZALEA_TREE = nullptr;
 
 // ConfiguredFeature pointers - Nether fungi
 ConfiguredFeature* TreeFeatures::CRIMSON_FUNGUS = nullptr;
@@ -944,6 +946,48 @@ void TreeFeatures::bootstrap() {
         JUNGLE_BUSH = feature.get();
         s_configs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
+    }
+
+    // AZALEA_TREE
+    // Reference: TreeFeatures.java line 209
+    {
+        auto trunkProvider = BlockStateProvider::simple("minecraft:oak_log");
+        s_providers.push_back(trunkProvider);
+
+        auto foliageProvider = std::make_shared<WeightedStateProvider>(
+            std::vector<WeightedStateEntry>{
+                {minecraft::world::level::block::Blocks::AZALEA_LEAVES->defaultBlockState(), 3},
+                {minecraft::world::level::block::Blocks::FLOWERING_AZALEA_LEAVES->defaultBlockState(), 1}
+            }
+        );
+        s_providers.push_back(foliageProvider);
+
+        auto trunkPlacer = std::make_shared<BendingTrunkPlacer>(4, 2, 0, 3, uniformInt(1, 2));
+        s_trunkPlacers.push_back(trunkPlacer);
+
+        auto foliagePlacer = std::make_shared<RandomSpreadFoliagePlacer>(
+            constantInt(3),
+            constantInt(0),
+            constantInt(2),
+            50
+        );
+        s_foliagePlacers.push_back(foliagePlacer);
+
+        auto featureSize = std::make_shared<TwoLayersFeatureSize>(1, 0, 1);
+        s_featureSizes.push_back(featureSize);
+
+        auto rootedDirtProvider = BlockStateProvider::simple("minecraft:rooted_dirt");
+        s_providers.push_back(rootedDirtProvider);
+
+        auto builder = TreeConfigurationBuilder(
+            trunkProvider,
+            trunkPlacer,
+            foliageProvider,
+            foliagePlacer,
+            featureSize
+        );
+        builder.dirt(rootedDirtProvider).forceDirt();
+        AZALEA_TREE = registerTree(builder);
     }
 
     // =========================================================================

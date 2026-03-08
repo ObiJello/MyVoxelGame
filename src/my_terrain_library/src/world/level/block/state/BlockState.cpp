@@ -12,6 +12,9 @@ BlockState::BlockState(Block* owner, const ValueMap& values)
     , m_isAir(false)
     , m_liquid(false)
     , m_blocksMotion(true)
+    , m_forceSolidOff(false)
+    , m_forceSolidOn(false)
+    , m_noOcclusion(false)
     , m_isReplaceable(false)
     , m_isLeaves(false)
     , m_isLog(false)
@@ -34,6 +37,9 @@ void BlockState::setCachedValues() {
         m_isAir = props.isAir();
         m_liquid = props.isLiquid();
         m_blocksMotion = props.blocksMotion();
+        m_forceSolidOff = props.forceSolidOff();
+        m_forceSolidOn = props.forceSolidOn();
+        m_noOcclusion = props.noOcclusion();
         m_isReplaceable = props.isReplaceable();
         m_isLeaves = props.isLeaves();
         m_isLog = props.isLog();
@@ -89,23 +95,26 @@ bool BlockState::equals(const BlockState* other) const {
 
 bool BlockState::isSolid() const {
     // Reference: BlockBehaviour.BlockStateBase.isSolid() line 875-877
-    // Simplified implementation - in full Minecraft this is calculated
-    return m_blocksMotion && !m_isAir && !m_liquid;
+    if (m_isAir || m_liquid) {
+        return false;
+    }
+    if (m_forceSolidOff) {
+        return false;
+    }
+    if (m_forceSolidOn) {
+        return true;
+    }
+    return m_blocksMotion;
 }
 
 bool BlockState::isSolidRender() const {
     // Reference: BlockBehaviour.BlockStateBase.isSolidRender()
-    // Returns true for blocks with full cube render shape AND opaque material.
-    // True for: stone, dirt, grass_block, sand, gravel, ores, deepslate, logs, etc.
-    // False for: air, leaves (transparent), water, flowers (not full cube), etc.
-    // Logs are full opaque blocks so they ARE isSolidRender.
-    return m_blocksMotion && !m_isAir && !m_liquid && !m_isLeaves && !m_isReplaceableByTrees;
+    return isSolid() && !m_noOcclusion && !m_isLeaves && !m_isReplaceableByTrees;
 }
 
 bool BlockState::canOcclude() const {
     // Reference: BlockBehaviour.BlockStateBase.canOcclude()
-    // Simplified - solid blocks occlude light
-    return isSolid();
+    return !m_noOcclusion && !m_isAir && !m_liquid;
 }
 
 int BlockState::getLightEmission() const {

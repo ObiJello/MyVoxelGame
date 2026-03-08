@@ -1,4 +1,5 @@
 #include "data/worldgen/features/CaveFeatures.h"
+#include "data/worldgen/features/TreeFeatures.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/carver/CarverConfiguration.h"
@@ -72,6 +73,7 @@ static std::vector<std::unique_ptr<VegetationPatchConfiguration>> s_vegPatchConf
 static std::vector<std::unique_ptr<BlockColumnConfiguration>> s_blockColumnConfigs;
 static std::vector<std::unique_ptr<SimpleRandomFeatureConfiguration>> s_simpleRandomConfigs;
 static std::vector<std::unique_ptr<RandomBooleanFeatureConfiguration>> s_randomBooleanConfigs;
+static std::vector<std::unique_ptr<RootSystemConfiguration>> s_rootSystemConfigs;
 static std::vector<std::unique_ptr<UnderwaterMagmaConfiguration>> s_underwaterMagmaConfigs;
 static std::vector<std::unique_ptr<SculkPatchConfiguration>> s_sculkPatchConfigs;
 
@@ -90,6 +92,7 @@ static BlockColumnFeature s_dripleafBlockColumnFeature;
 
 void CaveFeatures::bootstrap() {
     if (s_initialized) return;
+    TreeFeatures::bootstrap();
 
     auto createPlacedFeature = [](ConfiguredFeature* feature, const std::string& name = "") -> PlacedFeature* {
         auto placed = std::make_unique<PlacedFeature>(feature, std::vector<PlacementModifier*>{}, name);
@@ -228,6 +231,49 @@ void CaveFeatures::bootstrap() {
         GLOW_LICHEN = feature.get();
         s_multifaceConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
+    // ROOTED_AZALEA_TREE
+    // Reference: CaveFeatures.java line 107
+    // =========================================================================
+    {
+        auto azaleaTree = createPlacedFeature(TreeFeatures::AZALEA_TREE, "AZALEA_TREE_INLINE");
+        auto config = std::make_unique<RootSystemConfiguration>(
+            azaleaTree,
+            3,
+            3,
+            "minecraft:azalea_root_replaceable",
+            BlockStateProvider::simple(Blocks::ROOTED_DIRT),
+            20,
+            100,
+            3,
+            2,
+            BlockStateProvider::simple(Blocks::HANGING_ROOTS),
+            20,
+            2,
+            BlockPredicate::allOf(
+                BlockPredicate::anyOf(
+                    BlockPredicate::matchesBlocks(
+                        std::vector<std::string>{
+                            "minecraft:air",
+                            "minecraft:cave_air",
+                            "minecraft:void_air"
+                        }
+                    ),
+                    BlockPredicate::matchesTag("minecraft:replaceable_by_trees")
+                ),
+                BlockPredicate::matchesTag(core::Vec3i(0, -1, 0), "minecraft:azalea_grows_on")
+            )
+        );
+
+        auto feature = std::make_unique<ConfiguredFeatureImpl<RootSystemConfiguration, RootSystemFeature>>(
+            &s_rootSystemFeature, *config);
+        ROOTED_AZALEA_TREE = feature.get();
+        s_features.push_back(std::move(feature));
+        s_blockStateProviders.push_back(config->rootStateProvider);
+        s_blockStateProviders.push_back(config->hangingRootStateProvider);
+        s_rootSystemConfigs.push_back(std::move(config));
     }
 
     // =========================================================================

@@ -248,7 +248,10 @@ int TreeFeature::getMaxFreeTreeHeight(
                     isFree = blockState->isAir() ||
                              blockState->isLeaves() ||
                              blockState->isLog() ||
-                             blockState->isReplaceableByTrees();
+                             ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                                 blockState,
+                                 "minecraft:replaceable_by_trees"
+                             );
                 }
 
                 if (!isFree || (!config.ignoreVines && isVine(level, blockPos))) {

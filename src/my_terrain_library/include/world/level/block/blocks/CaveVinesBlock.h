@@ -20,7 +20,7 @@ public:
     static inline BooleanProperty* BERRIES = nullptr;
 
     explicit CaveVinesBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission().replaceable()) {
+        : Block(Properties(properties).noCollission()) {
         initializeProperties();
         rebuildStateDefinition();
 

@@ -108,7 +108,7 @@ public:
      */
     virtual bool isOutsideBuildHeight(const core::BlockPos& pos) const {
         int y = pos.getY();
-        return y < getMinY() || y > getMaxY();
+        return y < getMinY() || y >= getMaxY();
     }
 
     /**

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "levelgen/WorldGenLevel.h"
 #include "world/level/block/Block.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 
@@ -13,33 +14,44 @@ using state::StateDefinition;
 using state::properties::BlockStateProperties;
 using state::properties::BooleanProperty;
 
-class CaveVinesPlantBlock : public Block {
+class HangingRootsBlock : public Block {
 public:
-    static inline BooleanProperty* BERRIES = nullptr;
+    static inline BooleanProperty* WATERLOGGED = nullptr;
 
-    explicit CaveVinesPlantBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission()) {
+    explicit HangingRootsBlock(const Properties& properties)
+        : Block(properties) {
         initializeProperties();
         rebuildStateDefinition();
 
         BlockState* defaultState = getStateDefinition().any();
         if (defaultState) {
-            defaultState = defaultState->setValue(*BERRIES, false);
+            defaultState = defaultState->setValue(*WATERLOGGED, false);
             registerDefaultState(defaultState);
         }
+    }
+
+    bool canSurvive(
+        BlockState* /*state*/,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        const core::BlockPos attachedToPos = pos.above();
+        BlockState* attachedToState = level.getBlockState(attachedToPos);
+        return attachedToState &&
+               attachedToState->isFaceSturdy(level, attachedToPos, core::Direction::DOWN);
     }
 
 protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();
-        builder.add(BERRIES);
+        builder.add(WATERLOGGED);
     }
 
 private:
     static void initializeProperties() {
-        if (!BERRIES) {
+        if (!WATERLOGGED) {
             BlockStateProperties::initialize();
-            BERRIES = BlockStateProperties::BERRIES;
+            WATERLOGGED = BlockStateProperties::WATERLOGGED;
         }
     }
 };

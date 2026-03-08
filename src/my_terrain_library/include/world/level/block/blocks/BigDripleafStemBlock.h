@@ -21,7 +21,7 @@ public:
     static inline DirectionProperty* FACING = nullptr;
 
     explicit BigDripleafStemBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission().replaceable()) {
+        : Block(properties) {
         initializeProperties();
         rebuildStateDefinition();
 

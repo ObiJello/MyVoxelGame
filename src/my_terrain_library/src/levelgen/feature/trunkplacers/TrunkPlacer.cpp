@@ -46,10 +46,12 @@ bool TrunkPlacer::placeLog(
 }
 
 bool TrunkPlacer::validTreePos(LevelReader& level, const core::BlockPos& pos) const {
-    // Reference: TrunkPlacer.java validTreePos() -> TreeFeature.validTreePos()
-    // Checks: isAir || REPLACEABLE_BY_TREES (which includes leaves)
     return level.isStateAtPosition(pos, [](BlockState* state) {
-        return state->isAir() || state->isReplaceableByTrees();
+        return state && (state->isAir() ||
+                         ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                             state,
+                             "minecraft:replaceable_by_trees"
+                         ));
     });
 }
 

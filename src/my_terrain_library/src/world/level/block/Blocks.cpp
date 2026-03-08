@@ -151,10 +151,11 @@ Block* minecraft::world::level::block::Blocks::MOSS_BLOCK = nullptr;
 Block* minecraft::world::level::block::Blocks::MOSS_CARPET = nullptr;
 Block* minecraft::world::level::block::Blocks::CAVE_VINES = nullptr;
 Block* minecraft::world::level::block::Blocks::CAVE_VINES_PLANT = nullptr;
-Block* minecraft::world::level::block::Blocks::GLOW_LICHEN = nullptr;
+GlowLichenBlock* minecraft::world::level::block::Blocks::GLOW_LICHEN = nullptr;
 Block* minecraft::world::level::block::Blocks::AZALEA = nullptr;
 Block* minecraft::world::level::block::Blocks::FLOWERING_AZALEA = nullptr;
-Block* minecraft::world::level::block::Blocks::SPORE_BLOSSOM = nullptr;
+HangingRootsBlock* minecraft::world::level::block::Blocks::HANGING_ROOTS = nullptr;
+SporeBlossomBlock* minecraft::world::level::block::Blocks::SPORE_BLOSSOM = nullptr;
 Block* minecraft::world::level::block::Blocks::BIG_DRIPLEAF = nullptr;
 Block* minecraft::world::level::block::Blocks::BIG_DRIPLEAF_STEM = nullptr;
 Block* minecraft::world::level::block::Blocks::SMALL_DRIPLEAF = nullptr;
@@ -314,7 +315,7 @@ BushBlock* minecraft::world::level::block::Blocks::createBushBlock(const std::st
 
 VineBlock* minecraft::world::level::block::Blocks::createVineBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name);
+    props.setId(name).replaceable();
     auto block = new VineBlock(props);
     registerBlock(name, block);
     return block;
@@ -322,7 +323,7 @@ VineBlock* minecraft::world::level::block::Blocks::createVineBlock(const std::st
 
 AzaleaBlock* minecraft::world::level::block::Blocks::createAzaleaBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name).replaceable().replaceableByTrees();
+    props.setId(name).forceSolidOff().noOcclusion();
     auto block = new AzaleaBlock(props);
     registerBlock(name, block);
     return block;
@@ -344,9 +345,33 @@ CaveVinesPlantBlock* minecraft::world::level::block::Blocks::createCaveVinesPlan
     return block;
 }
 
+GlowLichenBlock* minecraft::world::level::block::Blocks::createGlowLichenBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).noCollission();
+    auto block = new GlowLichenBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+HangingRootsBlock* minecraft::world::level::block::Blocks::createHangingRootsBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).noCollission().replaceable();
+    auto block = new HangingRootsBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
+SporeBlossomBlock* minecraft::world::level::block::Blocks::createSporeBlossomBlock(const std::string& name) {
+    Block::Properties props;
+    props.setId(name).noCollission();
+    auto block = new SporeBlossomBlock(props);
+    registerBlock(name, block);
+    return block;
+}
+
 SmallDripleafBlock* minecraft::world::level::block::Blocks::createSmallDripleafBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name).replaceable().replaceableByTrees();
+    props.setId(name);
     auto block = new SmallDripleafBlock(props);
     registerBlock(name, block);
     return block;
@@ -354,7 +379,7 @@ SmallDripleafBlock* minecraft::world::level::block::Blocks::createSmallDripleafB
 
 BigDripleafBlock* minecraft::world::level::block::Blocks::createBigDripleafBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name);
+    props.setId(name).forceSolidOff();
     auto block = new BigDripleafBlock(props);
     registerBlock(name, block);
     return block;
@@ -362,7 +387,7 @@ BigDripleafBlock* minecraft::world::level::block::Blocks::createBigDripleafBlock
 
 BigDripleafStemBlock* minecraft::world::level::block::Blocks::createBigDripleafStemBlock(const std::string& name) {
     Block::Properties props;
-    props.setId(name);
+    props.setId(name).noCollission();
     auto block = new BigDripleafStemBlock(props);
     registerBlock(name, block);
     return block;
@@ -666,10 +691,11 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     MOSS_CARPET = createCarpetBlock("minecraft:moss_carpet");
     CAVE_VINES = createCaveVinesBlock("minecraft:cave_vines");
     CAVE_VINES_PLANT = createCaveVinesPlantBlock("minecraft:cave_vines_plant");
-    GLOW_LICHEN = createReplaceableByTreesBlock("minecraft:glow_lichen");
+    GLOW_LICHEN = createGlowLichenBlock("minecraft:glow_lichen");
     AZALEA = createAzaleaBlock("minecraft:azalea");
     FLOWERING_AZALEA = createAzaleaBlock("minecraft:flowering_azalea");
-    SPORE_BLOSSOM = createReplaceablePlantBlock("minecraft:spore_blossom");
+    HANGING_ROOTS = createHangingRootsBlock("minecraft:hanging_roots");
+    SPORE_BLOSSOM = createSporeBlossomBlock("minecraft:spore_blossom");
     BIG_DRIPLEAF = createBigDripleafBlock("minecraft:big_dripleaf");
     BIG_DRIPLEAF_STEM = createBigDripleafStemBlock("minecraft:big_dripleaf_stem");
     SMALL_DRIPLEAF = createSmallDripleafBlock("minecraft:small_dripleaf");

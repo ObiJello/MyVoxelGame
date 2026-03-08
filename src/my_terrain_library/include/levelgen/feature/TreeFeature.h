@@ -217,8 +217,11 @@ public:
      */
     static bool validTreePos(WorldGenLevel& level, const core::BlockPos& pos) {
         return level.isStateAtPosition(pos, [](BlockState* state) {
-            // Reference: TreeFeature.java validTreePos() -> isAir || REPLACEABLE_BY_TREES
-            return state && (state->isAir() || state->isReplaceableByTrees());
+            return state && (state->isAir() ||
+                             ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                                 state,
+                                 "minecraft:replaceable_by_trees"
+                             ));
         });
     }
 

@@ -4,6 +4,7 @@
 #include "core/Direction.h"
 #include "world/IChunk.h"
 #include "world/level/block/blocks/DoublePlantBlock.h"
+#include "world/level/block/blocks/MultifaceSpreadeableBlock.h"
 #include "world/level/block/blocks/SculkVeinBlock.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
@@ -5897,8 +5898,11 @@ private:
             Block* placeBlock = world::level::block::Blocks::getBlock(config.placeBlock);
             BlockState* newState = nullptr;
             auto* sculkVeinBlock = dynamic_cast<world::level::block::SculkVeinBlock*>(placeBlock);
+            auto* multifaceBlock = dynamic_cast<world::level::block::MultifaceSpreadeableBlock*>(placeBlock);
             if (sculkVeinBlock) {
                 newState = sculkVeinBlock->getStateForPlacement(oldState, *level, pos, placementDirection);
+            } else if (multifaceBlock) {
+                newState = multifaceBlock->getStateForPlacement(oldState, *level, pos, placementDirection);
             } else {
                 newState = static_cast<BlockState*>(world::level::block::Blocks::getDefaultState(config.placeBlock));
             }
@@ -5915,6 +5919,15 @@ private:
             if (random.nextFloat() < config.chanceOfSpreading) {
                 if (sculkVeinBlock) {
                     sculkVeinBlock->spreadFromFaceTowardRandomDirection(
+                        newState,
+                        level,
+                        pos,
+                        placementDirection,
+                        random,
+                        true
+                    );
+                } else if (multifaceBlock) {
+                    multifaceBlock->getSpreader().spreadFromFaceTowardRandomDirection(
                         newState,
                         level,
                         pos,
@@ -6068,19 +6081,51 @@ private:
 //=============================================================================
 
 struct RootSystemConfiguration {
+    placement::PlacedFeature* treeFeature = nullptr;
     int requiredVerticalSpaceForTree = 2;
-    int allowedVerticalWaterForTree = 1;
-    int rootColumnMaxHeight = 10;
     int rootRadius = 3;
+    std::string rootReplaceableTag;
+    std::shared_ptr<feature::stateproviders::BlockStateProvider> rootStateProvider;
     int rootPlacementAttempts = 20;
+    int rootColumnMaxHeight = 10;
     int hangingRootRadius = 5;
     int hangingRootsVerticalSpan = 5;
-    int hangingRootPlacementAttempts = 100;
-    std::shared_ptr<feature::stateproviders::BlockStateProvider> rootStateProvider;
     std::shared_ptr<feature::stateproviders::BlockStateProvider> hangingRootStateProvider;
-    std::vector<std::string> rootReplaceable;
+    int hangingRootPlacementAttempts = 100;
+    int allowedVerticalWaterForTree = 1;
+    std::shared_ptr<blockpredicates::BlockPredicate> allowedTreePosition;
 
     RootSystemConfiguration() = default;
+
+    RootSystemConfiguration(
+        placement::PlacedFeature* treeFeature,
+        int requiredVerticalSpaceForTree,
+        int rootRadius,
+        const std::string& rootReplaceableTag,
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> rootStateProvider,
+        int rootPlacementAttempts,
+        int rootColumnMaxHeight,
+        int hangingRootRadius,
+        int hangingRootsVerticalSpan,
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> hangingRootStateProvider,
+        int hangingRootPlacementAttempts,
+        int allowedVerticalWaterForTree,
+        std::shared_ptr<blockpredicates::BlockPredicate> allowedTreePosition
+    )
+        : treeFeature(treeFeature)
+        , requiredVerticalSpaceForTree(requiredVerticalSpaceForTree)
+        , rootRadius(rootRadius)
+        , rootReplaceableTag(rootReplaceableTag)
+        , rootStateProvider(std::move(rootStateProvider))
+        , rootPlacementAttempts(rootPlacementAttempts)
+        , rootColumnMaxHeight(rootColumnMaxHeight)
+        , hangingRootRadius(hangingRootRadius)
+        , hangingRootsVerticalSpan(hangingRootsVerticalSpan)
+        , hangingRootStateProvider(std::move(hangingRootStateProvider))
+        , hangingRootPlacementAttempts(hangingRootPlacementAttempts)
+        , allowedVerticalWaterForTree(allowedVerticalWaterForTree)
+        , allowedTreePosition(std::move(allowedTreePosition))
+    {}
 };
 
 //=============================================================================
@@ -6104,32 +6149,132 @@ public:
 
         core::BlockPos::MutableBlockPos workingPos(origin.getX(), origin.getY(), origin.getZ());
 
-        // Place dirt and tree - Reference: lines 61-77
-        // Place roots - Reference: lines 107-121
-        placeRoots(level, config, random, origin, workingPos);
+        if (placeDirtAndTree(level, context.chunkGenerator(), config, random, workingPos, origin)) {
+            placeRoots(level, config, random, origin, workingPos);
+        }
 
         return true;
     }
 
 private:
+    static bool isAllowedTreeSpace(BlockState* state, int blocksAboveOrigin, int allowedVerticalWaterHeight) {
+        if (!state || state->isAir()) {
+            return true;
+        }
+
+        int blocksAboveGround = blocksAboveOrigin + 1;
+        return blocksAboveGround <= allowedVerticalWaterHeight &&
+               state->getIdentifier() == "minecraft:water";
+    }
+
+    static bool spaceForTree(
+        WorldGenLevel* level,
+        const RootSystemConfiguration& config,
+        const core::BlockPos& pos
+    ) {
+        core::BlockPos::MutableBlockPos columnUpPos(pos.getX(), pos.getY(), pos.getZ());
+
+        for (int i = 1; i <= config.requiredVerticalSpaceForTree; ++i) {
+            columnUpPos.move(core::Direction::UP);
+            BlockState* state = level->getBlockState(columnUpPos);
+            if (!isAllowedTreeSpace(state, i, config.allowedVerticalWaterForTree)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    static bool placeDirtAndTree(
+        WorldGenLevel* level,
+        ChunkGenerator* generator,
+        const RootSystemConfiguration& config,
+        WorldgenRandom& random,
+        core::BlockPos::MutableBlockPos& workingPos,
+        const core::BlockPos& pos
+    ) {
+        for (int y = 0; y < config.rootColumnMaxHeight; ++y) {
+            workingPos.move(core::Direction::UP);
+            if (config.allowedTreePosition &&
+                config.allowedTreePosition->test(*level, workingPos) &&
+                spaceForTree(level, config, workingPos)) {
+                core::BlockPos belowPos = workingPos.below();
+                BlockState* belowState = level->getBlockState(belowPos);
+                if ((belowState && belowState->getIdentifier() == "minecraft:lava") ||
+                    !belowState || !belowState->isSolid()) {
+                    return false;
+                }
+
+                if (config.treeFeature &&
+                    config.treeFeature->place(level, generator, random, workingPos)) {
+                    placeDirt(pos, pos.getY() + y, level, config, random);
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    static void placeDirt(
+        const core::BlockPos& origin,
+        int targetHeight,
+        WorldGenLevel* level,
+        const RootSystemConfiguration& config,
+        WorldgenRandom& random
+    ) {
+        int originX = origin.getX();
+        int originZ = origin.getZ();
+        core::BlockPos::MutableBlockPos workingPos(originX, origin.getY(), originZ);
+
+        for (int y = origin.getY(); y < targetHeight; ++y) {
+            workingPos.set(originX, y, originZ);
+            placeRootedDirt(level, config, random, originX, originZ, workingPos);
+        }
+    }
+
+    static void placeRootedDirt(
+        WorldGenLevel* level,
+        const RootSystemConfiguration& config,
+        WorldgenRandom& random,
+        int originX,
+        int originZ,
+        core::BlockPos::MutableBlockPos& workingPos
+    ) {
+        for (int i = 0; i < config.rootPlacementAttempts; ++i) {
+            workingPos.setWithOffset(
+                workingPos,
+                random.nextInt(config.rootRadius) - random.nextInt(config.rootRadius),
+                0,
+                random.nextInt(config.rootRadius) - random.nextInt(config.rootRadius)
+            );
+
+            if (blockpredicates::matchesBlockTagName(level->getBlockState(workingPos), config.rootReplaceableTag)) {
+                level->setBlock(workingPos, config.rootStateProvider->getState(random, workingPos), 2);
+            }
+
+            workingPos.set(originX, workingPos.getY(), originZ);
+        }
+    }
+
     // Reference: RootSystemFeature.java placeRoots() lines 107-121
     void placeRoots(WorldGenLevel* level, const RootSystemConfiguration& config,
                     WorldgenRandom& random, const core::BlockPos& pos,
                     core::BlockPos::MutableBlockPos& workingPos) {
-        int rootRadius = config.hangingRootRadius;
-        int verticalSpan = config.hangingRootsVerticalSpan;
-
         for (int i = 0; i < config.hangingRootPlacementAttempts; ++i) {
-            int ox = random.nextInt(rootRadius) - random.nextInt(rootRadius);
-            int oy = random.nextInt(verticalSpan) - random.nextInt(verticalSpan);
-            int oz = random.nextInt(rootRadius) - random.nextInt(rootRadius);
-            workingPos.set(pos.getX() + ox, pos.getY() + oy, pos.getZ() + oz);
+            workingPos.setWithOffset(
+                pos,
+                random.nextInt(config.hangingRootRadius) - random.nextInt(config.hangingRootRadius),
+                random.nextInt(config.hangingRootsVerticalSpan) - random.nextInt(config.hangingRootsVerticalSpan),
+                random.nextInt(config.hangingRootRadius) - random.nextInt(config.hangingRootRadius)
+            );
 
-            BlockState* block = level->getBlockState(workingPos);
-            if (block && static_cast<BlockState*>(block)->isAir()) {
-                BlockState* aboveBlock = level->getBlockState(workingPos.above());
-                if (aboveBlock && !static_cast<BlockState*>(aboveBlock)->isAir()) {
-                    // Would set hanging root state
+            if (level->isEmptyBlock(workingPos)) {
+                BlockState* targetState = config.hangingRootStateProvider->getState(random, workingPos);
+                if (targetState &&
+                    targetState->canSurvive(*level, workingPos) &&
+                    level->getBlockState(workingPos.above())->isFaceSturdy(*level, workingPos, core::Direction::DOWN)) {
+                    level->setBlock(workingPos, targetState, 2);
                 }
             }
         }

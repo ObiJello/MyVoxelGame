@@ -57,24 +57,47 @@ private:
     }
 
     void rehash(size_t newCapacity) {
+        // Match java.util.HashMap.resize(): each old bucket is split into low/high
+        // lists based on (hash & oldCap), preserving relative order within each list.
         std::vector<Node*> newTable(newCapacity, nullptr);
+        size_t oldCapacity = m_table.size();
 
-        for (const auto& holder : m_nodes) {
-            Node* node = holder.get();
-            node->next = nullptr;
-
-            size_t idx = bucketIndex(node->hash, newCapacity);
-            Node*& bucketHead = newTable[idx];
-            if (!bucketHead) {
-                bucketHead = node;
+        for (size_t i = 0; i < oldCapacity; ++i) {
+            Node* bucket = m_table[i];
+            if (!bucket) {
                 continue;
             }
 
-            Node* tail = bucketHead;
-            while (tail->next) {
-                tail = tail->next;
+            Node* loHead = nullptr;
+            Node* loTail = nullptr;
+            Node* hiHead = nullptr;
+            Node* hiTail = nullptr;
+
+            while (bucket) {
+                Node* next = bucket->next;
+                bucket->next = nullptr;
+
+                if ((static_cast<size_t>(static_cast<uint32_t>(bucket->hash)) & oldCapacity) == 0) {
+                    if (!loHead) {
+                        loHead = bucket;
+                    } else {
+                        loTail->next = bucket;
+                    }
+                    loTail = bucket;
+                } else {
+                    if (!hiHead) {
+                        hiHead = bucket;
+                    } else {
+                        hiTail->next = bucket;
+                    }
+                    hiTail = bucket;
+                }
+
+                bucket = next;
             }
-            tail->next = node;
+
+            newTable[i] = loHead;
+            newTable[i + oldCapacity] = hiHead;
         }
 
         m_table = std::move(newTable);

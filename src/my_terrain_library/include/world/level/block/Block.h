@@ -50,6 +50,9 @@ public:
         bool m_isAir = false;
         bool m_liquid = false;
         bool m_blocksMotion = true;
+        bool m_forceSolidOff = false;
+        bool m_forceSolidOn = false;
+        bool m_noOcclusion = false;
         bool m_isReplaceable = false;
         bool m_isLeaves = false;
         bool m_isLog = false;
@@ -72,6 +75,23 @@ public:
 
         Properties& noCollission() {
             m_blocksMotion = false;
+            return *this;
+        }
+
+        Properties& forceSolidOff() {
+            m_forceSolidOff = true;
+            m_forceSolidOn = false;
+            return *this;
+        }
+
+        Properties& forceSolidOn() {
+            m_forceSolidOn = true;
+            m_forceSolidOff = false;
+            return *this;
+        }
+
+        Properties& noOcclusion() {
+            m_noOcclusion = true;
             return *this;
         }
 
@@ -103,6 +123,9 @@ public:
         bool isAir() const { return m_isAir; }
         bool isLiquid() const { return m_liquid; }
         bool blocksMotion() const { return m_blocksMotion; }
+        bool forceSolidOff() const { return m_forceSolidOff; }
+        bool forceSolidOn() const { return m_forceSolidOn; }
+        bool noOcclusion() const { return m_noOcclusion; }
         bool isReplaceable() const { return m_isReplaceable; }
         bool isLeaves() const { return m_isLeaves; }
         bool isLog() const { return m_isLog; }

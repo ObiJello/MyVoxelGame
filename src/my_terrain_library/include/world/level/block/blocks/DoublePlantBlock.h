@@ -56,8 +56,8 @@ public:
             return;
         }
 
-        level->setBlock(lowerPos, state->setValue(*HALF, DoubleBlockHalf::lower()), updateFlags);
-        level->setBlock(lowerPos.above(), state->setValue(*HALF, DoubleBlockHalf::upper()), updateFlags);
+        level->setBlock(lowerPos, copyWaterloggedFrom(*level, lowerPos, state->setValue(*HALF, DoubleBlockHalf::lower())), updateFlags);
+        level->setBlock(lowerPos.above(), copyWaterloggedFrom(*level, lowerPos.above(), state->setValue(*HALF, DoubleBlockHalf::upper())), updateFlags);
     }
 
 protected:
@@ -67,6 +67,20 @@ protected:
     }
 
 private:
+    static BlockState* copyWaterloggedFrom(
+        const levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos,
+        BlockState* state
+    ) {
+        if (!state || !BlockStateProperties::WATERLOGGED || !state->hasProperty(BlockStateProperties::WATERLOGGED)) {
+            return state;
+        }
+
+        BlockState* currentState = level.getBlockState(pos);
+        bool waterlogged = currentState && currentState->getIdentifier() == "minecraft:water";
+        return state->setValue(*BlockStateProperties::WATERLOGGED, waterlogged);
+    }
+
     static void initializeProperties() {
         if (!HALF) {
             BlockStateProperties::initialize();

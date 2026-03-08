@@ -19,6 +19,9 @@
 #include "world/level/block/blocks/AzaleaBlock.h"
 #include "world/level/block/blocks/CaveVinesBlock.h"
 #include "world/level/block/blocks/CaveVinesPlantBlock.h"
+#include "world/level/block/blocks/GlowLichenBlock.h"
+#include "world/level/block/blocks/SporeBlossomBlock.h"
+#include "world/level/block/blocks/HangingRootsBlock.h"
 #include "world/level/block/blocks/SmallDripleafBlock.h"
 #include "world/level/block/blocks/BigDripleafBlock.h"
 #include "world/level/block/blocks/BigDripleafStemBlock.h"
@@ -224,10 +227,11 @@ public:
     static Block* MOSS_CARPET;
     static Block* CAVE_VINES;
     static Block* CAVE_VINES_PLANT;
-    static Block* GLOW_LICHEN;
+    static GlowLichenBlock* GLOW_LICHEN;
     static Block* AZALEA;
     static Block* FLOWERING_AZALEA;
-    static Block* SPORE_BLOSSOM;
+    static HangingRootsBlock* HANGING_ROOTS;
+    static SporeBlossomBlock* SPORE_BLOSSOM;
     static Block* BIG_DRIPLEAF;
     static Block* BIG_DRIPLEAF_STEM;
     static Block* SMALL_DRIPLEAF;
@@ -417,6 +421,9 @@ private:
     static AzaleaBlock* createAzaleaBlock(const std::string& name);
     static CaveVinesBlock* createCaveVinesBlock(const std::string& name);
     static CaveVinesPlantBlock* createCaveVinesPlantBlock(const std::string& name);
+    static GlowLichenBlock* createGlowLichenBlock(const std::string& name);
+    static HangingRootsBlock* createHangingRootsBlock(const std::string& name);
+    static SporeBlossomBlock* createSporeBlossomBlock(const std::string& name);
     static SmallDripleafBlock* createSmallDripleafBlock(const std::string& name);
     static BigDripleafBlock* createBigDripleafBlock(const std::string& name);
     static BigDripleafStemBlock* createBigDripleafStemBlock(const std::string& name);

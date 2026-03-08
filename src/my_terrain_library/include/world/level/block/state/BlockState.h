@@ -39,6 +39,9 @@ private:
     bool m_isAir;
     bool m_liquid;
     bool m_blocksMotion;
+    bool m_forceSolidOff;
+    bool m_forceSolidOn;
+    bool m_noOcclusion;
     bool m_isReplaceable;
     bool m_isLeaves;
     bool m_isLog;

@@ -829,8 +829,7 @@ public:
 
             pos.setY(pos.getY() + yDelta);
 
-            // Check bounds
-            if (pos.getY() < context.getMinY() || pos.getY() >= context.getMinGenY() + context.getGenDepth()) {
+            if (context.getLevel()->isOutsideBuildHeight(pos)) {
                 return {};
             }
 

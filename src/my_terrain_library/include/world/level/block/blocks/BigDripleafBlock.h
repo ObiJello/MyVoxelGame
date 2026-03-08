@@ -1,5 +1,6 @@
 #pragma once
 
+#include "levelgen/blockpredicates/BlockPredicate.h"
 #include "levelgen/WorldGenLevel.h"
 #include "world/level/block/Block.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
@@ -24,7 +25,7 @@ public:
     static inline EnumProperty<Tilt>* TILT = nullptr;
 
     explicit BigDripleafBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission().replaceable()) {
+        : Block(properties) {
         initializeProperties();
         rebuildStateDefinition();
 
@@ -57,22 +58,10 @@ protected:
 
 private:
     static bool isBigDripleafPlaceable(BlockState* state) {
-        if (!state) {
-            return false;
-        }
-
-        const std::string& name = state->getIdentifier();
-        return name == "minecraft:clay" ||
-               name == "minecraft:moss_block" ||
-               name == "minecraft:dirt" ||
-               name == "minecraft:grass_block" ||
-               name == "minecraft:podzol" ||
-               name == "minecraft:coarse_dirt" ||
-               name == "minecraft:mycelium" ||
-               name == "minecraft:rooted_dirt" ||
-               name == "minecraft:mud" ||
-               name == "minecraft:muddy_mangrove_roots" ||
-               name == "minecraft:farmland";
+        return minecraft::levelgen::blockpredicates::matchesBlockTagName(
+            state,
+            "minecraft:big_dripleaf_placeable"
+        );
     }
 
     static void initializeProperties() {

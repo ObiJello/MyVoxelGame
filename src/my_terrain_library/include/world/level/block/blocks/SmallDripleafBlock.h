@@ -1,5 +1,6 @@
 #pragma once
 
+#include "levelgen/blockpredicates/BlockPredicate.h"
 #include "levelgen/WorldGenLevel.h"
 #include "world/level/block/blocks/DoublePlantBlock.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
@@ -65,12 +66,10 @@ private:
         const levelgen::WorldGenLevel& level,
         const core::BlockPos& belowPos
     ) const {
-        if (!stateBelow) {
-            return false;
-        }
-
-        const std::string& belowName = stateBelow->getIdentifier();
-        if (belowName == "minecraft:clay" || belowName == "minecraft:moss_block") {
+        if (minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                stateBelow,
+                "minecraft:small_dripleaf_placeable"
+            )) {
             return true;
         }
 

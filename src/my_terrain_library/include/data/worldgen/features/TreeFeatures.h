@@ -63,6 +63,7 @@ public:
     // =========================================================================
     static levelgen::ConfiguredFeature* SWAMP_OAK;
     static levelgen::ConfiguredFeature* JUNGLE_BUSH;
+    static levelgen::ConfiguredFeature* AZALEA_TREE;
 
     // =========================================================================
     // NETHER FUNGI - Reference: TreeFeatures.java

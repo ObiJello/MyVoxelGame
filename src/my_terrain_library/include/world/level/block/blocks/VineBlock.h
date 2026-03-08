@@ -3,6 +3,7 @@
 #include "core/Direction.h"
 #include "levelgen/WorldGenLevel.h"
 #include "world/level/block/Block.h"
+#include "world/level/block/blocks/MultifaceBlock.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 
 namespace minecraft {
@@ -24,7 +25,7 @@ public:
     static inline BooleanProperty* WEST = nullptr;
 
     explicit VineBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission().replaceable().replaceableByTrees()) {
+        : Block(Properties(properties).noCollission().replaceable()) {
         initializeProperties();
         rebuildStateDefinition();
 
@@ -55,9 +56,7 @@ public:
         const core::BlockPos& neighbourPos,
         core::Direction directionToNeighbour
     ) {
-        BlockState* neighbourState = level.getBlockState(neighbourPos);
-        return neighbourState &&
-               neighbourState->isFaceSturdy(level, neighbourPos, core::getOpposite(directionToNeighbour));
+        return MultifaceBlock::canAttachTo(level, directionToNeighbour, neighbourPos, level.getBlockState(neighbourPos));
     }
 
     bool canSurvive(
