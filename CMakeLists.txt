@@ -194,15 +194,8 @@ target_include_directories(terrain_library PUBLIC
 )
 target_compile_features(terrain_library PUBLIC cxx_std_20)
 
-# Link crypto library based on platform
-if(APPLE)
-    # macOS: Use built-in CommonCrypto (universal binary support)
-    # No linking needed - CommonCrypto is part of libSystem
-else()
-    # Other platforms: Use OpenSSL
-    find_package(OpenSSL REQUIRED)
-    target_link_libraries(terrain_library PUBLIC OpenSSL::Crypto)
-endif()
+# MD5 hashing: macOS uses CommonCrypto (built-in), other platforms use
+# self-contained implementation in ext/md5/ - no OpenSSL needed
 
 # 5b) Optional Vulkan backend
 option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
