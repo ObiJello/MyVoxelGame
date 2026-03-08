@@ -827,6 +827,18 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
             message(WARNING "sentry-cli not found — dSYM will not be uploaded automatically")
         endif()
     endif()
+elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    # Windows: Upload PDB debug symbols to Sentry on Release builds
+    find_program(SENTRY_CLI sentry-cli)
+    if(SENTRY_CLI)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${SENTRY_CLI} debug-files upload "$<TARGET_PDB_FILE:MyVoxelGame>"
+            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            COMMENT "Uploading PDB to Sentry"
+        )
+    else()
+        message(STATUS "sentry-cli not found — PDB will not be uploaded to Sentry")
+    endif()
 endif()
 
 # ── Bundle crashpad handler into .app on macOS ────────────────────────────────
