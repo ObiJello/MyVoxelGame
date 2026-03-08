@@ -87,23 +87,23 @@ namespace Render {
 
     void ClientMeshManager::ProcessMeshBuildResults() {
         if (!m_chunkManager) return;
-        
+
         auto startTime = std::chrono::steady_clock::now();
-        
+
         // Drain all completed mesh build results
         auto& meshResultQueue = GetMeshResultQueue();
         auto results = meshResultQueue.DrainAll();
-        
+
         for (const auto& result : results) {
             ProcessMeshBuildResult(result);
         }
-        
+
         meshResultQueue.ResetProcessedCount();
-        
+
         // Record timing
         auto endTime = std::chrono::steady_clock::now();
         float processingTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        
+
         if (!results.empty()) {
             Log::Debug("Processed %zu mesh build results in %.2fms", results.size(), processingTime);
         }
@@ -299,31 +299,27 @@ namespace Render {
     void ClientMeshManager::UploadMeshResultsWithBudget() {
         auto startTime = std::chrono::steady_clock::now();
         int uploadsThisFrame = 0;
-        
-        // Process pending upload queue with time and count budgets
+
         auto& meshResultQueue = GetMeshResultQueue();
-        
+
         while (uploadsThisFrame < m_config.maxGPUUploadsPerFrame) {
-            // Check time budget
             auto currentTime = std::chrono::steady_clock::now();
             float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
             if (elapsedMs >= m_config.gpuUploadBudgetMs) {
-                break; // Time budget exceeded
+                break;
             }
-            
-            // Get next result to upload
+
             Network::MeshBuildResult result;
             if (!meshResultQueue.try_pop(result)) {
-                break; // No more results
+                break;
             }
-            
-            // Upload to GPU
-            if (ValidateMeshBuildResult(result)) {
-                UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData);
-                uploadsThisFrame++;
-                m_stats.meshUploadsThisFrame++;
-                m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
-            }
+
+            // Use the SAME processing path as ProcessMeshBuildResults()
+            // This ensures AcceptMeshResult() validation and FinalizeSectionUpload() are called,
+            // preventing sections from getting stuck in MESHING state with dirty=true forever
+            ProcessMeshBuildResult(result);
+            uploadsThisFrame++;
+            m_stats.meshUploadsThisFrame++;
         }
     }
     
