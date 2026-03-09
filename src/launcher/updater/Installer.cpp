@@ -281,9 +281,9 @@ namespace Launcher {
         std::ofstream bat(batPath);
         bat << "@echo off\r\n";
         bat << "timeout /t 2 /nobreak >nul\r\n";
-        bat << "xcopy /E /Y \"" << newLauncherPath << "\" \"" << exeDir << "\\\"\r\n";
-        bat << "rmdir /S /Q \"" << stagingDir << "\"\r\n";
+        bat << "copy /Y \"" << newLauncherPath << "\" \"" << currentAppPath << "\"\r\n";
         bat << "start \"\" \"" << currentAppPath << "\"\r\n";
+        bat << "rmdir /S /Q \"" << stagingDir << "\"\r\n";
         bat << "del \"%~f0\"\r\n";
         bat.close();
 

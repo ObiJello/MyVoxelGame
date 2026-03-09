@@ -91,24 +91,25 @@ namespace Launcher {
                 return false;
             }
 
-            std::string launcherPrefix(LauncherReleaseTagPrefix);
+            std::string gamePrefix(GameReleaseTagPrefix);
 
             for (const auto& release : releases) {
                 std::string tag = release.value("tag_name", "");
-                // Skip launcher releases
-                if (tag.find(launcherPrefix) == 0) continue;
+                // Only consider game releases for this platform
+                if (tag.find(gamePrefix) != 0) continue;
                 // Skip drafts and prereleases
                 if (release.value("draft", false)) continue;
                 if (release.value("prerelease", false)) continue;
 
-                // This is the latest game release (GitHub returns newest first)
+                // This is the latest game release for this platform (GitHub returns newest first)
                 ParseRelease(release, outInfo);
                 Log::Info("Latest game release: %s (%s) with %zu assets",
                           outInfo.tagName.c_str(), outInfo.name.c_str(), outInfo.assets.size());
-                return SelectPlatformAsset(outInfo);
+                SelectPlatformAsset(outInfo);
+                return true;
             }
 
-            Log::Info("No game releases found");
+            Log::Info("No game releases found for this platform");
             return false;
 
         } catch (const nlohmann::json::exception& e) {
@@ -215,18 +216,7 @@ namespace Launcher {
             }
         }
 
-        // Last resort: any zip
-        for (const auto& asset : info.assets) {
-            std::string nameLower = toLower(asset.name);
-            if (nameLower.find(".zip") != std::string::npos) {
-                info.platformAsset = asset;
-                info.hasPlatformAsset = true;
-                Log::Warning("No platform-specific asset, using: %s", asset.name.c_str());
-                return true;
-            }
-        }
-
-        Log::Error("No suitable asset for platform: %s", primaryTag.c_str());
+        Log::Info("No asset found for platform: %s - skipping update", primaryTag.c_str());
         info.hasPlatformAsset = false;
         return false;
     }

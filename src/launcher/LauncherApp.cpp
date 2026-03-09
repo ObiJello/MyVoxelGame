@@ -138,6 +138,18 @@ namespace Launcher {
             return -1;
         }
 
+        // Set window icon (taskbar + title bar)
+        {
+            std::string iconPath = GetAssetPath("launcher/logo.png");
+            int iconW, iconH, iconChannels;
+            unsigned char* iconData = stbi_load(iconPath.c_str(), &iconW, &iconH, &iconChannels, 4);
+            if (iconData) {
+                GLFWimage glfwIcon{ iconW, iconH, iconData };
+                glfwSetWindowIcon(window, 1, &glfwIcon);
+                stbi_image_free(iconData);
+            }
+        }
+
         glfwMakeContextCurrent(window);
         glfwSwapInterval(1); // VSync
 
@@ -286,7 +298,9 @@ namespace Launcher {
             latestRelease = info;
             checkSuccess = success;
             if (!success) {
-                checkError = "Could not connect to update server";
+                checkError = !info.tagName.empty()
+                    ? "No game download available for this platform yet"
+                    : "Could not connect to update server";
             }
             checkComplete = true;
             workerRunning = false;
@@ -381,7 +395,9 @@ namespace Launcher {
                 latestRelease = info;
                 checkSuccess = success;
                 if (!success) {
-                    checkError = "Could not connect to update server";
+                    checkError = !info.tagName.empty()
+                        ? "No game download available for this platform yet"
+                        : "Could not connect to update server";
                 }
                 checkComplete = true;
                 workerRunning = false;

@@ -353,6 +353,7 @@ namespace Render {
     }
 
     GLint GLBackend::GLShaderInfo::GetUniform(const std::string& name) const {
+        if (programId == 0) return -1;
         auto it = uniformCache.find(name);
         if (it != uniformCache.end()) return it->second;
         GLint loc = glGetUniformLocation(programId, name.c_str());
@@ -364,6 +365,10 @@ namespace Render {
                                    const glm::mat4& value) {
         auto it = m_shaders.find(handle);
         if (it == m_shaders.end()) return;
+        if (it->second.programId == 0) {
+            Log::Error("GLBackend: SetUniformMat4 called with shader handle %u but programId is 0", handle);
+            return;
+        }
         GLint loc = it->second.GetUniform(name);
         if (loc != -1) glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(value));
     }
@@ -543,6 +548,7 @@ namespace Render {
         glBindVertexArray(it->second.vao);
         glDrawElements(ToGLPrimitive(m_currentState.primitiveType), indexCount, GL_UNSIGNED_INT,
                       reinterpret_cast<void*>(static_cast<uintptr_t>(indexOffset * sizeof(uint32_t))));
+        glBindVertexArray(0);
     }
 
     void GLBackend::DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) {
@@ -551,6 +557,7 @@ namespace Render {
 
         glBindVertexArray(it->second.vao);
         glDrawArrays(ToGLPrimitive(m_currentState.primitiveType), firstVertex, vertexCount);
+        glBindVertexArray(0);
     }
 
     // ========================================================================

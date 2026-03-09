@@ -17,16 +17,31 @@ namespace Launcher {
     inline constexpr const char* UserAgent = "ObeyCraftLauncher/1.0";
 
     // Launcher version (auto-updated by tools/bump_version.sh on Release builds)
-    inline constexpr const char* LauncherVersion = "1.0.47";
+    inline constexpr const char* LauncherVersion = "1.0.23";
 
     // Launcher self-update
-    inline constexpr const char* LauncherReleaseTagPrefix = "launcher-v";
+#ifdef __APPLE__
+    inline constexpr const char* LauncherReleaseTagPrefix = "launcher-mac-v";
+#elif defined(_WIN32)
+    inline constexpr const char* LauncherReleaseTagPrefix = "launcher-win-v";
+#else
+    inline constexpr const char* LauncherReleaseTagPrefix = "launcher-linux-v";
+#endif
 #ifdef __APPLE__
     inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher.app";
 #elif _WIN32
     inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher.exe";
 #else
     inline constexpr const char* LauncherBinaryName = "ObeyCraftLauncher";
+#endif
+
+    // Game release tag prefix (platform-specific)
+#ifdef __APPLE__
+    inline constexpr const char* GameReleaseTagPrefix = "game-mac-v";
+#elif defined(_WIN32)
+    inline constexpr const char* GameReleaseTagPrefix = "game-win-v";
+#else
+    inline constexpr const char* GameReleaseTagPrefix = "game-linux-v";
 #endif
 
     // File names

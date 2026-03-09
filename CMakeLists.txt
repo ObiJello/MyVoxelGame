@@ -5,6 +5,7 @@ project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
         add_compile_options(/Zi)
+        add_link_options(/DEBUG /OPT:REF /OPT:ICF)
     else()
         add_compile_options(-g)
     endif()
@@ -643,6 +644,12 @@ endif()
 
 # 7) PCH
 target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
+
+# Hide console window on Windows (GUI app)
+if(WIN32)
+    set_target_properties(MyVoxelGame PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(MyVoxelGame PRIVATE /ENTRY:mainCRTStartup)
+endif()
 # Ensure SPIR-V shaders are compiled before MyVoxelGame links (so post-build copy gets fresh .spv)
 if(TARGET compile_shaders)
     add_dependencies(MyVoxelGame compile_shaders)
@@ -832,7 +839,8 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
     find_program(SENTRY_CLI sentry-cli)
     if(SENTRY_CLI)
         add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${SENTRY_CLI} debug-files upload "$<TARGET_PDB_FILE:MyVoxelGame>"
+            COMMAND ${CMAKE_COMMAND} -E echo "Uploading PDB to Sentry..."
+            COMMAND ${SENTRY_CLI} debug-files upload "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/MyVoxelGame.pdb" || ${CMAKE_COMMAND} -E echo "Sentry upload failed (non-fatal)"
             WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
             COMMENT "Uploading PDB to Sentry"
         )
@@ -927,6 +935,31 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Info.plist"
                 "0" "1"
             COMMENT "Updating bundle version in Info.plist"
+        )
+elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
+        # Auto-increment game build number before compiling
+        add_custom_target(bump_game_version ALL
+            COMMAND powershell -ExecutionPolicy Bypass -File
+                "${PROJECT_SOURCE_DIR}/tools/bump_version.ps1"
+                -Type game
+                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                -Major 0 -Minor 1
+                -SourceRoot "${PROJECT_SOURCE_DIR}"
+            COMMENT "Auto-incrementing game version"
+        )
+        add_dependencies(MyVoxelGame bump_game_version)
+
+        # POST_BUILD: zip + upload
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND powershell -ExecutionPolicy Bypass -File
+                "${PROJECT_SOURCE_DIR}/tools/auto_release.ps1"
+                -Type game
+                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                -Major 0 -Minor 1
+                -AppName MyVoxelGame.exe
+                -BinDir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+                -Repo "ObiJello/MyVoxelGame-Download"
+            COMMENT "Auto-releasing game (Windows)"
         )
 endif()
 
@@ -1054,6 +1087,12 @@ if(CURL_FOUND)
         set_target_properties(ObeyCraftLauncher PROPERTIES
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/LauncherInfo.plist"
         )
+    elseif(WIN32)
+        add_executable(ObeyCraftLauncher ${LAUNCHER_SOURCES}
+            "${PROJECT_SOURCE_DIR}/src/launcher/launcher.rc"
+        )
+        set_target_properties(ObeyCraftLauncher PROPERTIES WIN32_EXECUTABLE TRUE)
+        target_link_options(ObeyCraftLauncher PRIVATE /ENTRY:mainCRTStartup)
     else()
         add_executable(ObeyCraftLauncher ${LAUNCHER_SOURCES})
     endif()
@@ -1074,16 +1113,29 @@ if(CURL_FOUND)
 
     # Auto-increment launcher version (Release builds only, NOT universal/JALIN)
     if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
-        # Auto-increment launcher version before compiling (edits LauncherConfig.hpp directly)
-        add_custom_target(bump_launcher_version ALL
-            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
-                launcher
-                "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
-                "1" "0"
-                "${PROJECT_SOURCE_DIR}"
-            COMMENT "Auto-incrementing launcher version"
-        )
-        add_dependencies(ObeyCraftLauncher bump_launcher_version)
+        if(APPLE)
+            add_custom_target(bump_launcher_version ALL
+                COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
+                    launcher
+                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    "1" "0"
+                    "${PROJECT_SOURCE_DIR}"
+                COMMENT "Auto-incrementing launcher version"
+            )
+        elseif(WIN32)
+            add_custom_target(bump_launcher_version ALL
+                COMMAND powershell -ExecutionPolicy Bypass -File
+                    "${PROJECT_SOURCE_DIR}/tools/bump_version.ps1"
+                    -Type launcher
+                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    -Major 1 -Minor 0
+                    -SourceRoot "${PROJECT_SOURCE_DIR}"
+                COMMENT "Auto-incrementing launcher version"
+            )
+        endif()
+        if(TARGET bump_launcher_version)
+            add_dependencies(ObeyCraftLauncher bump_launcher_version)
+        endif()
     endif()
 
     target_link_libraries(ObeyCraftLauncher PRIVATE
@@ -1165,6 +1217,20 @@ if(CURL_FOUND)
                     "${PROJECT_SOURCE_DIR}/assets/launcher"
                     "$<TARGET_FILE_DIR:ObeyCraftLauncher>/launcher"
                 COMMENT "Copying launcher assets"
+            )
+        endif()
+        # Auto version bump + release for launcher (Release only, NOT universal/JALIN)
+        if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
+            add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
+                COMMAND powershell -ExecutionPolicy Bypass -File
+                    "${PROJECT_SOURCE_DIR}/tools/auto_release.ps1"
+                    -Type launcher
+                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    -Major 1 -Minor 0
+                    -AppName ObeyCraftLauncher.exe
+                    -BinDir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+                    -Repo "ObiJello/MyVoxelGame-Download"
+                COMMENT "Auto-releasing launcher (Windows)"
             )
         endif()
     endif()

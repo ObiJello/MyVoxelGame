@@ -16,10 +16,10 @@ N=$(cat "$NUMBER_FILE" 2>/dev/null || echo "0")
 VERSION="${MAJOR}.${MINOR}.${N}"
 
 if [ "$TYPE" = "launcher" ]; then
-    TAG="launcher-v${VERSION}"
+    TAG="launcher-mac-v${VERSION}"
     ZIP_NAME="ObeyCraftLauncher-v${VERSION}-macos-universal.zip"
 else
-    TAG="v${VERSION}"
+    TAG="game-mac-v${VERSION}"
     ZIP_NAME="ObeyCraft-v${VERSION}-macos-universal.zip"
 fi
 

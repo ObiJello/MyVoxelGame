@@ -40,9 +40,10 @@ namespace Launcher {
         return true;
 
 #elif defined(_WIN32)
-        // On Windows, use ShellExecute
+        // On Windows, use ShellExecute with the game's own directory as working dir
+        std::string gameDir = std::filesystem::path(gamePath).parent_path().string();
         HINSTANCE result = ShellExecuteA(nullptr, "open", gamePath.c_str(),
-                                          nullptr, nullptr, SW_SHOWNORMAL);
+                                          nullptr, gameDir.c_str(), SW_SHOWNORMAL);
         if (reinterpret_cast<intptr_t>(result) <= 32) {
             Log::Error("Failed to launch game (ShellExecute error %lld)",
                        static_cast<long long>(reinterpret_cast<intptr_t>(result)));
@@ -70,9 +71,19 @@ namespace Launcher {
 
 #ifdef _WIN32
         if (!updaterScript.empty()) {
-            // Launch the updater batch script which will swap and relaunch
-            ShellExecuteA(nullptr, "open", updaterScript.c_str(),
-                          nullptr, nullptr, SW_HIDE);
+            // Launch cmd.exe /C to run the batch script reliably as a detached process
+            std::string cmd = "cmd.exe /C \"\"" + updaterScript + "\"\"";
+            STARTUPINFOA si = {};
+            si.cb = sizeof(si);
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION pi = {};
+            CreateProcessA(nullptr, const_cast<char*>(cmd.c_str()),
+                           nullptr, nullptr, FALSE,
+                           CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+                           nullptr, nullptr, &si, &pi);
+            if (pi.hProcess) CloseHandle(pi.hProcess);
+            if (pi.hThread)  CloseHandle(pi.hThread);
         } else {
             ShellExecuteA(nullptr, "open", launcherPath.c_str(),
                           nullptr, nullptr, SW_SHOWNORMAL);
