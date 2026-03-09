@@ -49,6 +49,7 @@
             ChunkBatchStartS2C    = 0x23,  // Signals start of a chunk batch
             ChunkBatchFinishedS2C = 0x24,  // Signals end of batch (includes chunk count)
             HotbarSyncS2C         = 0x25,  // Server-authoritative hotbar contents
+            SetChunkCacheRadiusS2C = 0x26, // Server tells client the effective view distance
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)

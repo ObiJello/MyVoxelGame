@@ -37,9 +37,6 @@ namespace Game {
         bool InitializeChunkProvider();
         void Shutdown();
 
-        // Refresh settings from game settings
-        void RefreshSettings();
-
         // IBlockAccess implementation
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
@@ -52,9 +49,6 @@ namespace Game {
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags);
 
-        // Simplified chunk management - loads ALL chunks in square pattern
-        void UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance = 0);
-
         // Mesh system integration
         void MarkSectionDirty(int worldX, int worldY, int worldZ);
         bool HasDirtySections() const;
@@ -65,9 +59,6 @@ namespace Game {
 
         // Get loaded chunk count for debugging
         size_t GetLoadedChunkCount() const;
-
-        // Get current render distance from settings
-        int GetRenderDistance() const { return m_renderDistance; }
 
         // World bounds (from Config)
         static constexpr int MIN_Y = -64;
@@ -105,40 +96,33 @@ namespace Game {
         // ========================================================================
         // SERVER WORLD LOOP
         // ========================================================================
-        
+
         // Main world tick function called from server thread
-        void WorldLoop(float deltaTime, int maxChunksPerTick = -1);  // -1 means no limit
-        
-        // Chunk management - load/unload based on player positions
-        void ChunkLoadUnload();
-        
+        // Handles simulation only (block ticks, entities, etc.)
+        // Chunk loading is driven by the session system, NOT by World.
+        void WorldLoop(float deltaTime);
+
         // Block update processing
         void ProcessBlockUpdates();
-        
+
         // Random block ticks (like crop growth, ice melting, etc.)
         void PerformRandomBlockTick();
-        
+
         // Process scheduled block events
         void ProcessBlockEvents();
-        
+
         // Update tile entities
         void TileEntityTick();
-        
+
         // Update entities
         void EntityTick();
-        
+
         // Update world time and weather
         void WorldTimeWeatherTick();
-        
-        // Send chunk and entity packets to clients
-        void ChunkEntityPacketDispatch(int maxChunksPerTick = -1);  // -1 means no limit
 
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;
-
-        // Settings-based configuration
-        int m_renderDistance;
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
@@ -146,20 +130,8 @@ namespace Game {
         Math::ChunkPos WorldToChunkPos(int worldX, int worldZ) const;
         void MarkNeighboringSectionsIfNeeded(int worldX, int worldY, int worldZ);
 
-        // Square-based chunk unloading helper
-        void UnloadDistantChunks(int centerX, int centerZ, int keepDistance);
-
-        // Load settings from game settings
-        void LoadWorldSettings();
-
         // Statistics
         mutable size_t m_blockAccessCount = 0;
-        
-        // Track chunks already sent to client (reset when player moves significantly)
-        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_sentChunks;
-
-        // Track chunks already requested for async generation (prevents duplicate requests)
-        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_requestedChunks;
 
         // Stop flag for early termination of long-running loops
         std::atomic<bool> m_stopRequested{false};

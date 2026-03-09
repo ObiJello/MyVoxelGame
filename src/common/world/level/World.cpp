@@ -2,14 +2,9 @@
 #include "World.hpp"
 #include "../../core/Log.hpp"
 #include "../block/BlockRegistry.hpp"
-#include "../../physics/Physics.hpp"
-#include "platform/GameDirectory.hpp"
+#include "../../physics/RayCast.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
-#include "server/world/status/ChunkStatusManager.hpp"
-#include "server/world/ServerWorkerPool.hpp"
-#include "server/world/MyTerrainGenerator.hpp"
-#include "../../physics/RayCast.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -17,8 +12,7 @@
 namespace Game {
 
     World::World() {
-        LoadWorldSettings();
-        Log::Info("World created (render distance: %d chunks)", m_renderDistance);
+        Log::Info("World created");
     }
 
     World::~World() {
@@ -27,23 +21,11 @@ namespace Game {
     }
 
     void World::Initialize() {
-        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION START ===");
-
-        // Load world settings from game settings
-        LoadWorldSettings();
-        Log::Info("World settings loaded - render distance: %d", m_renderDistance);
+        Log::Info("=== WORLD INITIALIZATION START ===");
 
         // Create and configure chunk provider
         ChunkProviderConfig config = CreateDefaultConfig();
-
-        // Configure based on world settings - square area calculation
-        int squareSize = 2 * m_renderDistance + 1;
-        // ChunkCache now manages its own size (defaults to 2048)
         config.enableFallbackGeneration = false;
-
-        Log::Info("Config - %dx%d square area, Fallback generation: %s",
-                  squareSize, squareSize,
-                  config.enableFallbackGeneration ? "enabled" : "disabled");
 
         // Set up generation config
         // NOTE: Seed comes from GenerationConfig default (IChunkGenerator.hpp)
@@ -85,8 +67,8 @@ namespace Game {
         // via World::InitializeChunkProvider(). This ensures ServerChunkCache
         // captures the correct thread ID (matching Minecraft's architecture).
 
-        Log::Info("✓ World created successfully (render distance: %d chunks)", m_renderDistance);
-        Log::Info("=== SIMPLIFIED WORLD INITIALIZATION COMPLETE ===");
+        Log::Info("✓ World created successfully");
+        Log::Info("=== WORLD INITIALIZATION COMPLETE ===");
     }
 
     bool World::InitializeChunkProvider() {
@@ -117,21 +99,6 @@ namespace Game {
         SetGlobalBlockAccess(nullptr);
 
         Log::Info("World shutdown complete");
-    }
-
-    void World::RefreshSettings() {
-        LoadWorldSettings();
-        Log::Info("World settings refreshed (render distance: %d chunks)", m_renderDistance);
-    }
-
-    void World::LoadWorldSettings() {
-        // Load render distance from game settings
-        m_renderDistance = Platform::g_gameSettings.GetRenderDistance();
-
-        // Clamp to reasonable values
-        m_renderDistance = std::clamp(m_renderDistance, 4, 32);
-
-        Log::Debug("Loaded world settings: render distance=%d chunks", m_renderDistance);
     }
 
     // IBlockAccess implementation
@@ -296,85 +263,6 @@ namespace Game {
         }
     }
 
-    void World::UpdateLoadedChunks(int playerChunkX, int playerChunkZ, int viewDistance) {
-        if (!m_chunkProvider) {
-            return;
-        }
-
-        // Use setting-based view distance if not provided
-        if (viewDistance <= 0) {
-            viewDistance = m_renderDistance;
-        }
-
-        // Create list of all chunk positions in the square area
-        std::vector<Math::ChunkPos> chunksToLoad;
-        for (int dx = -viewDistance; dx <= viewDistance; ++dx) {
-            for (int dz = -viewDistance; dz <= viewDistance; ++dz) {
-                int chunkX = playerChunkX + dx;
-                int chunkZ = playerChunkZ + dz;
-                Math::ChunkPos chunkPos{chunkX, chunkZ};
-
-                // Only add chunks that aren't already loaded
-                if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
-                    chunksToLoad.push_back(chunkPos);
-                }
-            }
-        }
-
-        // Sort chunks by distance from player (nearest first)
-        std::sort(chunksToLoad.begin(), chunksToLoad.end(),
-                 [playerChunkX, playerChunkZ](const Math::ChunkPos& a, const Math::ChunkPos& b) {
-                     // Calculate squared distance (avoid sqrt for performance)
-                     int distASq = (a.x - playerChunkX) * (a.x - playerChunkX) +
-                                   (a.z - playerChunkZ) * (a.z - playerChunkZ);
-                     int distBSq = (b.x - playerChunkX) * (b.x - playerChunkX) +
-                                   (b.z - playerChunkZ) * (b.z - playerChunkZ);
-                     return distASq < distBSq;
-                 });
-
-        if (chunksToLoad.size() > 0) {
-            Log::Debug("Loading %zu chunks in %dx%d square around player chunk (%d, %d) - nearest first",
-                      chunksToLoad.size(), 2 * viewDistance + 1, 2 * viewDistance + 1,
-                      playerChunkX, playerChunkZ);
-        }
-
-        size_t chunksLoaded = 0;
-        size_t totalChunksInArea = (2 * viewDistance + 1) * (2 * viewDistance + 1);
-        size_t chunksSkipped = totalChunksInArea - chunksToLoad.size();
-
-        // Load chunks in order of proximity to player
-        for (const auto& chunkPos : chunksToLoad) {
-            if (m_stopRequested.load()) break;
-
-            // Load the chunk
-            auto chunk = m_chunkProvider->GetChunk(chunkPos);
-            if (chunk) {
-                chunksLoaded++;
-
-                // Server-side chunk loaded - client will handle its own dirty tracking
-                // when it receives the chunk data packet
-
-                // Log progress for nearest chunks
-                int distanceSq = (chunkPos.x - playerChunkX) * (chunkPos.x - playerChunkX) +
-                                (chunkPos.z - playerChunkZ) * (chunkPos.z - playerChunkZ);
-                if (distanceSq <= 4) { // Within 2 chunk radius
-                    /*Log::Debug("Loaded nearby chunk (%d, %d) - distance: %.1f",
-                              chunkPos.x, chunkPos.z, std::sqrt(distanceSq));*/
-                }
-            } else {
-                Log::Warning("Failed to load chunk (%d, %d)", chunkPos.x, chunkPos.z);
-            }
-        }
-
-        // Unload chunks outside the square area
-        UnloadDistantChunks(playerChunkX, playerChunkZ, viewDistance + 2);
-
-        if (chunksLoaded > 0) {
-            Log::Info("Chunk loading complete: %zu new chunks loaded, %zu already loaded (nearest-first order)",
-                     chunksLoaded, chunksSkipped);
-        }
-    }
-
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {
         if (!m_chunkProvider) {
             return;
@@ -455,47 +343,6 @@ namespace Game {
         return chunk.get();
     }
 
-    void World::UnloadDistantChunks(int centerX, int centerZ, int keepDistance) {
-        if (!m_chunkProvider) {
-            return;
-        }
-
-        // Simple square-based unloading
-        // Create a reasonable search area
-        int searchRadius = keepDistance + 10;
-        std::vector<Math::ChunkPos> chunksToUnload;
-
-        for (int x = centerX - searchRadius; x <= centerX + searchRadius; ++x) {
-            for (int z = centerZ - searchRadius; z <= centerZ + searchRadius; ++z) {
-                Math::ChunkPos pos{x, z};
-
-                if (m_chunkProvider->IsChunkLoaded(pos)) {
-                    // Check if outside keep distance (square pattern)
-                    int distanceX = std::abs(x - centerX);
-                    int distanceZ = std::abs(z - centerZ);
-                    int squareDistance = std::max(distanceX, distanceZ);
-
-                    if (squareDistance > keepDistance) {
-                        chunksToUnload.push_back(pos);
-                    }
-                }
-            }
-        }
-
-        // Unload chunks
-        size_t unloaded = 0;
-        for (const Math::ChunkPos& pos : chunksToUnload) {
-            if (m_chunkProvider->UnloadChunk(pos)) {
-                unloaded++;
-            }
-        }
-
-        if (unloaded > 0) {
-            Log::Debug("Unloaded %zu distant chunks (total candidates: %zu, keep distance: %d)",
-                      unloaded, chunksToUnload.size(), keepDistance);
-        }
-    }
-
     // Additional helper methods for integration with mesh system
     std::vector<DirtySection> World::GetDirtySections() {
         if (!m_chunkProvider) {
@@ -568,140 +415,29 @@ namespace Game {
     // SERVER WORLD LOOP IMPLEMENTATION
     // ========================================================================
 
-    void World::WorldLoop(float deltaTime, int maxChunksPerTick) {
+    void World::WorldLoop(float deltaTime) {
         if (m_stopRequested.load()) return;
 
-        // Main world tick function - processes all world updates
+        // World simulation only — chunk loading is driven by the session system
+        // (IntegratedServer::ProcessWatchSetChanges), NOT by World.
 
-        // 1. Chunk loading/unloading based on player positions
-        ChunkLoadUnload();
-
-        // 2. Process any pending block updates
+        // 1. Process any pending block updates
         ProcessBlockUpdates();
-        
-        // 3. Perform random block ticks (growth, decay, etc.)
+
+        // 2. Perform random block ticks (growth, decay, etc.)
         PerformRandomBlockTick();
-        
-        // 4. Process scheduled block events
+
+        // 3. Process scheduled block events
         ProcessBlockEvents();
-        
-        // 5. Update tile entities
+
+        // 4. Update tile entities
         TileEntityTick();
-        
-        // 6. Update entities
+
+        // 5. Update entities
         EntityTick();
-        
-        // 7. Update world time and weather
+
+        // 6. Update world time and weather
         WorldTimeWeatherTick();
-        
-        // 8. Send chunk and entity updates to clients
-        ChunkEntityPacketDispatch(maxChunksPerTick);
-    }
-
-    void World::ChunkLoadUnload() {
-        if (!m_chunkProvider) {
-            return;
-        }
-
-        // Get player position from integrated server
-        int playerChunkX = 0;
-        int playerChunkZ = 0;
-
-        if (Server::g_integratedServer) {
-            auto playerChunk = Server::g_integratedServer->GetPlayerChunkPosition();
-            playerChunkX = playerChunk.x;
-            playerChunkZ = playerChunk.z;
-        }
-
-        // Async path: use terrain library's own async pipeline (non-blocking)
-        // Mirrors Minecraft's ServerChunkCache.tick() pattern:
-        //   1. Pump tasks (runDistanceManagerUpdates + pollTask loop)
-        //   2. Submit ALL needed chunks (just ticket + queue post, non-blocking)
-        //   3. Harvest ALL completed chunks (getChunkNow + convert + send)
-        if (Server::g_integratedServer &&
-            Server::g_integratedServer->GetConfig().enableAsyncChunkLoading) {
-
-            auto* generator = dynamic_cast<MyTerrainGenerator*>(m_chunkProvider->GetGenerator());
-            if (!generator) {
-                UpdateLoadedChunks(playerChunkX, playerChunkZ, m_renderDistance);
-                UnloadDistantChunks(playerChunkX, playerChunkZ, m_renderDistance + 2);
-                return;
-            }
-
-            // 1. Pump the terrain library's async pipeline (recursive pollTask loop)
-            generator->PumpAsyncTasks();
-
-            // 2. Submit ALL unloaded chunks — no cap, just ticket + queue posts
-            // Minecraft's runGenerationTasks() processes ALL pending tasks uncapped.
-            for (int dx = -m_renderDistance; dx <= m_renderDistance; ++dx) {
-                for (int dz = -m_renderDistance; dz <= m_renderDistance; ++dz) {
-                    Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
-
-                    if (m_chunkProvider->IsChunkLoaded(chunkPos)) continue;
-                    if (m_requestedChunks.count(chunkPos)) continue;
-
-                    if (generator->RequestChunkGeneration(chunkPos)) {
-                        m_requestedChunks.insert(chunkPos);
-                    }
-                }
-            }
-
-            // 3. Harvest ALL completed chunks — no cap
-            // Sort nearest-first so player sees nearby world first.
-            struct ReadyChunk {
-                Math::ChunkPos pos;
-                int distanceSq;
-            };
-            std::vector<ReadyChunk> readyChunks;
-
-            for (int dx = -m_renderDistance; dx <= m_renderDistance; ++dx) {
-                for (int dz = -m_renderDistance; dz <= m_renderDistance; ++dz) {
-                    Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
-                    if (!m_chunkProvider->IsChunkLoaded(chunkPos) &&
-                        generator->IsChunkReady(chunkPos)) {
-                        int distSq = dx * dx + dz * dz;
-                        readyChunks.push_back({chunkPos, distSq});
-                    }
-                }
-            }
-
-            std::sort(readyChunks.begin(), readyChunks.end(),
-                      [](const ReadyChunk& a, const ReadyChunk& b) {
-                          return a.distanceSq < b.distanceSq;
-                      });
-
-            int chunksDelivered = 0;
-            for (const auto& entry : readyChunks) {
-                auto gameChunk = generator->GetCompletedChunk(entry.pos);
-                if (gameChunk) {
-                    m_chunkProvider->StoreChunkInCache(gameChunk);
-                    Server::g_integratedServer->QueueChunkForSending(entry.pos);
-                    m_requestedChunks.erase(entry.pos);
-                    chunksDelivered++;
-                }
-            }
-
-            if (chunksDelivered > 0) {
-                Log::Debug("Async: %d chunks delivered this tick", chunksDelivered);
-            }
-
-            // Clean up requests for chunks that moved out of range
-            for (auto it = m_requestedChunks.begin(); it != m_requestedChunks.end(); ) {
-                int dx = it->x - playerChunkX;
-                int dz = it->z - playerChunkZ;
-                if (std::abs(dx) > m_renderDistance + 2 || std::abs(dz) > m_renderDistance + 2) {
-                    it = m_requestedChunks.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        } else {
-            // Sync fallback: load all chunks in a blocking loop
-            UpdateLoadedChunks(playerChunkX, playerChunkZ, m_renderDistance);
-        }
-
-        // Unload distant chunks (always non-blocking)
-        UnloadDistantChunks(playerChunkX, playerChunkZ, m_renderDistance + 2);
     }
 
     void World::ProcessBlockUpdates() {
@@ -773,183 +509,6 @@ namespace Game {
         // - Light level updates based on time
         
         // TODO: Implement time and weather system
-    }
-
-    void World::ChunkEntityPacketDispatch(int maxChunksPerTick) {
-        // Send chunk and entity updates to all connected clients
-        // This handles:
-        // - Chunk data packets for newly loaded chunks
-        // - Block change packets for modified blocks
-        // - Entity spawn/despawn packets
-        // - Entity movement/update packets
-        // - Tile entity update packets
-        
-        if (!m_chunkProvider) {
-            return;
-        }
-        
-        if (!Server::g_integratedServer) {
-            return;
-        }
-        
-        // When async chunk loading is enabled, ProcessAsyncChunkResults handles sending.
-        // Only use this sync scan-and-send path as a fallback.
-        if (Server::g_integratedServer->GetConfig().enableAsyncChunkLoading) {
-            return;
-        }
-
-        // Get player position to determine which chunks to send
-        auto playerChunk = Server::g_integratedServer->GetPlayerChunkPosition();
-        int playerChunkX = playerChunk.x;
-        int playerChunkZ = playerChunk.z;
-        
-        // Check if player moved significantly (more than render distance)
-        // If so, clear the sent chunks cache as we need to resend for new area
-        static Math::ChunkPos lastPlayerChunk{INT_MAX, INT_MAX};
-        if (lastPlayerChunk.x != INT_MAX) {
-            int dx = std::abs(playerChunkX - lastPlayerChunk.x);
-            int dz = std::abs(playerChunkZ - lastPlayerChunk.z);
-            if (dx > m_renderDistance || dz > m_renderDistance) {
-                Log::Debug("[World] Player moved significantly, clearing sent chunks cache");
-                m_sentChunks.clear();
-            }
-        }
-        lastPlayerChunk = Math::ChunkPos{playerChunkX, playerChunkZ};
-        
-        // Build list of chunks that need to be sent (loaded but not sent yet)
-        struct ChunkToSend {
-            Math::ChunkPos pos;
-            float distanceSq;
-        };
-        std::vector<ChunkToSend> chunksToSend;
-        
-        for (int dx = -m_renderDistance; dx <= m_renderDistance; ++dx) {
-            for (int dz = -m_renderDistance; dz <= m_renderDistance; ++dz) {
-                Math::ChunkPos chunkPos{playerChunkX + dx, playerChunkZ + dz};
-                
-                // Skip if already sent
-                if (m_sentChunks.find(chunkPos) != m_sentChunks.end()) {
-                    continue;
-                }
-                
-                // Skip if not loaded
-                if (!m_chunkProvider->IsChunkLoaded(chunkPos)) {
-                    continue;
-                }
-                
-                // Add to list with distance for priority sorting
-                float distSq = static_cast<float>(dx * dx + dz * dz);
-                chunksToSend.push_back({chunkPos, distSq});
-            }
-        }
-        
-        // Sort by distance (closest first)
-        std::sort(chunksToSend.begin(), chunksToSend.end(),
-                  [](const ChunkToSend& a, const ChunkToSend& b) {
-                      return a.distanceSq < b.distanceSq;
-                  });
-        
-        // Apply the chunk send limit
-        int chunksToSendThisTick = static_cast<int>(chunksToSend.size());
-        if (maxChunksPerTick > 0 && chunksToSendThisTick > maxChunksPerTick) {
-            chunksToSendThisTick = maxChunksPerTick;
-        }
-        
-        // Send chunks up to the limit
-        int chunksSent = 0;
-        for (int i = 0; i < chunksToSendThisTick; ++i) {
-            const auto& chunkToSend = chunksToSend[i];
-            auto chunk = m_chunkProvider->GetChunk(chunkToSend.pos);
-            
-            if (!chunk) {
-                continue;
-            }
-            
-            // Create ChunkDataS2CPacket
-            Network::ChunkDataS2CPacket packet;
-            packet.chunkX = chunkToSend.pos.x;
-            packet.chunkZ = chunkToSend.pos.z;
-            packet.groundUpContinuous = true;
-            packet.primaryBitmask = 0;
-            
-            // Build section data for non-empty sections
-            for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                const auto* section = chunk->GetSection(sectionY);
-                if (section) {
-                    // Check if section has any non-air blocks
-                    uint16_t nonAirCount = 0;
-                    for (size_t i = 0; i < section->blocks.size(); ++i) {
-                        if (section->blocks[i] != static_cast<uint16_t>(BlockID::Air)) {
-                            nonAirCount++;
-                        }
-                    }
-                    
-                    // Skip empty sections
-                    if (nonAirCount == 0) {
-                        continue;
-                    }
-                    
-                    // Set bit in bitmask for this section
-                    packet.primaryBitmask |= (1 << sectionY);
-                    
-                    // Create section data
-                    Network::ChunkDataS2CPacket::SectionData sectionData;
-                    sectionData.blockCount = nonAirCount;
-                    
-                    // For now, use direct block IDs (no palette)
-                    sectionData.bitsPerEntry = 16; // Direct block IDs
-                    
-                    // Pack block data (16x16x16 blocks)
-                    const size_t blocksPerSection = 16 * 16 * 16;
-                    const size_t blocksPerLong = 64 / 16; // 4 blocks per uint64_t
-                    sectionData.dataArray.resize((blocksPerSection + blocksPerLong - 1) / blocksPerLong);
-                    
-                    // Copy block data
-                    for (size_t i = 0; i < blocksPerSection; ++i) {
-                        uint16_t blockId = section->blocks[i];
-                        size_t longIndex = i / blocksPerLong;
-                        size_t bitOffset = (i % blocksPerLong) * 16;
-                        sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
-                    }
-                    
-                    packet.sections.push_back(std::move(sectionData));
-                }
-            }
-            
-            // Send packet via IntegratedServer
-            Server::g_integratedServer->SendChunkDataS2CPacket(std::move(packet));
-            
-            // Mark as sent
-            m_sentChunks.insert(chunkToSend.pos);
-            chunksSent++;
-        }
-        
-        if (chunksSent > 0) {
-            Log::Info("[World] Sent %d chunks to client (%.0f%% complete, %zu remaining)", 
-                      chunksSent, 
-                      (m_sentChunks.size() * 100.0f) / ((2 * m_renderDistance + 1) * (2 * m_renderDistance + 1)),
-                      chunksToSend.size() - chunksSent);
-        }
-        
-        // TODO: Implement entity spawn/despawn packets
-        // - Track entities entering/leaving player's view distance
-        // - Send EntitySpawn packets for new entities
-        // - Send EntityDestroy packets for entities leaving view
-        
-        // TODO: Implement entity movement/update packets
-        // - Track entity position changes
-        // - Send EntityMove packets for entities that have moved
-        // - Batch multiple entity movements into single packet if possible
-        
-        // TODO: Implement tile entity update packets
-        // - Track tile entities that have changed state
-        // - Send tile entity data packets (e.g., for chests, furnaces, etc.)
-        // - Only send updates for tile entities in loaded chunks
-        
-        // TODO: Implement block change packet batching
-        // - Block changes are already handled via ProcessBlockAction
-        // - But we could batch multiple changes in the same chunk
-        // - Use MultiBlockChangeS2CPacket for efficiency
     }
 
 } // namespace Game

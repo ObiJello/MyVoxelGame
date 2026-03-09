@@ -122,7 +122,7 @@ namespace Platform {
         int GetCloudRange() const { return GetInt("cloudRange", 128); }
         void SetCloudRange(int range) { SetInt("cloudRange", range); }
 
-        int GetRenderDistance() const { return GetInt("renderDistance", 32); }
+        int GetRenderDistance() const { return GetInt("renderDistance", 12); }
         void SetRenderDistance(int distance) { SetInt("renderDistance", distance); }
 
         int GetSimulationDistance() const { return GetInt("simulationDistance", 12); }

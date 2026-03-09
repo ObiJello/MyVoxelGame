@@ -20,7 +20,6 @@ namespace Server {
     PlayerSession::PlayerSession(uint32_t playerId, uint32_t connectionId)
         : m_playerId(playerId)
         , m_connectionId(connectionId)
-        , m_pendingAdd(32)  // 32 distance rings
     {
         m_lastTickTime = std::chrono::steady_clock::now();
         m_lastKeepAliveRx = m_lastTickTime;
@@ -54,17 +53,12 @@ namespace Server {
         ClearQueues();
         ClearDiffs();
 
-        // Compute initial watch set and populate m_watchSet
-        auto initialWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
-        for (const auto& chunk : initialWatch) {
-            m_watchSet.insert(chunk);
-            int priority = CalculateChunkPriority(chunk);
-            m_pendingAdd.Push(chunk, priority);
-        }
-
         // Set state to joining
         m_state = State::JOINING;
-        m_needsWatchUpdate = false; // Already computed above
+
+        // Let the first Tick() → UpdateWatchSet() compute the initial watch set.
+        // This ensures deltas flow through the normal path (ProcessSessionTick → ChunkWatchIndex).
+        m_needsWatchUpdate = true;
         
         Log::Info("PlayerSession: Initialized session for player %u in dimension %d",
                  m_playerId, dimensionId);
@@ -108,7 +102,7 @@ namespace Server {
         }
         
         // Transition to playing state after initial join
-        if (m_state == State::JOINING && !m_pendingAdd.Empty()) {
+        if (m_state == State::JOINING && (!m_pendingChunkLoads.empty() || !m_pendingChunksToSend.empty())) {
             m_state = State::PLAYING;
         }
         
@@ -278,14 +272,13 @@ namespace Server {
 
         // Apply removals first
         for (const auto& chunk : toRemove) {
-            m_pendingRemove.push_back(chunk);
+            DropChunk(chunk);
             m_watchSet.erase(chunk);
         }
 
-        // Queue additions with priority
+        // Queue additions — add to pending loads (IntegratedServer will move to ready-to-send when loaded)
         for (const auto& chunk : toAdd) {
-            int priority = CalculateChunkPriority(chunk);
-            m_pendingAdd.Push(chunk, priority);
+            m_pendingChunkLoads.insert(chunk);
             m_watchSet.insert(chunk);
         }
 
@@ -297,7 +290,7 @@ namespace Server {
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);
             m_stats.chunksInWatch = m_watchSet.size();
-            m_stats.chunksPending = m_pendingAdd.Size();
+            m_stats.chunksPending = m_pendingChunkLoads.size() + m_pendingChunksToSend.size();
         }
     }
 
@@ -309,55 +302,150 @@ namespace Server {
         return m_sentChunks.count(chunk) > 0;
     }
 
-    // === CHUNK STREAMING ===
+    // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
-    void PlayerSession::QueueChunkSend(Game::Math::ChunkPos chunk, int priority) {
-        if (HasSentChunk(chunk) || m_inflightChunks.count(chunk) > 0) {
-            return; // Already sent or in flight
-        }
-        
-        m_pendingAdd.Push(chunk, priority);
+    void PlayerSession::MarkChunkReadyToSend(Game::Math::ChunkPos pos) {
+        m_pendingChunkLoads.erase(pos);    // No longer waiting for load
+        m_pendingChunksToSend.insert(pos); // Ready to send to client
     }
 
-    void PlayerSession::ProcessChunkSends(ChunkStatusManager* statusMgr, SendScheduler* scheduler) {
-        // Process removals first (up to N per tick)
-        size_t maxRemovals = 16;  // Increased from 10 for faster unloading
-        while (!m_pendingRemove.empty() && maxRemovals > 0) {
-            auto chunk = m_pendingRemove.back();
-            m_pendingRemove.pop_back();
-            
-            SendChunkUnload(chunk);
-            maxRemovals--;
-        }
-        
-        // Process additions within budget
-        while (m_chunksOutThisTick < static_cast<size_t>(m_config.maxChunksPerTick) &&
-               m_bytesOutThisTick < static_cast<size_t>(m_config.maxBytesPerTick) &&
-               !m_pendingAdd.Empty()) {
-            
-            Game::Math::ChunkPos chunk;
-            if (!m_pendingAdd.Pop(chunk)) {
-                break;
+    void PlayerSession::DropChunk(Game::Math::ChunkPos pos) {
+        m_pendingChunkLoads.erase(pos);
+        if (!m_pendingChunksToSend.erase(pos)) {
+            // Wasn't pending to send — if already sent, send unload to client
+            if (m_sentChunks.erase(pos)) {
+                SendChunkUnload(pos);
             }
-            
-            // Skip if already sent or in flight
-            if (HasSentChunk(chunk) || m_inflightChunks.count(chunk) > 0) {
-                continue;
-            }
-            
-            // TODO: Check chunk status with ChunkStatusManager
-            // For now, assume chunk is ready
-            
-            // TODO: Build and send chunk data packet
-            // This would involve getting chunk data, building packet, and sending via scheduler
-            
-            // Mark as in flight
-            m_inflightChunks.insert(chunk);
-            m_chunksOutThisTick++;
-            
-            // TODO: Track bytes sent
-            m_bytesOutThisTick += 65536; // Estimate for now
         }
+    }
+
+    void PlayerSession::SendNextChunks(Game::World* world) {
+        if (!world || !m_connection) return;
+        if (m_pendingChunksToSend.empty()) return;
+
+        // Back-pressure: don't send if too many unacknowledged batches
+        if (m_unackedBatches >= m_maxUnackedBatches) return;
+
+        // Accumulate fractional budget
+        float maxBatchSize = std::max(1.0f, m_desiredChunksPerTick);
+        m_batchQuota = std::min(m_batchQuota + m_desiredChunksPerTick, maxBatchSize);
+
+        if (m_batchQuota < 1.0f) return;
+
+        int maxBatch = static_cast<int>(m_batchQuota);
+
+        // Collect loaded chunks, sorted by distance from anchor
+        struct ChunkDist {
+            Game::Math::ChunkPos pos;
+            std::shared_ptr<Game::Chunk> chunk;
+            int distSq;
+        };
+        std::vector<ChunkDist> candidates;
+        candidates.reserve(m_pendingChunksToSend.size());
+
+        for (const auto& pos : m_pendingChunksToSend) {
+            auto chunk = world->GetChunk(pos.x, pos.z);
+            if (!chunk) continue;  // Not loaded yet — skip, will be picked up later
+
+            int dx = pos.x - m_anchorChunk.x;
+            int dz = pos.z - m_anchorChunk.z;
+            candidates.push_back({pos, chunk, dx * dx + dz * dz});
+        }
+
+        if (candidates.empty()) return;
+
+        size_t toSend = std::min(static_cast<size_t>(maxBatch), candidates.size());
+        if (candidates.size() > toSend) {
+            std::partial_sort(candidates.begin(), candidates.begin() + toSend, candidates.end(),
+                              [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+        } else {
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+        }
+
+        // Send ChunkBatchStartS2C
+        {
+            auto data = Network::Serialization::Serialize(Network::ChunkBatchStartS2CPacket{});
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchStartS2C), data);
+        }
+
+        // Send each chunk
+        size_t sentCount = 0;
+        for (size_t i = 0; i < toSend; ++i) {
+            const auto& cd = candidates[i];
+
+            // Build ChunkDataS2CPacket
+            Network::ChunkDataS2CPacket packet;
+            packet.chunkX = cd.pos.x;
+            packet.chunkZ = cd.pos.z;
+            packet.groundUpContinuous = true;
+            packet.primaryBitmask = 0;
+
+            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                const auto* section = cd.chunk->GetSection(sectionY);
+                if (!section) continue;
+
+                uint16_t nonAirCount = 0;
+                for (size_t j = 0; j < section->blocks.size(); ++j) {
+                    if (section->blocks[j] != static_cast<uint16_t>(Game::BlockID::Air)) {
+                        nonAirCount++;
+                    }
+                }
+                if (nonAirCount == 0) continue;
+
+                packet.primaryBitmask |= (1 << sectionY);
+
+                Network::ChunkDataS2CPacket::SectionData sectionData;
+                sectionData.blockCount = nonAirCount;
+                sectionData.bitsPerEntry = 16; // Direct block IDs
+
+                const size_t blocksPerSection = 16 * 16 * 16;
+                const size_t blocksPerLong = 64 / 16; // 4 blocks per uint64_t
+                sectionData.dataArray.resize((blocksPerSection + blocksPerLong - 1) / blocksPerLong, 0);
+
+                for (size_t j = 0; j < blocksPerSection; ++j) {
+                    uint16_t blockId = section->blocks[j];
+                    size_t longIndex = j / blocksPerLong;
+                    size_t bitOffset = (j % blocksPerLong) * 16;
+                    sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
+                }
+
+                packet.sections.push_back(std::move(sectionData));
+            }
+
+            auto data = Network::Serialization::Serialize(packet);
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
+
+            // Move from pending to sent
+            m_pendingChunksToSend.erase(cd.pos);
+            m_sentChunks.insert(cd.pos);
+            sentCount++;
+
+            Log::Debug("Sent chunk (%d, %d) to player %u", cd.pos.x, cd.pos.z, m_playerId);
+        }
+
+        // Send ChunkBatchFinishedS2C
+        {
+            Network::ChunkBatchFinishedS2CPacket finishPacket(static_cast<int32_t>(sentCount));
+            auto data = Network::Serialization::Serialize(finishPacket);
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchFinishedS2C), data);
+        }
+
+        m_batchQuota -= static_cast<float>(sentCount);
+        m_unackedBatches++;
+
+        Log::Debug("Sent chunk batch: %zu chunks (quota=%.1f, unacked=%d, rate=%.1f) to player %u",
+                  sentCount, m_batchQuota, m_unackedBatches, m_desiredChunksPerTick, m_playerId);
+    }
+
+    void PlayerSession::OnChunkBatchAck(float desiredRate) {
+        m_unackedBatches--;
+        m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, 64.0f);
+        if (m_unackedBatches == 0) m_batchQuota = 1.0f;
+        m_maxUnackedBatches = 10;
+
+        Log::Debug("Chunk batch ack: desiredRate=%.2f, unacked=%d, maxUnacked=%d (player %u)",
+                  m_desiredChunksPerTick, m_unackedBatches, m_maxUnackedBatches, m_playerId);
     }
 
     void PlayerSession::SendChunkUnload(Game::Math::ChunkPos chunk) {
@@ -373,8 +461,8 @@ namespace Server {
         // Remove from sets
         m_watchSet.erase(chunk);
         m_sentChunks.erase(chunk);
-        m_inflightChunks.erase(chunk);
-        
+        m_pendingChunksToSend.erase(chunk);
+
         // Clear any pending diffs for this chunk
         m_pendingDiffs.erase(chunk);
         
@@ -851,10 +939,9 @@ namespace Server {
     }
     
     void PlayerSession::OnChunkSendComplete(Game::Math::ChunkPos chunk) {
-        // Move from inflight to sent
-        m_inflightChunks.erase(chunk);
+        // Mark as sent
         m_sentChunks.insert(chunk);
-        
+
         // Process any buffered diffs for this chunk
         auto diffIt = m_pendingDiffs.find(chunk);
         if (diffIt != m_pendingDiffs.end()) {
@@ -864,11 +951,10 @@ namespace Server {
                 }
             }
         }
-        
+
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);
             m_stats.chunksSent++;
-            m_stats.chunksInFlight = m_inflightChunks.size();
         }
     }
 
@@ -876,7 +962,8 @@ namespace Server {
         // Ensure chunk is removed from all sets
         m_watchSet.erase(chunk);
         m_sentChunks.erase(chunk);
-        m_inflightChunks.erase(chunk);
+        m_pendingChunkLoads.erase(chunk);
+        m_pendingChunksToSend.erase(chunk);
     }
 
     // === STATISTICS ===
@@ -954,13 +1041,6 @@ namespace Server {
         }
     }
 
-    int PlayerSession::CalculateChunkPriority(Game::Math::ChunkPos chunk) const {
-        // Calculate Chebyshev distance from anchor
-        int dx = std::abs(chunk.x - m_anchorChunk.x);
-        int dz = std::abs(chunk.z - m_anchorChunk.z);
-        return std::max(dx, dz);
-    }
-
     void PlayerSession::CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                            uint8_t localX, uint8_t localY, uint8_t localZ,
                                            Game::BlockID blockId) {
@@ -981,13 +1061,13 @@ namespace Server {
     void PlayerSession::ClearWatchSets() {
         m_watchSet.clear();
         m_sentChunks.clear();
-        m_inflightChunks.clear();
+        m_pendingChunkLoads.clear();
     }
 
     void PlayerSession::ClearQueues() {
-        m_pendingAdd.Clear();
-        m_pendingRemove.clear();
-        
+        m_pendingChunkLoads.clear();
+        m_pendingChunksToSend.clear();
+
         // Clear diff queue
         while (!m_diffQueue.empty()) {
             m_diffQueue.pop();

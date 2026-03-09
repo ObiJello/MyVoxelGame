@@ -198,12 +198,12 @@ namespace Server {
         // Get spawn position
         glm::vec3 spawnPos = GetPlayerSpawn(playerId);
         
-        // Initialize session — view distance must match render distance
-        // so the session's watch set covers the same area as World::ChunkLoadUnload()
-        int renderDistance = Platform::g_gameSettings.GetRenderDistance();
+        // Initialize at minimum view distance (2), like Minecraft's ServerPlayer default.
+        // The client sends its actual render distance via ClientConfigC2S right after login,
+        // which calls OnClientSettingsReceived → SetViewDistance to expand to the real value.
         PlayerSession::Config sessionConfig;
-        sessionConfig.simulationDistance = renderDistance;
-        sessionConfig.viewDistance = renderDistance;
+        sessionConfig.simulationDistance = m_config.maxViewDistance;
+        sessionConfig.viewDistance = 2;
         sessionConfig.maxChunksPerTick = m_config.maxChunksPerPlayerPerTick;
         sessionConfig.maxBytesPerTick = m_config.maxBytesPerPlayerPerTick;
         sessionConfig.maxDiffBytesPerTick = m_config.maxDiffBytesPerPlayerPerTick;
@@ -298,9 +298,9 @@ namespace Server {
             processed++;
         }
         
-        // Process chunk streaming
-        ProcessChunkStreaming();
-        
+        // NOTE: Chunk sending is now driven by IntegratedServer calling session->SendNextChunks()
+        // per tick, matching Minecraft's tickChildren "send chunks" phase.
+
         // Process block diffs
         ProcessBlockDiffs();
         
@@ -309,36 +309,9 @@ namespace Server {
     }
 
     void PlayerSessionManager::ProcessChunkStreaming() {
-        // Global budget tracking
-        size_t globalChunksSent = 0;
-        size_t globalBytesSent = 0;
-        
-        auto sessions = GetAllSessions();
-        
-        for (const auto& session : sessions) {
-            // Check global budgets
-            if (globalChunksSent >= static_cast<size_t>(m_config.maxGlobalChunksPerTick) ||
-                globalBytesSent >= m_config.maxGlobalBytesPerTick) {
-                break;
-            }
-            
-            // Process chunk sends for this session
-            session->ProcessChunkSends(m_statusManager, m_sendScheduler);
-            
-            // Update global counters
-            auto stats = session->GetStats();
-            globalChunksSent += stats.chunksInWatch;  // TODO: Get actual sent count
-            globalBytesSent += stats.bytesOutThisTick;
-        }
-        
-        // Update stats
-        {
-            std::lock_guard<std::mutex> lock(m_statsMutex);
-            m_stats.chunksPerTick = globalChunksSent;
-            m_stats.bytesPerTick = globalBytesSent;
-            m_stats.totalChunksStreamed += globalChunksSent;
-            m_stats.totalBytesStreamed += globalBytesSent;
-        }
+        // Chunk sending is now driven by IntegratedServer calling session->SendNextChunks()
+        // directly per tick, matching Minecraft's tickChildren "send chunks" phase.
+        // This method is kept for API compatibility but does nothing.
     }
 
     void PlayerSessionManager::ProcessBlockDiffs() {

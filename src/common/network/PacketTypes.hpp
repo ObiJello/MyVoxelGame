@@ -90,6 +90,13 @@ namespace Network {
         explicit ChunkBatchFinishedS2CPacket(int32_t size) : batchSize(size) {}
     };
 
+    // Server tells client the effective view distance (like Minecraft's ClientboundSetChunkCacheRadiusPacket)
+    struct SetChunkCacheRadiusS2CPacket {
+        int32_t viewDistance = 8;
+        SetChunkCacheRadiusS2CPacket() = default;
+        explicit SetChunkCacheRadiusS2CPacket(int32_t dist) : viewDistance(dist) {}
+    };
+
     // Client acknowledges chunk batch with desired send rate
     struct ChunkBatchAckC2SPacket {
         float desiredChunksPerTick = 9.0f;
@@ -773,6 +780,20 @@ namespace Network {
             Network::PacketReader reader(data);
             ChunkBatchFinishedS2CPacket packet;
             packet.batchSize = reader.ReadInt();
+            return packet;
+        }
+
+        // ---- SetChunkCacheRadiusS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const SetChunkCacheRadiusS2CPacket& packet) {
+            Network::PacketBuffer buffer;
+            buffer.WriteVarInt(packet.viewDistance);
+            return buffer.GetData();
+        }
+
+        inline SetChunkCacheRadiusS2CPacket DeserializeSetChunkCacheRadiusS2C(const std::vector<uint8_t>& data) {
+            Network::PacketReader reader(data);
+            SetChunkCacheRadiusS2CPacket packet;
+            packet.viewDistance = reader.ReadVarInt();
             return packet;
         }
 

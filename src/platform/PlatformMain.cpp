@@ -36,6 +36,7 @@
 
 // Include new Minecraft-style architecture
 #include "client/network/NetworkClient.hpp"
+#include "server/session/PlayerSession.hpp"
 #include "client/network/ClientConnection.hpp"
 #include "client/network/NetworkIOService.hpp"
 #include "server/IntegratedServer.hpp"
@@ -753,6 +754,19 @@ namespace PlatformMain {
             Render::PerformClientGPUUploads();
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
 
+            // Capture per-frame mesh stats BEFORE they get reset
+            int lastFrameMeshUploads = 0;
+            size_t lastFrameMeshPending = 0;
+            size_t lastFrameMeshActive = 0;
+            if (Render::g_clientMeshManager) {
+                const auto& meshStats = Render::g_clientMeshManager->GetStats();
+                lastFrameMeshUploads = meshStats.meshUploadsThisFrame;
+            }
+            if (Threading::g_clientWorkerPool) {
+                lastFrameMeshPending = Threading::g_clientWorkerPool->GetPendingJobCount();
+                lastFrameMeshActive = Threading::g_clientWorkerPool->GetActiveJobCount();
+            }
+
             // 8. Update texture animations
             PROFILE_TIMER_START(texanim);
             if (Render::g_textureAnimator) {
@@ -788,7 +802,11 @@ namespace PlatformMain {
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
-            float farPlane = static_cast<float>(Platform::g_gameSettings.GetRenderDistance()) * 16.0f * 4.0f;
+            int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();
+            if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+                effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
+            }
+            float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
             glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
@@ -849,6 +867,28 @@ namespace PlatformMain {
                     srvSnap.serverJobsCancelled = sw.jobsCancelled.load(std::memory_order_relaxed);
                     srvSnap.serverJobsFailed = sw.jobsFailed.load(std::memory_order_relaxed);
                 }
+
+                // Chunk loading metrics (still on IntegratedServer)
+                srvSnap.chunksPendingLoad = Server::g_integratedServer->GetPendingChunkLoadCount();
+
+                // ChunkProvider loaded count
+                auto* srvWorld = Server::g_integratedServer->GetWorld();
+                if (srvWorld && srvWorld->GetChunkProvider()) {
+                    srvSnap.chunkProviderLoaded = srvWorld->GetChunkProvider()->GetLoadedChunkCount();
+                }
+
+                // Player session metrics (chunk sender now lives on session)
+                auto session = Server::g_integratedServer->GetPlayerSession();
+                if (session) {
+                    auto sessionStats = session->GetStats();
+                    srvSnap.sessionWatchSetSize = sessionStats.chunksInWatch;
+                    srvSnap.sessionSentChunks = sessionStats.chunksSent;
+                    srvSnap.sessionViewDistance = session->GetViewDistance();
+                    srvSnap.chunkSenderPending = session->GetPendingChunksToSendCount();
+                    srvSnap.chunkSendRate = session->GetDesiredChunksPerTick();
+                    srvSnap.chunkSenderUnacked = session->GetUnackedBatches();
+                }
+
                 Debug::DebugSystem::SetServerSnapshot(srvSnap);
 
                 Debug::NetworkMetricsSnapshot netSnap;
@@ -868,6 +908,84 @@ namespace PlatformMain {
                     }
                 }
                 Debug::DebugSystem::SetNetworkSnapshot(netSnap);
+
+                // Chunk Pipeline snapshot
+                Debug::ChunkPipelineSnapshot pipeSnap;
+
+                // View Distance
+                pipeSnap.viewDistance = Platform::g_gameSettings.GetRenderDistance();
+                if (Client::g_networkClient)
+                    pipeSnap.serverViewDistance = Client::g_networkClient->GetServerViewDistance();
+
+                // Session data
+                auto pipeSession = Server::g_integratedServer ? Server::g_integratedServer->GetPlayerSession() : nullptr;
+                if (pipeSession) {
+                    pipeSnap.watchSetSize = pipeSession->GetStats().chunksInWatch;
+                    pipeSnap.sessionPendingLoads = pipeSession->GetPendingChunkLoadsCount();
+                    pipeSnap.readyToSend = pipeSession->GetPendingChunksToSendCount();
+                    pipeSnap.sentToClient = pipeSession->GetSentChunkCount();
+                    pipeSnap.sendRate = pipeSession->GetDesiredChunksPerTick();
+                    pipeSnap.batchQuota = pipeSession->GetBatchQuota();
+                    pipeSnap.unackedBatches = pipeSession->GetUnackedBatches();
+                    pipeSnap.maxUnackedBatches = pipeSession->GetMaxUnackedBatches();
+                    pipeSnap.viewDistance = pipeSession->GetViewDistance();
+                }
+
+                // Server worker pool
+                if (Threading::g_serverWorkerPool) {
+                    pipeSnap.workerThreads = Threading::g_serverWorkerPool->GetWorkerCount();
+                    pipeSnap.workerPendingJobs = Threading::g_serverWorkerPool->GetPendingJobCount();
+                    pipeSnap.workerActiveJobs = Threading::g_serverWorkerPool->GetActiveJobCount();
+                    const auto& swStats = Threading::g_serverWorkerPool->GetStats();
+                    pipeSnap.chunksGenerated = swStats.chunksGenerated.load(std::memory_order_relaxed);
+                    pipeSnap.chunksLoadedFromDisk = swStats.chunksLoaded.load(std::memory_order_relaxed);
+                    pipeSnap.jobsFailed = swStats.jobsFailed.load(std::memory_order_relaxed);
+                }
+                if (Server::g_integratedServer)
+                    pipeSnap.serverPendingLoads = Server::g_integratedServer->GetPendingChunkLoadCount();
+
+                // Provider cache
+                auto* pipeWorld = Server::g_integratedServer ? Server::g_integratedServer->GetWorld() : nullptr;
+                if (pipeWorld && pipeWorld->GetChunkProvider()) {
+                    pipeSnap.providerLoaded = pipeWorld->GetChunkProvider()->GetLoadedChunkCount();
+                    auto cacheStats = pipeWorld->GetChunkProvider()->GetCacheStats();
+                    pipeSnap.providerMaxSize = cacheStats.maxSize;
+                    pipeSnap.providerEvictions = cacheStats.totalEvictions;
+                }
+
+                // Client receive
+                if (networkClient) {
+                    if (auto handler = networkClient->GetPacketHandler()) {
+                        auto hs = handler->getStats();
+                        pipeSnap.clientChunksReceived = hs.chunksReceived;
+                        pipeSnap.clientChunksUnloaded = hs.chunksUnloaded;
+                        pipeSnap.clientDesiredRate = handler->GetDesiredChunksPerTick();
+                        pipeSnap.clientAvgNanosPerChunk = handler->GetAvgNanosPerChunk();
+                    }
+                }
+
+                // Client mesh
+                if (Client::g_clientChunkManager)
+                    pipeSnap.clientChunkCount = Client::g_clientChunkManager->GetLoadedChunkCount();
+                if (Render::g_clientMeshManager) {
+                    const auto& meshStats = Render::g_clientMeshManager->GetStats();
+                    pipeSnap.meshBuildsCompleted = meshStats.meshBuildsCompleted.load(std::memory_order_relaxed);
+                    pipeSnap.gpuActiveSections = Render::g_clientMeshManager->GetActiveSectionCount();
+                }
+                // Use values captured BEFORE reset (see step 7 above)
+                pipeSnap.meshPendingJobs = lastFrameMeshPending;
+                pipeSnap.meshActiveJobs = lastFrameMeshActive;
+                pipeSnap.meshUploadsThisFrame = lastFrameMeshUploads;
+
+                // Rendering (from ChunkRenderer stats and metrics)
+                if (auto* renderStats = Render::GetChunkRendererStats()) {
+                    pipeSnap.sectionsRendered = renderStats->sectionsRendered;
+                    pipeSnap.sectionsCulled = renderStats->sectionsSkipped;
+                    pipeSnap.totalDrawCalls = renderStats->totalDrawCalls;
+                    pipeSnap.renderTimeMs = renderStats->renderTimeMs;
+                }
+
+                Debug::DebugSystem::SetChunkPipelineSnapshot(pipeSnap);
             }
 
             Debug::DebugSystem::RenderDebugUI(
@@ -877,6 +995,27 @@ namespace PlatformMain {
 
             Debug::DebugSystem::EndFrame();
             PROFILE_TIMER_END(debugui, metrics.debugUITime);
+
+            // Handle render distance change from debug UI
+            if (Debug::DebugSystem::ConsumeRenderDistanceChanged()) {
+                int newDist = Platform::g_gameSettings.GetRenderDistance();
+                Log::Info("Render distance changed to %d", newDist);
+
+                // Resend client settings to server (Minecraft-style broadcastOptions)
+                if (networkClient) {
+                    auto conn = networkClient->GetConnection();
+                    if (conn) {
+                        conn->SendClientSettings(
+                            newDist,
+                            Platform::g_gameSettings.GetVSync(),
+                            Platform::g_gameSettings.GetMouseSensitivity()
+                        );
+                    }
+                }
+
+                // Persist to disk
+                Platform::g_gameSettings.Save();
+            }
 
             // 11. Swap buffers (includes VSync wait)
             PROFILE_TIMER_START(vsync);

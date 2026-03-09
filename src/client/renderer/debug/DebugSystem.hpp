@@ -101,6 +101,18 @@ namespace Debug {
         size_t serverJobsCompleted = 0;
         size_t serverJobsCancelled = 0;
         size_t serverJobsFailed = 0;
+
+        // Chunk streaming
+        size_t chunkProviderLoaded = 0;
+        size_t chunkSenderPending = 0;
+        size_t chunksPendingLoad = 0;
+        float chunkSendRate = 9.0f;
+        int chunkSenderUnacked = 0;
+
+        // Player session
+        size_t sessionWatchSetSize = 0;
+        size_t sessionSentChunks = 0;
+        int sessionViewDistance = 0;
     };
 
     struct NetworkMetricsSnapshot {
@@ -112,6 +124,57 @@ namespace Debug {
         size_t incomingQueueSize = 0;
         size_t droppedPacketCount = 0;
         float connectionUptimeSec = 0.0f;
+    };
+
+    struct ChunkPipelineSnapshot {
+        // View Distance
+        int viewDistance = 0;
+        int serverViewDistance = 0;
+        size_t watchSetSize = 0;
+
+        // Generation Queue (server workers)
+        size_t sessionPendingLoads = 0;    // Chunks waiting for generation
+        size_t serverPendingLoads = 0;     // Submitted to worker pool
+        size_t workerThreads = 0;
+        size_t workerPendingJobs = 0;
+        size_t workerActiveJobs = 0;
+        size_t chunksGenerated = 0;
+        size_t chunksLoadedFromDisk = 0;
+        size_t jobsFailed = 0;
+
+        // Provider Cache
+        size_t providerLoaded = 0;
+        size_t providerMaxSize = 0;
+        size_t providerEvictions = 0;
+
+        // Send Queue (per-player chunk sender)
+        size_t readyToSend = 0;            // m_pendingChunksToSend
+        size_t sentToClient = 0;           // m_sentChunks
+        float sendRate = 0.0f;             // desiredChunksPerTick
+        float batchQuota = 0.0f;
+        int unackedBatches = 0;
+        int maxUnackedBatches = 0;
+
+        // Client Receive
+        uint64_t clientChunksReceived = 0;
+        uint64_t clientChunksUnloaded = 0;
+        float clientDesiredRate = 0.0f;    // What client asks server
+        float clientAvgNanosPerChunk = 0.0f;
+
+        // Client Mesh Pipeline
+        size_t clientChunkCount = 0;
+        size_t meshBuildsScheduled = 0;
+        size_t meshBuildsCompleted = 0;
+        size_t meshPendingJobs = 0;
+        size_t meshActiveJobs = 0;
+        size_t gpuActiveSections = 0;
+        int meshUploadsThisFrame = 0;
+
+        // Rendering
+        int sectionsRendered = 0;
+        int sectionsCulled = 0;
+        int totalDrawCalls = 0;
+        float renderTimeMs = 0.0f;
     };
 
     // ========================================================================
@@ -151,12 +214,13 @@ namespace Debug {
         bool serverNetwork = false;
         bool clientSystems = false;
         bool memory = false;
-        bool player = true;
-        bool renderControls = true;
+        bool player = false;
+        bool renderControls = false;
         bool chunkViz = false;
         bool textureAtlas = false;
         bool logConsole = false;
         bool controls = false;
+        bool chunkPipeline = false;
     };
 
     // ========================================================================
@@ -185,6 +249,7 @@ namespace Debug {
         // Call from PlatformMain to populate cross-thread metrics before RenderDebugUI
         static void SetServerSnapshot(const ServerMetricsSnapshot& snap);
         static void SetNetworkSnapshot(const NetworkMetricsSnapshot& snap);
+        static void SetChunkPipelineSnapshot(const ChunkPipelineSnapshot& snap);
 
     private:
         // Style
@@ -212,6 +277,7 @@ namespace Debug {
         static void DrawWorldDebug();
         static void DrawLogConsolePanel();
         static void DrawControlsPanel(bool cursorEnabled, const Render::Camera& camera);
+        static void DrawChunkPipelinePanel();
 
         // Helpers
         static bool IsChunkInFrustum(const Frustum& frustum, Game::Math::ChunkPos chunkPos);
@@ -223,7 +289,13 @@ namespace Debug {
         static LogBuffer s_logBuffer;
         static ServerMetricsSnapshot s_serverSnap;
         static NetworkMetricsSnapshot s_netSnap;
+        static ChunkPipelineSnapshot s_pipelineSnap;
         static bool s_debugEnabled;
+        static bool s_renderDistanceChanged;
+
+    public:
+        // Returns true once if render distance was changed via debug UI, then resets
+        static bool ConsumeRenderDistanceChanged();
     };
 
 } // namespace Debug

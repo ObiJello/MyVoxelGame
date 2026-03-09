@@ -25,20 +25,14 @@ namespace Core {
         
         enum class ReservedThread {
             RENDER = 1,          // Client render thread
-            SERVER = 1,          // Server tick thread  
-            IO_CLIENT = 1,       // Client I/O network thread
-            IO_SERVER = 1,       // Server I/O network thread
-            STORAGE = 1,         // Future: Storage/Region I/O thread
-            COMPRESSION = 1      // Future: Net payload compression thread
+            SERVER = 1,          // Server tick thread
+            IO = 1,              // Network I/O thread (shared client+server, mostly idle)
         };
-        
-        static constexpr size_t TOTAL_RESERVED = 
+
+        static constexpr size_t TOTAL_RESERVED =
             static_cast<size_t>(ReservedThread::RENDER) +
             static_cast<size_t>(ReservedThread::SERVER) +
-            static_cast<size_t>(ReservedThread::IO_CLIENT) +
-            static_cast<size_t>(ReservedThread::IO_SERVER) +
-            static_cast<size_t>(ReservedThread::STORAGE) +
-            static_cast<size_t>(ReservedThread::COMPRESSION);
+            static_cast<size_t>(ReservedThread::IO);
         
         // Get optimal thread allocation based on system capabilities
         static ThreadAllocation GetOptimalAllocation();

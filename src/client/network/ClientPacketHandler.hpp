@@ -42,6 +42,7 @@ namespace Client {
         void onChunkBatchStart() override { handleChunkBatchStart(); }
         void onChunkBatchFinished(int batchSize) override { handleChunkBatchFinished(batchSize); }
         void onHotbarSyncS2C(const Network::HotbarSyncS2CPacket& packet) override { handleHotbarSync(packet); }
+        void onSetChunkCacheRadiusS2C(int viewDistance) override { handleSetChunkCacheRadius(viewDistance); }
 
         // ========================================================================
         // PACKET HANDLERS (called via IPacket::apply on main thread)
@@ -82,6 +83,9 @@ namespace Client {
         // Inventory sync
         void handleHotbarSync(const Network::HotbarSyncS2CPacket& packet);
 
+        // View distance
+        void handleSetChunkCacheRadius(int viewDistance);
+
         // ========================================================================
         // STATISTICS
         // ========================================================================
@@ -101,6 +105,10 @@ namespace Client {
         
         const HandlerStats& getStats() const { return m_stats; }
         void resetStats() { m_stats.reset(); }
+
+        // Chunk batch rate getters for pipeline debug panel
+        float GetDesiredChunksPerTick() const { return m_batchCalculator.getDesiredChunksPerTick(); }
+        float GetAvgNanosPerChunk() const { return static_cast<float>(m_batchCalculator.aggregatedNanosPerChunk); }
 
     private:
         HandlerStats m_stats;

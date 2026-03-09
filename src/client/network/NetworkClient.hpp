@@ -80,6 +80,10 @@ namespace Client {
         const std::string& GetServerHost() const { return m_serverHost; }
         uint16_t GetServerPort() const { return m_serverPort; }
         
+        // Server-sent view distance (effective render distance capped by server)
+        void SetServerViewDistance(int distance) { m_serverViewDistance.store(distance); }
+        int GetServerViewDistance() const { return m_serverViewDistance.load(); }
+
         // Get connection state
         enum class ClientState {
             IDLE,
@@ -152,9 +156,12 @@ namespace Client {
         OnPacketCallback m_onPacket;
         OnErrorCallback m_onError;
         
+        // Server-sent view distance (-1 = not yet received)
+        std::atomic<int> m_serverViewDistance{-1};
+
         // Statistics
         ClientStats m_stats;
-        
+
         // Packet handler for main thread processing
         std::shared_ptr<ClientPacketHandler> m_packetHandler;
     };

@@ -4,6 +4,7 @@
 #include "common/core/Log.hpp"
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
 #include "../world/ClientChunkManager.hpp"
+#include "platform/GameDirectory.hpp"
 
 namespace Client {
 
@@ -175,8 +176,12 @@ namespace Client {
         m_loggedIn = true;
         m_phase = ConnectionPhase::PLAY;
         
-        // Send client settings
-        SendClientSettings(8, true, 1.0f);
+        // Send client settings with actual render distance from game settings
+        SendClientSettings(
+            Platform::g_gameSettings.GetRenderDistance(),
+            Platform::g_gameSettings.GetVSync(),
+            Platform::g_gameSettings.GetMouseSensitivity()
+        );
     }
 
     void ClientConnection::HandleDisconnect(const std::vector<uint8_t>& payload) {
@@ -304,6 +309,11 @@ namespace Client {
             case PacketId::HotbarSyncS2C: {
                 auto data = Serialization::DeserializeHotbarSyncS2C(payload);
                 return std::make_unique<HotbarSyncS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::SetChunkCacheRadiusS2C: {
+                auto data = Serialization::DeserializeSetChunkCacheRadiusS2C(payload);
+                return std::make_unique<SetChunkCacheRadiusS2CPacketImpl>(data.viewDistance);
             }
 
             default:

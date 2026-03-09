@@ -562,11 +562,21 @@ namespace Server {
     }
 
     void ServerConnection::HandleClientSettings(const std::vector<uint8_t>& payload) {
-        Log::Info("[Server#%u] RECEIVED ClientConfigC2S (ID: 0x%02X)",
-                  GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ClientConfigC2S));
-        
-        // Parse client settings (render distance, etc.)
-        // This would update per-player settings
+        Network::PacketReader reader(payload);
+        int renderDistance = reader.ReadVarInt();
+        bool vsync = reader.ReadByte() != 0;
+        float mouseSensitivity = reader.ReadFloat();
+
+        // Clamp to valid range
+        renderDistance = std::clamp(renderDistance, 2, 32);
+
+        Log::Info("[Server#%u] Client settings: renderDistance=%d, vsync=%s, sensitivity=%.2f",
+                  GetConnectionId(), renderDistance, vsync ? "true" : "false", mouseSensitivity);
+
+        // Forward to IntegratedServer for per-player view distance update
+        if (Server::g_integratedServer) {
+            Server::g_integratedServer->OnClientSettingsReceived(GetConnectionId(), renderDistance);
+        }
     }
 
     // ========================================================================

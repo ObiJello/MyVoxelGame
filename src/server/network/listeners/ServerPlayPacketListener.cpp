@@ -6,7 +6,6 @@
 #include "common/core/Assert.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/PacketTypes.hpp"
-#include "server/IntegratedServer.hpp"
 
 namespace Server {
     
@@ -67,10 +66,8 @@ namespace Server {
     }
 
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
-        // Forward to IntegratedServer for adaptive rate control
-        if (Server::g_integratedServer) {
-            Server::g_integratedServer->OnChunkBatchAck(desiredChunksPerTick);
-        }
+        // Forward to session for per-player adaptive rate control (Minecraft's PlayerChunkSender)
+        m_session.OnChunkBatchAck(desiredChunksPerTick);
     }
 
 } // namespace Server

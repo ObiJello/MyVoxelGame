@@ -1,6 +1,7 @@
 // File: src/client/renderer/debug/DebugSystem.cpp
 #include "DebugSystem.hpp"
 #include "common/core/Log.hpp"
+#include "platform/GameDirectory.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "../debug/Crosshair.hpp"
 #include "../texture/AtlasBuilder.hpp"
@@ -58,11 +59,19 @@ namespace Debug {
     LogBuffer DebugSystem::s_logBuffer;
     ServerMetricsSnapshot DebugSystem::s_serverSnap;
     NetworkMetricsSnapshot DebugSystem::s_netSnap;
+    ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
 #ifdef NDEBUG
     bool DebugSystem::s_debugEnabled = false; // Release: hidden until Shift+Tab+D
 #else
     bool DebugSystem::s_debugEnabled = true;  // Debug: always visible
 #endif
+    bool DebugSystem::s_renderDistanceChanged = false;
+
+    bool DebugSystem::ConsumeRenderDistanceChanged() {
+        bool changed = s_renderDistanceChanged;
+        s_renderDistanceChanged = false;
+        return changed;
+    }
 
     // ========================================================================
     // LOG BUFFER
@@ -235,6 +244,10 @@ namespace Debug {
         s_netSnap = snap;
     }
 
+    void DebugSystem::SetChunkPipelineSnapshot(const ChunkPipelineSnapshot& snap) {
+        s_pipelineSnap = snap;
+    }
+
     // ========================================================================
     // HELPERS
     // ========================================================================
@@ -319,6 +332,7 @@ namespace Debug {
         if (s_visibility.textureAtlas)   DrawTextureAtlasDebug();
         if (s_visibility.logConsole)     DrawLogConsolePanel();
         if (s_visibility.controls)       DrawControlsPanel(cursorEnabled, camera);
+        if (s_visibility.chunkPipeline)  DrawChunkPipelinePanel();
     }
 
     // ========================================================================
@@ -351,6 +365,8 @@ namespace Debug {
         ImGui::Checkbox("Log Console (~)", &s_visibility.logConsole);
         ImGui::SameLine();
         ImGui::Checkbox("Controls",        &s_visibility.controls);
+
+        ImGui::Checkbox("Chunk Pipeline",  &s_visibility.chunkPipeline);
 
         ImGui::Separator();
         ImGui::TextColored(COL_GRAY, "F3: Overlay | ~: Log | Shift+~+D: Toggle UI");
@@ -649,6 +665,22 @@ namespace Debug {
                 ImGui::TextColored(COL_RED, "Failed: %zu", srv.serverJobsFailed);
         }
 
+        // Chunk Streaming
+        if (ImGui::CollapsingHeader("Chunk Streaming", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Provider Loaded: %zu", srv.chunkProviderLoaded);
+            ImGui::Text("Sender Queue:    %zu", srv.chunkSenderPending);
+            ImGui::Text("Pending Load:    %zu", srv.chunksPendingLoad);
+            ImGui::Text("Send Rate:       %.1f chunks/tick", srv.chunkSendRate);
+            ImGui::Text("Unacked Batches: %d", srv.chunkSenderUnacked);
+        }
+
+        // Player Session
+        if (ImGui::CollapsingHeader("Player Session", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("View Distance:   %d chunks", srv.sessionViewDistance);
+            ImGui::Text("Watch Set:       %zu chunks", srv.sessionWatchSetSize);
+            ImGui::Text("Chunks Sent:     %zu", srv.sessionSentChunks);
+        }
+
         // Network
         if (ImGui::CollapsingHeader("Network", ImGuiTreeNodeFlags_DefaultOpen)) {
             if (net.connected) {
@@ -811,7 +843,7 @@ namespace Debug {
         // World
         if (Game::g_world) {
             ImGui::Text("World Loaded Chunks: %zu", Game::g_world->GetLoadedChunkCount());
-            ImGui::Text("Render Distance: %d", Game::g_world->GetRenderDistance());
+            ImGui::Text("Render Distance: %d chunks", Platform::g_gameSettings.GetRenderDistance());
         }
 
         ImGui::End();
@@ -943,6 +975,20 @@ namespace Debug {
             ImGui::End();
             return;
         }
+
+        // Render Distance
+        ImGui::TextColored(COL_BLUE, "View Distance");
+        static int renderDistance = Platform::g_gameSettings.GetRenderDistance();
+        if (ImGui::SliderInt("Render Distance", &renderDistance, 2, 32, "%d chunks")) {
+            Platform::g_gameSettings.SetRenderDistance(renderDistance);
+            s_renderDistanceChanged = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("How far chunks are loaded and rendered (2-32 chunks)");
+
+        ImGui::Separator();
 
         // VSync
         static bool vsyncEnabled = true;
@@ -1317,6 +1363,95 @@ namespace Debug {
             ImGui::TextColored(COL_GREEN, "Cursor: HIDDEN (Camera active)");
         }
         ImGui::Text("Mouse Look: %s", camera.enableMouseLook ? "ON" : "OFF");
+
+        ImGui::End();
+    }
+
+    // ========================================================================
+    // APPLY RENDERING MODE
+    // ========================================================================
+
+    // ========================================================================
+    // CHUNK PIPELINE PANEL
+    // ========================================================================
+
+    void DebugSystem::DrawChunkPipelinePanel() {
+        ImGui::SetNextWindowPos(ImVec2(20, 400), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(380, 600), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Chunk Pipeline", &s_visibility.chunkPipeline)) {
+            ImGui::End();
+            return;
+        }
+
+        const auto& p = s_pipelineSnap;
+
+        // View Distance
+        if (ImGui::CollapsingHeader("View Distance", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("View Distance:   %d chunks", p.viewDistance);
+            ImGui::Text("Server Cap:      %d chunks", p.serverViewDistance);
+            ImGui::Text("Watch Set:       %zu chunks", p.watchSetSize);
+        }
+
+        // Generation Queue
+        if (ImGui::CollapsingHeader("Generation Queue", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Pending Loads:   %zu (session) / %zu (submitted)", p.sessionPendingLoads, p.serverPendingLoads);
+            ImGui::Text("Worker Threads:  %zu", p.workerThreads);
+            ImGui::Text("Jobs:            %zu pending | %zu active", p.workerPendingJobs, p.workerActiveJobs);
+            ImGui::Text("Produced:        %zu total", p.chunksGenerated + p.chunksLoadedFromDisk);
+            if (p.jobsFailed > 0)
+                ImGui::TextColored(ImVec4(1,0.3f,0.3f,1), "Failed: %zu", p.jobsFailed);
+        }
+
+        // Provider Cache
+        if (ImGui::CollapsingHeader("Chunk Provider Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
+            float util = p.providerMaxSize > 0 ? (float)p.providerLoaded / (float)p.providerMaxSize : 0;
+            ImGui::Text("Loaded:          %zu / %zu (%.1f%%)", p.providerLoaded, p.providerMaxSize, util * 100.0f);
+            ImGui::Text("Evictions:       %zu", p.providerEvictions);
+        }
+
+        // Send Queue
+        if (ImGui::CollapsingHeader("Send Queue (PlayerChunkSender)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Ready to Send:   %zu", p.readyToSend);
+            ImGui::Text("Sent to Client:  %zu", p.sentToClient);
+            float chunksPerSec = p.sendRate * 20.0f;
+            ImGui::Text("Send Rate:       %.1f chunks/tick (%.0f/sec)", p.sendRate, chunksPerSec);
+            ImGui::Text("Batch Quota:     %.2f", p.batchQuota);
+            ImVec4 unackedColor = (p.unackedBatches >= p.maxUnackedBatches) ? ImVec4(1,0.3f,0.3f,1) : ImVec4(1,1,1,1);
+            ImGui::TextColored(unackedColor, "Unacked Batches: %d / %d", p.unackedBatches, p.maxUnackedBatches);
+        }
+
+        // Client Receive
+        if (ImGui::CollapsingHeader("Client Receive", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Chunks Received: %llu", (unsigned long long)p.clientChunksReceived);
+            ImGui::Text("Chunks Unloaded: %llu", (unsigned long long)p.clientChunksUnloaded);
+            float clientPerSec = p.clientDesiredRate * 20.0f;
+            ImGui::Text("Client Rate:     %.1f chunks/tick (%.0f/sec)", p.clientDesiredRate, clientPerSec);
+            float avgMs = p.clientAvgNanosPerChunk / 1000000.0f;
+            ImGui::Text("Avg Process:     %.2f ms/chunk", avgMs);
+        }
+
+        // Client Mesh Pipeline
+        if (ImGui::CollapsingHeader("Client Mesh Pipeline", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Client Chunks:   %zu", p.clientChunkCount);
+            ImGui::Text("Mesh Builds:     %zu completed", p.meshBuildsCompleted);
+            ImGui::Text("Mesh Queue:      %zu pending | %zu active", p.meshPendingJobs, p.meshActiveJobs);
+            ImGui::Text("GPU Sections:    %zu active", p.gpuActiveSections);
+            ImGui::Text("Uploads/Frame:   %d", p.meshUploadsThisFrame);
+        }
+
+        // Rendering
+        if (ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Sections:        %d rendered | %d culled", p.sectionsRendered, p.sectionsCulled);
+            ImGui::Text("Draw Calls:      %d", p.totalDrawCalls);
+            ImGui::Text("Render Time:     %.2f ms", p.renderTimeMs);
+        }
+
+        // Progress bar
+        ImGui::Separator();
+        float progress = p.watchSetSize > 0 ? (float)p.sentToClient / (float)p.watchSetSize : 0;
+        char progressText[64];
+        snprintf(progressText, sizeof(progressText), "%zu / %zu chunks (%.0f%%)", p.sentToClient, p.watchSetSize, progress * 100.0f);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), progressText);
 
         ImGui::End();
     }

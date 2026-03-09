@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "platform/GameDirectory.hpp"
+#include "client/network/NetworkClient.hpp"
 #include "../../world/ClientChunkManager.hpp"
 #include <algorithm>
 #include <chrono>
@@ -212,8 +213,11 @@ namespace Render {
         int playerChunkX = static_cast<int>(std::floor(playerPos.x / ::Game::Math::CHUNK_SIZE_X));
         int playerChunkZ = static_cast<int>(std::floor(playerPos.z / ::Game::Math::CHUNK_SIZE_Z));
 
-        // Get render distance from settings (already in chunks)
+        // Get effective render distance: min(client setting, server cap)
         int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
+        if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+            renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
+        }
         int renderDistanceSquared = renderDistanceChunks * renderDistanceChunks;
 
         int totalSectionsChecked = 0;        // Total sections we looked at
@@ -321,7 +325,11 @@ namespace Render {
         glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
         float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
         glm::mat4 view = camera.GetViewMatrix();
-        float farPlane = static_cast<float>(Platform::g_gameSettings.GetRenderDistance()) * 16.0f * 4.0f;
+        int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();
+        if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+            effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
+        }
+        float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
         glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
         glm::mat4 mvp = proj * view;
         g_renderBackend->SetUniformMat4(m_backendShader, "uMVP", mvp);

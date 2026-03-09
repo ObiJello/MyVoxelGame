@@ -40,20 +40,13 @@ namespace Server {
         int maxChunksPerTick = 32;             // Max chunks to process per tick (increased from 5)
         float chunkProcessBudgetMs = 2.0f;     // Time budget for chunk processing per tick
         int defaultViewDistance = 8;           // Default view distance in chunks (Minecraft-like)
+        int serverViewDistance = 32;           // Server's max view distance cap (clients clamped to this)
         bool enableAsyncChunkLoading = true;   // Use ServerWorkerPool for chunk loading
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
         bool useLocalSaveDirectory = true;     // Automatically use local save directory if available (temporary feature)
     };
 
-
-    // Chunk send tracking
-    struct ChunkSendState {
-        Game::Math::ChunkPos chunkPos{0, 0};  // Initialize to (0,0)
-        bool sent = false;
-        bool needsResend = false;
-        std::chrono::steady_clock::time_point sendTime;
-    };
 
     // Integrated server class (mirrors MinecraftServer + IntegratedServer from Minecraft)
     class IntegratedServer {
@@ -107,7 +100,7 @@ namespace Server {
 
         // Get player session for network/view management
         // NOTE: Delegates to SessionManager now instead of using m_playerSession
-        PlayerSession* GetPlayerSession() const;
+        std::shared_ptr<PlayerSession> GetPlayerSession() const;
 
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
@@ -115,20 +108,11 @@ namespace Server {
         // Get status manager for chunk generation tracking
         ChunkStatusManager* GetStatusManager() const { return m_statusManager.get(); }
 
-        // Send ChunkDataS2CPacket to client (new Minecraft-compatible format)
-        void SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet);
+        // Process watch set changes: request loading for new chunks, unload for removed
+        void ProcessWatchSetChanges();
 
-        // Send chunk data to client (builds packet with section data and sends)
-        void SendChunkToClient(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
-
-        // Queue a chunk position for adaptive-rate sending (Minecraft's PlayerChunkSender pattern)
-        void QueueChunkForSending(Game::Math::ChunkPos chunkPos);
-
-        // Send queued chunks with adaptive rate control (called end of tick)
-        void SendChunksToPlayer();
-
-        // Handle client batch acknowledgment (updates send rate)
-        void OnChunkBatchAck(float desiredChunksPerTick);
+        // Unload chunks that no player is watching (periodic cleanup)
+        void UnloadUnwatchedChunks();
         
         // Send block change packets to client
         void SendBlockChangeS2CPacket(const Network::BlockChangeS2CPacket& packet);
@@ -146,6 +130,12 @@ namespace Server {
         
         // Called when a player successfully logs in and needs initial chunks
         void OnPlayerJoined(std::shared_ptr<class ServerConnection> connection);
+
+        // Called when server receives client settings (render distance, etc.)
+        void OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance);
+
+        // Send the effective view distance to the client
+        void SendSetChunkCacheRadius(uint32_t connectionId, int viewDistance);
 
         // ========================================================================
         // CONFIGURATION
@@ -180,6 +170,9 @@ namespace Server {
         void ResetStats() { m_stats.Reset(); }
         void LogStats() const;
 
+        // Chunk streaming metrics
+        size_t GetPendingChunkLoadCount() const { return m_pendingChunkLoads.size(); }
+
     private:
         // Configuration
         IntegratedServerConfig m_config;
@@ -211,25 +204,7 @@ namespace Server {
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
         // Chunk management
-        std::unordered_map<Game::Math::ChunkPos, ChunkSendState, Game::Math::ChunkPosHash> m_chunkSendStates;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunkLoads;
-
-        // Adaptive chunk send rate (Minecraft's PlayerChunkSender)
-        struct ChunkSenderState {
-            static constexpr float MIN_RATE = 0.01f;
-            static constexpr float MAX_RATE = 64.0f;
-            static constexpr float START_RATE = 9.0f;
-            static constexpr int MAX_UNACKED_BATCHES = 10;
-
-            float desiredChunksPerTick = START_RATE;
-            float batchQuota = 0.0f;
-            int unacknowledgedBatches = 0;
-            int maxUnacknowledgedBatches = 1; // starts at 1, bumped to 10 after first ack
-
-            // Pending chunk positions (just keys — chunk data looked up at send time)
-            std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> pendingChunks;
-        };
-        ChunkSenderState m_chunkSender;
 
         // Statistics
         ServerStats m_stats;
@@ -269,9 +244,6 @@ namespace Server {
 
         // Request chunk loading (either sync or async via ServerWorkerPool)
         void RequestChunkLoad(Game::Math::ChunkPos chunkPos, int priority = 0);
-
-        // Check if chunk should be sent to client
-        bool ShouldSendChunk(Game::Math::ChunkPos chunkPos) const;
 
         // Process async chunk load results from ServerWorkerPool
         void ProcessAsyncChunkResults();

@@ -280,4 +280,14 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleSetChunkCacheRadius(int viewDistance) {
+        Log::Info("[ClientPacketHandler] Server set chunk cache radius: %d", viewDistance);
+
+        if (g_networkClient) {
+            g_networkClient->SetServerViewDistance(viewDistance);
+        }
+
+        m_stats.packetsProcessed++;
+    }
+
 } // namespace Client

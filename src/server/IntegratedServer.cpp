@@ -18,6 +18,7 @@
 #include "common/world/level/World.hpp"
 #include "client/entity/Player.hpp"
 #include "world/ServerWorkerPool.hpp"
+#include "world/MyTerrainGenerator.hpp"
 #include "world/storage/SectionDataUnpacker.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
@@ -47,7 +48,11 @@ namespace Server {
 
     bool IntegratedServer::Initialize() {
         Log::Info("IntegratedServer::Initialize - Creating world on server thread");
-        
+
+        // serverViewDistance stays at default (32) for integrated server — no cap on client.
+        // A dedicated server would set this from its config file.
+        Log::Info("Server view distance cap: %d chunks", m_config.serverViewDistance);
+
         // Create the world instance owned by the server
         m_world = std::make_unique<Game::World>();
         
@@ -203,7 +208,6 @@ namespace Server {
         }
         
         // Clear state
-        m_chunkSendStates.clear();
         m_pendingChunkLoads.clear();
         
         // Cleanup session management system
@@ -225,23 +229,22 @@ namespace Server {
         // Session position will be set when the first move packet arrives
     }
 
-    PlayerSession* IntegratedServer::GetPlayerSession() const {
+    std::shared_ptr<PlayerSession> IntegratedServer::GetPlayerSession() const {
         // Delegate to SessionManager (migrated from direct m_playerSession member)
         if (m_sessionManager) {
-            auto session = m_sessionManager->GetSession(1); // playerId=1 for integrated server
-            return session.get();
+            return m_sessionManager->GetSession(1); // playerId=1 for integrated server
         }
         return nullptr;
     }
 
     Game::Math::ChunkPos IntegratedServer::GetPlayerChunkPosition() const {
-        auto* session = GetPlayerSession();
+        auto session = GetPlayerSession();
         if (session) return session->GetChunkPosition();
         return {0, 0};
     }
 
     glm::vec3 IntegratedServer::GetPlayerPosition() const {
-        auto* session = GetPlayerSession();
+        auto session = GetPlayerSession();
         if (session) return session->GetPosition();
         return glm::vec3(0.0f, 67.0f, 0.0f);
     }
@@ -404,18 +407,30 @@ namespace Server {
         // NOTE: PlayerSession is now ticked via m_sessionManager->Tick() at line 384
         // No need to tick it directly here anymore
 
+        // === 2. SESSION-DRIVEN CHUNK LOADING (Minecraft-style) ===
+        // Process watch set changes: request loading for new chunks entering view
+        ProcessWatchSetChanges();
+
         // Process async chunk load results from ServerWorkerPool
         ProcessAsyncChunkResults();
-        
-        // === 2. RUN WORLD SIMULATION ===
-        // Minecraft runs runDistanceManagerUpdates + runGenerationTasks unconditionally
-        // every tick with zero budget. haveTime is only used for unloading/saving.
+
+        // === 3. RUN WORLD SIMULATION (no chunk loading — session system handles that) ===
         if (m_world) {
-            m_world->WorldLoop(deltaTime, m_config.maxChunksPerTick);
+            m_world->WorldLoop(deltaTime);
         }
-        
-        // Send chunks to player with adaptive rate control (after WorldLoop, like Minecraft's tickChildren)
-        SendChunksToPlayer();
+
+        // === 4. SEND CHUNKS per player (Minecraft's PlayerChunkSender pattern) ===
+        if (m_sessionManager) {
+            auto sessions = m_sessionManager->GetAllSessions();
+            for (auto& session : sessions) {
+                session->SendNextChunks(m_world.get());
+            }
+        }
+
+        // === 5. PERIODIC CLEANUP: unload chunks with no watchers ===
+        if (serverTick % 200 == 0) { // Every 10 seconds at 20 TPS
+            UnloadUnwatchedChunks();
+        }
 
         // Increment tick counter
         m_stats.ticksProcessed.fetch_add(1, std::memory_order_relaxed);
@@ -447,212 +462,24 @@ namespace Server {
     }
 
     void IntegratedServer::RequestChunkLoad(Game::Math::ChunkPos chunkPos, int priority) {
-        // Check if chunk is already loaded
+        // Already loaded — SendNextChunks() will pick it up
         if (m_world && m_world->IsChunkLoaded(chunkPos.x, chunkPos.z)) {
-            auto chunk = m_world->GetChunk(chunkPos.x, chunkPos.z);
-            if (chunk) {
-                SendChunkToClient(chunkPos, chunk);
-                return;
-            }
+            return;
         }
-        
+
         // Mark as pending
         m_pendingChunkLoads.insert(chunkPos);
-        
+
         if (m_config.enableAsyncChunkLoading) {
             // Use ServerWorkerPool for async loading
             Threading::SubmitServerChunkLoading(chunkPos, priority);
             Log::Debug("Requested async chunk loading for (%d, %d)", chunkPos.x, chunkPos.z);
         } else {
-            // Load synchronously (like vanilla Minecraft's integrated server)
+            // Load synchronously via ChunkProvider
             if (m_world) {
-                m_world->UpdateLoadedChunks(chunkPos.x, chunkPos.z);
-                auto chunk = m_world->GetChunk(chunkPos.x, chunkPos.z);
-                if (chunk) {
-                    SendChunkToClient(chunkPos, chunk);
-                }
+                m_world->GetChunk(chunkPos.x, chunkPos.z); // Sync load into cache
             }
         }
-    }
-
-    void IntegratedServer::SendChunkToClient(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk) {
-        if (!chunk) {
-            return;
-        }
-
-        // Check if chunk is already loaded by the client
-        auto* session = GetPlayerSession();
-        if (session && session->HasSentChunk(chunkPos)) {
-            Log::Debug("Chunk (%d, %d) already loaded by client, skipping send", chunkPos.x, chunkPos.z);
-            return;
-        }
-        
-        // Build ChunkDataS2CPacket with full section data
-        Network::ChunkDataS2CPacket packet;
-        packet.chunkX = chunkPos.x;
-        packet.chunkZ = chunkPos.z;
-        packet.groundUpContinuous = true;
-        packet.primaryBitmask = 0;
-
-        // Serialize non-empty sections (same logic as World::ChunkEntityPacketDispatch)
-        for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-            const auto* section = chunk->GetSection(sectionY);
-            if (!section) continue;
-
-            uint16_t nonAirCount = 0;
-            for (size_t i = 0; i < section->blocks.size(); ++i) {
-                if (section->blocks[i] != static_cast<uint16_t>(Game::BlockID::Air)) {
-                    nonAirCount++;
-                }
-            }
-            if (nonAirCount == 0) continue;
-
-            packet.primaryBitmask |= (1 << sectionY);
-
-            Network::ChunkDataS2CPacket::SectionData sectionData;
-            sectionData.blockCount = nonAirCount;
-            sectionData.bitsPerEntry = 16; // Direct block IDs
-
-            const size_t blocksPerSection = 16 * 16 * 16;
-            const size_t blocksPerLong = 64 / 16; // 4 blocks per uint64_t
-            sectionData.dataArray.resize((blocksPerSection + blocksPerLong - 1) / blocksPerLong, 0);
-
-            for (size_t i = 0; i < blocksPerSection; ++i) {
-                uint16_t blockId = section->blocks[i];
-                size_t longIndex = i / blocksPerLong;
-                size_t bitOffset = (i % blocksPerLong) * 16;
-                sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
-            }
-
-            packet.sections.push_back(std::move(sectionData));
-        }
-
-        SendChunkDataS2CPacket(std::move(packet));
-        
-        // Update send state
-        ChunkSendState& sendState = m_chunkSendStates[chunkPos];
-        sendState.chunkPos = chunkPos;
-        sendState.sent = true;
-        sendState.needsResend = false;
-        sendState.sendTime = std::chrono::steady_clock::now();
-        
-        // Mark chunk as loaded by the client
-        if (session) session->MarkChunkSent(chunkPos);
-        
-        // Register player as watcher for this chunk
-        // This is critical for block change tracking to work!
-        if (m_watchIndex) {
-            m_watchIndex->AddWatcher(1, chunkPos);  // playerId=1 for integrated server
-            Log::Info("[IntegratedServer] Registered player 1 as watcher for chunk (%d, %d)", chunkPos.x, chunkPos.z);
-        } else {
-            Log::Error("[IntegratedServer] m_watchIndex is null when trying to register watcher!");
-        }
-        
-        m_stats.chunksSent.fetch_add(1, std::memory_order_relaxed);
-        Log::Debug("Sent chunk (%d, %d) to client", chunkPos.x, chunkPos.z);
-    }
-    
-    void IntegratedServer::QueueChunkForSending(Game::Math::ChunkPos chunkPos) {
-        m_chunkSender.pendingChunks.insert(chunkPos);
-    }
-
-    void IntegratedServer::SendChunksToPlayer() {
-        if (m_chunkSender.pendingChunks.empty()) return;
-
-        // Back-pressure: don't send if too many unacknowledged batches
-        if (m_chunkSender.unacknowledgedBatches >= m_chunkSender.maxUnacknowledgedBatches) {
-            return;
-        }
-
-        // Accumulate fractional budget
-        float maxBatchSize = std::max(1.0f, m_chunkSender.desiredChunksPerTick);
-        m_chunkSender.batchQuota = std::min(
-            m_chunkSender.batchQuota + m_chunkSender.desiredChunksPerTick,
-            maxBatchSize
-        );
-
-        if (m_chunkSender.batchQuota < 1.0f) return;
-
-        int maxBatch = static_cast<int>(m_chunkSender.batchQuota);
-
-        // Collect closest chunks using partial sort when pending > maxBatch
-        // Matches Minecraft's Comparators.least(maxBatchSize, comparator)
-        struct ChunkDist {
-            Game::Math::ChunkPos pos;
-            int distSq;
-        };
-        std::vector<ChunkDist> candidates;
-        candidates.reserve(m_chunkSender.pendingChunks.size());
-
-        auto playerChunk = GetPlayerChunkPosition();
-        for (const auto& pos : m_chunkSender.pendingChunks) {
-            int dx = pos.x - playerChunk.x;
-            int dz = pos.z - playerChunk.z;
-            candidates.push_back({pos, dx * dx + dz * dz});
-        }
-
-        size_t toSend = std::min(static_cast<size_t>(maxBatch), candidates.size());
-        if (toSend == 0) return;
-
-        if (candidates.size() > toSend) {
-            std::partial_sort(candidates.begin(), candidates.begin() + toSend, candidates.end(),
-                              [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
-        } else {
-            std::sort(candidates.begin(), candidates.end(),
-                      [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
-        }
-
-        // Build the batch — look up chunk data from cache at send time
-        std::vector<std::pair<Game::Math::ChunkPos, std::shared_ptr<Game::Chunk>>> batch;
-        for (size_t i = 0; i < toSend; ++i) {
-            auto chunk = m_world->GetChunkProvider()->GetChunk(candidates[i].pos);
-            if (chunk) {
-                batch.push_back({candidates[i].pos, chunk});
-            }
-        }
-
-        if (batch.empty()) return;
-
-        // Send batch start
-        {
-            auto data = Network::Serialization::Serialize(Network::ChunkBatchStartS2CPacket{});
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchStartS2C), data);
-        }
-
-        // Send each chunk
-        for (const auto& [pos, chunk] : batch) {
-            SendChunkToClient(pos, chunk);
-            m_chunkSender.pendingChunks.erase(pos);
-        }
-
-        // Send batch finished
-        {
-            Network::ChunkBatchFinishedS2CPacket finishPacket(static_cast<int32_t>(batch.size()));
-            auto data = Network::Serialization::Serialize(finishPacket);
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchFinishedS2C), data);
-        }
-
-        m_chunkSender.batchQuota -= static_cast<float>(batch.size());
-        m_chunkSender.unacknowledgedBatches++;
-
-        Log::Debug("Sent chunk batch: %zu chunks (quota=%.1f, unacked=%d, rate=%.1f)",
-                  batch.size(), m_chunkSender.batchQuota,
-                  m_chunkSender.unacknowledgedBatches, m_chunkSender.desiredChunksPerTick);
-    }
-
-    void IntegratedServer::OnChunkBatchAck(float desiredRate) {
-        m_chunkSender.unacknowledgedBatches--;
-        m_chunkSender.desiredChunksPerTick = std::isnan(desiredRate)
-            ? ChunkSenderState::MIN_RATE
-            : std::clamp(desiredRate, ChunkSenderState::MIN_RATE, ChunkSenderState::MAX_RATE);
-        if (m_chunkSender.unacknowledgedBatches == 0) {
-            m_chunkSender.batchQuota = 1.0f;
-        }
-        m_chunkSender.maxUnacknowledgedBatches = ChunkSenderState::MAX_UNACKED_BATCHES;
-
-        Log::Debug("Chunk batch ack: desiredRate=%.2f, unacked=%d, maxUnacked=%d",
-                  m_chunkSender.desiredChunksPerTick, m_chunkSender.unacknowledgedBatches,
-                  m_chunkSender.maxUnacknowledgedBatches);
     }
 
     void IntegratedServer::ProcessAsyncChunkResults() {
@@ -663,19 +490,11 @@ namespace Server {
 
         auto& resultQueue = Threading::ServerWorkerPool::GetChunkGenResultQueue();
 
-        // Use time budget instead of fixed count — process results until budget exhausted
-        auto startTime = std::chrono::steady_clock::now();
-        const float budgetMs = 5.0f;
+        // Process ALL completed results this tick (no time budget — let the send rate be the throttle)
         int resultsProcessed = 0;
 
         Network::ChunkGenResult result;
         while (resultQueue.try_pop(result)) {
-            // Check time budget
-            if (resultsProcessed > 0) {
-                auto now = std::chrono::steady_clock::now();
-                float elapsedMs = std::chrono::duration<float, std::milli>(now - startTime).count();
-                if (elapsedMs >= budgetMs) break;
-            }
 
             if (result.success && result.chunk) {
                 // Chunk is already in ChunkProvider cache (worker called GetChunk -> CompleteChunkLoad)
@@ -684,10 +503,17 @@ namespace Server {
                     m_statusManager->MarkChunkReady(result.position);
                 }
 
-                // Send to client
-                SendChunkToClient(result.position, result.chunk);
+                // Move chunk to ready-to-send for all sessions waiting for it
+                if (m_sessionManager) {
+                    auto sessions = m_sessionManager->GetAllSessions();
+                    for (auto& session : sessions) {
+                        if (session && session->IsWaitingForChunk(result.position)) {
+                            session->MarkChunkReadyToSend(result.position);
+                        }
+                    }
+                }
 
-                Log::Debug("Processed async chunk load for (%d, %d) - success",
+                Log::Debug("Async chunk ready (%d, %d)",
                          result.position.x, result.position.z);
             } else {
                 // Mark as failed so it can be retried
@@ -709,6 +535,81 @@ namespace Server {
         }
     }
 
+
+    void IntegratedServer::ProcessWatchSetChanges() {
+        if (!m_sessionManager || !m_world) return;
+
+        // Pump the terrain generator's async pipeline (like Minecraft's runDistanceManagerUpdates)
+        auto* chunkProvider = m_world->GetChunkProvider();
+        if (chunkProvider) {
+            auto* generator = dynamic_cast<Game::MyTerrainGenerator*>(chunkProvider->GetGenerator());
+            if (generator) {
+                generator->PumpAsyncTasks();
+            }
+        }
+
+        // Iterate pending chunk loads for each session
+        auto sessions = m_sessionManager->GetAllSessions();
+        for (const auto& session : sessions) {
+            if (!session) continue;
+
+            auto anchor = session->GetAnchorChunk();
+
+            // Copy pending loads into a sortable vector
+            std::vector<Game::Math::ChunkPos> pending(
+                session->GetPendingChunkLoads().begin(),
+                session->GetPendingChunkLoads().end());
+
+            // Sort nearest-first so workers process close chunks before far ones
+            std::sort(pending.begin(), pending.end(),
+                [&anchor](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
+                    int distA = std::max(std::abs(a.x - anchor.x), std::abs(a.z - anchor.z));
+                    int distB = std::max(std::abs(b.x - anchor.x), std::abs(b.z - anchor.z));
+                    return distA < distB;
+                });
+
+            // Process: move loaded chunks to ready-to-send, request loading for unloaded
+            std::vector<Game::Math::ChunkPos> nowLoaded;
+            for (const auto& pos : pending) {
+                if (m_world->IsChunkLoaded(pos.x, pos.z)) {
+                    nowLoaded.push_back(pos);
+                } else if (m_pendingChunkLoads.count(pos) == 0) {
+                    RequestChunkLoad(pos, 0);
+                }
+            }
+
+            for (const auto& pos : nowLoaded) {
+                session->MarkChunkReadyToSend(pos);
+            }
+        }
+    }
+
+    void IntegratedServer::UnloadUnwatchedChunks() {
+        if (!m_world || !m_watchIndex) return;
+
+        auto* chunkProvider = m_world->GetChunkProvider();
+        if (!chunkProvider) return;
+
+        // Use the player's chunk position to scan a reasonable area
+        auto playerChunk = GetPlayerChunkPosition();
+        int scanRadius = 40; // Scan well beyond max view distance
+
+        size_t unloaded = 0;
+        for (int dx = -scanRadius; dx <= scanRadius; ++dx) {
+            for (int dz = -scanRadius; dz <= scanRadius; ++dz) {
+                Game::Math::ChunkPos pos{playerChunk.x + dx, playerChunk.z + dz};
+                if (chunkProvider->IsChunkLoaded(pos) && !m_watchIndex->HasWatchers(pos)) {
+                    if (chunkProvider->UnloadChunk(pos)) {
+                        unloaded++;
+                    }
+                }
+            }
+        }
+
+        if (unloaded > 0) {
+            Log::Info("Unloaded %zu unwatched chunks", unloaded);
+        }
+    }
 
     void IntegratedServer::ProcessBlockAction(const Network::BlockActionC2SPacket& packet) {
         if (!ValidateBlockAction(packet)) {
@@ -855,78 +756,50 @@ namespace Server {
 
             Log::Info("[IntegratedServer] Player session created through manager");
         } else {
-            // Fallback to old system if session manager not available
-            Log::Warning("[IntegratedServer] Session manager not available, using legacy chunk sending");
-            
-            // Get spawn position (player's initial position)
-            glm::vec3 spawnPos = GetPlayerPosition();
-            if (spawnPos.x == 0.0f && spawnPos.z == 0.0f) {
-                spawnPos = glm::vec3(0.0f, 67.0f, 0.0f); // Default spawn
-            }
-            
-            // Calculate chunk position
-            auto centerChunk = Game::Math::WorldCoordinates::WorldToChunkPos(
-                static_cast<int>(spawnPos.x), 
-                static_cast<int>(spawnPos.z)
-            );
-            
-            Log::Info("[IntegratedServer] Player spawn chunk: (%d, %d)", centerChunk.x, centerChunk.z);
-            
-            // Send chunks in a radius around the spawn position
-            int chunkRadius = Platform::g_gameSettings.GetRenderDistance(); // Use actual render distance setting
-            int chunksSent = 0;
-        
-            for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
-                for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
-                    Game::Math::ChunkPos chunkPos(centerChunk.x + dx, centerChunk.z + dz);
-                    
-                    // Calculate priority based on Chebyshev distance (square pattern like Minecraft)
-                    // Chebyshev distance = max(abs(dx), abs(dz))
-                    int chebyshevDistance = std::max(std::abs(dx), std::abs(dz));
-                    int priority = chunkRadius - chebyshevDistance;
-                    
-                    // Request chunk loading (will send to client once loaded)
-                    RequestChunkLoad(chunkPos, priority);
-                    chunksSent++;
-                }
-            }
-            
-            Log::Info("[IntegratedServer] Requested %d chunks for new player", chunksSent);
-        }  // End of else block for legacy chunk sending
+            Log::Warning("[IntegratedServer] Session manager not available, cannot handle player join");
+        }
+    }
+
+    // ========================================================================
+    // CLIENT SETTINGS
+    // ========================================================================
+
+    void IntegratedServer::OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance) {
+        if (!m_sessionManager) return;
+
+        auto session = m_sessionManager->GetSessionByConnection(connectionId);
+        if (!session) {
+            Log::Warning("[IntegratedServer] No session for connection %u", connectionId);
+            return;
+        }
+
+        // Clamp client's requested distance to [2, serverViewDistance]
+        int effectiveViewDistance = std::clamp(requestedViewDistance, 2, m_config.serverViewDistance);
+
+        Log::Info("[IntegratedServer] Player %u requested view distance %d, effective: %d (server cap: %d)",
+                  session->GetPlayerId(), requestedViewDistance, effectiveViewDistance, m_config.serverViewDistance);
+
+        // Update session view distance (triggers watch set recalculation)
+        session->SetViewDistance(effectiveViewDistance);
+
+        // Send effective view distance back to client
+        SendSetChunkCacheRadius(connectionId, effectiveViewDistance);
+    }
+
+    void IntegratedServer::SendSetChunkCacheRadius(uint32_t connectionId, int viewDistance) {
+        if (!m_networkServer || m_shouldStop.load()) return;
+
+        Network::SetChunkCacheRadiusS2CPacket packet(viewDistance);
+        auto data = Network::Serialization::Serialize(packet);
+        m_networkServer->SendPacketTo(connectionId,
+            static_cast<uint8_t>(Network::PacketId::SetChunkCacheRadiusS2C), data);
+
+        Log::Info("[IntegratedServer] Sent SetChunkCacheRadius(%d) to connection %u", viewDistance, connectionId);
     }
 
     // ========================================================================
     // PACKET SENDING
     // ========================================================================
-
-    void IntegratedServer::SendChunkDataS2CPacket(Network::ChunkDataS2CPacket&& packet) {
-        // Check both that NetworkServer exists and we're not shutting down
-        if (m_networkServer && !m_shouldStop.load()) {
-            // Log::Info("[IntegratedServer] SendChunkDataS2CPacket: chunk (%d, %d) with bitmask 0x%X, sections: %zu",
-            //           packet.chunkX, packet.chunkZ, packet.primaryBitmask, packet.sections.size());
-            
-            auto data = Network::Serialization::Serialize(packet);
-            
-            // // Log first few bytes of serialized data
-            // std::string hexDump;
-            // for (size_t i = 0; i < std::min(size_t(20), data.size()); i++) {
-            //     char buf[4];
-            //     snprintf(buf, sizeof(buf), "%02X ", data[i]);
-            //     hexDump += buf;
-            // }
-            // Log::Debug("[IntegratedServer] Serialized chunk data (first 20 bytes): %s", hexDump.c_str());
-            
-            // Log::Debug("[IntegratedServer] Broadcasting packet ID 0x%02X (ChunkDataS2C), data size: %zu",
-            //           static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data.size());
-            
-            m_networkServer->BroadcastPacket(static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
-            m_stats.packetsSent.fetch_add(1, std::memory_order_relaxed);
-            m_stats.chunksSent.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            Log::Warning("[IntegratedServer] Cannot send chunk: NetworkServer=%p, shouldStop=%d",
-                        m_networkServer.get(), m_shouldStop.load());
-        }
-    }
 
     void IntegratedServer::SendPacketToClient(Network::BlockChangeS2CPacket&& packet) {
         // Check both that NetworkServer exists and we're not shutting down
@@ -969,9 +842,9 @@ namespace Server {
 
     std::vector<Game::Math::ChunkPos> IntegratedServer::GetRequiredChunks() const {
         std::vector<Game::Math::ChunkPos> chunks;
-        
+
         auto playerChunk = GetPlayerChunkPosition();
-        int renderDistance = Platform::g_gameSettings.GetRenderDistance();
+        int renderDistance = m_config.serverViewDistance;
         
         // Generate square pattern around player
         for (int dx = -renderDistance; dx <= renderDistance; ++dx) {
@@ -990,32 +863,7 @@ namespace Server {
     }
     
     void IntegratedServer::UpdateViewDistanceWatchers() {
-        if (!m_watchIndex) {
-            return;
-        }
-        
-        // Get current required chunks based on view distance
-        auto requiredChunks = GetRequiredChunks();
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> requiredSet(
-            requiredChunks.begin(), requiredChunks.end()
-        );
-        
-        // Find chunks to remove (in sent states but not in required)
-        std::vector<Game::Math::ChunkPos> toRemove;
-        for (const auto& [chunk, state] : m_chunkSendStates) {
-            if (requiredSet.find(chunk) == requiredSet.end()) {
-                toRemove.push_back(chunk);
-            }
-        }
-
-        // Remove watchers for chunks going out of view
-        for (const auto& chunk : toRemove) {
-            m_watchIndex->RemoveWatcher(1, chunk);  // playerId=1 for integrated server
-            m_chunkSendStates.erase(chunk);
-            Log::Debug("Removed watcher for chunk (%d, %d) - out of view distance", chunk.x, chunk.z);
-        }
-        
-        // Note: Adding watchers is handled in SendChunkToClient when chunks are sent
+        // View distance watching is now handled by PlayerSession's watch set system
     }
 
     void IntegratedServer::UpdateStatistics(float tickExecutionTime, float timeBetweenTicks) {
@@ -1037,7 +885,7 @@ namespace Server {
     }
 
     void IntegratedServer::LogServerState() const {
-        auto* session = GetPlayerSession();
+        auto session = GetPlayerSession();
         size_t sentChunks = session ? session->GetSentChunkCount() : 0;
         Log::Info("Server State: TPS=%.1f, TickTime=%.2fms, LoadedChunks=%zu, PendingLoads=%zu",
                  m_stats.averageTPS.load(), m_stats.averageTickTime.load(),
@@ -1110,11 +958,13 @@ namespace Server {
         // Configure session manager
         PlayerSessionManager::Config sessionConfig;
         sessionConfig.defaultSimulationDistance = 8;
-        sessionConfig.defaultViewDistance = m_config.defaultViewDistance;  // Use view distance in chunks
+        sessionConfig.defaultViewDistance = m_config.defaultViewDistance;
+        sessionConfig.maxViewDistance = m_config.serverViewDistance;  // Server's view distance cap
         sessionConfig.worldSpawn = glm::vec3(0.0f, 67.0f, 0.0f);
         sessionConfig.spawnChunkRadius = 2;
         sessionConfig.maxChunksPerPlayerPerTick = m_config.maxChunksPerTick;
-        
+        sessionConfig.kickOnTimeout = false;  // Integrated server: never kick local player
+
         m_sessionManager->Initialize(
             sessionConfig,
             m_ticketManager.get(),

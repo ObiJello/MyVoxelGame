@@ -59,13 +59,11 @@ namespace Game {
             // Create core components
             Log::Info("Creating ChunkCache...");
             ChunkCacheConfig cacheConfig;
-            // Calculate cache size based on render distance
-            int renderDistance = Platform::g_gameSettings.GetRenderDistance();
-            // Formula: (diameter)² + 20% margin for smooth operation
-            size_t requiredChunks = (2 * renderDistance + 1) * (2 * renderDistance + 1);
-            cacheConfig.maxSize = static_cast<size_t>(requiredChunks * 1.2); // 20% margin
+            // Cache sized for max view distance (32) + margin
+            // (2*32+1)^2 * 1.2 ≈ 5070, rounded up
+            cacheConfig.maxSize = 5120;
             m_chunkCache = std::make_unique<ChunkCache>(cacheConfig);
-            Log::Info("ChunkCache created with size %zu (for render distance %d)", cacheConfig.maxSize, renderDistance);
+            Log::Info("ChunkCache created with size %zu", cacheConfig.maxSize);
 
             // ========================================================================
             // TERRAIN GENERATION: Using MyTerrainGenerator (custom library)

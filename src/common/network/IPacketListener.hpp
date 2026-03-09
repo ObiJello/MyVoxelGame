@@ -56,6 +56,9 @@ namespace Network {
 
         // Inventory sync
         virtual void onHotbarSyncS2C(const HotbarSyncS2CPacket& packet) {}
+
+        // View distance
+        virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}
         
         // Connection management
         virtual void onDisconnect(const std::string& reason) {}

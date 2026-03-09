@@ -14,6 +14,10 @@
 #include <mutex>
 #include <atomic>
 
+namespace Game {
+    class World;
+}
+
 namespace Server {
 
     // Forward declarations
@@ -23,46 +27,6 @@ namespace Server {
     class ChunkWatchIndex;
     class ChunkStatusManager;
     class SendScheduler;
-
-    // Ring-based priority queue for chunk streaming
-    template<typename T>
-    class RingPriorityQueue {
-    public:
-        explicit RingPriorityQueue(size_t maxRings = 32) : m_rings(maxRings) {}
-        
-        void Push(const T& item, size_t ring) {
-            if (ring < m_rings.size()) {
-                m_rings[ring].push_back(item);
-                m_totalSize++;
-            }
-        }
-        
-        bool Pop(T& item) {
-            for (auto& ring : m_rings) {
-                if (!ring.empty()) {
-                    item = ring.front();
-                    ring.erase(ring.begin());
-                    m_totalSize--;
-                    return true;
-                }
-            }
-            return false;
-        }
-        
-        bool Empty() const { return m_totalSize == 0; }
-        size_t Size() const { return m_totalSize; }
-        
-        void Clear() {
-            for (auto& ring : m_rings) {
-                ring.clear();
-            }
-            m_totalSize = 0;
-        }
-        
-    private:
-        std::vector<std::vector<T>> m_rings;
-        size_t m_totalSize = 0;
-    };
 
     // Coalesced block changes for a chunk section
     struct SectionDiffs {
@@ -173,14 +137,35 @@ namespace Server {
         // Mark a chunk as sent (for legacy IntegratedServer path)
         void MarkChunkSent(Game::Math::ChunkPos pos) { m_sentChunks.insert(pos); }
 
-        // === CHUNK STREAMING ===
+        // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
-        // Queue chunk for sending
-        void QueueChunkSend(Game::Math::ChunkPos chunk, int priority = 0);
-        
-        // Process chunk sends for this tick
-        void ProcessChunkSends(ChunkStatusManager* statusMgr, SendScheduler* scheduler);
-        
+        // Mark a chunk as loaded and ready to send (moves from pending loads to pending sends)
+        void MarkChunkReadyToSend(Game::Math::ChunkPos pos);
+
+        // Drop a chunk: remove from pending, or send unload if already sent
+        void DropChunk(Game::Math::ChunkPos pos);
+
+        // Send next batch of chunks (called once per tick from IntegratedServer)
+        void SendNextChunks(Game::World* world);
+
+        // Handle client's batch acknowledgment (updates send rate)
+        void OnChunkBatchAck(float desiredRate);
+
+        // Check if this session is waiting for a chunk to load
+        bool IsWaitingForChunk(Game::Math::ChunkPos pos) const { return m_pendingChunkLoads.count(pos) > 0; }
+
+        // Get pending chunk loads (chunks waiting for generation/loading)
+        const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>& GetPendingChunkLoads() const { return m_pendingChunkLoads; }
+        size_t GetPendingChunkLoadsCount() const { return m_pendingChunkLoads.size(); }
+
+        // Chunk sender getters
+        size_t GetPendingChunksToSendCount() const { return m_pendingChunksToSend.size(); }
+        float GetDesiredChunksPerTick() const { return m_desiredChunksPerTick; }
+        int GetUnackedBatches() const { return m_unackedBatches; }
+        float GetBatchQuota() const { return m_batchQuota; }
+        int GetMaxUnackedBatches() const { return m_maxUnackedBatches; }
+        const auto& GetPendingChunksToSend() const { return m_pendingChunksToSend; }
+
         // Send unload packet for chunk
         void SendChunkUnload(Game::Math::ChunkPos chunk);
 
@@ -303,11 +288,14 @@ namespace Server {
         // === WATCH SETS ===
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_watchSet;
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_sentChunks;
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_inflightChunks;
 
-        // === STREAMING QUEUES ===
-        RingPriorityQueue<Game::Math::ChunkPos> m_pendingAdd;
-        std::vector<Game::Math::ChunkPos> m_pendingRemove;
+        // === CHUNK SENDER STATE (Minecraft's PlayerChunkSender) ===
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunkLoads;    // Chunks waiting for generation/loading
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunksToSend;  // Chunks loaded and ready to send
+        float m_desiredChunksPerTick = 9.0f;
+        float m_batchQuota = 0.0f;
+        int m_unackedBatches = 0;
+        int m_maxUnackedBatches = 1;  // Bumps to 10 after first ack
 
         // === WATCH INDEX SYNCHRONIZATION ===
         // Deltas to apply to ChunkWatchIndex (consumed by PlayerSessionManager)
@@ -355,9 +343,6 @@ namespace Server {
             std::vector<Game::Math::ChunkPos>& toAdd,
             std::vector<Game::Math::ChunkPos>& toRemove
         ) const;
-        
-        // Priority calculation
-        int CalculateChunkPriority(Game::Math::ChunkPos chunk) const;
         
         // Diff coalescing
         void CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,

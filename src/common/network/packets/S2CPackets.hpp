@@ -278,5 +278,29 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // ========================================================================
+    // SET CHUNK CACHE RADIUS PACKET (server tells client effective view distance)
+    // ========================================================================
+
+    class SetChunkCacheRadiusS2CPacketImpl : public IS2CPacket {
+    private:
+        int m_viewDistance;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit SetChunkCacheRadiusS2CPacketImpl(int viewDistance)
+            : m_viewDistance(viewDistance)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onSetChunkCacheRadiusS2C(m_viewDistance);
+        }
+
+        int getViewDistance() const { return m_viewDistance; }
+
+        PacketId getId() const override { return PacketId::SetChunkCacheRadiusS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network

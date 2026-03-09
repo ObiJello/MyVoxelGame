@@ -45,11 +45,9 @@ namespace Threading {
             return;
         }
         
-        // Calculate queue size based on render distance
-        int renderDistance = Platform::g_gameSettings.GetRenderDistance();
-        size_t requiredQueueSize = (2 * renderDistance + 1) * (2 * renderDistance + 1);
-        m_maxQueueSize = static_cast<size_t>(requiredQueueSize * 1.2); // 20% margin
-        Log::Info("ServerWorkerPool queue size set to %zu (for render distance %d)", m_maxQueueSize, renderDistance);
+        // Queue sized for max view distance (32) + margin
+        m_maxQueueSize = 5120;
+        Log::Info("ServerWorkerPool queue size set to %zu", m_maxQueueSize);
         
         m_running.store(true);
 
