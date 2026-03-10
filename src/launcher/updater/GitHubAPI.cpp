@@ -91,18 +91,31 @@ namespace Launcher {
                 return false;
             }
 
+            // Accept both new platform-specific prefix (e.g. "game-mac-v") and old format ("v")
             std::string gamePrefix(GameReleaseTagPrefix);
+            std::string oldGamePrefix = "v";
             Version bestVersion;
             nlohmann::json bestRelease;
             bool found = false;
 
             for (const auto& release : releases) {
                 std::string tag = release.value("tag_name", "");
-                if (tag.find(gamePrefix) != 0) continue;
+
+                // Determine which prefix matches, skip if neither
+                std::string matchedPrefix;
+                if (tag.find(gamePrefix) == 0) {
+                    matchedPrefix = gamePrefix;
+                } else if (tag.find(oldGamePrefix) == 0 && tag.find("launcher") == std::string::npos) {
+                    // Old format "v0.1.X" — but skip anything with "launcher" in it
+                    matchedPrefix = oldGamePrefix;
+                } else {
+                    continue;
+                }
+
                 if (release.value("draft", false)) continue;
                 if (release.value("prerelease", false)) continue;
 
-                std::string versionStr = tag.substr(gamePrefix.length());
+                std::string versionStr = tag.substr(matchedPrefix.length());
                 Version v = Version::Parse(versionStr);
 
                 if (v.IsValid() && (!found || v > bestVersion)) {
@@ -120,8 +133,7 @@ namespace Launcher {
             ParseRelease(bestRelease, outInfo);
             Log::Info("Latest game release: %s (%s) with %zu assets",
                       outInfo.tagName.c_str(), outInfo.name.c_str(), outInfo.assets.size());
-            SelectPlatformAsset(outInfo);
-            return true;
+            return SelectPlatformAsset(outInfo);
 
         } catch (const nlohmann::json::exception& e) {
             Log::Error("Failed to parse releases JSON: %s", e.what());
@@ -144,18 +156,27 @@ namespace Launcher {
                 return false;
             }
 
+            // Accept both new platform-specific prefix (e.g. "launcher-mac-v") and old format ("launcher-v")
             std::string prefix(LauncherReleaseTagPrefix);
+            std::string oldPrefix = "launcher-v";
             Version bestVersion;
             nlohmann::json bestRelease;
             bool found = false;
 
             for (const auto& release : releases) {
                 std::string tag = release.value("tag_name", "");
-                // Only consider releases tagged with "launcher-v"
-                if (tag.find(prefix) != 0) continue;
 
-                // Extract version from tag (strip "launcher-v" prefix)
-                std::string versionStr = tag.substr(prefix.length());
+                // Determine which prefix matches, skip if neither
+                std::string matchedPrefix;
+                if (tag.find(prefix) == 0) {
+                    matchedPrefix = prefix;
+                } else if (tag.find(oldPrefix) == 0) {
+                    matchedPrefix = oldPrefix;
+                } else {
+                    continue;
+                }
+
+                std::string versionStr = tag.substr(matchedPrefix.length());
                 Version v = Version::Parse(versionStr);
 
                 if (v.IsValid() && (!found || v > bestVersion)) {

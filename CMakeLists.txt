@@ -906,13 +906,19 @@ endif()
 
 # ── Auto version bump + release for game (Universal/JALIN builds only) ──
 if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
-        # Auto-increment game build number before compiling (edits Config.hpp directly)
+        set(GAME_VERSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/game")
+        file(MAKE_DIRECTORY "${GAME_VERSION_DIR}")
+        target_include_directories(MyVoxelGame PRIVATE "${GAME_VERSION_DIR}")
+
+        # Auto-increment game build number before compiling
         add_custom_target(bump_game_version ALL
             COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
                 game
                 "${PROJECT_SOURCE_DIR}/tools/game_build_number"
                 "0" "1"
                 "${PROJECT_SOURCE_DIR}"
+                "${GAME_VERSION_DIR}"
+            BYPRODUCTS "${GAME_VERSION_DIR}/BuildVersion.hpp"
             COMMENT "Auto-incrementing game version"
         )
         add_dependencies(MyVoxelGame bump_game_version)
@@ -937,6 +943,10 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
             COMMENT "Updating bundle version in Info.plist"
         )
 elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
+        set(GAME_VERSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/game")
+        file(MAKE_DIRECTORY "${GAME_VERSION_DIR}")
+        target_include_directories(MyVoxelGame PRIVATE "${GAME_VERSION_DIR}")
+
         # Auto-increment game build number before compiling
         add_custom_target(bump_game_version ALL
             COMMAND powershell -ExecutionPolicy Bypass -File
@@ -945,6 +955,8 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
                 -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number"
                 -Major 0 -Minor 1
                 -SourceRoot "${PROJECT_SOURCE_DIR}"
+                -BuildDir "${GAME_VERSION_DIR}"
+            BYPRODUCTS "${GAME_VERSION_DIR}/BuildVersion.hpp"
             COMMENT "Auto-incrementing game version"
         )
         add_dependencies(MyVoxelGame bump_game_version)
@@ -1113,6 +1125,10 @@ if(CURL_FOUND)
 
     # Auto-increment launcher version (Release builds only, NOT universal/JALIN)
     if(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
+        set(LAUNCHER_VERSION_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/launcher")
+        file(MAKE_DIRECTORY "${LAUNCHER_VERSION_DIR}")
+        target_include_directories(ObeyCraftLauncher PRIVATE "${LAUNCHER_VERSION_DIR}")
+
         if(APPLE)
             add_custom_target(bump_launcher_version ALL
                 COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
@@ -1120,6 +1136,8 @@ if(CURL_FOUND)
                     "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
                     "1" "0"
                     "${PROJECT_SOURCE_DIR}"
+                    "${LAUNCHER_VERSION_DIR}"
+                BYPRODUCTS "${LAUNCHER_VERSION_DIR}/BuildVersion.hpp"
                 COMMENT "Auto-incrementing launcher version"
             )
         elseif(WIN32)
@@ -1130,6 +1148,8 @@ if(CURL_FOUND)
                     -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
                     -Major 1 -Minor 0
                     -SourceRoot "${PROJECT_SOURCE_DIR}"
+                    -BuildDir "${LAUNCHER_VERSION_DIR}"
+                BYPRODUCTS "${LAUNCHER_VERSION_DIR}/BuildVersion.hpp"
                 COMMENT "Auto-incrementing launcher version"
             )
         endif()

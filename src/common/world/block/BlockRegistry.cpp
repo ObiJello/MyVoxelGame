@@ -65,6 +65,7 @@ namespace Game {
         #include "BlockDefs.inc"
         #undef BLOCK_DEF
 
+
         // Manual entries not in all_blocks.txt
         RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", RenderLayer::Opaque, "grass_block_snow");
 

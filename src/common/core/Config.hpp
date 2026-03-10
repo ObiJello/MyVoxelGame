@@ -1,7 +1,13 @@
 // File: src/common/core/Config.hpp
 #pragma once
 
-#define GAME_VERSION "0.1.12"
+// Game version (auto-updated by tools/bump_version.sh on Release builds)
+#if __has_include("BuildVersion.hpp")
+    #include "BuildVersion.hpp"
+    #define GAME_VERSION BUILD_VERSION
+#else
+    #define GAME_VERSION "0.1.14"
+#endif
 
 namespace Config {
     // Window settings

@@ -49,6 +49,7 @@ if command -v gh &> /dev/null; then
             "$BIN_DIR/$ZIP_NAME" 2>/dev/null || true
         echo "[auto-release] Created release: $TAG"
     fi
+
 else
     echo "[auto-release] gh CLI not found - zip created but not uploaded"
 fi

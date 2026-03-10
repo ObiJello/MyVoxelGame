@@ -229,11 +229,15 @@ namespace Launcher {
         std::atomic<bool> checkSuccess{false};
         std::string checkError;
 
-        // Strip the platform tag prefix (e.g. "game-win-v") before parsing version numbers
+        // Strip the platform tag prefix (e.g. "game-win-v") or old "v" prefix before parsing
         auto ParseGameVersion = [](const std::string& tagName) -> Version {
             std::string s = tagName;
             std::string prefix(GameReleaseTagPrefix);
-            if (s.find(prefix) == 0) s = s.substr(prefix.length());
+            if (s.find(prefix) == 0) {
+                s = s.substr(prefix.length());
+            } else if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) {
+                s = s.substr(1);
+            }
             return Version::Parse(s);
         };
 
@@ -263,9 +267,12 @@ namespace Launcher {
                 ReleaseInfo launcherRelease;
                 if (api.FetchLatestLauncherRelease(launcherRelease)) {
                     std::string tagPrefix(LauncherReleaseTagPrefix);
+                    std::string oldTagPrefix = "launcher-v";
                     std::string versionStr = launcherRelease.tagName;
                     if (versionStr.find(tagPrefix) == 0) {
                         versionStr = versionStr.substr(tagPrefix.length());
+                    } else if (versionStr.find(oldTagPrefix) == 0) {
+                        versionStr = versionStr.substr(oldTagPrefix.length());
                     }
                     Version latestLauncher = Version::Parse(versionStr);
                     Version currentLauncher = Version::Parse(LauncherVersion);
@@ -274,7 +281,12 @@ namespace Launcher {
                     Log::Info("[SELFUPDATE] Compiled: %s", currentLauncher.ToString().c_str());
                     Log::Info("[SELFUPDATE] Is newer: %d", (latestLauncher > currentLauncher) ? 1 : 0);
 
-                    if (latestLauncher > currentLauncher && launcherRelease.hasPlatformAsset) {
+                    // Also check config version — if we already installed this version
+                    // in a previous session, don't re-download (avoids loop if compiled
+                    // version is stale due to incremental build)
+                    Version configLauncher = Version::Parse(config.launcherVersion);
+
+                    if (latestLauncher > currentLauncher && latestLauncher > configLauncher && launcherRelease.hasPlatformAsset) {
                         Log::Info("[SELFUPDATE] UPDATE NEEDED: %s -> %s",
                                   currentLauncher.ToString().c_str(), latestLauncher.ToString().c_str());
 
