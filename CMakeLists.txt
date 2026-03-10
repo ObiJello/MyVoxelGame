@@ -914,7 +914,7 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         add_custom_target(bump_game_version ALL
             COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
                 game
-                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
                 "0" "1"
                 "${PROJECT_SOURCE_DIR}"
                 "${GAME_VERSION_DIR}"
@@ -927,7 +927,7 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
                 game
-                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
                 "0" "1"
                 "MyVoxelGame.app"
                 "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
@@ -937,7 +937,7 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         # Update Info.plist version in bundle
         add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND bash "${PROJECT_SOURCE_DIR}/tools/update_plist_version.sh"
-                "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Info.plist"
                 "0" "1"
             COMMENT "Updating bundle version in Info.plist"
@@ -952,7 +952,7 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
             COMMAND powershell -ExecutionPolicy Bypass -File
                 "${PROJECT_SOURCE_DIR}/tools/bump_version.ps1"
                 -Type game
-                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number_win"
                 -Major 0 -Minor 1
                 -SourceRoot "${PROJECT_SOURCE_DIR}"
                 -BuildDir "${GAME_VERSION_DIR}"
@@ -966,7 +966,7 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
             COMMAND powershell -ExecutionPolicy Bypass -File
                 "${PROJECT_SOURCE_DIR}/tools/auto_release.ps1"
                 -Type game
-                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number"
+                -NumberFile "${PROJECT_SOURCE_DIR}/tools/game_build_number_win"
                 -Major 0 -Minor 1
                 -AppName MyVoxelGame.exe
                 -BinDir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
@@ -1133,7 +1133,7 @@ if(CURL_FOUND)
             add_custom_target(bump_launcher_version ALL
                 COMMAND bash "${PROJECT_SOURCE_DIR}/tools/bump_version.sh"
                     launcher
-                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number_mac"
                     "1" "0"
                     "${PROJECT_SOURCE_DIR}"
                     "${LAUNCHER_VERSION_DIR}"
@@ -1145,7 +1145,7 @@ if(CURL_FOUND)
                 COMMAND powershell -ExecutionPolicy Bypass -File
                     "${PROJECT_SOURCE_DIR}/tools/bump_version.ps1"
                     -Type launcher
-                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number_win"
                     -Major 1 -Minor 0
                     -SourceRoot "${PROJECT_SOURCE_DIR}"
                     -BuildDir "${LAUNCHER_VERSION_DIR}"
@@ -1208,7 +1208,7 @@ if(CURL_FOUND)
             add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
                 COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
                     launcher
-                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    "${PROJECT_SOURCE_DIR}/tools/launcher_build_number_mac"
                     "1" "0"
                     "ObeyCraftLauncher.app"
                     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
@@ -1245,7 +1245,7 @@ if(CURL_FOUND)
                 COMMAND powershell -ExecutionPolicy Bypass -File
                     "${PROJECT_SOURCE_DIR}/tools/auto_release.ps1"
                     -Type launcher
-                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number"
+                    -NumberFile "${PROJECT_SOURCE_DIR}/tools/launcher_build_number_win"
                     -Major 1 -Minor 0
                     -AppName ObeyCraftLauncher.exe
                     -BinDir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"

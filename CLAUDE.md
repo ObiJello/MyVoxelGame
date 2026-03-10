@@ -194,7 +194,7 @@ This is only needed once to distribute the launcher to new users. After that, th
 ```powershell
 # Requires Inno Setup 6 installed at %LOCALAPPDATA%\Programs\Inno Setup 6\
 powershell -ExecutionPolicy Bypass -File tools/create_installer.ps1
-# Output: cmake-build-release\ObeyCraftLauncherSetup.exe
+# Output: %USERPROFILE%\Downloads\ObeyCraftLauncherInstaller.exe
 ```
 Run this whenever you need to do a fresh Windows install (e.g. to bypass a broken auto-update). The `.iss` script is at `tools/create_installer.iss`.
 

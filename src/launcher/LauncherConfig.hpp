@@ -22,7 +22,7 @@ namespace Launcher {
     #include "BuildVersion.hpp"
     inline constexpr const char* LauncherVersion = BUILD_VERSION;
 #else
-    inline constexpr const char* LauncherVersion = "1.0.54";
+    inline constexpr const char* LauncherVersion = "1.0.57";
 #endif
 
     // Launcher self-update

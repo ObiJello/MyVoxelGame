@@ -1,4 +1,5 @@
-$ISCC = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
-$ISS  = "$PSScriptRoot\create_installer.iss"
-& $ISCC $ISS
-Write-Host "Installer created: cmake-build-release\ObeyCraftLauncherSetup.exe"
+$ISCC      = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+$ISS       = "$PSScriptRoot\create_installer.iss"
+$Downloads = "$env:USERPROFILE\Downloads"
+& $ISCC $ISS /O"$Downloads"
+Write-Host "Installer created: $Downloads\ObeyCraftLauncherInstaller.exe"
