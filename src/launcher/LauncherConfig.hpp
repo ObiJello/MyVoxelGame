@@ -17,7 +17,7 @@ namespace Launcher {
     inline constexpr const char* UserAgent = "ObeyCraftLauncher/1.0";
 
     // Launcher version (auto-updated by tools/bump_version.sh on Release builds)
-    inline constexpr const char* LauncherVersion = "1.0.23";
+    inline constexpr const char* LauncherVersion = "1.0.26";
 
     // Launcher self-update
 #ifdef __APPLE__

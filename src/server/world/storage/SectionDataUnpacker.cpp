@@ -97,39 +97,37 @@ namespace Game {
     // BlockStateRegistry implementation
     std::unordered_map<std::string, BlockID> BlockStateRegistry::s_nameToBlockId;
     std::unordered_map<std::string, BlockID> BlockStateRegistry::s_stateToBlockId;
-    bool BlockStateRegistry::s_initialized = false;
+    std::once_flag BlockStateRegistry::s_initFlag;
 
     void BlockStateRegistry::Initialize() {
-        if (s_initialized) return;
+        std::call_once(s_initFlag, []() {
+            Log::Info("Initializing BlockStateRegistry...");
 
-        Log::Info("Initializing BlockStateRegistry...");
+            // Air must be manual (not in .inc)
+            s_nameToBlockId["minecraft:air"] = BlockID::Air;
 
-        // Air must be manual (not in .inc)
-        s_nameToBlockId["minecraft:air"] = BlockID::Air;
+            // All blocks from BlockDefs.inc (single source of truth)
+            #define BLOCK_DEF(e, m, d, o) s_nameToBlockId["minecraft:" m] = BlockID::e;
+            #include "common/world/block/BlockDefs.inc"
+            #undef BLOCK_DEF
 
-        // All blocks from BlockDefs.inc (single source of truth)
-        #define BLOCK_DEF(e, m, d, o) s_nameToBlockId["minecraft:" m] = BlockID::e;
-        #include "common/world/block/BlockDefs.inc"
-        #undef BLOCK_DEF
+            // Manual aliases
+            s_nameToBlockId["minecraft:grass"] = BlockID::Grass;
+            s_nameToBlockId["minecraft:cave_air"] = BlockID::Air;
+            s_nameToBlockId["minecraft:void_air"] = BlockID::Air;
+            s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
 
-        // Manual aliases
-        s_nameToBlockId["minecraft:grass"] = BlockID::Grass;
-        s_nameToBlockId["minecraft:cave_air"] = BlockID::Air;
-        s_nameToBlockId["minecraft:void_air"] = BlockID::Air;
-        s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
+            // Specific block state overrides
+            s_stateToBlockId["minecraft:grass_block{snowy:true}"] = BlockID::SnowGrass;
 
-        // Specific block state overrides
-        s_stateToBlockId["minecraft:grass_block{snowy:true}"] = BlockID::SnowGrass;
-
-        // Log statistics
-        Log::Info("BlockStateRegistry initialized with %zu base blocks and %zu specific states",
-                 s_nameToBlockId.size(), s_stateToBlockId.size());
-
-        s_initialized = true;
+            // Log statistics
+            Log::Info("BlockStateRegistry initialized with %zu base blocks and %zu specific states",
+                     s_nameToBlockId.size(), s_stateToBlockId.size());
+        });
     }
 
     BlockID BlockStateRegistry::ResolveBlockState(const BlockState& state) {
-        if (!s_initialized) Initialize();
+        Initialize();
 
         // First try exact state match (for blocks with important properties)
         std::string stateKey = state.GetStateKey();
@@ -156,9 +154,13 @@ namespace Game {
 
         // Unknown block - track it and return air
         static std::unordered_set<std::string> loggedUnknown;
-        if (loggedUnknown.find(normalizedName) == loggedUnknown.end()) {
-            Log::Warning("Unknown block state: %s", stateKey.c_str());
-            loggedUnknown.insert(normalizedName);
+        static std::mutex loggedUnknownMutex;
+        {
+            std::lock_guard<std::mutex> lock(loggedUnknownMutex);
+            if (loggedUnknown.find(normalizedName) == loggedUnknown.end()) {
+                Log::Warning("Unknown block state: %s", stateKey.c_str());
+                loggedUnknown.insert(normalizedName);
+            }
         }
         
         // Track this unimplemented block

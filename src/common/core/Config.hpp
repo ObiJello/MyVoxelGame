@@ -1,7 +1,7 @@
 // File: src/common/core/Config.hpp
 #pragma once
 
-#define GAME_VERSION "0.1.8"
+#define GAME_VERSION "0.1.12"
 
 namespace Config {
     // Window settings

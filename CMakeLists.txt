@@ -645,8 +645,8 @@ endif()
 # 7) PCH
 target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
 
-# Hide console window on Windows (GUI app)
-if(WIN32)
+# Hide console window on Windows (distribution builds only, requires -DJALIN=ON)
+if(WIN32 AND JALIN)
     set_target_properties(MyVoxelGame PROPERTIES WIN32_EXECUTABLE TRUE)
     target_link_options(MyVoxelGame PRIVATE /ENTRY:mainCRTStartup)
 endif()

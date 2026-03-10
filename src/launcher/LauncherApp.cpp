@@ -229,6 +229,14 @@ namespace Launcher {
         std::atomic<bool> checkSuccess{false};
         std::string checkError;
 
+        // Strip the platform tag prefix (e.g. "game-win-v") before parsing version numbers
+        auto ParseGameVersion = [](const std::string& tagName) -> Version {
+            std::string s = tagName;
+            std::string prefix(GameReleaseTagPrefix);
+            if (s.find(prefix) == 0) s = s.substr(prefix.length());
+            return Version::Parse(s);
+        };
+
         std::atomic<bool> downloadComplete{false};
         std::atomic<bool> downloadSuccess{false};
 
@@ -413,7 +421,7 @@ namespace Launcher {
             if (checkComplete.load() && uiState.state == LauncherState::CheckingForUpdates) {
                 if (checkSuccess.load()) {
                     std::lock_guard<std::mutex> lock(resultMutex);
-                    Version latest = Version::Parse(latestRelease.tagName);
+                    Version latest = ParseGameVersion(latestRelease.tagName);
                     Version installed = Version::Parse(config.installedVersion);
 
                     uiState.latestVersion = latest.ToString();
@@ -449,7 +457,7 @@ namespace Launcher {
                     // Update config
                     {
                         std::lock_guard<std::mutex> lock(resultMutex);
-                        Version latest = Version::Parse(latestRelease.tagName);
+                        Version latest = ParseGameVersion(latestRelease.tagName);
                         config.installedVersion = latest.ToString();
                     }
                     config.Save(configPath);

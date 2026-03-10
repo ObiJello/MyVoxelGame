@@ -77,7 +77,7 @@ namespace Launcher {
     }
 
     bool GitHubAPI::FetchLatestRelease(ReleaseInfo& outInfo) {
-        // Query all releases and find the latest GAME release (skip launcher-v* tags)
+        // Query all releases and find the highest-versioned GAME release for this platform
         std::string url = std::string(GitHubAPIBase) + "/repos/" + m_owner + "/" + m_repo + "/releases?per_page=30";
         Log::Info("Checking for game updates...");
 
@@ -92,25 +92,36 @@ namespace Launcher {
             }
 
             std::string gamePrefix(GameReleaseTagPrefix);
+            Version bestVersion;
+            nlohmann::json bestRelease;
+            bool found = false;
 
             for (const auto& release : releases) {
                 std::string tag = release.value("tag_name", "");
-                // Only consider game releases for this platform
                 if (tag.find(gamePrefix) != 0) continue;
-                // Skip drafts and prereleases
                 if (release.value("draft", false)) continue;
                 if (release.value("prerelease", false)) continue;
 
-                // This is the latest game release for this platform (GitHub returns newest first)
-                ParseRelease(release, outInfo);
-                Log::Info("Latest game release: %s (%s) with %zu assets",
-                          outInfo.tagName.c_str(), outInfo.name.c_str(), outInfo.assets.size());
-                SelectPlatformAsset(outInfo);
-                return true;
+                std::string versionStr = tag.substr(gamePrefix.length());
+                Version v = Version::Parse(versionStr);
+
+                if (v.IsValid() && (!found || v > bestVersion)) {
+                    bestVersion = v;
+                    bestRelease = release;
+                    found = true;
+                }
             }
 
-            Log::Info("No game releases found for this platform");
-            return false;
+            if (!found) {
+                Log::Info("No game releases found for this platform");
+                return false;
+            }
+
+            ParseRelease(bestRelease, outInfo);
+            Log::Info("Latest game release: %s (%s) with %zu assets",
+                      outInfo.tagName.c_str(), outInfo.name.c_str(), outInfo.assets.size());
+            SelectPlatformAsset(outInfo);
+            return true;
 
         } catch (const nlohmann::json::exception& e) {
             Log::Error("Failed to parse releases JSON: %s", e.what());

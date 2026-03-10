@@ -142,11 +142,14 @@ Building in the right configuration automatically handles everything:
 | Build | What happens automatically |
 |-------|--------------------------|
 | Game **Debug** | Normal build, nothing extra |
-| Game **Universal Release** (`cmake-build-universal`, `-DJALIN=ON`) | Version bumps, zips, uploads to GitHub, uploads dSYMs to Sentry |
+| Game **Release** (no `-DJALIN=ON`) | Normal build, nothing extra |
+| Game **Release** (`-DJALIN=ON`) | Version bumps, zips, uploads to GitHub, uploads debug symbols to Sentry |
 | Launcher **Debug** | Normal build, nothing extra |
-| Launcher **Release** (`cmake-build-release`) | Version bumps, zips, uploads to GitHub |
+| Launcher **Release** (no `-DJALIN=ON`) | Version bumps, zips, uploads to GitHub |
 
 **Just build in CLion and everything happens.** No scripts to run.
+
+> **Important:** `-DJALIN=ON` is required for game GitHub uploads and Sentry symbol uploads. Without it, Release builds compile normally but don't publish anything. The launcher uploads on any Release build regardless of JALIN.
 
 ### How the Auto-Release Works
 
@@ -181,11 +184,19 @@ On Universal Release builds (with `-DJALIN=ON`, which is the default for `cmake-
 - **Game install location**: `~/Library/Application Support/obeycraft/game/`
 - **Asset name matching**: Zip filenames must contain a platform tag (`macos-universal`, `macos-arm64`, `windows-x64`) for the launcher to pick the right one
 
-### Creating a DMG for First-Time Distribution
+### Creating a DMG for First-Time Distribution (macOS)
 ```bash
 ./tools/create_dmg.sh    # Creates ~/Downloads/ObeyCraftLauncher.dmg
 ```
 This is only needed once to distribute the launcher to new users. After that, the launcher updates itself.
+
+### Creating a Windows Installer
+```powershell
+# Requires Inno Setup 6 installed at %LOCALAPPDATA%\Programs\Inno Setup 6\
+powershell -ExecutionPolicy Bypass -File tools/create_installer.ps1
+# Output: cmake-build-release\ObeyCraftLauncherSetup.exe
+```
+Run this whenever you need to do a fresh Windows install (e.g. to bypass a broken auto-update). The `.iss` script is at `tools/create_installer.iss`.
 
 ### Manual Release Scripts (Optional)
 These still exist if you ever need manual control:

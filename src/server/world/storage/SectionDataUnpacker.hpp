@@ -89,7 +89,7 @@ namespace Game {
     private:
         static std::unordered_map<std::string, BlockID> s_nameToBlockId;
         static std::unordered_map<std::string, BlockID> s_stateToBlockId; // For specific states
-        static bool s_initialized;
+        static std::once_flag s_initFlag;
 
         static std::string NormalizeName(const std::string& name);
     };

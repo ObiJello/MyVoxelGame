@@ -278,11 +278,21 @@ namespace Launcher {
         std::string exeDir = fs::path(currentAppPath).parent_path().string();
         std::string batPath = stagingDir + "/update_launcher.bat";
 
+        // Build helper paths for the rename trick
+        std::string currentFilename = fs::path(currentAppPath).filename().string();
+        std::string oldFilename = currentFilename + ".old";
+        std::string oldFullPath = fs::path(currentAppPath).parent_path().string() + "\\" + oldFilename;
+
         std::ofstream bat(batPath);
         bat << "@echo off\r\n";
         bat << "timeout /t 2 /nobreak >nul\r\n";
+        // Rename old exe first — renaming always succeeds even if the file is still briefly
+        // held by the OS (e.g. Defender), because rename is a directory-entry operation.
+        // Then copy to the now-vacant path so there is nothing to lock.
+        bat << "ren \"" << currentAppPath << "\" \"" << oldFilename << "\"\r\n";
         bat << "copy /Y \"" << newLauncherPath << "\" \"" << currentAppPath << "\"\r\n";
         bat << "start \"\" \"" << currentAppPath << "\"\r\n";
+        bat << "del /F /Q \"" << oldFullPath << "\"\r\n";
         bat << "rmdir /S /Q \"" << stagingDir << "\"\r\n";
         bat << "del \"%~f0\"\r\n";
         bat.close();
