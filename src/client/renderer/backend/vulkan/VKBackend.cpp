@@ -77,7 +77,7 @@ namespace Render {
             size_t sz = sizeof(isTranslated);
             bool isRosetta = (sysctlbyname("sysctl.proc_translated", &isTranslated, &sz, NULL, 0) == 0 && isTranslated);
             if (!isRosetta) {
-                setenv("MVK_CONFIG_USE_METAL_HEAP", "0", 0);
+                setenv("MVK_CONFIG_USE_MTLHEAP", "0", 0);
                 setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 0);
                 Log::Info("VKBackend: Intel Mac detected, disabled Metal heaps for driver compatibility");
             }
