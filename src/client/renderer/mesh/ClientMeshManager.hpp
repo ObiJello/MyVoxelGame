@@ -7,13 +7,14 @@
 #include "common/network/MessageQueue.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "SectionMesh.hpp"
+#include "ChunkMegaBuffer.hpp"
+#include "Mesher.hpp"          // For RenderLayer enum
 #include <memory>
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace Render {
 
@@ -104,14 +105,14 @@ namespace Render {
         
         // Iterate all active sections under shared lock (zero-copy, zero-alloc)
         // Callback receives (const SectionKey&, const GPUSectionData*)
+        // Iterates m_gpuData directly — it only contains sections with geometry
+        // (empty sections are erased at upload time), eliminating the old
+        // m_activeSections set and its redundant per-entry hash lookup.
         template<typename Func>
         void ForEachActiveSection(Func&& fn) const {
             std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
-            for (const auto& key : m_activeSections) {
-                auto it = m_gpuData.find(key);
-                if (it != m_gpuData.end()) {
-                    fn(key, &it->second);
-                }
+            for (const auto& [key, data] : m_gpuData) {
+                fn(key, &data);
             }
         }
         
@@ -120,6 +121,23 @@ namespace Render {
 
         // Remove GPU data for entire chunk (all 24 sections)
         void RemoveChunkGPUData(::Game::Math::ChunkPos chunkPos);
+
+        // ========================================================================
+        // MEGA-BUFFER ACCESS (for ChunkRenderer multi-draw)
+        // ========================================================================
+
+        // Get the mega-buffer for a given render layer (opaque/cutout/translucent)
+        ChunkMegaBuffer* GetMegaBuffer(RenderLayer layer);
+
+        // ========================================================================
+        // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
+        // ========================================================================
+
+        // Bind the shared block VAO (call once per frame before any mega-buffer
+        // BindBuffers calls).  The shared VAO defines the vertex format; individual
+        // mega-buffer VBOs are switched with glBindVertexBuffer — no GPU flush.
+        void BindSharedBlockVAO();
+        bool HasVertexAttribBinding() const { return m_hasVertexAttribBinding; }
 
         // ========================================================================
         // CONFIGURATION
@@ -198,7 +216,7 @@ namespace Render {
 
         // Get GPU data counts for debug UI
         size_t GetGPUDataCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_gpuData.size(); }
-        size_t GetActiveSectionCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_activeSections.size(); }
+        size_t GetActiveSectionCount() const { std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex); return m_gpuData.size(); }
 
         // Force mesh rebuild for debugging
         void ForceMeshRebuild(::Game::Math::ChunkPos chunkPos);
@@ -225,6 +243,28 @@ namespace Render {
         std::chrono::steady_clock::time_point m_frameStartTime;
 
         // ========================================================================
+        // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
+        // ========================================================================
+        //
+        // One VAO defines the vertex format for ALL block geometry.  Mega-buffer
+        // VBOs are switched at render time with glBindVertexBuffer (cheap pointer
+        // swap) instead of glBindVertexArray (expensive — triggers GPU pipeline
+        // flush on macOS).
+        //
+        GLuint m_sharedBlockVAO = 0;
+        bool m_hasVertexAttribBinding = false;  // Runtime: GL_ARB_vertex_attrib_binding
+        void CreateSharedBlockVAO();
+        void DestroySharedBlockVAO();
+
+        // ========================================================================
+        // MEGA-BUFFERS (one per render layer)
+        // ========================================================================
+
+        ChunkMegaBuffer m_opaqueMegaBuffer;
+        ChunkMegaBuffer m_cutoutMegaBuffer;
+        ChunkMegaBuffer m_translucentMegaBuffer;
+
+        // ========================================================================
         // GPU DATA STORAGE
         // ========================================================================
 
@@ -234,9 +274,17 @@ namespace Render {
         mutable std::shared_mutex m_gpuDataMutex;
         std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash> m_gpuData;
         
-        // Track active sections (sections that have GPU data)
-        // This allows ChunkRenderer to iterate only sections with geometry
-        std::unordered_set<SectionKey, SectionKeyHash> m_activeSections;
+        // NOTE: m_activeSections was removed — m_gpuData only contains sections
+        // with geometry (empty sections are erased at upload time), so iterating
+        // m_gpuData directly is equivalent and avoids a redundant hash set.
+
+        // Deferred GPU resource destruction queue.
+        // Instead of destroying GPU buffers synchronously during chunk unload
+        // (which stalls the main thread), we queue the GPUSectionData for
+        // destruction in the next PerformGPUUploads() call, spreading the cost
+        // across frames.
+        std::vector<GPUSectionData> m_pendingDestroys;
+        void ProcessPendingDestroys();
 
 
         // ========================================================================

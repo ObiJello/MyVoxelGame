@@ -51,6 +51,39 @@ namespace Debug {
         return avgTimeMs > 0.0f ? 1000.0f / avgTimeMs : 0.0f;
     }
 
+    void PerformanceMetrics::RecordSpike(const FrameSpike& spike) {
+        if (spikeCount < MAX_SPIKES) {
+            recentSpikes[spikeCount++] = spike;
+        } else {
+            // Shift left, drop oldest
+            for (int i = 0; i < MAX_SPIKES - 1; i++) recentSpikes[i] = recentSpikes[i + 1];
+            recentSpikes[MAX_SPIKES - 1] = spike;
+        }
+    }
+
+    float PerformanceMetrics::Get99thPercentile() const {
+        float sorted[SAMPLE_COUNT];
+        std::copy(std::begin(frameTimes), std::end(frameTimes), sorted);
+        std::sort(sorted, sorted + SAMPLE_COUNT);
+        return sorted[static_cast<int>(SAMPLE_COUNT * 0.99f)];
+    }
+
+    float PerformanceMetrics::Get1PercentLow() const {
+        float sorted[SAMPLE_COUNT];
+        std::copy(std::begin(frameTimes), std::end(frameTimes), sorted);
+        std::sort(sorted, sorted + SAMPLE_COUNT);
+        // 1% low = 99th percentile frame time -> FPS = 1000/that
+        return sorted[static_cast<int>(SAMPLE_COUNT * 0.99f)];
+    }
+
+    int PerformanceMetrics::CountSpikesInHistory() const {
+        int count = 0;
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            if (frameTimes[i] > targetFrameTimeMs) count++;
+        }
+        return count;
+    }
+
     // ========================================================================
     // STATIC STATE
     // ========================================================================
@@ -152,18 +185,25 @@ namespace Debug {
         Log::Info("Debug system shutdown");
     }
 
+    // Track whether we started an ImGui frame this cycle (must be matched with Render)
+    static bool s_imguiFrameActive = false;
+
     void DebugSystem::BeginFrame() {
         // Check toggle even when disabled so user can re-enable
-        bool justToggled = false;
         if (Input::IsKeyDown(Input::Key::LeftShift) &&
             Input::IsKeyDown(Input::Key::Tilde) &&
             Input::IsKeyPressed(Input::Key::D)) {
             s_debugEnabled = !s_debugEnabled;
-            justToggled = true;
             Log::Info(s_debugEnabled ? "Debug UI enabled" : "Debug UI disabled");
         }
 
-        // Always run ImGui frame cycle to keep internal state consistent
+        // Skip the entire ImGui frame cycle when debug UI is disabled
+        if (!s_debugEnabled) {
+            s_imguiFrameActive = false;
+            return;
+        }
+
+        // Start ImGui frame
         if (Render::g_renderBackend) {
             Render::g_renderBackend->ImGuiNewFrame();
         } else {
@@ -171,22 +211,22 @@ namespace Debug {
             ImGui_ImplGlfw_NewFrame();
         }
         ImGui::NewFrame();
-
-        if (justToggled) {
-            ImGui::SetWindowFocus(nullptr);
-        }
+        s_imguiFrameActive = true;
     }
 
     void DebugSystem::EndFrame() {
-        // Always end ImGui frame to match BeginFrame
-        ImGui::Render();
-        if (s_debugEnabled) {
-            if (Render::g_renderBackend) {
-                Render::g_renderBackend->ImGuiRender();
-            } else {
-                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-            }
+        // Only end ImGui frame if we started one (matched pair)
+        if (!s_imguiFrameActive) {
+            return;
         }
+
+        ImGui::Render();
+        if (Render::g_renderBackend) {
+            Render::g_renderBackend->ImGuiRender();
+        } else {
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+        s_imguiFrameActive = false;
     }
 
     // ========================================================================
@@ -296,14 +336,15 @@ namespace Debug {
         int windowWidth, int windowHeight,
         int framebufferWidth, int framebufferHeight) {
 
+        // Skip all ImGui interaction if debug UI is disabled (no ImGui frame active)
+        if (!s_debugEnabled) return;
+
         // Disable ImGui mouse interaction when cursor is hidden (game mode)
         ImGuiIO& io = ImGui::GetIO();
         if (!cursorEnabled)
             io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
         else
             io.ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
-
-        if (!s_debugEnabled) return;
 
         // Handle F3 toggle
         if (Input::IsKeyPressed(Input::Key::F3)) {
@@ -468,28 +509,81 @@ namespace Debug {
     // PERFORMANCE PANEL
     // ========================================================================
 
+    // Helper: draw a single waterfall row with label, time bar, and optional detail text
+    static void DrawWaterfallRow(const char* label, float timeMs, float maxTimeMs,
+                                 ImU32 color, int indent = 0, const char* detail = nullptr) {
+        if (indent > 0) {
+            ImGui::Indent(static_cast<float>(indent) * 12.0f);
+        }
+
+        // Label and time value
+        ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color), "%-14s %6.2f ms", label, timeMs);
+        ImGui::SameLine(160.0f + static_cast<float>(indent) * 12.0f);
+
+        // Progress bar
+        float barWidth = ImGui::GetContentRegionAvail().x - 100.0f;
+        if (barWidth < 40.0f) barWidth = 40.0f;
+        float fraction = maxTimeMs > 0 ? (timeMs / maxTimeMs) : 0.0f;
+        if (fraction > 1.0f) fraction = 1.0f;
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::ColorConvertU32ToFloat4(color));
+        ImGui::ProgressBar(fraction, ImVec2(barWidth * 0.6f, 14.0f), "");
+        ImGui::PopStyleColor();
+
+        // Optional detail (draw calls, section count, etc.)
+        if (detail) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", detail);
+        }
+
+        if (indent > 0) {
+            ImGui::Unindent(static_cast<float>(indent) * 12.0f);
+        }
+    }
+
     void DebugSystem::DrawPerformancePanel(const PerformanceMetrics& metrics) {
         ImGui::SetNextWindowPos(ImVec2(10, 110), ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(420, 520), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(520, 700), ImGuiCond_FirstUseEver);
         if (!ImGui::Begin("Performance", &s_visibility.performance)) {
             ImGui::End();
             return;
         }
 
-        // FPS header
         float fps = metrics.GetFPS();
         float avgMs = metrics.GetAverageFrameTime();
+        char buf[256];
+
+        // Get render stats for use throughout the panel
+        const auto* rs = Render::GetChunkRendererStats();
+        int totalDrawCalls = rs ? rs->totalDrawCalls : 0;
+        int sectionsRendered = rs ? rs->sectionsRendered : metrics.meshesRenderedThisFrame;
+        int sectionsAvailable = rs ? rs->sectionsAvailable : 0;
+
+        // ── Key Stats Line ─────────────────────────────────────────────────
         ImVec4 fpsCol = fps >= 55 ? COL_GREEN : (fps >= 30 ? COL_YELLOW : COL_RED);
         ImGui::TextColored(fpsCol, "%.0f FPS", fps);
         ImGui::SameLine();
-        ImGui::Text("(%.2f ms avg, %.2f ms frame)", avgMs, metrics.frameTime);
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::Text("%.1f ms", avgMs);
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::Text("%d draws", totalDrawCalls);
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::Text("%d/%d sec", sectionsRendered, sectionsAvailable);
+        if (metrics.gpuTotalTimeMs > 0) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            ImVec4 gpuCol = metrics.gpuTotalTimeMs < 10.0f ? COL_GREEN : (metrics.gpuTotalTimeMs < 16.0f ? COL_YELLOW : COL_RED);
+            ImGui::TextColored(gpuCol, "GPU %.1f ms", metrics.gpuTotalTimeMs);
+        }
 
         ImGui::Separator();
 
-        // Percentage helper
-        auto pct = [&](float t) { return metrics.frameTime > 0 ? (t / metrics.frameTime * 100.0f) : 0.0f; };
-
-        // Frame time breakdown bar
+        // ── Stacked Bar Chart (kept from original) ─────────────────────────
         float barWidth = ImGui::GetContentRegionAvail().x;
         float barHeight = 20.0f;
         ImVec2 barPos = ImGui::GetCursorScreenPos();
@@ -525,95 +619,177 @@ namespace Debug {
         }
         ImGui::Dummy(ImVec2(barWidth, barHeight + 4));
 
-        // CPU Operations
-        if (ImGui::CollapsingHeader("CPU Operations", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent();
-            ImGui::TextColored(COL_BLUE, "Network:       %6.2f ms (%4.1f%%)", metrics.networkProcessingTime, pct(metrics.networkProcessingTime));
-            ImGui::TextColored(COL_BLUE, "Input:         %6.2f ms (%4.1f%%)", metrics.inputHandlingTime, pct(metrics.inputHandlingTime));
-            ImGui::TextColored(COL_BLUE, "Game Logic:    %6.2f ms (%4.1f%%)", metrics.gameLogicTime, pct(metrics.gameLogicTime));
-            ImGui::TextColored(COL_BLUE, "Mesh Results:  %6.2f ms (%4.1f%%)", metrics.meshResultProcessingTime, pct(metrics.meshResultProcessingTime));
-            ImGui::TextColored(COL_BLUE, "Mesh Schedule: %6.2f ms (%4.1f%%)", metrics.meshSchedulingTime, pct(metrics.meshSchedulingTime));
-            ImGui::TextColored(COL_BLUE, "Tex Animation: %6.2f ms (%4.1f%%)", metrics.textureAnimationTime, pct(metrics.textureAnimationTime));
-            ImGui::Unindent();
-        }
+        // ── Bottleneck Indicator ───────────────────────────────────────────
+        {
+            const char* bottleneckLabel = "Balanced";
+            ImVec4 bottleneckColor = COL_GREEN;
 
-        // GPU Operations
-        if (ImGui::CollapsingHeader("GPU Operations", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Indent();
-            ImGui::TextColored(COL_ORANGE, "GPU Upload:  %6.2f ms (%4.1f%%)", metrics.gpuUploadTime, pct(metrics.gpuUploadTime));
-            ImGui::TextColored(COL_ORANGE, "Rendering:   %6.2f ms (%4.1f%%)", metrics.renderTime, pct(metrics.renderTime));
-
-            if (ImGui::TreeNode("Render Breakdown")) {
-                if (auto* rs = Render::GetChunkRendererStats()) {
-                    ImGui::Text("Build Draw Lists:  %.2f ms", rs->buildDrawListsTimeMs);
-                    if (ImGui::TreeNode("Build Details")) {
-                        ImGui::Text("  Chunk Iteration: %.2f ms", rs->chunkIterationTimeMs);
-                        ImGui::Text("  GPU Data Load:   %.2f ms", rs->gpuDataLoadTimeMs);
-                        ImGui::Text("  Frustum Culling: %.2f ms", rs->frustumCullingTimeMs);
-                        ImGui::Text("  Sorting:         %.2f ms", rs->sortingTimeMs);
-                        ImGui::Text("  Sections: %d checked, %d culled, %d rendered",
-                            rs->sectionsAvailable, rs->sectionsSkipped, rs->sectionsRendered);
-                        ImGui::TreePop();
-                    }
-                    ImGui::Spacing();
-                    ImGui::Text("Opaque Pass:       %.2f ms (%d sections)", rs->opaquePassTimeMs, rs->opaqueSections);
-                    ImGui::Text("Cutout Pass:       %.2f ms (%d sections)", rs->cutoutPassTimeMs, rs->cutoutSections);
-                    ImGui::Text("Translucent Pass:  %.2f ms (%d sections)", rs->translucentPassTimeMs, rs->translucentSections);
-                    ImGui::Text("Draw Calls:        %d", rs->totalDrawCalls);
-
-                    if (rs->gpuDataLoadTimeMs > 1.0f)
-                        ImGui::TextColored(COL_RED, "! Atomic loads slow (%.2f ms)", rs->gpuDataLoadTimeMs);
-                } else {
-                    ImGui::TextDisabled("Render stats unavailable");
-                }
-                ImGui::TreePop();
+            if (metrics.gpuTotalTimeMs > 0 && metrics.gpuTotalTimeMs > metrics.renderTime * 0.8f) {
+                // GPU is slower than CPU render submission -- GPU-bound
+                const char* heaviestPass = "Opaque";
+                float heaviestTime = metrics.gpuOpaqueTimeMs;
+                if (metrics.gpuCutoutTimeMs > heaviestTime) { heaviestPass = "Cutout"; heaviestTime = metrics.gpuCutoutTimeMs; }
+                if (metrics.gpuTranslucentTimeMs > heaviestTime) { heaviestPass = "Translucent"; heaviestTime = metrics.gpuTranslucentTimeMs; }
+                snprintf(buf, sizeof(buf), "GPU-bound (%s pass: %.1fms)", heaviestPass, heaviestTime);
+                bottleneckLabel = buf;
+                bottleneckColor = COL_RED;
+            } else if (metrics.vsyncWaitTime > metrics.frameTime * 0.4f) {
+                bottleneckLabel = "VSync-limited (headroom available)";
+                bottleneckColor = COL_GREEN;
+            } else if (metrics.meshSchedulingTime > 3.0f) {
+                snprintf(buf, sizeof(buf), "CPU-bound (Mesh scheduling: %.1fms)", metrics.meshSchedulingTime);
+                bottleneckLabel = buf;
+                bottleneckColor = COL_YELLOW;
+            } else if (metrics.renderTime > metrics.frameTime * 0.7f) {
+                snprintf(buf, sizeof(buf), "CPU-bound (Render submission: %.1fms)", metrics.renderTime);
+                bottleneckLabel = buf;
+                bottleneckColor = COL_YELLOW;
             }
-            ImGui::Unindent();
+
+            // Draw colored banner
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(bottleneckColor.x * 0.3f, bottleneckColor.y * 0.3f, bottleneckColor.z * 0.3f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(bottleneckColor.x * 0.3f, bottleneckColor.y * 0.3f, bottleneckColor.z * 0.3f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(bottleneckColor.x * 0.3f, bottleneckColor.y * 0.3f, bottleneckColor.z * 0.3f, 0.8f));
+            ImGui::PushStyleColor(ImGuiCol_Text, bottleneckColor);
+            float btnWidth = ImGui::GetContentRegionAvail().x;
+            ImGui::Button(bottleneckLabel, ImVec2(btnWidth, 0));
+            ImGui::PopStyleColor(4);
         }
 
-        // System
-        if (ImGui::CollapsingHeader("System")) {
-            ImGui::Indent();
-            ImGui::Text("Debug UI:      %6.2f ms (%4.1f%%)", metrics.debugUITime, pct(metrics.debugUITime));
-            ImGui::Text("Buffer Swap:   %6.2f ms (%4.1f%%)", metrics.vsyncWaitTime, pct(metrics.vsyncWaitTime));
-            ImGui::Text("Unaccounted:   %6.2f ms (%4.1f%%)", metrics.otherTime, pct(metrics.otherTime));
-            ImGui::Unindent();
-        }
+        ImGui::Spacing();
 
-        // Bottleneck
-        struct TimerEntry { const char* name; float time; };
-        TimerEntry timers[] = {
-            {"Network", metrics.networkProcessingTime}, {"Input", metrics.inputHandlingTime},
-            {"Game Logic", metrics.gameLogicTime}, {"Mesh Results", metrics.meshResultProcessingTime},
-            {"Mesh Schedule", metrics.meshSchedulingTime}, {"GPU Upload", metrics.gpuUploadTime},
-            {"Rendering", metrics.renderTime}, {"Debug UI", metrics.debugUITime},
-            {"Buffer Swap", metrics.vsyncWaitTime}
-        };
-        auto* bottleneck = &timers[0];
-        for (auto& t : timers) { if (t.time > bottleneck->time) bottleneck = &t; }
-
-        if (bottleneck->time > 10.0f) {
-            ImGui::TextColored(COL_RED, "BOTTLENECK: %s (%.1f ms)", bottleneck->name, bottleneck->time);
-        } else if (bottleneck->time > 5.0f) {
-            ImGui::TextColored(COL_YELLOW, "Slowest: %s (%.1f ms)", bottleneck->name, bottleneck->time);
-        }
-
-        // Frame time graph
+        // ── Flat Waterfall ─────────────────────────────────────────────────
+        ImGui::TextColored(COL_BLUE, "Timing Waterfall");
         ImGui::Separator();
+
+        // Determine max time for bar scaling (use frame time, clamped to at least 1ms)
+        float waterfallMax = std::max(metrics.frameTime, 1.0f);
+        // If GPU time exceeds frame time, scale to that instead
+        if (metrics.gpuTotalTimeMs > waterfallMax) waterfallMax = metrics.gpuTotalTimeMs;
+
+        DrawWaterfallRow("Network",      metrics.networkProcessingTime,   waterfallMax, IM_COL32(100, 160, 255, 255));
+        DrawWaterfallRow("Input",        metrics.inputHandlingTime,       waterfallMax, IM_COL32(100, 200, 100, 255));
+        DrawWaterfallRow("Game Logic",   metrics.gameLogicTime,           waterfallMax, IM_COL32(100, 220, 180, 255));
+        DrawWaterfallRow("Mesh Results", metrics.meshResultProcessingTime,waterfallMax, IM_COL32(180, 140, 255, 255));
+
+        snprintf(buf, sizeof(buf), "%d uploads", metrics.meshesUploadedThisFrame);
+        DrawWaterfallRow("Mesh Schedule",metrics.meshSchedulingTime,      waterfallMax, IM_COL32(140, 180, 255, 255), 0, buf);
+
+        snprintf(buf, sizeof(buf), "%d uploads", metrics.meshesUploadedThisFrame);
+        DrawWaterfallRow("GPU Upload",   metrics.gpuUploadTime,           waterfallMax, IM_COL32(255, 180, 80,  255), 0, buf);
+
+        DrawWaterfallRow("Tex Animation",metrics.textureAnimationTime,    waterfallMax, IM_COL32(200, 200, 100, 255));
+
+        // Render row with sub-breakdown
+        snprintf(buf, sizeof(buf), "%d draws", totalDrawCalls);
+        DrawWaterfallRow("Render",       metrics.renderTime,              waterfallMax, IM_COL32(255, 140, 80,  255), 0, buf);
+
+        if (rs) {
+            snprintf(buf, sizeof(buf), "%d sections", rs->sectionsRendered);
+            DrawWaterfallRow("Prepare",  rs->buildDrawListsTimeMs,        waterfallMax, IM_COL32(255, 160, 100, 200), 1, buf);
+
+            snprintf(buf, sizeof(buf), "%d draws", rs->opaqueSections);
+            DrawWaterfallRow("Opaque",   rs->opaquePassTimeMs,            waterfallMax, IM_COL32(255, 180, 120, 200), 1, buf);
+
+            snprintf(buf, sizeof(buf), "%d draws", rs->cutoutSections);
+            DrawWaterfallRow("Cutout",   rs->cutoutPassTimeMs,            waterfallMax, IM_COL32(255, 200, 140, 200), 1, buf);
+
+            snprintf(buf, sizeof(buf), "%d draws", rs->translucentSections);
+            DrawWaterfallRow("Translucnt",rs->translucentPassTimeMs,      waterfallMax, IM_COL32(255, 220, 160, 200), 1, buf);
+        }
+
+        // GPU timing row
+        if (metrics.gpuTotalTimeMs > 0) {
+            snprintf(buf, sizeof(buf), "(actual GPU)");
+            ImU32 gpuColor = metrics.gpuTotalTimeMs < 10.0f ? IM_COL32(80, 200, 80, 255) :
+                             (metrics.gpuTotalTimeMs < 16.0f ? IM_COL32(255, 200, 80, 255) : IM_COL32(255, 80, 80, 255));
+            DrawWaterfallRow("GPU Time",  metrics.gpuTotalTimeMs,         waterfallMax, gpuColor, 0, buf);
+        }
+
+        DrawWaterfallRow("Debug UI",     metrics.debugUITime,             waterfallMax, IM_COL32(150, 255, 150, 255));
+        DrawWaterfallRow("VSync Wait",   metrics.vsyncWaitTime,           waterfallMax, IM_COL32(100, 100, 100, 255));
+
+        if (metrics.otherTime > 0.1f) {
+            DrawWaterfallRow("Other",    metrics.otherTime,               waterfallMax, IM_COL32(120, 120, 120, 255));
+        }
+
+        ImGui::Spacing();
+
+        // ── Frame Time Graph with Target Line ──────────────────────────────
+        ImGui::TextColored(COL_BLUE, "Frame Time History");
+        ImGui::Separator();
+
         float maxTime = 0.0f;
         for (int i = 0; i < PerformanceMetrics::SAMPLE_COUNT; i++) {
             if (metrics.frameTimes[i] > maxTime) maxTime = metrics.frameTimes[i];
         }
-        maxTime = std::max(maxTime * 1.2f, 16.67f); // At least 60fps scale
-        char overlay[64];
-        snprintf(overlay, sizeof(overlay), "%.1f ms avg", avgMs);
+        maxTime = std::max(maxTime * 1.2f, metrics.targetFrameTimeMs * 1.5f);
+
+        // Save cursor position for the graph so we can draw the target line on top
+        ImVec2 graphPos = ImGui::GetCursorScreenPos();
+        float graphWidth = ImGui::GetContentRegionAvail().x;
+        float graphHeight = 60.0f;
+
+        char overlay[128];
+        float p99 = metrics.Get99thPercentile();
+        float p1LowMs = metrics.Get1PercentLow();
+        float p1LowFps = p1LowMs > 0 ? 1000.0f / p1LowMs : 0.0f;
+        int spikeCountInHistory = metrics.CountSpikesInHistory();
+
+        snprintf(overlay, sizeof(overlay), "Avg: %.1fms | 99th: %.1fms | 1%% Low: %.0ffps | Spikes: %d/%d",
+                 avgMs, p99, p1LowFps, spikeCountInHistory, PerformanceMetrics::SAMPLE_COUNT);
+
         ImGui::PlotLines("##FrameTime", metrics.frameTimes, PerformanceMetrics::SAMPLE_COUNT,
-            metrics.sampleIndex, overlay, 0.0f, maxTime, ImVec2(0, 60));
+            metrics.sampleIndex, overlay, 0.0f, maxTime, ImVec2(graphWidth, graphHeight));
+
+        // Draw target frame time line on the graph
+        if (maxTime > 0) {
+            float targetY = graphPos.y + graphHeight * (1.0f - metrics.targetFrameTimeMs / maxTime);
+            // Clamp so the line stays within the graph area
+            if (targetY >= graphPos.y && targetY <= graphPos.y + graphHeight) {
+                ImGui::GetWindowDrawList()->AddLine(
+                    ImVec2(graphPos.x, targetY),
+                    ImVec2(graphPos.x + graphWidth, targetY),
+                    IM_COL32(255, 100, 100, 180), 1.0f);
+                // Label the target line
+                char targetLabel[32];
+                snprintf(targetLabel, sizeof(targetLabel), "%.0fms target", metrics.targetFrameTimeMs);
+                ImGui::GetWindowDrawList()->AddText(
+                    ImVec2(graphPos.x + graphWidth - 80.0f, targetY - 12.0f),
+                    IM_COL32(255, 100, 100, 200), targetLabel);
+            }
+        }
 
         // Geometry stats
-        ImGui::Text("~Vertices: %zu  Indices: %zu", metrics.totalVerticesRendered, metrics.totalIndicesRendered);
+        ImGui::Text("Vertices: %zu  Indices: %zu", metrics.totalVerticesRendered, metrics.totalIndicesRendered);
         ImGui::Text("By Layer: Opaque %d | Cutout %d | Translucent %d",
             metrics.opaqueMeshesRendered, metrics.cutoutMeshesRendered, metrics.translucentMeshesRendered);
+
+        // ── Recent Spikes ──────────────────────────────────────────────────
+        if (metrics.spikeCount > 0) {
+            ImGui::Spacing();
+            ImGui::TextColored(COL_ORANGE, "Recent Spikes");
+            ImGui::Separator();
+
+            for (int i = metrics.spikeCount - 1; i >= 0; i--) {
+                const auto& spike = metrics.recentSpikes[i];
+                // Determine the heaviest component for the summary
+                const char* heaviest = "Render";
+                float heaviestTime = spike.renderMs;
+                if (spike.meshSchedMs > heaviestTime) { heaviest = "Mesh Sched"; heaviestTime = spike.meshSchedMs; }
+                if (spike.gpuUploadMs > heaviestTime) { heaviest = "GPU Upload"; heaviestTime = spike.gpuUploadMs; }
+                if (spike.gpuTimeMs > heaviestTime)   { heaviest = "GPU"; heaviestTime = spike.gpuTimeMs; }
+
+                ImVec4 spikeCol = spike.totalMs > 33.0f ? COL_RED : COL_YELLOW;
+                ImGui::TextColored(spikeCol, "#%d: %.1fms (%.1fs ago) - %s %.1fms, %d draws",
+                    metrics.spikeCount - i,
+                    spike.totalMs,
+                    spike.secondsAgo,
+                    heaviest,
+                    heaviestTime,
+                    spike.drawCalls);
+            }
+        }
 
         ImGui::End();
     }
@@ -836,6 +1012,25 @@ namespace Debug {
             size_t gpuEntries = Render::g_clientMeshManager->GetGPUDataCount();
             size_t activeSections = Render::g_clientMeshManager->GetActiveSectionCount();
             ImGui::Text("GPU Data: %zu entries, %zu active", gpuEntries, activeSections);
+        }
+
+        ImGui::Separator();
+
+        // Mega-Buffer Stats (per-layer GPU memory usage)
+        if (Render::g_clientMeshManager) {
+            ImGui::TextColored(ImVec4(0.9f, 0.7f, 0.3f, 1.0f), "Mega-Buffers:");
+            const char* layerNames[] = {"Opaque", "Cutout", "Translucnt"};
+            Render::RenderLayer layers[] = {Render::RenderLayer::Opaque, Render::RenderLayer::Cutout, Render::RenderLayer::Translucent};
+            for (int i = 0; i < 3; ++i) {
+                auto* mb = Render::g_clientMeshManager->GetMegaBuffer(layers[i]);
+                if (mb && mb->IsInitialized()) {
+                    float usedMB = static_cast<float>(mb->GetUsedVertices() * 24 + mb->GetUsedIndices() * 4) / (1024.0f * 1024.0f);
+                    float capacityMB = static_cast<float>(mb->GetMemoryUsageBytes()) / (1024.0f * 1024.0f);
+                    float frag = mb->GetFragmentation() * 100.0f;
+                    ImGui::Text("  %-10s %5.1f / %5.1f MB  (%zu sec, %.0f%% frag)",
+                               layerNames[i], usedMB, capacityMB, mb->GetSectionCount(), frag);
+                }
+            }
         }
 
         ImGui::Separator();

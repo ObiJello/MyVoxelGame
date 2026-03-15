@@ -1,7 +1,9 @@
 // File: src/client/renderer/mesh/ClientMeshManager.cpp
 #include "ClientMeshManager.hpp"
+#include "ChunkRenderer.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "../../world/ClientWorkerPool.hpp"
 #include "../backend/RenderBackend.hpp"
 #include <algorithm>
@@ -10,17 +12,10 @@
 namespace Render {
 
     // Implementation of GPUSectionData::DestroyAllResources (declared in SectionMesh.hpp)
+    // No-op: GPU resources are now owned by ChunkMegaBuffer, not per-section handles.
+    // Kept for API compatibility with legacy code paths (GPUDataPool, ChunkMeshData).
     void GPUSectionData::DestroyAllResources(RenderBackend* backend) {
-        if (!backend) return;
-        if (opaqueMesh != INVALID_MESH)       { backend->DeferredDestroyMesh(opaqueMesh);       opaqueMesh = INVALID_MESH; }
-        if (opaqueVB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(opaqueVB);       opaqueVB = INVALID_BUFFER; }
-        if (opaqueIB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(opaqueIB);       opaqueIB = INVALID_BUFFER; }
-        if (cutoutMesh != INVALID_MESH)       { backend->DeferredDestroyMesh(cutoutMesh);       cutoutMesh = INVALID_MESH; }
-        if (cutoutVB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(cutoutVB);       cutoutVB = INVALID_BUFFER; }
-        if (cutoutIB != INVALID_BUFFER)       { backend->DeferredDestroyBuffer(cutoutIB);       cutoutIB = INVALID_BUFFER; }
-        if (translucentMesh != INVALID_MESH)  { backend->DeferredDestroyMesh(translucentMesh);  translucentMesh = INVALID_MESH; }
-        if (translucentVB != INVALID_BUFFER)  { backend->DeferredDestroyBuffer(translucentVB);  translucentVB = INVALID_BUFFER; }
-        if (translucentIB != INVALID_BUFFER)  { backend->DeferredDestroyBuffer(translucentIB);  translucentIB = INVALID_BUFFER; }
+        (void)backend;
         opaqueIndexCount = cutoutIndexCount = translucentIndexCount = 0;
         opaqueVertexCount = cutoutVertexCount = translucentVertexCount = 0;
     }
@@ -47,37 +42,54 @@ namespace Render {
         }
 
         m_chunkManager = chunkManager;
-        
+
         // Reset statistics
         m_stats.Reset();
-        
+
         // Initialize player position
         {
             std::lock_guard<std::mutex> lock(m_playerMutex);
             m_playerPosition = glm::vec3(0.0f, 67.0f, 0.0f);
         }
-        
+
+        // Initialize mega-buffers (one per render layer)
+        m_opaqueMegaBuffer.Initialize(500000, 1000000);
+        m_cutoutMegaBuffer.Initialize(200000, 400000);
+        m_translucentMegaBuffer.Initialize(200000, 400000);
+
+        // Create the shared block VAO (GL_ARB_vertex_attrib_binding).
+        // One VAO defines the vertex format; mega-buffer VBOs are switched at
+        // render time with glBindVertexBuffer — no GPU pipeline flush.
+        CreateSharedBlockVAO();
+
         Log::Info("ClientMeshManager initialized successfully");
     }
 
     void ClientMeshManager::Shutdown() {
         Log::Info("Shutting down ClientMeshManager...");
 
-        // Clean up all GPU data
+        // Destroy the shared block VAO before mega-buffers (clean teardown order)
+        DestroySharedBlockVAO();
+
+        // Shut down mega-buffers (frees all GPU resources they own)
+        m_opaqueMegaBuffer.Shutdown();
+        m_cutoutMegaBuffer.Shutdown();
+        m_translucentMegaBuffer.Shutdown();
+
+        // Clean up GPU data tracking (no per-section GPU resources to destroy anymore)
         {
             std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-            for (auto& [key, gpuData] : m_gpuData) {
-                gpuData.DestroyAllResources(g_renderBackend.get());
-            }
             m_gpuData.clear();
-            m_activeSections.clear();
         }
-        
+
+        // Clear any pending destroys (mega-buffers already cleaned up)
+        m_pendingDestroys.clear();
+
         // Log final statistics
         LogStats();
-        
+
         m_chunkManager = nullptr;
-        
+
         Log::Info("ClientMeshManager shutdown complete");
     }
 
@@ -124,11 +136,59 @@ namespace Render {
     }
 
     void ClientMeshManager::PerformGPUUploads() {
+        PROFILE_ZONE;
         if (!m_chunkManager) return;
-        
+
+        // Destroy any GPU resources that were deferred during chunk unloads
+        ProcessPendingDestroys();
+
+        // Periodic mega-buffer compaction to reclaim fragmented space.
+        // Runs every ~10 seconds (600 frames). Compacts if >30% fragmented.
+        static int compactFrameCounter = 0;
+        if (++compactFrameCounter >= 600) {
+            compactFrameCounter = 0;
+            float fragBefore = std::max({m_opaqueMegaBuffer.GetFragmentation(),
+                                          m_cutoutMegaBuffer.GetFragmentation(),
+                                          m_translucentMegaBuffer.GetFragmentation()});
+            m_opaqueMegaBuffer.CompactIfNeeded(0.3f);
+            m_cutoutMegaBuffer.CompactIfNeeded(0.3f);
+            m_translucentMegaBuffer.CompactIfNeeded(0.3f);
+
+            // If any buffer was actually compacted, refresh all cached draw commands
+            // because compaction changes vertex/index offsets in the mega-buffer regions.
+            if (fragBefore >= 0.3f) {
+                std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+                for (auto& [key, gpuData] : m_gpuData) {
+                    MegaBufferSectionKey megaKey{key.chunkPos, key.sectionY};
+                    ChunkMegaBuffer::DrawCommand cmd;
+                    // Refresh opaque
+                    if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                        gpuData.opaqueDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                                 cmd.indexByteOffset, cmd.baseVertex, true};
+                    } else {
+                        gpuData.opaqueDrawCmd = {};
+                    }
+                    // Refresh cutout
+                    if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                        gpuData.cutoutDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                                 cmd.indexByteOffset, cmd.baseVertex, true};
+                    } else {
+                        gpuData.cutoutDrawCmd = {};
+                    }
+                    // Refresh translucent
+                    if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                        gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                                      cmd.indexByteOffset, cmd.baseVertex, true};
+                    } else {
+                        gpuData.translucentDrawCmd = {};
+                    }
+                }
+            }
+        }
+
         m_stats.meshUploadsThisFrame = 0;
         auto startTime = std::chrono::steady_clock::now();
-        
+
         UploadMeshResultsWithBudget();
         
         // Record timing
@@ -249,12 +309,12 @@ namespace Render {
             case Client::MeshApplyAction::Upload: {
                 // Check if the build succeeded
                 if (!result.success) {
-                    Log::Warning("Failed mesh build for chunk (%d, %d) section %d", 
+                    Log::Warning("Failed mesh build for chunk (%d, %d) section %d",
                                 result.chunkPos.x, result.chunkPos.z, result.sectionY);
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
-                
+
                 // Validate result
                 if (!ValidateMeshBuildResult(result)) {
                     Log::Error("Invalid mesh build result for chunk (%d, %d) section %d",
@@ -262,7 +322,15 @@ namespace Render {
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
-                
+
+                // Final check: chunk may have been unloaded between AcceptMeshResult and here
+                if (m_chunkManager && !m_chunkManager->IsChunkLoaded(result.chunkPos)) {
+                    Log::Debug("Chunk (%d, %d) unloaded before GPU upload, skipping",
+                              result.chunkPos.x, result.chunkPos.z);
+                    m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+
                 // Upload to GPU
                 UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData);
                 
@@ -390,8 +458,8 @@ namespace Render {
             if (result.meshData.opaqueVertices.empty() != result.meshData.opaqueIndices.empty()) {
                 return false;
             }
-            if (result.meshData.opaqueVertexCount * 12 != result.meshData.opaqueVertices.size()) {
-                return false; // 12 floats per vertex
+            if (result.meshData.opaqueVertexCount * 6 != result.meshData.opaqueVertices.size()) {
+                return false; // 6 float-sized slots per vertex
             }
             if (result.meshData.opaqueIndexCount != result.meshData.opaqueIndices.size()) {
                 return false;
@@ -403,7 +471,7 @@ namespace Render {
             if (result.meshData.cutoutVertices.empty() != result.meshData.cutoutIndices.empty()) {
                 return false;
             }
-            if (result.meshData.cutoutVertexCount * 12 != result.meshData.cutoutVertices.size()) {
+            if (result.meshData.cutoutVertexCount * 6 != result.meshData.cutoutVertices.size()) {
                 return false;
             }
             if (result.meshData.cutoutIndexCount != result.meshData.cutoutIndices.size()) {
@@ -416,7 +484,7 @@ namespace Render {
             if (result.meshData.translucentVertices.empty() != result.meshData.translucentIndices.empty()) {
                 return false;
             }
-            if (result.meshData.translucentVertexCount * 12 != result.meshData.translucentVertices.size()) {
+            if (result.meshData.translucentVertexCount * 6 != result.meshData.translucentVertices.size()) {
                 return false;
             }
             if (result.meshData.translucentIndexCount != result.meshData.translucentIndices.size()) {
@@ -450,14 +518,16 @@ namespace Render {
         SectionKey key{chunkPos, sectionY};
         auto it = m_gpuData.find(key);
         if (it != m_gpuData.end()) {
-            // Tell the grid this section is gone BEFORE deleting buffers
+            // Tell the grid this section is gone
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
-            // Clean up GPU resources
-            it->second.DestroyAllResources(g_renderBackend.get());
+            // Remove from mega-buffers (frees GPU regions)
+            MegaBufferSectionKey megaKey{chunkPos, sectionY};
+            m_opaqueMegaBuffer.RemoveSection(megaKey);
+            m_cutoutMegaBuffer.RemoveSection(megaKey);
+            m_translucentMegaBuffer.RemoveSection(megaKey);
 
             m_gpuData.erase(it);
-            m_activeSections.erase(key);
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
         }
     }
@@ -465,13 +535,19 @@ namespace Render {
     void ClientMeshManager::RemoveChunkGPUData(::Game::Math::ChunkPos chunkPos) {
         std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
 
-        // Remove all sections for this chunk
+        // With mega-buffers, RemoveSection is O(1) (free-list update only),
+        // so no deferred destroy queue is needed.
         for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
             SectionKey key{chunkPos, sectionY};
             auto it = m_gpuData.find(key);
             if (it != m_gpuData.end()) {
-                it->second.DestroyAllResources(g_renderBackend.get());
+                // Remove from mega-buffers (frees GPU regions, O(1))
+                MegaBufferSectionKey megaKey{chunkPos, sectionY};
+                m_opaqueMegaBuffer.RemoveSection(megaKey);
+                m_cutoutMegaBuffer.RemoveSection(megaKey);
+                m_translucentMegaBuffer.RemoveSection(megaKey);
 
+                // Clear references
                 auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
                 if (sectionInfo) {
                     sectionInfo->gpuData.store(nullptr, std::memory_order_release);
@@ -480,17 +556,30 @@ namespace Render {
                 m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
                 m_gpuData.erase(it);
-                m_activeSections.erase(key);
             }
         }
 
-        LogMeshActivity("Removed chunk GPU data", chunkPos);
+        // Notify renderer that visible sections need rebuilding
+        if (Render::g_chunkRenderer) {
+            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        }
+
+        LogMeshActivity("Removed chunk GPU data from mega-buffers", chunkPos);
     }
 
-    void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY, 
+    void ClientMeshManager::ProcessPendingDestroys() {
+        PROFILE_ZONE;
+        // With mega-buffers, per-section GPU resource cleanup is handled by
+        // RemoveSection (O(1) free-list update). The deferred destroy queue
+        // is no longer needed, so just clear any remaining entries.
+        m_pendingDestroys.clear();
+    }
+
+    void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
                                                  const Network::MeshBuildResult::SectionMeshData& meshData) {
+        PROFILE_ZONE;
         std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-        
+
         // Validate section index
         if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
             Log::Error("Invalid section Y %d for chunk (%d, %d)", sectionY, chunkPos.x, chunkPos.z);
@@ -499,102 +588,177 @@ namespace Render {
 
         SectionKey key{chunkPos, sectionY};
         GPUSectionData& gpuData = m_gpuData[key];
-        
+
         // Initialize GPU data
         gpuData.chunkPos = chunkPos;
         gpuData.sectionY = sectionY;
-        
-        // Clean up existing GPU resources if allocated
-        if (gpuData.IsUploaded()) {
-            gpuData.DestroyAllResources(g_renderBackend.get());
-        }
 
-        // Set index/vertex counts
+        // Remove existing mega-buffer regions for this section (re-upload)
+        MegaBufferSectionKey megaKey{chunkPos, sectionY};
+        m_opaqueMegaBuffer.RemoveSection(megaKey);
+        m_cutoutMegaBuffer.RemoveSection(megaKey);
+        m_translucentMegaBuffer.RemoveSection(megaKey);
+
+        // Reset counts and cached draw commands before re-upload
+        gpuData.opaqueIndexCount = 0;
+        gpuData.opaqueVertexCount = 0;
+        gpuData.cutoutIndexCount = 0;
+        gpuData.cutoutVertexCount = 0;
+        gpuData.translucentIndexCount = 0;
+        gpuData.translucentVertexCount = 0;
+        gpuData.opaqueDrawCmd = {};
+        gpuData.cutoutDrawCmd = {};
+        gpuData.translucentDrawCmd = {};
+
+        // Upload each non-empty layer into its mega-buffer and cache draw commands
         if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
-            gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndices.size());
+            m_opaqueMegaBuffer.UploadSection(megaKey,
+                meshData.opaqueVertices.data(),
+                meshData.opaqueVertexCount,
+                meshData.opaqueIndices.data(),
+                meshData.opaqueIndexCount);
             gpuData.opaqueVertexCount = static_cast<uint32_t>(meshData.opaqueVertexCount);
+            gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndexCount);
+            // Cache draw command to avoid per-frame hash lookup in RenderLayerPass
+            ChunkMegaBuffer::DrawCommand cmd;
+            if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                gpuData.opaqueDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                         cmd.indexByteOffset, cmd.baseVertex, true};
+            }
         }
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
-            gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndices.size());
+            m_cutoutMegaBuffer.UploadSection(megaKey,
+                meshData.cutoutVertices.data(),
+                meshData.cutoutVertexCount,
+                meshData.cutoutIndices.data(),
+                meshData.cutoutIndexCount);
             gpuData.cutoutVertexCount = static_cast<uint32_t>(meshData.cutoutVertexCount);
+            gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndexCount);
+            ChunkMegaBuffer::DrawCommand cmd;
+            if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                gpuData.cutoutDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                         cmd.indexByteOffset, cmd.baseVertex, true};
+            }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
-            gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndices.size());
+            m_translucentMegaBuffer.UploadSection(megaKey,
+                meshData.translucentVertices.data(),
+                meshData.translucentVertexCount,
+                meshData.translucentIndices.data(),
+                meshData.translucentIndexCount);
             gpuData.translucentVertexCount = static_cast<uint32_t>(meshData.translucentVertexCount);
-        }
-
-        // Create GPU resources through the render backend
-        if (g_renderBackend) {
-            auto blockLayout = GetBlockVertexLayout();
-
-            // Opaque backend resources
-            if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
-                gpuData.opaqueVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                    meshData.opaqueVertices.size() * sizeof(float), meshData.opaqueVertices.data());
-                gpuData.opaqueIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
-                    meshData.opaqueIndices.size() * sizeof(uint32_t), meshData.opaqueIndices.data());
-                gpuData.opaqueMesh = g_renderBackend->CreateMesh(gpuData.opaqueVB, gpuData.opaqueIB, blockLayout);
-            }
-
-            // Cutout backend resources
-            if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
-                gpuData.cutoutVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                    meshData.cutoutVertices.size() * sizeof(float), meshData.cutoutVertices.data());
-                gpuData.cutoutIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
-                    meshData.cutoutIndices.size() * sizeof(uint32_t), meshData.cutoutIndices.data());
-                gpuData.cutoutMesh = g_renderBackend->CreateMesh(gpuData.cutoutVB, gpuData.cutoutIB, blockLayout);
-            }
-
-            // Translucent backend resources
-            if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
-                gpuData.translucentVB = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-                    meshData.translucentVertices.size() * sizeof(float), meshData.translucentVertices.data());
-                gpuData.translucentIB = g_renderBackend->CreateBuffer(BufferUsage::Index,
-                    meshData.translucentIndices.size() * sizeof(uint32_t), meshData.translucentIndices.data());
-                gpuData.translucentMesh = g_renderBackend->CreateMesh(gpuData.translucentVB, gpuData.translucentIB, blockLayout);
+            gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndexCount);
+            ChunkMegaBuffer::DrawCommand cmd;
+            if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
+                gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
+                                              cmd.indexByteOffset, cmd.baseVertex, true};
             }
         }
 
         // Update metadata
         gpuData.lastUploadFrame = 0; // TODO: Add frame counter
         gpuData.needsUpload = false;
-        
-        // Add to active sections set if it has any geometry
-        if (gpuData.HasGeometry()) {
-            m_activeSections.insert(key);
-        } else {
-            // Remove from active sections if no geometry
-            m_activeSections.erase(key);
+
+        // Skip empty sections entirely to avoid "zombie" entries in m_gpuData
+        // that waste map lookup time during rendering.
+        if (!gpuData.HasGeometry()) {
+            m_gpuData.erase(key);
+            return;
         }
-        
-        // NEW: Store GPU data pointer in the atomic field for lock-free rendering
+
+        // Store GPU data pointer in the atomic field for lock-free rendering
         auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
         if (sectionInfo) {
             // Store the pointer to the GPU data in the hash map
             GPUSectionData* gpuDataPtr = &m_gpuData[key];
-            
+
             // Atomically update the GPU data pointer
             GPUSectionData* oldPtr = sectionInfo->gpuData.exchange(gpuDataPtr, std::memory_order_release);
-            
+
             // If there was old data, mark it for deferred deletion
             if (oldPtr && oldPtr != gpuDataPtr) {
                 // For now, we're reusing the same hash map entry, so this shouldn't happen
-                Log::Warning("Replacing existing GPU data for chunk (%d, %d) section %d", 
+                Log::Warning("Replacing existing GPU data for chunk (%d, %d) section %d",
                            chunkPos.x, chunkPos.z, sectionY);
             }
-            
+
             // IMPORTANT: publish the pointer to the render grid so BuildDrawLists can see it
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, gpuDataPtr);
         } else {
             Log::Warning("Could not find SectionInfo for chunk (%d, %d) section %d to store GPU data pointer",
                        chunkPos.x, chunkPos.z, sectionY);
         }
-        
+
         // Update statistics
         m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
         m_stats.meshUploadsThisFrame++;
-        
+
+        // Notify renderer that visible sections need rebuilding
+        if (Render::g_chunkRenderer) {
+            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        }
+
         LogMeshActivity("Uploaded mesh result to GPU", chunkPos, sectionY);
+    }
+
+    // ========================================================================
+    // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
+    // ========================================================================
+
+    void ClientMeshManager::CreateSharedBlockVAO() {
+        m_hasVertexAttribBinding = (GLAD_GL_ARB_vertex_attrib_binding != 0);
+
+        glGenVertexArrays(1, &m_sharedBlockVAO);
+        glBindVertexArray(m_sharedBlockVAO);
+
+        if (m_hasVertexAttribBinding) {
+            // Windows/Linux: vertex format decoupled from buffer binding.
+            // VBO switching uses glBindVertexBuffer — cheapest possible path.
+            // Matches Minecraft's VertexArrayCache.Separate (VertexArrayCache.java:86-152).
+            glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
+            glVertexAttribBinding(0, 0);
+            glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float));
+            glVertexAttribBinding(1, 0);
+            glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 5 * sizeof(float));
+            glVertexAttribBinding(2, 0);
+            Log::Info("Shared block VAO created (GL_ARB_vertex_attrib_binding)");
+        } else {
+            // macOS (OpenGL 4.1, no ARB_vertex_attrib_binding):
+            // VBO switching re-sets glVertexAttribPointer — still avoids VAO switch.
+            // Matches Minecraft's VertexArrayCache.Emulated (VertexArrayCache.java:25-84).
+            Log::Info("Shared block VAO created (emulated, no ARB_vertex_attrib_binding)");
+        }
+
+        // Enable attributes once — both paths share this
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
+    }
+
+    void ClientMeshManager::DestroySharedBlockVAO() {
+        if (m_sharedBlockVAO) {
+            glDeleteVertexArrays(1, &m_sharedBlockVAO);
+            m_sharedBlockVAO = 0;
+        }
+    }
+
+    void ClientMeshManager::BindSharedBlockVAO() {
+        glBindVertexArray(m_sharedBlockVAO);
+    }
+
+    // ========================================================================
+    // MEGA-BUFFER ACCESS
+    // ========================================================================
+
+    ChunkMegaBuffer* ClientMeshManager::GetMegaBuffer(RenderLayer layer) {
+        switch (layer) {
+            case RenderLayer::Opaque:      return &m_opaqueMegaBuffer;
+            case RenderLayer::Cutout:      return &m_cutoutMegaBuffer;
+            case RenderLayer::Translucent: return &m_translucentMegaBuffer;
+            default: return nullptr;
+        }
     }
 
     // ========================================================================

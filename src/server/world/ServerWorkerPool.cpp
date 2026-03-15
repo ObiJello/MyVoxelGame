@@ -1,6 +1,7 @@
 // File: src/server/world/ServerWorkerPool.cpp
 #include "ServerWorkerPool.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "server/IntegratedServer.hpp"
@@ -96,9 +97,16 @@ namespace Threading {
             return;
         }
 
+        uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            generation = ++m_chunkGenerations[chunkPos];
+        }
+
         ServerJob job(ServerJobType::CHUNK_GENERATION, chunkPos);
         job.priority = priority;
-        job.task = [this, chunkPos]() { ProcessChunkGeneration(chunkPos); };
+        job.generationId = generation;
+        job.task = [this, chunkPos, generation]() { ProcessChunkGeneration(chunkPos, generation); };
 
         EnqueueJob(std::move(job));
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
@@ -110,9 +118,16 @@ namespace Threading {
             return;
         }
 
+        uint64_t generation;
+        {
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            generation = ++m_chunkGenerations[chunkPos];
+        }
+
         ServerJob job(ServerJobType::CHUNK_LOADING, chunkPos);
         job.priority = priority;
-        job.task = [this, chunkPos]() { ProcessChunkLoading(chunkPos); };
+        job.generationId = generation;
+        job.task = [this, chunkPos, generation]() { ProcessChunkLoading(chunkPos, generation); };
 
         EnqueueJob(std::move(job));
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
@@ -158,8 +173,9 @@ namespace Threading {
 
     void ServerWorkerPool::CancelChunkJobs(Game::Math::ChunkPos chunkPos) {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        m_cancelledChunks.insert(chunkPos);
-        Log::Debug("Cancelled all jobs for chunk (%d, %d)", chunkPos.x, chunkPos.z);
+        ++m_chunkGenerations[chunkPos];
+        Log::Debug("Cancelled jobs for chunk (%d, %d) (gen %llu)", chunkPos.x, chunkPos.z,
+                   static_cast<unsigned long long>(m_chunkGenerations[chunkPos]));
     }
 
     void ServerWorkerPool::CancelAllJobs() {
@@ -171,7 +187,7 @@ namespace Threading {
 
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
-            m_cancelledChunks.clear();
+            m_chunkGenerations.clear();
         }
 
         Log::Info("Cancelled all pending server worker jobs");
@@ -212,20 +228,19 @@ namespace Threading {
     // ========================================================================
 
     void ServerWorkerPool::WorkerLoop() {
+        PROFILE_THREAD("ServerWorker");
         Log::Debug("Server worker thread started");
 
         while (m_running.load()) {
             ServerJob job(ServerJobType::CHUNK_GENERATION, Game::Math::ChunkPos{0, 0});
-            
-            // Wait for job or shutdown
+
+            // Wait for job or shutdown (DequeueJob blocks until a job is available or shutdown)
             if (DequeueJob(job)) {
                 m_activeJobs.fetch_add(1, std::memory_order_relaxed);
                 ProcessJob(job);
                 m_activeJobs.fetch_sub(1, std::memory_order_relaxed);
-            } else {
-                // No job available, sleep briefly
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
+            // DequeueJob returns false only on shutdown, so just loop back
         }
 
         Log::Debug("Server worker thread stopped");
@@ -259,10 +274,11 @@ namespace Threading {
             return false;
         }
 
-        return IsChunkCancelled(job.chunkPos);
+        return IsGenerationStale(job.chunkPos, job.generationId);
     }
 
-    void ServerWorkerPool::ProcessChunkGeneration(Game::Math::ChunkPos chunkPos) {
+    void ServerWorkerPool::ProcessChunkGeneration(Game::Math::ChunkPos chunkPos, uint64_t generation) {
+        PROFILE_ZONE;
         if (!m_world) {
             Log::Error("Cannot generate chunk - no world reference");
             return;
@@ -280,6 +296,13 @@ namespace Threading {
             // GetChunk routes through cache -> disk -> MyTerrainGenerator (all thread-safe)
             auto chunk = chunkProvider->GetChunk(chunkPos);
 
+            // Check if this job's generation is still current before sending result
+            if (IsGenerationStale(chunkPos, generation)) {
+                m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
+                Log::Debug("Chunk (%d, %d) generation stale, discarding result", chunkPos.x, chunkPos.z);
+                return;
+            }
+
             if (chunk) {
                 SendChunkGenResult(chunkPos, chunk, true);
                 m_stats.chunksGenerated.fetch_add(1, std::memory_order_relaxed);
@@ -293,7 +316,7 @@ namespace Threading {
         }
     }
 
-    void ServerWorkerPool::ProcessChunkLoading(Game::Math::ChunkPos chunkPos) {
+    void ServerWorkerPool::ProcessChunkLoading(Game::Math::ChunkPos chunkPos, uint64_t generation) {
         if (!m_world) {
             Log::Error("Cannot load chunk - no world reference");
             return;
@@ -310,6 +333,13 @@ namespace Threading {
 
             // GetChunk routes through cache -> disk -> MyTerrainGenerator (all thread-safe)
             auto chunk = chunkProvider->GetChunk(chunkPos);
+
+            // Check if this job's generation is still current before sending result
+            if (IsGenerationStale(chunkPos, generation)) {
+                m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
+                Log::Debug("Chunk (%d, %d) generation stale, discarding result", chunkPos.x, chunkPos.z);
+                return;
+            }
 
             if (chunk) {
                 SendChunkGenResult(chunkPos, chunk, true);
@@ -368,16 +398,15 @@ namespace Threading {
 
     bool ServerWorkerPool::DequeueJob(ServerJob& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
-        
-        if (m_jobCondition.wait_for(lock, std::chrono::milliseconds(100), 
-                                   [this] { return !m_jobQueue.empty() || !m_running.load(); })) {
-            if (!m_jobQueue.empty()) {
-                job = std::move(m_jobQueue.front());
-                m_jobQueue.pop();
-                return true;
-            }
+
+        m_jobCondition.wait(lock, [this] { return !m_jobQueue.empty() || !m_running.load(); });
+
+        if (!m_jobQueue.empty()) {
+            job = std::move(m_jobQueue.front());
+            m_jobQueue.pop();
+            return true;
         }
-        
+
         return false;
     }
 
@@ -395,14 +424,11 @@ namespace Threading {
         return s_chunkGenResultQueue;
     }
 
-    bool ServerWorkerPool::IsChunkCancelled(Game::Math::ChunkPos chunkPos) const {
+    bool ServerWorkerPool::IsGenerationStale(Game::Math::ChunkPos chunkPos, uint64_t generation) const {
         std::lock_guard<std::mutex> lock(m_cancelMutex);
-        return m_cancelledChunks.find(chunkPos) != m_cancelledChunks.end();
-    }
-
-    void ServerWorkerPool::CleanupCancelledChunks() {
-        std::lock_guard<std::mutex> lock(m_cancelMutex);
-        m_cancelledChunks.clear();
+        auto it = m_chunkGenerations.find(chunkPos);
+        if (it == m_chunkGenerations.end()) return false;
+        return generation != it->second;
     }
 
     // ========================================================================

@@ -1,34 +1,22 @@
-// File: shaders/block.vert (Updated with Color Support)
+// File: shaders/block.vert
 #version 330 core
 
-// Input vertex attributes
-layout (location = 0) in vec3 aPos;       // Vertex position
-layout (location = 1) in vec3 aNormal;    // Face normal
-layout (location = 2) in vec2 aTexCoord;  // Texture coordinates from atlas
-layout (location = 3) in vec4 aColor;     // Vertex color/tint (NEW)
+// Input vertex attributes (24-byte compact vertex: pos + uv + RGBA8 color)
+layout (location = 0) in vec3 aPos;       // Vertex position (world-space)
+layout (location = 1) in vec2 aTexCoord;  // Texture coordinates from atlas
+layout (location = 2) in vec4 aColor;     // Vertex color (RGBA8 normalized by GL)
 
 // Uniforms
 uniform mat4 uMVP;  // Model-View-Projection matrix
 
 // Output to fragment shader
-out vec3 fragNormal;    // Interpolated normal for lighting
-out vec2 fragTexCoord;  // Interpolated texture coordinates
-out vec3 fragWorldPos;  // World position for biome sampling
-out vec4 fragColor;     // Interpolated vertex color (NEW)
+out vec2 fragTexCoord;
+out vec3 fragWorldPos;
+out vec4 fragColor;
 
 void main() {
-    // Transform vertex position to clip space
     gl_Position = uMVP * vec4(aPos, 1.0);
-
-    // Pass through normal (assume no non-uniform scaling for now)
-    fragNormal = aNormal;
-
-    // Pass through texture coordinates
     fragTexCoord = aTexCoord;
-
-    // Pass world position for biome tinting
     fragWorldPos = aPos;
-
-    // Pass through vertex color for tinting
     fragColor = aColor;
 }

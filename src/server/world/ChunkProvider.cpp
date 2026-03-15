@@ -1,6 +1,7 @@
 // File: src/server/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "storage/MinecraftChunkLoaderImpl.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "platform/GameDirectory.hpp"
@@ -188,6 +189,7 @@ namespace Game {
     // === CORE CHUNK OPERATIONS ===
 
     std::shared_ptr<Chunk> ChunkProvider::GetChunk(Math::ChunkPos position) {
+        PROFILE_ZONE;
         if (!m_initialized) {
             Log::Error("ChunkProvider::GetChunk: Not initialized");
             return nullptr;
@@ -559,6 +561,13 @@ namespace Game {
 
     size_t ChunkProvider::GetLoadedChunkCount() const {
         return m_chunkCache ? m_chunkCache->GetStats().currentSize : 0;
+    }
+
+    std::vector<Math::ChunkPos> ChunkProvider::GetLoadedChunkPositions() const {
+        if (!m_initialized || !m_chunkCache) {
+            return {};
+        }
+        return m_chunkCache->GetLoadedChunkPositions();
     }
 
     void ChunkProvider::LogPerformanceStats() const {

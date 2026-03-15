@@ -143,6 +143,9 @@ namespace Game {
         mutable std::mutex m_dirtyMutex;
         std::unordered_set<DirtySection, DirtySectionHash> m_dirtySections;
 
+        // Chunk-level dirty index for O(1) IsChunkDirty lookups
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> m_dirtyChunks;
+
         // Statistics
         mutable std::mutex m_statsMutex;
         DirtyTrackerStats m_stats;

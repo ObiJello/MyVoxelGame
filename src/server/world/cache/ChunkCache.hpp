@@ -121,6 +121,9 @@ namespace Game {
         // Get memory usage estimate
         size_t GetMemoryUsageBytes() const;
 
+        // Get all loaded chunk positions (for iteration without full debug state)
+        std::vector<Math::ChunkPos> GetLoadedChunkPositions() const;
+
         // === DEBUGGING ===
 
         // Get detailed cache state for debugging

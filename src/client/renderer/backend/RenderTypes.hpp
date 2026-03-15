@@ -130,12 +130,16 @@ namespace Render {
         LineStrip
     };
 
+    // Attribute data type
+    enum class AttribType : uint8_t { Float = 0, UByte = 1 };
+
     // Describes how one vertex attribute is laid out
     struct VertexAttribute {
         uint32_t location;        // Shader attribute location
         uint32_t componentCount;  // 1-4 (float, vec2, vec3, vec4)
         uint32_t offset;          // Byte offset within vertex
         bool normalized = false;  // Whether to normalize integer data
+        AttribType type = AttribType::Float;  // Data type of components
     };
 
     // Describes the full vertex layout (stride + attributes)
@@ -194,19 +198,18 @@ namespace Render {
     static constexpr GPUTimerHandle INVALID_GPU_TIMER = 0;
 
     // ========================================================================
-    // STANDARD VERTEX LAYOUT (12 floats per vertex)
+    // STANDARD VERTEX LAYOUT (24 bytes per vertex)
     // ========================================================================
 
     // The block vertex layout used by the chunk mesh system:
-    //   Position (3 floats) + Normal (3 floats) + UV (2 floats) + Color (4 floats)
+    //   Position (3 floats) + UV (2 floats) + Color (4 ubytes normalized)
     inline VertexLayout GetBlockVertexLayout() {
         VertexLayout layout;
-        layout.stride = sizeof(float) * 12;
+        layout.stride = 24;
         layout.attributes = {
-            {0, 3, 0,                    false},  // Position
-            {1, 3, sizeof(float) * 3,    false},  // Normal
-            {2, 2, sizeof(float) * 6,    false},  // UV
-            {3, 4, sizeof(float) * 8,    false},  // Color/Tint
+            {0, 3, 0, false, AttribType::Float},                                      // Position: 3 floats at offset 0
+            {1, 2, static_cast<uint32_t>(sizeof(float) * 3), false, AttribType::Float},  // UV: 2 floats at offset 12
+            {2, 4, static_cast<uint32_t>(sizeof(float) * 5), true, AttribType::UByte},   // Color: 4 ubytes normalized at offset 20
         };
         return layout;
     }

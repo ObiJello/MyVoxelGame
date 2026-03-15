@@ -78,14 +78,7 @@ namespace Game {
 
     bool DirtyTracker::IsChunkDirty(Math::ChunkPos chunkPos) const {
         std::lock_guard<std::mutex> lock(m_dirtyMutex);
-
-        for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
-            DirtySection section(chunkPos, sectionY);
-            if (m_dirtySections.find(section) != m_dirtySections.end()) {
-                return true;
-            }
-        }
-        return false;
+        return m_dirtyChunks.find(chunkPos) != m_dirtyChunks.end();
     }
 
     size_t DirtyTracker::GetDirtyCount() const {
@@ -110,9 +103,10 @@ namespace Game {
             result.push_back(section);
         }
 
-        // Clear all sections
+        // Clear all sections and chunk-level index
         size_t clearedCount = m_dirtySections.size();
         m_dirtySections.clear();
+        m_dirtyChunks.clear();
 
         // Update statistics
         {
@@ -146,10 +140,28 @@ namespace Game {
 
         std::lock_guard<std::mutex> lock(m_dirtyMutex);
 
+        // Collect chunks that had sections removed so we can check if they're still dirty
+        std::unordered_set<Math::ChunkPos, Math::ChunkPosHash> affectedChunks;
+
         size_t clearedCount = 0;
         for (const auto& section : sections) {
             if (m_dirtySections.erase(section)) {
                 clearedCount++;
+                affectedChunks.insert(section.chunkPos);
+            }
+        }
+
+        // For each affected chunk, check if it still has any dirty sections
+        for (const auto& chunkPos : affectedChunks) {
+            bool stillDirty = false;
+            for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                if (m_dirtySections.find(DirtySection(chunkPos, sectionY)) != m_dirtySections.end()) {
+                    stillDirty = true;
+                    break;
+                }
+            }
+            if (!stillDirty) {
+                m_dirtyChunks.erase(chunkPos);
             }
         }
 
@@ -166,6 +178,7 @@ namespace Game {
 
         size_t clearedCount = m_dirtySections.size();
         m_dirtySections.clear();
+        m_dirtyChunks.clear();
 
         // Update statistics
         {
@@ -327,6 +340,8 @@ namespace Game {
             std::lock_guard<std::mutex> lock(m_dirtyMutex);
             auto [it, inserted] = m_dirtySections.insert(section);
             wasNew = inserted;
+            // Also track at chunk level for O(1) IsChunkDirty
+            m_dirtyChunks.insert(section.chunkPos);
         }
 
         // Update statistics

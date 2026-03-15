@@ -267,6 +267,19 @@ namespace Game {
         return totalSize;
     }
 
+    std::vector<Math::ChunkPos> ChunkCache::GetLoadedChunkPositions() const {
+        std::lock_guard<std::mutex> lock(m_cacheMutex);
+
+        std::vector<Math::ChunkPos> positions;
+        positions.reserve(m_cache.size());
+
+        for (const auto& [pos, entry] : m_cache) {
+            positions.push_back(pos);
+        }
+
+        return positions;
+    }
+
     // === DEBUGGING ===
 
     ChunkCache::CacheState ChunkCache::GetDebugState() const {

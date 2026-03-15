@@ -155,6 +155,9 @@ namespace Game {
         size_t GetMemoryUsage() const;
         size_t GetLoadedChunkCount() const;
 
+        // Get all loaded chunk positions (for iterating loaded chunks)
+        std::vector<Math::ChunkPos> GetLoadedChunkPositions() const;
+
         void LogPerformanceStats() const;
         bool ValidateState() const;
 

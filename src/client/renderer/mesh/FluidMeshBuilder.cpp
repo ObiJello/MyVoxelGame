@@ -26,9 +26,11 @@ namespace Render {
     static void ApplyDirectionalShade(std::vector<Vertex>& verts, BlockFace face) {
         float shade = GetFluidDirectionalShade(face);
         for (auto& v : verts) {
-            v.color.r *= shade;
-            v.color.g *= shade;
-            v.color.b *= shade;
+            glm::vec4 c = v.GetColor();
+            c.r *= shade;
+            c.g *= shade;
+            c.b *= shade;
+            v.SetColor(c);
         }
     }
 

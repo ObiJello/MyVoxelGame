@@ -423,7 +423,11 @@ namespace Render {
 
         // Setup vertex attributes
         for (const auto& attr : layout.attributes) {
-            glVertexAttribPointer(attr.location, attr.componentCount, GL_FLOAT,
+            GLenum glType = GL_FLOAT;
+            if (attr.type == AttribType::UByte) {
+                glType = GL_UNSIGNED_BYTE;
+            }
+            glVertexAttribPointer(attr.location, attr.componentCount, glType,
                                 attr.normalized ? GL_TRUE : GL_FALSE,
                                 layout.stride, reinterpret_cast<void*>(static_cast<uintptr_t>(attr.offset)));
             glEnableVertexAttribArray(attr.location);
@@ -548,7 +552,7 @@ namespace Render {
         glBindVertexArray(it->second.vao);
         glDrawElements(ToGLPrimitive(m_currentState.primitiveType), indexCount, GL_UNSIGNED_INT,
                       reinterpret_cast<void*>(static_cast<uintptr_t>(indexOffset * sizeof(uint32_t))));
-        glBindVertexArray(0);
+        // VAO intentionally left bound — next DrawIndexed will rebind, avoiding redundant unbind/rebind cycles
     }
 
     void GLBackend::DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) {
@@ -557,7 +561,6 @@ namespace Render {
 
         glBindVertexArray(it->second.vao);
         glDrawArrays(ToGLPrimitive(m_currentState.primitiveType), firstVertex, vertexCount);
-        glBindVertexArray(0);
     }
 
     // ========================================================================

@@ -4,10 +4,17 @@
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <chrono>
 #include <algorithm>
+#include <cstring>
 
 namespace Render {
+
+    // Thread-local block property cache and UV cache definitions
+    thread_local std::array<Mesher::CachedBlockProps, Mesher::BLOCK_ID_COUNT> Mesher::s_blockPropsCache{};
+    thread_local bool Mesher::s_blockPropsCacheValid = false;
+    thread_local std::unordered_map<const Game::FaceDef*, glm::vec4> Mesher::s_faceUVCache;
 
     // Face normal vectors for each block face
     static const glm::vec3 FACE_NORMALS[] = {
@@ -31,7 +38,10 @@ namespace Render {
 
     Mesher::Mesher(const MeshConfig& config) : m_config(config), m_world(nullptr) {
         m_lastStats = {};
-        // Create fluid mesh builder
+        m_sectionBaseWorldX = 0;
+        m_sectionBaseWorldY = 0;
+        m_sectionBaseWorldZ = 0;
+        std::memset(m_opaqueCache, 0, sizeof(m_opaqueCache));
         m_fluidBuilder = std::make_unique<FluidMeshBuilder>();
     }
 
@@ -39,27 +49,77 @@ namespace Render {
         m_world = world;
     }
 
+    void Mesher::EnsureBlockPropsCache() {
+        if (s_blockPropsCacheValid) return;
+
+        for (size_t i = 0; i < BLOCK_ID_COUNT; ++i) {
+            auto blockId = static_cast<Game::BlockID>(i);
+            const Game::Block& block = Game::BlockRegistry::Get(blockId);
+            s_blockPropsCache[i].isOpaque = block.opaque;
+            switch (block.renderLayer) {
+                case Game::RenderLayer::Cutout:      s_blockPropsCache[i].renderLayer = RenderLayer::Cutout; break;
+                case Game::RenderLayer::Translucent:  s_blockPropsCache[i].renderLayer = RenderLayer::Translucent; break;
+                default:                              s_blockPropsCache[i].renderLayer = RenderLayer::Opaque; break;
+            }
+        }
+        s_blockPropsCacheValid = true;
+    }
+
+    void Mesher::BuildOpaqueCache(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY) {
+        PROFILE_ZONE;
+        m_sectionBaseWorldX = chunkPos.x * 16;
+        m_sectionBaseWorldY = sectionY * 16 + Config::MinY;
+        m_sectionBaseWorldZ = chunkPos.z * 16;
+
+        // Sample a 18x18x18 region: the section (16^3) plus a 1-block border on all sides.
+        // This covers every neighbor position that AO and face culling will access.
+        for (int lx = -1; lx <= 16; ++lx) {
+            for (int ly = -1; ly <= 16; ++ly) {
+                for (int lz = -1; lz <= 16; ++lz) {
+                    int wx = m_sectionBaseWorldX + lx;
+                    int wy = m_sectionBaseWorldY + ly;
+                    int wz = m_sectionBaseWorldZ + lz;
+                    Game::BlockID bid = blocks.GetBlock(wx, wy, wz);
+                    m_opaqueCache[lx + 1][ly + 1][lz + 1] = s_blockPropsCache[static_cast<uint16_t>(bid)].isOpaque;
+                }
+            }
+        }
+    }
+
+    bool Mesher::GetCachedOpaque(int worldX, int worldY, int worldZ) const {
+        int lx = worldX - m_sectionBaseWorldX + 1;
+        int ly = worldY - m_sectionBaseWorldY + 1;
+        int lz = worldZ - m_sectionBaseWorldZ + 1;
+
+        // Bounds check — positions outside the cached region fall back to non-opaque
+        if (lx < 0 || lx >= 18 || ly < 0 || ly >= 18 || lz < 0 || lz >= 18) {
+            return false;
+        }
+        return m_opaqueCache[lx][ly][lz];
+    }
+
     void Mesher::BuildSectionMesh(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
+        PROFILE_ZONE;
         auto startTime = std::chrono::high_resolution_clock::now();
 
-        // Reset stats
         m_lastStats = {};
 
-        // Clear output mesh
         outMesh.Clear();
         outMesh.chunkPos = chunkPos;
         outMesh.sectionY = sectionY;
+        outMesh.Reserve(1024);
 
-        // Reserve space for estimated geometry
-        outMesh.Reserve(1024); // Estimate ~1024 quads per section
+        // Populate per-thread block property cache (once per thread lifetime)
+        EnsureBlockPropsCache();
 
-        // No need to check section existence - IBlockAccess handles it
+        // Build the 18x18x18 opaque cache for this section — all subsequent
+        // face culling and AO calculations index into this instead of calling
+        // GetBlock + IsBlockOpaque repeatedly.
+        BuildOpaqueCache(blocks, chunkPos, sectionY);
 
-        // **UPDATED**: Process all blocks in this 16x16x16 section using world Y coordinates
         for (int localX = 0; localX < 16; ++localX) {
             for (int sectionLocalY = 0; sectionLocalY < 16; ++sectionLocalY) {
                 for (int localZ = 0; localZ < 16; ++localZ) {
-                    // **NEW**: Convert section-local Y to world Y coordinate
                     int worldY = sectionY * 16 + sectionLocalY + Config::MinY;
                     int worldX = chunkPos.x * 16 + localX;
                     int worldZ = chunkPos.z * 16 + localZ;
@@ -67,13 +127,12 @@ namespace Render {
                     Game::BlockID blockId = blocks.GetBlock(worldX, worldY, worldZ);
 
                     if (blockId != Game::BlockID::Air) {
-                        ProcessBlock(blocks, chunkPos, localX, worldY, localZ, sectionY, outMesh);
+                        ProcessBlock(blocks, chunkPos, localX, worldY, localZ, sectionY, blockId, outMesh);
                     }
                 }
             }
         }
 
-        // Calculate build time
         auto endTime = std::chrono::high_resolution_clock::now();
         m_lastStats.buildTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
@@ -82,52 +141,40 @@ namespace Render {
 
     void Mesher::ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                              int localX, int worldY, int localZ,
-                             int sectionY, SectionMesh& mesh) {
+                             int sectionY, Game::BlockID blockId, SectionMesh& mesh) {
 
-        // **UPDATED**: Use IBlockAccess with world coordinates
         int worldX = chunkPos.x * 16 + localX;
         int worldZ = chunkPos.z * 16 + localZ;
-        Game::BlockID blockId = blocks.GetBlock(worldX, worldY, worldZ);
-        if (blockId == Game::BlockID::Air) return;
+        // blockId passed from caller — avoids redundant GetBlock() virtual call
 
         // Handle fluid blocks separately
         if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava) {
-            // Use FluidMeshBuilder for water and lava
             if (m_fluidBuilder) {
                 m_fluidBuilder->BuildFluidBlock(blocks, chunkPos, worldX, worldY, worldZ, mesh);
-                m_lastStats.facesGenerated++;  // Approximate count
+                m_lastStats.facesGenerated++;
             }
             return;
         }
 
-        // Get block model
         const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(blockId);
-
-        // Calculate world position for this block
         glm::vec3 worldPos = LocalToWorldPos(chunkPos, localX, worldY, localZ);
 
-        // Classify once per block (same for all faces)
-        RenderLayer blockLayer = ClassifyBlock(blockId);
+        // Use cached render layer instead of registry lookup
+        RenderLayer blockLayer = s_blockPropsCache[static_cast<uint16_t>(blockId)].renderLayer;
 
-        // Process each element in the block model
         for (const auto& element : model.elements) {
-            // Process each face of the element
             for (const auto& [faceDir, faceDef] : element.faces) {
-                // Convert to our face enum
                 BlockFace blockFace = static_cast<BlockFace>(static_cast<int>(faceDir));
 
-                // Check if face should be culled
+                // Face culling uses the pre-built opaque cache (no GetBlock/registry calls)
                 if (m_config.enableFaceCulling) {
-                    if (ShouldCullFace(blocks, worldX, worldY, worldZ, blockFace, blockId)) {
+                    if (ShouldCullFace(worldX, worldY, worldZ, blockFace)) {
                         m_lastStats.facesCulled++;
                         continue;
                     }
                 }
 
-                // Get face normal
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
-
-                // Add this face to the mesh
                 AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, worldX, worldY, worldZ, blockLayer, mesh);
                 m_lastStats.facesGenerated++;
             }
@@ -140,17 +187,18 @@ namespace Render {
                              glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
                              int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh) {
 
-        // Lookup UV rect from cache (avoids ResolveTexture string alloc + atlas hash per face)
+        // Lookup UV rect from thread-local cache (persists across Mesher instances,
+        // so texture resolution only happens once per FaceDef per thread lifetime)
         glm::vec4 uvRect;
-        auto cacheIt = m_faceUVCache.find(&faceDef);
-        if (cacheIt != m_faceUVCache.end()) {
+        auto cacheIt = s_faceUVCache.find(&faceDef);
+        if (cacheIt != s_faceUVCache.end()) {
             uvRect = cacheIt->second;
         } else {
             std::string texturePath = model.ResolveTexture(faceDef.textureRef);
             if (!GetTextureUV(texturePath, uvRect)) {
                 GetTextureUV("missingno", uvRect);
             }
-            m_faceUVCache[&faceDef] = uvRect;
+            s_faceUVCache[&faceDef] = uvRect;
         }
 
         // **FIXED**: Calculate biome tint based on tintIndex
@@ -181,9 +229,11 @@ namespace Render {
         for (int v = 0; v < 4; ++v) {
             float aoShade = CalculateVertexAO(blocks, worldX, worldY, worldZ, blockFace, v);
             float finalShade = aoShade * directionalShade;
-            faceVerts[v].color.r *= finalShade;
-            faceVerts[v].color.g *= finalShade;
-            faceVerts[v].color.b *= finalShade;
+            glm::vec4 c = faceVerts[v].GetColor();
+            c.r *= finalShade;
+            c.g *= finalShade;
+            c.b *= finalShade;
+            faceVerts[v].SetColor(c);
         }
 
         // Add to appropriate mesh layer
@@ -251,18 +301,11 @@ namespace Render {
         });
     }
 
-    bool Mesher::ShouldCullFace(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
-                               BlockFace face, Game::BlockID currentBlock) {
-        // Get neighbor block using world coordinates
-        Game::BlockID neighborBlock = GetNeighborBlock(blocks, worldX, worldY, worldZ, face);
-
-        // Don't cull if neighbor is air
-        if (neighborBlock == Game::BlockID::Air) {
-            return false;
-        }
-
-        // Check if neighbor is opaque and covers this face
-        return IsBlockOpaque(neighborBlock);
+    bool Mesher::ShouldCullFace(int worldX, int worldY, int worldZ, BlockFace face) {
+        // Use the pre-built opaque cache: neighbor is opaque → cull this face.
+        // The offset table gives us the neighbor position directly.
+        const glm::ivec3& offset = FACE_OFFSETS[static_cast<int>(face)];
+        return GetCachedOpaque(worldX + offset.x, worldY + offset.y, worldZ + offset.z);
     }
 
     // **UPDATED**: Now supports cross-chunk neighbor lookup via IBlockAccess
@@ -427,7 +470,7 @@ namespace Render {
     // Uses the exact Minecraft values: solid blocks = 0.2 shade, non-solid = 1.0
     // Formula: vertex_ao = (edge1 + edge2 + corner + center) * 0.25
     // Corner rule: if both edges are solid, corner is forced solid (prevents diagonal light leak)
-    float Mesher::CalculateVertexAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
+    float Mesher::CalculateVertexAO(const Game::IBlockAccess& /*blocks*/, int worldX, int worldY, int worldZ,
                                     BlockFace face, int vertexIndex) {
         if (!m_config.enableAmbientOcclusion) {
             return 1.0f;
@@ -435,14 +478,10 @@ namespace Render {
 
         const auto& neighbors = AO_NEIGHBORS[static_cast<int>(face)][vertexIndex];
 
-        // Sample the 3 neighbor blocks
-        Game::BlockID edge1Block = blocks.GetBlock(worldX + neighbors.edge1.x, worldY + neighbors.edge1.y, worldZ + neighbors.edge1.z);
-        Game::BlockID edge2Block = blocks.GetBlock(worldX + neighbors.edge2.x, worldY + neighbors.edge2.y, worldZ + neighbors.edge2.z);
-        Game::BlockID cornerBlock = blocks.GetBlock(worldX + neighbors.corner.x, worldY + neighbors.corner.y, worldZ + neighbors.corner.z);
-
-        // Minecraft shade values: solid/opaque = 0.2, non-solid = 1.0
-        bool edge1Solid = IsBlockOpaque(edge1Block);
-        bool edge2Solid = IsBlockOpaque(edge2Block);
+        // Use the pre-built opaque cache instead of GetBlock + IsBlockOpaque per sample.
+        // This eliminates 12 block lookups + 12 registry lookups per face (3 per vertex × 4 vertices).
+        bool edge1Solid = GetCachedOpaque(worldX + neighbors.edge1.x, worldY + neighbors.edge1.y, worldZ + neighbors.edge1.z);
+        bool edge2Solid = GetCachedOpaque(worldX + neighbors.edge2.x, worldY + neighbors.edge2.y, worldZ + neighbors.edge2.z);
 
         float edge1Shade = edge1Solid ? 0.2f : 1.0f;
         float edge2Shade = edge2Solid ? 0.2f : 1.0f;
@@ -450,20 +489,23 @@ namespace Render {
         // Corner rule: if both edges are solid, corner is forced solid (no diagonal light leak)
         float cornerShade;
         if (edge1Solid && edge2Solid) {
-            cornerShade = 0.2f;  // Both edges block light — corner is occluded regardless
+            cornerShade = 0.2f;
         } else {
-            cornerShade = IsBlockOpaque(cornerBlock) ? 0.2f : 1.0f;
+            bool cornerSolid = GetCachedOpaque(worldX + neighbors.corner.x, worldY + neighbors.corner.y, worldZ + neighbors.corner.z);
+            cornerShade = cornerSolid ? 0.2f : 1.0f;
         }
 
-        // Center is always 1.0 (the face itself is exposed to air/non-solid)
         float centerShade = 1.0f;
-
-        // Average of 4 samples (Minecraft formula)
         return (edge1Shade + edge2Shade + cornerShade + centerShade) * 0.25f;
     }
 
-    // Render layer classification — reads from registry (data-driven)
+    // Render layer classification — uses thread-local cache when available,
+    // falls back to registry for initial population or external callers.
     RenderLayer ClassifyBlock(Game::BlockID blockId) {
+        auto idx = static_cast<uint16_t>(blockId);
+        if (Mesher::s_blockPropsCacheValid && idx < Mesher::BLOCK_ID_COUNT) {
+            return Mesher::s_blockPropsCache[idx].renderLayer;
+        }
         switch (Game::BlockRegistry::Get(blockId).renderLayer) {
             case Game::RenderLayer::Cutout:       return RenderLayer::Cutout;
             case Game::RenderLayer::Translucent:  return RenderLayer::Translucent;
@@ -472,13 +514,15 @@ namespace Render {
     }
 
     bool IsBlockOpaque(Game::BlockID blockId) {
-        const Game::Block& block = Game::BlockRegistry::Get(blockId);
-        return block.opaque;
+        auto idx = static_cast<uint16_t>(blockId);
+        if (Mesher::s_blockPropsCacheValid && idx < Mesher::BLOCK_ID_COUNT) {
+            return Mesher::s_blockPropsCache[idx].isOpaque;
+        }
+        return Game::BlockRegistry::Get(blockId).opaque;
     }
 
     bool IsBlockTranslucent(Game::BlockID blockId) {
-        RenderLayer layer = ClassifyBlock(blockId);
-        return layer == RenderLayer::Translucent;
+        return ClassifyBlock(blockId) == RenderLayer::Translucent;
     }
 
 } // namespace Render

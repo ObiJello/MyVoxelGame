@@ -24,7 +24,7 @@ namespace Render {
     AtlasBuilder::AtlasBuilder()
         : atlasWidth(DEFAULT_ATLAS_SIZE)
         , atlasHeight(DEFAULT_ATLAS_SIZE)
-        , mipmapEnabled(false)
+        , mipmapEnabled(true)
         , textureAnimator(nullptr) {
     }
 
@@ -401,16 +401,16 @@ namespace Render {
             for (size_t i = 0; i < sources.size(); ++i) {
                 const auto& source = sources[i];
 
-                // Add 2 pixel padding to avoid bleeding
-                int paddedWidth = source.width + 2;
-                int paddedHeight = source.height + 2;
+                // Add MIPMAP_PADDING pixels on each side (32 total) for mipmap-safe padding
+                int paddedWidth = source.width + MIPMAP_PADDING * 2;
+                int paddedHeight = source.height + MIPMAP_PADDING * 2;
 
                 PackNode* node = InsertRect(root.get(), paddedWidth, paddedHeight, i);
 
                 if (node) {
                     PackRect rect;
-                    rect.x = node->x + 1; // Account for padding
-                    rect.y = node->y + 1;
+                    rect.x = node->x + MIPMAP_PADDING; // Account for padding
+                    rect.y = node->y + MIPMAP_PADDING;
                     rect.width = source.width;
                     rect.height = source.height;
                     rect.textureIndex = i;
@@ -517,11 +517,25 @@ namespace Render {
         
         // Save original atlas data before any modifications
         originalAtlasData = atlasData;
-        
-        // Apply border extrusion if building in Minecraft mode (for initial build)
+
+        // Pre-fill transparent pixels with nearest opaque color (prevents dark mipmap fringes)
+        // This must happen before border extrusion so the extrusion also picks up solidified colors
         if (m_borderExtrusionEnabled) {
             for (const auto& rect : packedRects) {
-                if (rect.textureIndex < 0 || rect.textureIndex >= sources.size()) {
+                if (rect.textureIndex < 0 || rect.textureIndex >= (int)sources.size()) {
+                    continue;
+                }
+                // Note: SolidifyTransparentPixels skipped here — it incorrectly fills
+                // grass block side overlay transparency with green. The 16-pixel edge
+                // extrusion is sufficient to prevent mipmap bleeding artifacts.
+                // SolidifyTransparentPixels(rect.x, rect.y, rect.width, rect.height);
+            }
+        }
+
+        // Apply border extrusion (clamp-to-edge padding) for mipmap safety
+        if (m_borderExtrusionEnabled) {
+            for (const auto& rect : packedRects) {
+                if (rect.textureIndex < 0 || rect.textureIndex >= (int)sources.size()) {
                     continue;
                 }
                 ExtrudeTextureBorders(rect.x, rect.y, rect.width, rect.height);
@@ -565,6 +579,14 @@ namespace Render {
             }
             Log::Info("Registered %zu animated textures", pendingAnimations.size());
         }
+
+        // Atlas is now on GPU — free the CPU copy to save 64-256MB of RAM.
+        // RebuildAtlas() regenerates from source textures if ever needed.
+        size_t freedBytes = atlasData.size();
+        atlasData.clear();
+        atlasData.shrink_to_fit();
+        Log::Info("Atlas CPU data freed (%.1f MB, GPU copy retained)",
+                  static_cast<double>(freedBytes) / (1024.0 * 1024.0));
 
         return true;
     }
@@ -616,10 +638,14 @@ namespace Render {
         // Destroy existing texture
         Render::g_renderBackend->DestroyTexture(m_atlasTexture);
 
-        // If Minecraft style, apply border extrusion to a copy of the data
+        // If Minecraft style, apply solidify + border extrusion to a copy of the data
         const unsigned char* uploadData = originalAtlasData.data();
         if (useMinecraftStyle) {
             atlasData = originalAtlasData;
+            // Note: SolidifyTransparentPixels skipped — causes grass side overlay
+            // to render all-green. Edge extrusion alone is sufficient for mipmap safety.
+
+            // Extrude borders into padding region
             for (const auto& kvp : textureKeyToUV) {
                 const AtlasUVRect& uvRect = kvp.second;
                 int x = static_cast<int>(uvRect.uvMin.x * atlasWidth);
@@ -668,90 +694,207 @@ namespace Render {
         }
     }
     
-    void AtlasBuilder::ExtrudeTextureBorders(int textureX, int textureY, 
+    void AtlasBuilder::ExtrudeTextureBorders(int textureX, int textureY,
                                             int textureWidth, int textureHeight) {
-        // Extrude edges by 1 pixel to prevent mipmap bleeding
-        // This copies the edge pixels into the padding area around the texture
-        
-        // Top edge - copy top row to padding above
-        if (textureY > 0) {
+        // Extrude edges by MIPMAP_PADDING pixels to prevent mipmap bleeding.
+        // Each edge pixel is repeated outward into the padding region (clamp-to-edge pattern).
+
+        // Top edge - repeat top row upward
+        for (int p = 1; p <= MIPMAP_PADDING; ++p) {
+            int dstY = textureY - p;
+            if (dstY < 0) break;
             for (int x = 0; x < textureWidth; ++x) {
-                int srcIdx = ((textureY) * atlasWidth + (textureX + x)) * 4;
-                int dstIdx = ((textureY - 1) * atlasWidth + (textureX + x)) * 4;
-                for (int c = 0; c < 4; ++c) {
+                int srcIdx = (textureY * atlasWidth + (textureX + x)) * 4;
+                int dstIdx = (dstY * atlasWidth + (textureX + x)) * 4;
+                for (int c = 0; c < 4; ++c)
                     atlasData[dstIdx + c] = atlasData[srcIdx + c];
-                }
             }
         }
-        
-        // Bottom edge - copy bottom row to padding below
-        if (textureY + textureHeight < atlasHeight - 1) {
+
+        // Bottom edge - repeat bottom row downward
+        for (int p = 0; p < MIPMAP_PADDING; ++p) {
+            int dstY = textureY + textureHeight + p;
+            if (dstY >= atlasHeight) break;
             for (int x = 0; x < textureWidth; ++x) {
                 int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + x)) * 4;
-                int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX + x)) * 4;
-                for (int c = 0; c < 4; ++c) {
+                int dstIdx = (dstY * atlasWidth + (textureX + x)) * 4;
+                for (int c = 0; c < 4; ++c)
                     atlasData[dstIdx + c] = atlasData[srcIdx + c];
-                }
             }
         }
-        
-        // Left edge - copy left column to padding on left
-        if (textureX > 0) {
+
+        // Left edge - repeat left column to the left
+        for (int p = 1; p <= MIPMAP_PADDING; ++p) {
+            int dstX = textureX - p;
+            if (dstX < 0) break;
             for (int y = 0; y < textureHeight; ++y) {
                 int srcIdx = ((textureY + y) * atlasWidth + textureX) * 4;
-                int dstIdx = ((textureY + y) * atlasWidth + (textureX - 1)) * 4;
-                for (int c = 0; c < 4; ++c) {
+                int dstIdx = ((textureY + y) * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
                     atlasData[dstIdx + c] = atlasData[srcIdx + c];
-                }
             }
         }
-        
-        // Right edge - copy right column to padding on right
-        if (textureX + textureWidth < atlasWidth - 1) {
+
+        // Right edge - repeat right column to the right
+        for (int p = 0; p < MIPMAP_PADDING; ++p) {
+            int dstX = textureX + textureWidth + p;
+            if (dstX >= atlasWidth) break;
             for (int y = 0; y < textureHeight; ++y) {
                 int srcIdx = ((textureY + y) * atlasWidth + (textureX + textureWidth - 1)) * 4;
-                int dstIdx = ((textureY + y) * atlasWidth + (textureX + textureWidth)) * 4;
-                for (int c = 0; c < 4; ++c) {
+                int dstIdx = ((textureY + y) * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
                     atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+
+        // Corner regions - fill the four rectangular corner padding areas
+        // Each corner extends MIPMAP_PADDING in both directions, filled with the nearest corner pixel
+
+        // Top-left corner block
+        for (int py = 1; py <= MIPMAP_PADDING; ++py) {
+            int dstY = textureY - py;
+            if (dstY < 0) continue;
+            for (int px = 1; px <= MIPMAP_PADDING; ++px) {
+                int dstX = textureX - px;
+                if (dstX < 0) continue;
+                int srcIdx = (textureY * atlasWidth + textureX) * 4;
+                int dstIdx = (dstY * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+
+        // Top-right corner block
+        for (int py = 1; py <= MIPMAP_PADDING; ++py) {
+            int dstY = textureY - py;
+            if (dstY < 0) continue;
+            for (int px = 0; px < MIPMAP_PADDING; ++px) {
+                int dstX = textureX + textureWidth + px;
+                if (dstX >= atlasWidth) continue;
+                int srcIdx = (textureY * atlasWidth + (textureX + textureWidth - 1)) * 4;
+                int dstIdx = (dstY * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+
+        // Bottom-left corner block
+        for (int py = 0; py < MIPMAP_PADDING; ++py) {
+            int dstY = textureY + textureHeight + py;
+            if (dstY >= atlasHeight) continue;
+            for (int px = 1; px <= MIPMAP_PADDING; ++px) {
+                int dstX = textureX - px;
+                if (dstX < 0) continue;
+                int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + textureX) * 4;
+                int dstIdx = (dstY * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+
+        // Bottom-right corner block
+        for (int py = 0; py < MIPMAP_PADDING; ++py) {
+            int dstY = textureY + textureHeight + py;
+            if (dstY >= atlasHeight) continue;
+            for (int px = 0; px < MIPMAP_PADDING; ++px) {
+                int dstX = textureX + textureWidth + px;
+                if (dstX >= atlasWidth) continue;
+                int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + textureWidth - 1)) * 4;
+                int dstIdx = (dstY * atlasWidth + dstX) * 4;
+                for (int c = 0; c < 4; ++c)
+                    atlasData[dstIdx + c] = atlasData[srcIdx + c];
+            }
+        }
+    }
+
+    void AtlasBuilder::SolidifyTransparentPixels(int textureX, int textureY,
+                                               int textureWidth, int textureHeight) {
+        // "Solidify" pass: for pixels with alpha == 0, fill RGB with the nearest opaque pixel's color.
+        // This prevents dark/black fringes when mipmaps blend transparent and opaque pixels together.
+        // Uses an iterative flood-fill approach: each pass expands opaque colors one pixel outward
+        // into adjacent transparent pixels.
+
+        // Work on a local copy of just this sprite region to avoid cross-sprite contamination
+        const int w = textureWidth;
+        const int h = textureHeight;
+        std::vector<unsigned char> region(w * h * 4);
+
+        // Copy sprite region from atlas
+        for (int y = 0; y < h; ++y) {
+            int srcRow = ((textureY + y) * atlasWidth + textureX) * 4;
+            int dstRow = (y * w) * 4;
+            std::memcpy(&region[dstRow], &atlasData[srcRow], w * 4);
+        }
+
+        // Check if this sprite has any transparent pixels at all
+        bool hasTransparent = false;
+        for (int i = 0; i < w * h; ++i) {
+            if (region[i * 4 + 3] == 0) {
+                hasTransparent = true;
+                break;
+            }
+        }
+        if (!hasTransparent) return;
+
+        // Track which pixels have been filled (start with opaque pixels marked as filled)
+        std::vector<bool> filled(w * h, false);
+        for (int i = 0; i < w * h; ++i) {
+            if (region[i * 4 + 3] > 0) {
+                filled[i] = true;
+            }
+        }
+
+        // Iterative expansion: each pass fills transparent pixels adjacent to filled pixels
+        // Do enough passes to cover the whole sprite (worst case is max(w, h) passes,
+        // but typically only a few are needed)
+        const int maxPasses = std::max(w, h);
+        const int dx[] = {-1, 1, 0, 0, -1, -1, 1, 1};
+        const int dy[] = {0, 0, -1, 1, -1, 1, -1, 1};
+
+        for (int pass = 0; pass < maxPasses; ++pass) {
+            bool anyChanged = false;
+            std::vector<bool> newFilled = filled;
+
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    int idx = y * w + x;
+                    if (filled[idx]) continue; // Already has color
+
+                    // Look at 8 neighbors for the nearest filled pixel
+                    int totalR = 0, totalG = 0, totalB = 0, count = 0;
+                    for (int d = 0; d < 8; ++d) {
+                        int nx = x + dx[d];
+                        int ny = y + dy[d];
+                        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+                        int nIdx = ny * w + nx;
+                        if (filled[nIdx]) {
+                            totalR += region[nIdx * 4 + 0];
+                            totalG += region[nIdx * 4 + 1];
+                            totalB += region[nIdx * 4 + 2];
+                            count++;
+                        }
+                    }
+
+                    if (count > 0) {
+                        region[idx * 4 + 0] = static_cast<unsigned char>(totalR / count);
+                        region[idx * 4 + 1] = static_cast<unsigned char>(totalG / count);
+                        region[idx * 4 + 2] = static_cast<unsigned char>(totalB / count);
+                        // Keep alpha = 0 so the pixel stays transparent for rendering
+                        newFilled[idx] = true;
+                        anyChanged = true;
+                    }
                 }
             }
+
+            filled = newFilled;
+            if (!anyChanged) break; // All transparent pixels have been filled
         }
-        
-        // Corners - copy corner pixels to diagonal padding
-        // Top-left corner
-        if (textureX > 0 && textureY > 0) {
-            int srcIdx = (textureY * atlasWidth + textureX) * 4;
-            int dstIdx = ((textureY - 1) * atlasWidth + (textureX - 1)) * 4;
-            for (int c = 0; c < 4; ++c) {
-                atlasData[dstIdx + c] = atlasData[srcIdx + c];
-            }
-        }
-        
-        // Top-right corner
-        if (textureX + textureWidth < atlasWidth - 1 && textureY > 0) {
-            int srcIdx = (textureY * atlasWidth + (textureX + textureWidth - 1)) * 4;
-            int dstIdx = ((textureY - 1) * atlasWidth + (textureX + textureWidth)) * 4;
-            for (int c = 0; c < 4; ++c) {
-                atlasData[dstIdx + c] = atlasData[srcIdx + c];
-            }
-        }
-        
-        // Bottom-left corner
-        if (textureX > 0 && textureY + textureHeight < atlasHeight - 1) {
-            int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + textureX) * 4;
-            int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX - 1)) * 4;
-            for (int c = 0; c < 4; ++c) {
-                atlasData[dstIdx + c] = atlasData[srcIdx + c];
-            }
-        }
-        
-        // Bottom-right corner
-        if (textureX + textureWidth < atlasWidth - 1 && textureY + textureHeight < atlasHeight - 1) {
-            int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + textureWidth - 1)) * 4;
-            int dstIdx = ((textureY + textureHeight) * atlasWidth + (textureX + textureWidth)) * 4;
-            for (int c = 0; c < 4; ++c) {
-                atlasData[dstIdx + c] = atlasData[srcIdx + c];
-            }
+
+        // Write solidified region back to atlas
+        for (int y = 0; y < h; ++y) {
+            int dstRow = ((textureY + y) * atlasWidth + textureX) * 4;
+            int srcRow = (y * w) * 4;
+            std::memcpy(&atlasData[dstRow], &region[srcRow], w * 4);
         }
     }
 

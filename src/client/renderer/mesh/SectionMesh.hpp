@@ -77,7 +77,10 @@ namespace Render {
         }
     };
 
-    // GPU data for one section (holds backend resource handles)
+    // GPU data for one section.
+    // With mega-buffer rendering, per-section GPU handles are no longer stored here.
+    // The ChunkMegaBuffer owns all GPU resources; this struct holds counts and identity
+    // needed by the rendering pipeline for frustum culling, stats, and draw command lookup.
     struct GPUSectionData {
         // Index counts for rendering
         uint32_t opaqueIndexCount = 0;
@@ -93,13 +96,17 @@ namespace Render {
         Game::Math::ChunkPos chunkPos{0, 0};
         int sectionY = 0;
 
-        // Backend resource handles
-        MeshHandle opaqueMesh = INVALID_MESH;
-        MeshHandle cutoutMesh = INVALID_MESH;
-        MeshHandle translucentMesh = INVALID_MESH;
-        BufferHandle opaqueVB = INVALID_BUFFER, opaqueIB = INVALID_BUFFER;
-        BufferHandle cutoutVB = INVALID_BUFFER, cutoutIB = INVALID_BUFFER;
-        BufferHandle translucentVB = INVALID_BUFFER, translucentIB = INVALID_BUFFER;
+        // Cached mega-buffer draw commands (populated at upload, read during rendering).
+        // Eliminates per-frame hash lookups in RenderLayerPass.
+        struct CachedDrawCmd {
+            int32_t indexCount = 0;
+            size_t indexByteOffset = 0;
+            int32_t baseVertex = 0;
+            bool valid = false;
+        };
+        CachedDrawCmd opaqueDrawCmd;
+        CachedDrawCmd cutoutDrawCmd;
+        CachedDrawCmd translucentDrawCmd;
 
         // Upload timestamp for LRU management
         uint64_t lastUploadFrame = 0;
@@ -113,19 +120,14 @@ namespace Render {
             return opaqueIndexCount > 0 || cutoutIndexCount > 0 || translucentIndexCount > 0;
         }
 
-        // Check if GPU buffers are allocated
-        bool IsUploaded() const {
-            return opaqueMesh != INVALID_MESH || cutoutMesh != INVALID_MESH || translucentMesh != INVALID_MESH;
-        }
-
         // Get total memory usage estimate
         size_t GetMemoryUsage() const {
             return (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) *
                    (sizeof(Vertex) + sizeof(uint32_t));
         }
 
-        // Destroy all backend resources and reset handles/counts
-        // Pass the backend pointer to avoid including RenderBackend.hpp in this header
+        // No-op: GPU resources are now owned by ChunkMegaBuffer.
+        // Kept for API compatibility with legacy code paths (GPUDataPool, ChunkMeshData).
         void DestroyAllResources(RenderBackend* backend);
     };
 

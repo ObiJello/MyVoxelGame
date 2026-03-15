@@ -2,6 +2,7 @@
 #include "ClientWorkerPool.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
 #include "../renderer/mesh/Mesher.hpp"
@@ -10,6 +11,7 @@
 #include "../renderer/mesh/SnapshotBuilder.hpp"
 #include "../renderer/mesh/SnapshotBlockAccess.hpp"
 #include <algorithm>
+#include <cstring>
 #include <optional>
 #include <glm/glm.hpp>
 
@@ -287,8 +289,9 @@ namespace Threading {
     // ========================================================================
 
     void ClientWorkerPool::WorkerLoop() {
+        PROFILE_THREAD("MeshWorker");
         // Log::Debug("WORKER: Client worker thread started");
-        
+
         static std::atomic<uint64_t> jobCounter{0};
 
         while (m_running.load()) {
@@ -325,6 +328,7 @@ namespace Threading {
     }
 
     void ClientWorkerPool::ProcessMeshJob(const MeshJob& job) {
+        PROFILE_ZONE;
         // Check if job should be cancelled
         // Per-task cancellation check (Minecraft-style)
         if (job.snapshot && job.snapshot->IsCancelled()) {
@@ -497,90 +501,48 @@ namespace Threading {
         queue.IncrementProcessed();
     }
 
+    // Bulk-copy a Vertex array into a flat float array using memcpy instead of
+    // individual push_back calls per vertex. The Vertex struct layout
+    // (vec3 pos, vec2 uv, uint32 packedColor) is 6 float-sized slots per vertex
+    // (3 float pos + 2 float UV + 1 uint32 packed color).
+    static void CopyVertexLayer(const std::vector<Render::Vertex>& verts,
+                                std::vector<float>& outFloats) {
+        static_assert(sizeof(Render::Vertex) == 6 * sizeof(float),
+                      "Vertex layout changed — update CopyVertexLayer");
+
+        const size_t floatCount = verts.size() * 6;
+        outFloats.resize(floatCount);
+        std::memcpy(outFloats.data(), verts.data(), floatCount * sizeof(float));
+    }
+
     Network::MeshBuildResult ClientWorkerPool::ConvertSectionMeshToResult(const Render::SectionMesh& sectionMesh,
                                                                           Game::Math::ChunkPos chunkPos, int sectionY) {
         Network::MeshBuildResult result(chunkPos, sectionY);
-        
-        // Convert each layer from Vertex format to flat float arrays
-        
+
         // Opaque layer
         if (!sectionMesh.opaqueVerts.empty()) {
-            result.meshData.opaqueVertices.reserve(sectionMesh.opaqueVerts.size() * 12); // 12 floats per vertex
-            for (const auto& vertex : sectionMesh.opaqueVerts) {
-                // Position (3 floats)
-                result.meshData.opaqueVertices.push_back(vertex.pos.x);
-                result.meshData.opaqueVertices.push_back(vertex.pos.y);
-                result.meshData.opaqueVertices.push_back(vertex.pos.z);
-                // Normal (3 floats)
-                result.meshData.opaqueVertices.push_back(vertex.nrm.x);
-                result.meshData.opaqueVertices.push_back(vertex.nrm.y);
-                result.meshData.opaqueVertices.push_back(vertex.nrm.z);
-                // UV (2 floats)
-                result.meshData.opaqueVertices.push_back(vertex.uv.x);
-                result.meshData.opaqueVertices.push_back(vertex.uv.y);
-                // Color (4 floats)
-                result.meshData.opaqueVertices.push_back(vertex.color.r);
-                result.meshData.opaqueVertices.push_back(vertex.color.g);
-                result.meshData.opaqueVertices.push_back(vertex.color.b);
-                result.meshData.opaqueVertices.push_back(vertex.color.a);
-            }
+            CopyVertexLayer(sectionMesh.opaqueVerts, result.meshData.opaqueVertices);
             result.meshData.opaqueIndices = sectionMesh.opaqueIdxs;
             result.meshData.opaqueVertexCount = sectionMesh.opaqueVerts.size();
             result.meshData.opaqueIndexCount = sectionMesh.opaqueIdxs.size();
         }
-        
+
         // Cutout layer
         if (!sectionMesh.cutoutVerts.empty()) {
-            result.meshData.cutoutVertices.reserve(sectionMesh.cutoutVerts.size() * 12);
-            for (const auto& vertex : sectionMesh.cutoutVerts) {
-                // Position (3 floats)
-                result.meshData.cutoutVertices.push_back(vertex.pos.x);
-                result.meshData.cutoutVertices.push_back(vertex.pos.y);
-                result.meshData.cutoutVertices.push_back(vertex.pos.z);
-                // Normal (3 floats)
-                result.meshData.cutoutVertices.push_back(vertex.nrm.x);
-                result.meshData.cutoutVertices.push_back(vertex.nrm.y);
-                result.meshData.cutoutVertices.push_back(vertex.nrm.z);
-                // UV (2 floats)
-                result.meshData.cutoutVertices.push_back(vertex.uv.x);
-                result.meshData.cutoutVertices.push_back(vertex.uv.y);
-                // Color (4 floats)
-                result.meshData.cutoutVertices.push_back(vertex.color.r);
-                result.meshData.cutoutVertices.push_back(vertex.color.g);
-                result.meshData.cutoutVertices.push_back(vertex.color.b);
-                result.meshData.cutoutVertices.push_back(vertex.color.a);
-            }
+            CopyVertexLayer(sectionMesh.cutoutVerts, result.meshData.cutoutVertices);
             result.meshData.cutoutIndices = sectionMesh.cutoutIdxs;
             result.meshData.cutoutVertexCount = sectionMesh.cutoutVerts.size();
             result.meshData.cutoutIndexCount = sectionMesh.cutoutIdxs.size();
         }
-        
+
         // Translucent layer
         if (!sectionMesh.translucentVerts.empty()) {
-            result.meshData.translucentVertices.reserve(sectionMesh.translucentVerts.size() * 12);
-            for (const auto& vertex : sectionMesh.translucentVerts) {
-                // Position (3 floats)
-                result.meshData.translucentVertices.push_back(vertex.pos.x);
-                result.meshData.translucentVertices.push_back(vertex.pos.y);
-                result.meshData.translucentVertices.push_back(vertex.pos.z);
-                // Normal (3 floats)
-                result.meshData.translucentVertices.push_back(vertex.nrm.x);
-                result.meshData.translucentVertices.push_back(vertex.nrm.y);
-                result.meshData.translucentVertices.push_back(vertex.nrm.z);
-                // UV (2 floats)
-                result.meshData.translucentVertices.push_back(vertex.uv.x);
-                result.meshData.translucentVertices.push_back(vertex.uv.y);
-                // Color (4 floats)
-                result.meshData.translucentVertices.push_back(vertex.color.r);
-                result.meshData.translucentVertices.push_back(vertex.color.g);
-                result.meshData.translucentVertices.push_back(vertex.color.b);
-                result.meshData.translucentVertices.push_back(vertex.color.a);
-            }
+            CopyVertexLayer(sectionMesh.translucentVerts, result.meshData.translucentVertices);
             result.meshData.translucentIndices = sectionMesh.translucentIdxs;
             result.meshData.translucentVertexCount = sectionMesh.translucentVerts.size();
             result.meshData.translucentIndexCount = sectionMesh.translucentIdxs.size();
         }
-        
+
         return result;
     }
 

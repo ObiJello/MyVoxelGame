@@ -127,6 +127,20 @@ else()
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
+# 3b) Tracy profiler (client library only — viewer is a separate download)
+option(ENABLE_TRACY "Enable Tracy profiler integration" OFF)
+if(ENABLE_TRACY)
+    FetchContent_Declare(
+        tracy
+        GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+        GIT_TAG v0.13.1
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(tracy)
+    message(STATUS "Tracy profiler enabled")
+endif()
+# ────────────────────────────────────────────────────────────────────────────
+
 # 4) ImGui
 add_library(imgui
         ext/imgui/imgui.cpp
@@ -322,6 +336,7 @@ if(APPLE)
             src/client/input/PlayerController.cpp
             src/client/entity/Player.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
+            src/client/renderer/mesh/ChunkMegaBuffer.cpp
             src/client/renderer/mesh/ChunkRenderer.cpp
             src/client/renderer/mesh/ChunkMeshData.cpp
             src/client/renderer/mesh/FluidMeshBuilder.cpp
@@ -435,6 +450,8 @@ else()
             # Client rendering - Mesh
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/BlockHighlight.hpp
+            src/client/renderer/mesh/ChunkMegaBuffer.cpp
+            src/client/renderer/mesh/ChunkMegaBuffer.hpp
             src/client/renderer/mesh/ChunkMeshData.cpp
             src/client/renderer/mesh/ChunkMeshData.hpp
             src/client/renderer/mesh/ChunkRenderer.cpp
@@ -695,6 +712,13 @@ target_link_libraries(MyVoxelGame PRIVATE
 # Link with Asio if using standalone
 if(TARGET asio)
     target_link_libraries(MyVoxelGame PRIVATE asio)
+endif()
+
+# Link Tracy profiler if enabled
+if(ENABLE_TRACY)
+    target_link_libraries(MyVoxelGame PRIVATE TracyClient)
+    target_compile_definitions(MyVoxelGame PRIVATE TRACY_ENABLE)
+
 endif()
 
 # Link Vulkan if available
@@ -973,6 +997,19 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
                 -Repo "ObiJello/MyVoxelGame-Download"
             COMMENT "Auto-releasing game (Windows)"
         )
+endif()
+
+# ── Re-sign app bundle for Tracy (must be LAST post-build step) ────────────
+# Tracy modifies code pages at runtime, invalidating the code signature.
+# This must run after all other post-build steps (strip, install_name_tool,
+# crashpad_handler copy) that modify binaries in the bundle.
+if(APPLE AND ENABLE_TRACY)
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/.sentry-native"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/crashpad_handler"
+        COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>"
+        COMMENT "Re-signing app bundle for Tracy (must be last post-build step)"
+    )
 endif()
 
 # ── Optional: Install targets ──────────────────────────────────────────────

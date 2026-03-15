@@ -80,8 +80,8 @@ namespace Render {
         const GPUSectionData& GetGPUData() const { return m_gpuData; }
         GPUSectionData& GetGPUData() { return m_gpuData; }
 
-        // Check if uploaded
-        bool IsUploaded() const { return m_gpuData.IsUploaded(); }
+        // Check if has geometry
+        bool IsUploaded() const { return m_gpuData.HasGeometry(); }
 
         // Force cleanup
         void Release();

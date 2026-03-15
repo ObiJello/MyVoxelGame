@@ -24,6 +24,7 @@
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
 #include "common/core/Profiling.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 // Include world system headers
 #include "common/world/level/World.hpp"
@@ -471,7 +472,7 @@ namespace PlatformMain {
             glEnable(GL_CULL_FACE);
             glCullFace(GL_BACK);
             glFrontFace(GL_CCW);
-            glfwSwapInterval(1); // VSync
+            glfwSwapInterval(Platform::g_gameSettings.GetVSync() ? 1 : 0); // VSync from settings
         } else {
             Log::Info("Vulkan mode: skipping OpenGL initialization");
         }
@@ -653,19 +654,25 @@ namespace PlatformMain {
             frameStartTime = std::chrono::high_resolution_clock::now();
             
             // 1. Drain incoming network packets on main thread (Minecraft-style)
+            { PROFILE_ZONE_N("Network");
             PROFILE_TIMER_START(network);
             // Note: I/O is handled on dedicated thread, we just drain the queue here
             if (networkClient) {
                 networkClient->DrainIncomingPackets();
             }
             PROFILE_TIMER_END(network, metrics.networkProcessingTime);
+            }
 
             // 2. Process completed mesh build results from worker threads
+            { PROFILE_ZONE_N("MeshResults");
             PROFILE_TIMER_START(meshresults);
             Render::ProcessClientMeshBuildResults();  // Drain MeshResultQueue
             PROFILE_TIMER_END(meshresults, metrics.meshResultProcessingTime);
+            }
 
             // 3. Poll events and handle input
+            bool cursorEnabled;
+            { PROFILE_ZONE_N("Input");
             PROFILE_TIMER_START(input);
             glfwPollEvents();
             Input::UpdateKeyStates();
@@ -675,37 +682,41 @@ namespace PlatformMain {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
-            bool cursorEnabled = HandleCursorToggle(window, camera);
+            cursorEnabled = HandleCursorToggle(window, camera);
             HandlePlayerInput(player, playerController, camera);
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
+            }
 
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
             frameCounter++;
             
             // 4. Update time and game logic
+            float dt;
+            { PROFILE_ZONE_N("GameLogic");
             PROFILE_TIMER_START(gamelogic);
             Time::Tick();
-            float dt = static_cast<float>(Time::Delta());
+            dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt * 1000.0f);
 
             // Update player physics and camera
             player.UpdatePhysics(dt, world);
             camera.position = player.GetEyePosition();
             camera.Update(dt);
-            
+
             // Update raycast cache
             player.UpdateRaycast(camera);
-            
+
             // Update player controller (handles interactions)
             playerController.Tick(dt);
-            
+
             // Update visual smoothing
             player.UpdateVisual(dt);
-            
+
             // Update statistics
             player.UpdateStatistics(dt);
             PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
+            }
 
             // 5. Set player position for mesh prioritization
             glm::vec3 playerPos = player.physics.position;
@@ -745,14 +756,18 @@ namespace PlatformMain {
             }
 
             // 6. Schedule mesh builds for LOADED chunks
+            { PROFILE_ZONE_N("MeshSchedule");
             PROFILE_TIMER_START(meshsched);
             Render::ScheduleClientMeshBuilds(playerPos);
             PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
+            }
 
             // 7. Perform GPU uploads
+            { PROFILE_ZONE_N("GPUUpload");
             PROFILE_TIMER_START(gpuupload);
             Render::PerformClientGPUUploads();
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
+            }
 
             // Capture per-frame mesh stats BEFORE they get reset
             int lastFrameMeshUploads = 0;
@@ -768,13 +783,18 @@ namespace PlatformMain {
             }
 
             // 8. Update texture animations
+            { PROFILE_ZONE_N("TexAnimation");
             PROFILE_TIMER_START(texanim);
             if (Render::g_textureAnimator) {
                 Render::g_textureAnimator->UpdateAnimations(dt);
             }
             PROFILE_TIMER_END(texanim, metrics.textureAnimationTime);
+            }
 
             // 9. Main rendering phase (frustum culling + GPU draw calls)
+            int width, height;
+            Frustum frustum;
+            { PROFILE_ZONE_N("Render");
             PROFILE_TIMER_START(render);
 
             // Begin render backend frame (acquires swapchain image for Vulkan)
@@ -783,7 +803,7 @@ namespace PlatformMain {
             }
 
             Debug::DebugSystem::BeginFrame();
-            
+
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
 
@@ -798,7 +818,6 @@ namespace PlatformMain {
             }
 
             // Calculate view-projection matrices
-            int width, height;
             glfwGetFramebufferSize(window, &width, &height);
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
@@ -810,11 +829,11 @@ namespace PlatformMain {
             glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
-            Frustum frustum = Frustum::FromMatrix(viewProj);
+            frustum = Frustum::FromMatrix(viewProj);
 
             // Main chunk rendering (includes frustum culling and all render passes)
             Render::RenderChunksAll(camera, frustum);
-            
+
             // Get rendering statistics from ChunkRenderer
             if (auto* renderStats = Render::GetChunkRendererStats()) {
                 metrics.meshesRenderedThisFrame = renderStats->sectionsRendered;
@@ -823,14 +842,22 @@ namespace PlatformMain {
                 metrics.opaqueMeshesRendered = renderStats->opaqueSections;
                 metrics.cutoutMeshesRendered = renderStats->cutoutSections;
                 metrics.translucentMeshesRendered = renderStats->translucentSections;
+
+                // GPU timer query results (1-frame latency from GL_TIME_ELAPSED)
+                metrics.gpuOpaqueTimeMs = renderStats->gpuOpaqueTimeMs;
+                metrics.gpuCutoutTimeMs = renderStats->gpuCutoutTimeMs;
+                metrics.gpuTranslucentTimeMs = renderStats->gpuTranslucentTimeMs;
+                metrics.gpuTotalTimeMs = renderStats->gpuTotalTimeMs;
             }
 
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
             RenderCrosshair(window);
             PROFILE_TIMER_END(render, metrics.renderTime);
+            }
 
             // 10. Debug UI with new architecture statistics
+            { PROFILE_ZONE_N("DebugUI");
             PROFILE_TIMER_START(debugui);
             int windowWidth, windowHeight;
             glfwGetWindowSize(window, &windowWidth, &windowHeight);
@@ -995,6 +1022,7 @@ namespace PlatformMain {
 
             Debug::DebugSystem::EndFrame();
             PROFILE_TIMER_END(debugui, metrics.debugUITime);
+            }
 
             // Handle render distance change from debug UI
             if (Debug::DebugSystem::ConsumeRenderDistanceChanged()) {
@@ -1018,6 +1046,7 @@ namespace PlatformMain {
             }
 
             // 11. Swap buffers (includes VSync wait)
+            { PROFILE_ZONE_N("VSync");
             PROFILE_TIMER_START(vsync);
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->EndFrame(window);
@@ -1025,6 +1054,7 @@ namespace PlatformMain {
                 glfwSwapBuffers(window);
             }
             PROFILE_TIMER_END(vsync, metrics.vsyncWaitTime);
+            }
             
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
@@ -1040,6 +1070,30 @@ namespace PlatformMain {
                                  metrics.textureAnimationTime + metrics.renderTime + 
                                  metrics.debugUITime + metrics.vsyncWaitTime;
             metrics.otherTime = std::max(0.0f, metrics.frameTime - totalMeasured);
+
+            // Spike detection: record frames that exceed 2x the target budget
+            if (metrics.frameTime > metrics.targetFrameTimeMs * 2.0f) {
+                Debug::PerformanceMetrics::FrameSpike spike;
+                spike.totalMs = metrics.frameTime;
+                spike.renderMs = metrics.renderTime;
+                spike.meshSchedMs = metrics.meshSchedulingTime;
+                spike.gpuUploadMs = metrics.gpuUploadTime;
+                spike.gpuTimeMs = metrics.gpuTotalTimeMs;
+                if (auto* rs = Render::GetChunkRendererStats()) {
+                    spike.drawCalls = rs->totalDrawCalls;
+                    spike.sectionsRendered = rs->sectionsRendered;
+                }
+                spike.secondsAgo = 0.0f;
+                metrics.RecordSpike(spike);
+            }
+
+            // Age existing spikes
+            float frameSec = metrics.frameTime / 1000.0f;
+            for (int i = 0; i < metrics.spikeCount; i++) {
+                metrics.recentSpikes[i].secondsAgo += frameSec;
+            }
+
+            PROFILE_FRAME_MARK;
         }
 
         // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===

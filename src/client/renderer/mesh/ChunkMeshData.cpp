@@ -14,29 +14,16 @@ namespace Render {
         gpuData.chunkPos = mesh.chunkPos;
         gpuData.sectionY = mesh.sectionY;
 
-        if (!g_renderBackend) return false;
-        auto blockLayout = GetBlockVertexLayout();
+        // Legacy: GPU resources are now managed by ChunkMegaBuffer.
+        // Just set the counts for compatibility.
+        gpuData.opaqueIndexCount = static_cast<uint32_t>(mesh.opaqueIdxs.size());
+        gpuData.opaqueVertexCount = static_cast<uint32_t>(mesh.opaqueVerts.size());
+        gpuData.cutoutIndexCount = static_cast<uint32_t>(mesh.cutoutIdxs.size());
+        gpuData.cutoutVertexCount = static_cast<uint32_t>(mesh.cutoutVerts.size());
+        gpuData.translucentIndexCount = static_cast<uint32_t>(mesh.translucentIdxs.size());
+        gpuData.translucentVertexCount = static_cast<uint32_t>(mesh.translucentVerts.size());
 
-        auto uploadLayer = [&](const std::vector<Vertex>& verts, const std::vector<uint32_t>& idxs,
-                               MeshHandle& mesh, BufferHandle& vb, BufferHandle& ib, uint32_t& indexCount) -> bool {
-            if (verts.empty() || idxs.empty()) return true;
-            vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, verts.size() * sizeof(Vertex), verts.data());
-            ib = g_renderBackend->CreateBuffer(BufferUsage::Index, idxs.size() * sizeof(uint32_t), idxs.data());
-            mesh = g_renderBackend->CreateMesh(vb, ib, blockLayout);
-            indexCount = static_cast<uint32_t>(idxs.size());
-            return mesh != INVALID_MESH;
-        };
-
-        bool success = true;
-        success &= uploadLayer(mesh.opaqueVerts, mesh.opaqueIdxs,
-                               gpuData.opaqueMesh, gpuData.opaqueVB, gpuData.opaqueIB, gpuData.opaqueIndexCount);
-        success &= uploadLayer(mesh.cutoutVerts, mesh.cutoutIdxs,
-                               gpuData.cutoutMesh, gpuData.cutoutVB, gpuData.cutoutIB, gpuData.cutoutIndexCount);
-        success &= uploadLayer(mesh.translucentVerts, mesh.translucentIdxs,
-                               gpuData.translucentMesh, gpuData.translucentVB, gpuData.translucentIB, gpuData.translucentIndexCount);
-
-        if (!success) DeleteBuffers(gpuData);
-        return success;
+        return true;
     }
 
     bool ChunkMeshData::UpdateBuffers(const SectionMesh& mesh, GPUSectionData& gpuData) {
@@ -56,7 +43,7 @@ namespace Render {
     }
 
     bool ChunkMeshData::ValidateBuffers(const GPUSectionData& gpuData) {
-        return gpuData.IsUploaded();
+        return gpuData.HasGeometry();
     }
 
     size_t ChunkMeshData::CalculateMemoryUsage(const GPUSectionData& gpuData) {

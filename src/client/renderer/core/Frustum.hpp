@@ -10,6 +10,9 @@ struct AABB {
     glm::vec3 max; // world‐space maximum corner
 };
 
+// Tri-state frustum test result for hierarchical culling
+enum class FrustumResult { Outside, Intersect, Inside };
+
 // A view frustum represented by 6 planes in world space:
 // Each plane is (a, b, c, d) such that ax + by + cz + d >= 0 is "inside."
 struct Frustum {
@@ -90,5 +93,43 @@ struct Frustum {
             }
         }
         return true; // Box intersects or is inside frustum
+    }
+
+    // Tri-state AABB test: Outside / Intersect / Inside.
+    // Used for hierarchical culling — if a parent AABB is fully Inside,
+    // children can skip per-element frustum tests entirely.
+    FrustumResult TestAABB(const glm::vec3& boxMin, const glm::vec3& boxMax) const {
+        bool allInside = true;
+
+        for (int i = 0; i < 6; ++i) {
+            const glm::vec4& plane = planes[i];
+            glm::vec3 normal(plane.x, plane.y, plane.z);
+
+            // Positive vertex (furthest along plane normal)
+            glm::vec3 pVertex;
+            pVertex.x = (normal.x >= 0.0f) ? boxMax.x : boxMin.x;
+            pVertex.y = (normal.y >= 0.0f) ? boxMax.y : boxMin.y;
+            pVertex.z = (normal.z >= 0.0f) ? boxMax.z : boxMin.z;
+
+            float pDist = glm::dot(normal, pVertex) + plane.w;
+            if (pDist < -0.5f) {
+                return FrustumResult::Outside;
+            }
+
+            // Negative vertex (closest along plane normal)
+            glm::vec3 nVertex;
+            nVertex.x = (normal.x >= 0.0f) ? boxMin.x : boxMax.x;
+            nVertex.y = (normal.y >= 0.0f) ? boxMin.y : boxMax.y;
+            nVertex.z = (normal.z >= 0.0f) ? boxMin.z : boxMax.z;
+
+            float nDist = glm::dot(normal, nVertex) + plane.w;
+            if (nDist < -0.5f) {
+                // Negative vertex is outside this plane, so the box
+                // straddles the plane — it's not fully inside.
+                allInside = false;
+            }
+        }
+
+        return allInside ? FrustumResult::Inside : FrustumResult::Intersect;
     }
 };

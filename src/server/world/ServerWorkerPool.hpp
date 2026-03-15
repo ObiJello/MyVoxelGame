@@ -8,7 +8,7 @@
 #include <functional>
 #include <memory>
 #include <atomic>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace Game {
     class Chunk;
@@ -35,6 +35,7 @@ namespace Threading {
         Game::Math::ChunkPos chunkPos;
         std::function<void()> task;
         int priority = 0; // Higher = more important
+        uint64_t generationId{0}; // Generation ID for cancellation tracking
         std::chrono::steady_clock::time_point submitTime;
 
         ServerJob(ServerJobType jobType, Game::Math::ChunkPos pos)
@@ -143,9 +144,9 @@ namespace Threading {
         std::condition_variable m_jobCondition;
         size_t m_maxQueueSize = 1000;
 
-        // Job cancellation
+        // Job cancellation via generation IDs
         mutable std::mutex m_cancelMutex;
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_cancelledChunks;
+        std::unordered_map<Game::Math::ChunkPos, uint64_t, Game::Math::ChunkPosHash> m_chunkGenerations;
 
         // World reference
         Game::World* m_world = nullptr;
@@ -168,8 +169,8 @@ namespace Threading {
         bool ShouldCancelJob(const ServerJob& job) const;
 
         // Specific job handlers
-        void ProcessChunkGeneration(Game::Math::ChunkPos chunkPos);
-        void ProcessChunkLoading(Game::Math::ChunkPos chunkPos);
+        void ProcessChunkGeneration(Game::Math::ChunkPos chunkPos, uint64_t generation);
+        void ProcessChunkLoading(Game::Math::ChunkPos chunkPos, uint64_t generation);
         void ProcessChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
 
         // Job queue management
@@ -179,9 +180,8 @@ namespace Threading {
         // Result handling
         void SendChunkGenResult(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, bool success, const std::string& error = "");
 
-        // Utility
-        bool IsChunkCancelled(Game::Math::ChunkPos chunkPos) const;
-        void CleanupCancelledChunks();
+        // Check if a job's generation is stale
+        bool IsGenerationStale(Game::Math::ChunkPos chunkPos, uint64_t generation) const;
     };
 
     // ========================================================================

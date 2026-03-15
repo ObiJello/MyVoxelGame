@@ -226,6 +226,9 @@ namespace Client {
         // Generation counter for staleness control
         std::atomic<uint32_t> m_nextGeneration{1};
 
+        // Throttle mesh scheduling to ~30Hz instead of every frame
+        std::chrono::steady_clock::time_point m_lastMeshScheduleTime{};
+
 
         // ========================================================================
         // INTERNAL METHODS
@@ -252,10 +255,6 @@ namespace Client {
         bool BuildSectionSnapshot(Game::Math::ChunkPos chunkPos, int sectionY, 
                                  uint32_t expectedVersion, 
                                  std::shared_ptr<Render::MeshJobData>& outSnapshot);
-        
-        // Helper to copy neighbor data for a section
-        void CopyNeighborData(Game::Math::ChunkPos chunkPos, int sectionY, 
-                            Render::SectionSnapshot& snapshot);
         
         // Accept or reject mesh build result based on version and state
         MeshAcceptance AcceptMeshResult(const Network::MeshBuildResult& result);

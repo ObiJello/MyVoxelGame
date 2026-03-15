@@ -71,6 +71,7 @@ namespace Render {
         static constexpr int DEFAULT_ATLAS_SIZE = 2048;  // 2048x2048 atlas
         static constexpr int MIN_ATLAS_SIZE = 512;
         static constexpr int MAX_ATLAS_SIZE = 8192;
+        static constexpr int MIPMAP_PADDING = 16;  // 16px padding on each side for mipmap safety
 
         AtlasBuilder();
         ~AtlasBuilder();
@@ -133,7 +134,7 @@ namespace Render {
         // **NEW**: Mipmap state
         bool mipmapEnabled;
         int m_mipmapLevel = 4; // Default to max mipmap level
-        bool m_borderExtrusionEnabled = false; // Start with original settings (no extrusion)
+        bool m_borderExtrusionEnabled = true; // Enable border extrusion for mipmap padding
 
         // **NEW**: Animation support
         TextureAnimator* textureAnimator;
@@ -207,8 +208,12 @@ namespace Render {
                                int destX, int destY);
         
         // Helper: Extrude texture borders to prevent mipmap bleeding
-        void ExtrudeTextureBorders(int textureX, int textureY, 
+        void ExtrudeTextureBorders(int textureX, int textureY,
                                   int textureWidth, int textureHeight);
+
+        // Helper: Fill transparent pixel RGB with nearest opaque color (prevents dark mipmap fringes)
+        void SolidifyTransparentPixels(int textureX, int textureY,
+                                      int textureWidth, int textureHeight);
 
         // **NEW**: Animation helper methods
         bool ParseMcMetaFile(const std::string& mcmetaPath, TextureAnimation& animation);

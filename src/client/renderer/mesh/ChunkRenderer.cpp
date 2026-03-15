@@ -1,9 +1,11 @@
 // File: src/client/renderer/mesh/ChunkRenderer.cpp
 #include "ChunkRenderer.hpp"
+#include "ChunkMegaBuffer.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"
 #include "client/network/NetworkClient.hpp"
 #include "../../world/ClientChunkManager.hpp"
@@ -19,7 +21,13 @@ namespace Render {
 
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
-        m_visibleSections.reserve(768); // Reserve space for performance
+        m_visibleSections.reserve(2048);
+        m_multiDrawCounts.reserve(2048);
+        m_multiDrawOffsets.reserve(2048);
+        m_multiDrawBaseVertices.reserve(2048);
+        m_distantCutoutCounts.reserve(1024);
+        m_distantCutoutOffsets.reserve(1024);
+        m_distantCutoutBaseVertices.reserve(1024);
     }
 
     ChunkRenderer::~ChunkRenderer() {
@@ -63,14 +71,27 @@ namespace Render {
             return false;
         }
 
-        // Create backend shader (works for both GL and Vulkan)
-        m_backendShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block.frag");
-        if (m_backendShader == INVALID_SHADER) {
-            Log::Error("Failed to create block shader");
+        // Create separate shader programs for opaque (no discard → early-z enabled)
+        // and cutout/translucent (with discard for alpha testing).
+        // Matches Minecraft's SOLID_TERRAIN vs CUTOUT_TERRAIN pipeline split.
+        m_opaqueShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block_opaque.frag");
+        if (m_opaqueShader == INVALID_SHADER) {
+            Log::Error("Failed to create opaque block shader");
             return false;
         }
+        m_cutoutShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block.frag");
+        if (m_cutoutShader == INVALID_SHADER) {
+            Log::Error("Failed to create cutout block shader");
+            return false;
+        }
+        m_solidShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block_solid.frag");
+        if (m_solidShader == INVALID_SHADER) {
+            Log::Error("Failed to create solid block shader");
+            return false;
+        }
+        m_backendShader = m_opaqueShader;
         m_shadersLoaded = true;
-        Log::Info("Block shader created successfully");
+        Log::Info("Block shaders created (opaque + cutout + solid)");
 
         // Grab backend atlas texture handle (created by AtlasBuilder)
         if (g_atlasBuilder) {
@@ -87,10 +108,22 @@ namespace Render {
     }
 
     void ChunkRenderer::Shutdown() {
-        if (m_backendShader != INVALID_SHADER && g_renderBackend) {
-            g_renderBackend->DestroyShader(m_backendShader);
-            m_backendShader = INVALID_SHADER;
+        if (g_renderBackend) {
+            if (m_opaqueShader != INVALID_SHADER) {
+                g_renderBackend->DestroyShader(m_opaqueShader);
+                m_opaqueShader = INVALID_SHADER;
+            }
+            if (m_cutoutShader != INVALID_SHADER) {
+                g_renderBackend->DestroyShader(m_cutoutShader);
+                m_cutoutShader = INVALID_SHADER;
+            }
+            if (m_solidShader != INVALID_SHADER) {
+                g_renderBackend->DestroyShader(m_solidShader);
+                m_solidShader = INVALID_SHADER;
+            }
         }
+        m_backendShader = INVALID_SHADER;
+        m_activeShader = INVALID_SHADER;
         m_blockShader.reset();
         m_shadersLoaded = false;
         Log::Info("ChunkRenderer shutdown complete");
@@ -102,6 +135,7 @@ namespace Render {
 
 
     void ChunkRenderer::RenderOpaque(const Camera& camera, const Frustum& frustum) {
+        PROFILE_ZONE;
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 0)) {
             m_stats.opaquePassTimeMs = 0.0f;
             return;
@@ -113,13 +147,14 @@ namespace Render {
         SetupRenderPass(m_opaqueConfig);
 
         // Render directly from m_visibleSections, filtering by layerMask (front-to-back)
-        RenderLayerPass(RenderLayer::Opaque, camera, LayerOpaque);
+        RenderLayerPass(RenderLayer::Opaque, LayerOpaque);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.opaquePassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     void ChunkRenderer::RenderCutout(const Camera& camera, const Frustum& frustum) {
+        PROFILE_ZONE;
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 1)) {
             m_stats.cutoutPassTimeMs = 0.0f;
             return;
@@ -131,13 +166,14 @@ namespace Render {
         SetupRenderPass(m_cutoutConfig);
 
         // Render directly from m_visibleSections, filtering by layerMask (front-to-back)
-        RenderLayerPass(RenderLayer::Cutout, camera, LayerCutout);
+        RenderLayerPass(RenderLayer::Cutout, LayerCutout);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.cutoutPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     void ChunkRenderer::RenderTranslucent(const Camera& camera, const Frustum& frustum) {
+        PROFILE_ZONE;
         if (!m_shadersLoaded || !g_clientMeshManager || (m_debugLayer >= 0 && m_debugLayer != 2)) {
             m_stats.translucentPassTimeMs = 0.0f;
             return;
@@ -149,25 +185,55 @@ namespace Render {
         SetupRenderPass(m_translucentConfig);
 
         // Render directly from m_visibleSections in reverse (back-to-front for blending)
-        RenderLayerPass(RenderLayer::Translucent, camera, LayerTranslucent, true);
+        RenderLayerPass(RenderLayer::Translucent, LayerTranslucent, true);
 
         auto endTime = std::chrono::high_resolution_clock::now();
         m_stats.translucentPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum) {
+        PROFILE_ZONE;
         m_stats.Reset();
 
-        // Clear visible sections cache for fresh frame
-        m_visibleSections.clear();
-
-        // Prepare visible sections ONCE at the beginning of the frame
-        // This includes chunk iteration, GPU data loading, and frustum culling
+        // Prepare visible sections ONCE at the beginning of the frame.
+        // This includes chunk iteration, GPU data loading, and frustum culling.
+        // Note: PrepareVisibleSections manages its own clearing — the visible section
+        // cache may reuse last frame's list if the camera hasn't moved significantly.
         PrepareVisibleSections(camera, frustum);
 
-        // Render in correct order for proper blending
+        // Bind opaque shader, compute MVP, and bind atlas texture
+        BindSharedRenderState(camera);
+
+        // Bind shared block VAO once per frame — all mega-buffers share this
+        // VAO's vertex format.  Switching between mega-buffers only calls
+        // BindBuffers() (glBindVertexBuffer + IBO rebind), avoiding the GPU
+        // pipeline flush that glBindVertexArray causes on macOS.
+        if (g_clientMeshManager) {
+            g_clientMeshManager->BindSharedBlockVAO();
+        }
+
+        // Opaque pass: uses opaque shader (no discard → early-z enabled)
         RenderOpaque(camera, frustum);
+
+        // Switch to cutout shader for cutout + translucent passes (has discard)
+        if (m_cutoutShader != INVALID_SHADER && g_renderBackend) {
+            m_activeShader = m_cutoutShader;
+            g_renderBackend->BindShader(m_cutoutShader);
+            g_renderBackend->SetUniformMat4(m_cutoutShader, "uMVP", m_cachedMVP);
+            g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
+        }
+
         RenderCutout(camera, frustum);
+
+        // Switch to solid shader for translucent pass (no discard → early-z enabled,
+        // blending handles transparency). This avoids the discard penalty entirely.
+        if (m_solidShader != INVALID_SHADER && g_renderBackend) {
+            m_activeShader = m_solidShader;
+            g_renderBackend->BindShader(m_solidShader);
+            g_renderBackend->SetUniformMat4(m_solidShader, "uMVP", m_cachedMVP);
+            g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
+        }
+
         RenderTranslucent(camera, frustum);
 
         // Calculate total render time as sum of all components
@@ -190,8 +256,35 @@ namespace Render {
     }
 
     void ChunkRenderer::PrepareVisibleSections(const Camera& camera, const Frustum& frustum) {
+        PROFILE_ZONE;
         auto overallStartTime = std::chrono::high_resolution_clock::now();
 
+        // --- Visible section caching ---
+        // Skip full rebuild if camera hasn't moved to a new chunk or rotated significantly
+        // and no sections have been uploaded/removed since last frame.
+        int currentChunkX = static_cast<int>(std::floor(camera.position.x / 16.0f));
+        int currentChunkZ = static_cast<int>(std::floor(camera.position.z / 16.0f));
+
+        bool cameraChangedChunk = (currentChunkX != m_lastCameraChunkX ||
+                                   currentChunkZ != m_lastCameraChunkZ);
+        bool cameraRotated = (std::abs(camera.yaw - m_lastCameraYaw) > 3.0f ||
+                              std::abs(camera.pitch - m_lastCameraPitch) > 3.0f);
+
+        if (!m_visibleSectionsDirty && !cameraChangedChunk && !cameraRotated && !m_visibleSections.empty()) {
+            // Reuse last frame's visible sections — just update timing stats
+            auto overallEndTime = std::chrono::high_resolution_clock::now();
+            m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
+            return;
+        }
+
+        // Update cache state
+        m_lastCameraChunkX = currentChunkX;
+        m_lastCameraChunkZ = currentChunkZ;
+        m_lastCameraYaw = camera.yaw;
+        m_lastCameraPitch = camera.pitch;
+        m_visibleSectionsDirty = false;
+
+        // --- Full rebuild (existing code below) ---
         m_visibleSections.clear();
 
         if (!g_clientMeshManager) {
@@ -228,6 +321,14 @@ namespace Render {
         // Iterate active sections under shared lock (zero-copy, GPU data passed directly)
         auto iterationStart = std::chrono::high_resolution_clock::now();
 
+        // Cache chunk-level frustum results to avoid redundant per-section tests.
+        // Sections in the same chunk share XZ bounds — if the full-height chunk AABB
+        // is Outside, all 24 sections can be skipped; if Inside, per-section tests
+        // can be skipped entirely.
+        std::unordered_map<uint64_t, FrustumResult> chunkFrustumCache;
+        int cacheSize = (2 * renderDistanceChunks + 1) * (2 * renderDistanceChunks + 1);
+        chunkFrustumCache.reserve(cacheSize);
+
         g_clientMeshManager->ForEachActiveSection([&](const auto& sectionKey, const GPUSectionData* gpuData) {
             ::Game::Math::ChunkPos chunkPos = sectionKey.chunkPos;
             int sectionY = sectionKey.sectionY;
@@ -244,23 +345,51 @@ namespace Render {
                 return;  // Outside render distance
             }
 
-            // Perform frustum culling
+            // Perform frustum culling with chunk-level pre-test
             if (m_enableFrustumCulling) {
-                // Calculate section bounds directly without creating AABB object
-                float sectionMinX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
-                float sectionMaxX = sectionMinX + ::Game::Math::CHUNK_SIZE_X;
-                float sectionMinY = static_cast<float>(sectionY * ::Game::Math::SECTION_HEIGHT + Config::MinY);
-                float sectionMaxY = sectionMinY + ::Game::Math::SECTION_HEIGHT;
-                float sectionMinZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
-                float sectionMaxZ = sectionMinZ + ::Game::Math::CHUNK_SIZE_Z;
-
-                glm::vec3 sectionMin(sectionMinX, sectionMinY, sectionMinZ);
-                glm::vec3 sectionMax(sectionMaxX, sectionMaxY, sectionMaxZ);
-
-                if (!frustum.IsBoxVisible(sectionMin, sectionMax)) {
-                    sectionsCulled++;
-                    return; // Outside frustum
+                // Compute or retrieve chunk-level frustum result
+                uint64_t chunkKey = (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.x)) << 32)
+                                  | static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.z));
+                auto cacheIt = chunkFrustumCache.find(chunkKey);
+                FrustumResult chunkResult;
+                if (cacheIt != chunkFrustumCache.end()) {
+                    chunkResult = cacheIt->second;
+                } else {
+                    // Test full-height chunk AABB (all 24 sections)
+                    float minX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
+                    float maxX = minX + ::Game::Math::CHUNK_SIZE_X;
+                    float minZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
+                    float maxZ = minZ + ::Game::Math::CHUNK_SIZE_Z;
+                    chunkResult = frustum.TestAABB(
+                        glm::vec3(minX, static_cast<float>(Config::MinY), minZ),
+                        glm::vec3(maxX, static_cast<float>(Config::MaxY), maxZ)
+                    );
+                    chunkFrustumCache[chunkKey] = chunkResult;
                 }
+
+                if (chunkResult == FrustumResult::Outside) {
+                    sectionsCulled++;
+                    return;  // Entire chunk is outside frustum
+                }
+
+                if (chunkResult == FrustumResult::Intersect) {
+                    // Chunk straddles frustum boundary — do per-section test
+                    float sectionMinX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
+                    float sectionMaxX = sectionMinX + ::Game::Math::CHUNK_SIZE_X;
+                    float sectionMinY = static_cast<float>(sectionY * ::Game::Math::SECTION_HEIGHT + Config::MinY);
+                    float sectionMaxY = sectionMinY + ::Game::Math::SECTION_HEIGHT;
+                    float sectionMinZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
+                    float sectionMaxZ = sectionMinZ + ::Game::Math::CHUNK_SIZE_Z;
+
+                    glm::vec3 sectionMin(sectionMinX, sectionMinY, sectionMinZ);
+                    glm::vec3 sectionMax(sectionMaxX, sectionMaxY, sectionMaxZ);
+
+                    if (!frustum.IsBoxVisible(sectionMin, sectionMax)) {
+                        sectionsCulled++;
+                        return; // Section outside frustum
+                    }
+                }
+                // If chunkResult == FrustumResult::Inside, skip per-section test
             }
 
             // GPU data already passed in — no separate hash lookup needed
@@ -292,10 +421,11 @@ namespace Render {
         m_stats.sectionsSkipped = sectionsCulled;               // Sections culled by frustum
         m_stats.sectionsRendered = sectionsWithGeometry;        // Sections actually being rendered
 
-        // Measure sorting time if we have visible sections
+        // Measure sorting time if we have enough visible sections to warrant sorting
         auto sortingStart = std::chrono::high_resolution_clock::now();
-        if (!m_visibleSections.empty()) {
-            // Sort sections by distance for proper rendering order (if needed)
+        if (m_visibleSections.size() > 1) {
+            // Sort sections by distance for proper rendering order
+            // Front-to-back for opaque early-z; translucent pass iterates in reverse
             std::sort(m_visibleSections.begin(), m_visibleSections.end(),
                      [](const SectionRenderData& a, const SectionRenderData& b) {
                          return a.distanceToCamera < b.distanceToCamera;
@@ -312,15 +442,17 @@ namespace Render {
         // are now measured accurately and should sum to approximately buildDrawListsTimeMs
     }
 
-    void ChunkRenderer::RenderLayerPass(RenderLayer layer, const Camera& camera, uint8_t layerBit, bool reverseOrder) {
-        if (m_visibleSections.empty() || !g_renderBackend || m_backendShader == INVALID_SHADER) {
+    void ChunkRenderer::BindSharedRenderState(const Camera& camera) {
+        PROFILE_ZONE;
+        if (m_visibleSections.empty() || !g_renderBackend || m_opaqueShader == INVALID_SHADER) {
             return;
         }
 
-        // Bind shader and set uniforms through backend (works for both GL and Vulkan)
-        g_renderBackend->BindShader(m_backendShader);
+        // Bind opaque shader (no discard → GPU can use early-z)
+        m_activeShader = m_opaqueShader;
+        g_renderBackend->BindShader(m_opaqueShader);
 
-        // Compute and set MVP
+        // Compute MVP once and cache it (needed when switching to cutout shader)
         int width, height;
         glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
         float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
@@ -331,8 +463,22 @@ namespace Render {
         }
         float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
         glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
-        glm::mat4 mvp = proj * view;
-        g_renderBackend->SetUniformMat4(m_backendShader, "uMVP", mvp);
+        m_cachedMVP = proj * view;
+        g_renderBackend->SetUniformMat4(m_opaqueShader, "uMVP", m_cachedMVP);
+
+        // Fetch and bind atlas texture once (fresh handle in case atlas was rebuilt)
+        if (g_atlasBuilder) {
+            m_backendAtlasTexture = g_atlasBuilder->GetBackendTextureHandle();
+        }
+        if (m_backendAtlasTexture != INVALID_TEXTURE) {
+            g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
+        }
+    }
+
+    void ChunkRenderer::RenderLayerPass(RenderLayer layer, uint8_t layerBit, bool reverseOrder) {
+        if (m_visibleSections.empty() || !g_renderBackend || m_activeShader == INVALID_SHADER) {
+            return;
+        }
 
         // Set alpha discard threshold per pass:
         //   Opaque: 0.1 (discard overlay transparency like grass sides)
@@ -341,35 +487,73 @@ namespace Render {
         float alphaTest = 0.1f;
         if (layer == RenderLayer::Cutout) alphaTest = 0.5f;
         else if (layer == RenderLayer::Translucent) alphaTest = 0.01f;
-        g_renderBackend->SetUniformFloat(m_backendShader, "uAlphaTest", alphaTest);
+        g_renderBackend->SetUniformFloat(m_activeShader, "uAlphaTest", alphaTest);
 
-        // Bind texture atlas (fetch fresh handle in case atlas was rebuilt)
-        if (g_atlasBuilder) {
-            m_backendAtlasTexture = g_atlasBuilder->GetBackendTextureHandle();
-        }
-        if (m_backendAtlasTexture != INVALID_TEXTURE) {
-            g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
-        }
+        // Get the mega-buffer for this layer
+        auto* megaBuffer = g_clientMeshManager ? g_clientMeshManager->GetMegaBuffer(layer) : nullptr;
+        if (!megaBuffer || !megaBuffer->IsInitialized()) return;
 
-        // Iterate m_visibleSections directly, filtering by layerMask — zero copies
+        // Build multi-draw command arrays from visible sections
+        m_multiDrawCounts.clear();
+        m_multiDrawOffsets.clear();
+        m_multiDrawBaseVertices.clear();
+
         int layerCount = 0;
+        uint32_t totalVerts = 0, totalIndices = 0;
+
+        // Lambda to process a section into the multi-draw arrays.
+        // Uses cached draw commands on GPUSectionData (populated at upload time)
+        // instead of per-frame hash lookups into the mega-buffer.
+        auto processSection = [&](const SectionRenderData& section) {
+            if (!section.gpuData) return;
+            if (!(section.layerMask & layerBit)) return;
+
+            const auto& cachedCmd = (layer == RenderLayer::Opaque)      ? section.gpuData->opaqueDrawCmd :
+                                    (layer == RenderLayer::Cutout)       ? section.gpuData->cutoutDrawCmd :
+                                                                           section.gpuData->translucentDrawCmd;
+            if (cachedCmd.valid && cachedCmd.indexCount > 0) {
+                m_multiDrawCounts.push_back(cachedCmd.indexCount);
+                m_multiDrawOffsets.push_back(reinterpret_cast<const void*>(cachedCmd.indexByteOffset));
+                m_multiDrawBaseVertices.push_back(cachedCmd.baseVertex);
+                layerCount++;
+
+                totalIndices += cachedCmd.indexCount;
+                switch (layer) {
+                    case RenderLayer::Opaque:      totalVerts += section.gpuData->opaqueVertexCount; break;
+                    case RenderLayer::Cutout:       totalVerts += section.gpuData->cutoutVertexCount; break;
+                    case RenderLayer::Translucent:  totalVerts += section.gpuData->translucentVertexCount; break;
+                }
+            }
+        };
+
+        // Process in correct order
         if (reverseOrder) {
             for (auto it = m_visibleSections.rbegin(); it != m_visibleSections.rend(); ++it) {
-                if (it->layerMask & layerBit) {
-                    RenderSectionLayer(*it, layer);
-                    m_stats.totalDrawCalls++;
-                    layerCount++;
-                }
+                processSection(*it);
             }
         } else {
             for (const auto& section : m_visibleSections) {
-                if (section.layerMask & layerBit) {
-                    RenderSectionLayer(section, layer);
-                    m_stats.totalDrawCalls++;
-                    layerCount++;
-                }
+                processSection(section);
             }
         }
+
+        // Issue single multi-draw call for this layer
+        bool useVAB = g_clientMeshManager && g_clientMeshManager->HasVertexAttribBinding();
+        if (!m_multiDrawCounts.empty()) {
+            megaBuffer->BindBuffers(useVAB);
+            glMultiDrawElementsBaseVertex(
+                GL_TRIANGLES,
+                m_multiDrawCounts.data(),
+                GL_UNSIGNED_INT,
+                m_multiDrawOffsets.data(),
+                static_cast<GLsizei>(m_multiDrawCounts.size()),
+                m_multiDrawBaseVertices.data()
+            );
+            m_stats.totalDrawCalls++;
+        }
+
+        m_stats.totalVerticesRendered += totalVerts;
+        m_stats.totalIndicesRendered += totalIndices;
 
         // Update per-layer stats
         switch (layer) {
@@ -379,37 +563,12 @@ namespace Render {
         }
     }
 
+    // RenderSectionLayer is no longer needed (mega-buffer multi-draw replaces it),
+    // but kept as a no-op stub since the declaration exists in the header.
     void ChunkRenderer::RenderSectionLayer(const SectionRenderData& section, RenderLayer layer) {
-        if (!section.gpuData || !g_renderBackend) return;
-
-        MeshHandle mesh = INVALID_MESH;
-        uint32_t indexCount = 0;
-        uint32_t vertexCount = 0;
-
-        switch (layer) {
-            case RenderLayer::Opaque:
-                mesh = section.gpuData->opaqueMesh;
-                indexCount = section.gpuData->opaqueIndexCount;
-                vertexCount = section.gpuData->opaqueVertexCount;
-                break;
-            case RenderLayer::Cutout:
-                mesh = section.gpuData->cutoutMesh;
-                indexCount = section.gpuData->cutoutIndexCount;
-                vertexCount = section.gpuData->cutoutVertexCount;
-                break;
-            case RenderLayer::Translucent:
-                mesh = section.gpuData->translucentMesh;
-                indexCount = section.gpuData->translucentIndexCount;
-                vertexCount = section.gpuData->translucentVertexCount;
-                break;
-        }
-
-        if (indexCount == 0 || mesh == INVALID_MESH) return;
-
-        g_renderBackend->DrawIndexed(mesh, indexCount);
-
-        m_stats.totalVerticesRendered += vertexCount;
-        m_stats.totalIndicesRendered += indexCount;
+        // No-op: rendering now handled by glMultiDrawElementsBaseVertex in RenderLayerPass
+        (void)section;
+        (void)layer;
     }
 
     void ChunkRenderer::SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack) {
@@ -466,24 +625,19 @@ namespace Render {
     }
 
     float ChunkRenderer::CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY) {
-        // Calculate distance from camera to section center
-        // Use XZ distance primarily for chunk-based decisions, with Y as secondary factor for sorting
+        // Calculate squared distance from camera to section center.
+        // Squared distance preserves sort order and avoids ~7000 sqrt calls/frame.
         float sectionCenterX = chunkPos.x * ::Game::Math::CHUNK_SIZE_X + ::Game::Math::CHUNK_SIZE_X * 0.5f;
         float sectionCenterY = sectionY * ::Game::Math::SECTION_HEIGHT + ::Game::Math::SECTION_HEIGHT * 0.5f + Config::MinY;
         float sectionCenterZ = chunkPos.z * ::Game::Math::CHUNK_SIZE_Z + ::Game::Math::CHUNK_SIZE_Z * 0.5f;
 
-        // Calculate XZ distance (horizontal distance for chunk-based decisions)
         float dx = sectionCenterX - camera.position.x;
-        float dz = sectionCenterZ - camera.position.z;
-        float xzDistance = std::sqrt(dx * dx + dz * dz);
-        
-        // Add Y distance as secondary factor (less weight for sorting within chunk)
         float dy = sectionCenterY - camera.position.y;
-        float yDistance = std::abs(dy);
-        
-        // Combined distance: XZ is primary, Y is secondary with less weight
-        // This ensures proper square chunk pattern while still prioritizing closer sections
-        return xzDistance + yDistance * 0.1f;
+        float dz = sectionCenterZ - camera.position.z;
+
+        // Squared distance: XZ is primary, Y is de-weighted (same relative
+        // importance as the old linear formula, just squared throughout).
+        return (dx * dx + dz * dz) + (dy * dy * 0.01f);
     }
 
     bool ChunkRenderer::IsSectionInFrustum(const Frustum& frustum, ::Game::Math::ChunkPos chunkPos, int sectionY) {

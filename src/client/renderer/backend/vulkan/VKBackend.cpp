@@ -1687,17 +1687,16 @@ namespace Render {
 
         VkPipelineShaderStageCreateInfo stages[] = {vertStage, fragStage};
 
-        // Vertex input (12 floats per vertex: pos3 + norm3 + uv2 + color4)
+        // Vertex input (24 bytes per vertex: pos3 floats + uv2 floats + color4 ubytes)
         VkVertexInputBindingDescription bindingDesc{};
         bindingDesc.binding = 0;
-        bindingDesc.stride = sizeof(float) * 12;
+        bindingDesc.stride = 24;
         bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-        std::array<VkVertexInputAttributeDescription, 4> attrDescs{};
-        attrDescs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
-        attrDescs[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3};
-        attrDescs[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 6};
-        attrDescs[3] = {3, 0, VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(float) * 8};
+        std::array<VkVertexInputAttributeDescription, 3> attrDescs{};
+        attrDescs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};                          // Position: 3 floats at offset 0
+        attrDescs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<uint32_t>(sizeof(float) * 3)};  // UV: 2 floats at offset 12
+        attrDescs[2] = {2, 0, VK_FORMAT_R8G8B8A8_UNORM, static_cast<uint32_t>(sizeof(float) * 5)}; // Color: 4 ubytes normalized at offset 20
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;

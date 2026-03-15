@@ -2,7 +2,6 @@
 #version 330 core
 
 // Input from vertex shader
-in vec3 fragNormal;     // Interpolated normal
 in vec2 fragTexCoord;   // Interpolated texture coordinates
 in vec3 fragWorldPos;   // World position
 in vec4 fragColor;      // Vertex color (tint * AO * directional shade baked in)

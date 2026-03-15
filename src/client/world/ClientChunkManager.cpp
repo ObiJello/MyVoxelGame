@@ -2,6 +2,7 @@
 #include "ClientChunkManager.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world/chunk/ChunkSection.hpp"
 #include "ClientWorkerPool.hpp"
 #include "../renderer/core/Frustum.hpp"
@@ -69,6 +70,7 @@ namespace Client {
 
     
     void ClientChunkManager::LoadChunk(Game::Math::ChunkPos chunkPos, const Network::SerializedChunkData& serializedData) {
+        PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
         Log::Debug("PIPELINE: LoadChunk START for chunk (%d, %d) with %zu bytes", 
                   chunkPos.x, chunkPos.z, serializedData.GetTotalSize());
@@ -146,6 +148,7 @@ namespace Client {
 
 
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
+        PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
         Log::Info("CLIENT UNLOAD: chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
@@ -226,96 +229,50 @@ namespace Client {
     }
     
     void ClientChunkManager::MarkNeighborSectionsDirty(Game::Math::ChunkPos chunkPos) {
+        PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
-        
+
         Log::Debug("=== MarkNeighborSectionsDirty for chunk (%d, %d) ===", chunkPos.x, chunkPos.z);
-        
-        // Only mark non-empty sections of adjacent chunks as dirty
-        // This is much more efficient than marking all sections
-        
-        // North neighbor (-z)
-        auto northPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z - 1};
-        auto northIt = m_chunks.find(northPos);
-        if (northIt != m_chunks.end() && northIt->second->state == ChunkState::LOADED) {
+
+        // Get the source chunk's section info so we can skip neighbor sections
+        // where the source section at the same Y level is all-air (no new blocks
+        // to cull against means the neighbor's mesh won't change)
+        auto sourceIt = m_chunks.find(chunkPos);
+        const ClientChunk* sourceChunk = (sourceIt != m_chunks.end()) ? sourceIt->second.get() : nullptr;
+
+        // Helper lambda: mark dirty only neighbor sections that are non-empty AND
+        // where the source chunk's section at the same Y is also non-empty
+        auto markNeighborDirty = [&](Game::Math::ChunkPos neighborPos, const char* dirLabel) {
+            auto neighborIt = m_chunks.find(neighborPos);
+            if (neighborIt == m_chunks.end() || neighborIt->second->state != ChunkState::LOADED) {
+                return;
+            }
             int dirtyCount = 0;
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                auto& sectionInfo = northIt->second->sectionInfos[sectionY];
-                // Only mark non-empty sections that aren't already dirty
-                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
-                    sectionInfo.version++;  // Increment version (will cause in-flight meshes to be dropped)
-                    sectionInfo.dirty = true;
-                    northIt->second->dirtySections.insert(sectionY);  // Legacy support
-                    dirtyCount++;
-                }
+                auto& sectionInfo = neighborIt->second->sectionInfos[sectionY];
+                // Skip if neighbor section is all-air (no geometry to remesh)
+                if (sectionInfo.isAllAir) continue;
+                // Skip if already dirty
+                if (sectionInfo.dirty) continue;
+                // Skip if the source chunk's section at this Y level is all-air:
+                // no new blocks to cull against, so neighbor mesh won't change
+                if (sourceChunk && sourceChunk->sectionInfos[sectionY].isAllAir) continue;
+
+                sectionInfo.version++;
+                sectionInfo.dirty = true;
+                neighborIt->second->dirtySections.insert(sectionY);
+                dirtyCount++;
             }
             if (dirtyCount > 0) {
-                Log::Debug("  North neighbor (%d, %d): marked %d non-empty sections dirty", 
-                          northPos.x, northPos.z, dirtyCount);
+                Log::Debug("  %s neighbor (%d, %d): marked %d sections dirty",
+                          dirLabel, neighborPos.x, neighborPos.z, dirtyCount);
             }
-        }
-        
-        // South neighbor (+z)
-        auto southPos = Game::Math::ChunkPos{chunkPos.x, chunkPos.z + 1};
-        auto southIt = m_chunks.find(southPos);
-        if (southIt != m_chunks.end() && southIt->second->state == ChunkState::LOADED) {
-            int dirtyCount = 0;
-            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                auto& sectionInfo = southIt->second->sectionInfos[sectionY];
-                // Only mark non-empty sections that aren't already dirty
-                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
-                    sectionInfo.version++;
-                    sectionInfo.dirty = true;
-                    southIt->second->dirtySections.insert(sectionY);
-                    dirtyCount++;
-                }
-            }
-            if (dirtyCount > 0) {
-                Log::Debug("  South neighbor (%d, %d): marked %d non-empty sections dirty",
-                          southPos.x, southPos.z, dirtyCount);
-            }
-        }
-        
-        // East neighbor (+x)
-        auto eastPos = Game::Math::ChunkPos{chunkPos.x + 1, chunkPos.z};
-        auto eastIt = m_chunks.find(eastPos);
-        if (eastIt != m_chunks.end() && eastIt->second->state == ChunkState::LOADED) {
-            int dirtyCount = 0;
-            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                auto& sectionInfo = eastIt->second->sectionInfos[sectionY];
-                // Only mark non-empty sections that aren't already dirty
-                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
-                    sectionInfo.version++;
-                    sectionInfo.dirty = true;
-                    eastIt->second->dirtySections.insert(sectionY);
-                    dirtyCount++;
-                }
-            }
-            if (dirtyCount > 0) {
-                Log::Debug("  East neighbor (%d, %d): marked %d non-empty sections dirty",
-                          eastPos.x, eastPos.z, dirtyCount);
-            }
-        }
-        
-        // West neighbor (-x)
-        auto westPos = Game::Math::ChunkPos{chunkPos.x - 1, chunkPos.z};
-        auto westIt = m_chunks.find(westPos);
-        if (westIt != m_chunks.end() && westIt->second->state == ChunkState::LOADED) {
-            int dirtyCount = 0;
-            for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
-                auto& sectionInfo = westIt->second->sectionInfos[sectionY];
-                // Only mark non-empty sections that aren't already dirty
-                if (!sectionInfo.isAllAir && !sectionInfo.dirty) {
-                    sectionInfo.version++;
-                    sectionInfo.dirty = true;
-                    westIt->second->dirtySections.insert(sectionY);
-                    dirtyCount++;
-                }
-            }
-            if (dirtyCount > 0) {
-                Log::Debug("  West neighbor (%d, %d): marked %d non-empty sections dirty",
-                          westPos.x, westPos.z, dirtyCount);
-            }
-        }
+        };
+
+        markNeighborDirty({chunkPos.x, chunkPos.z - 1}, "North");
+        markNeighborDirty({chunkPos.x, chunkPos.z + 1}, "South");
+        markNeighborDirty({chunkPos.x + 1, chunkPos.z},  "East");
+        markNeighborDirty({chunkPos.x - 1, chunkPos.z},  "West");
     }
 
     // ========================================================================
@@ -828,7 +785,17 @@ namespace Client {
     
     // Schedule mesh builds for dirty sections (Minecraft-style per-section)
     void ClientChunkManager::ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition) {
+        PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
+
+        // Throttle: run at most every 33ms (~30 times/sec) to avoid
+        // iterating all chunks and computing sqrt() every single frame
+        auto now = std::chrono::steady_clock::now();
+        float elapsedMs = std::chrono::duration<float, std::milli>(now - m_lastMeshScheduleTime).count();
+        if (elapsedMs < 33.0f) {
+            return;
+        }
+        m_lastMeshScheduleTime = now;
 
         auto workerPool = Threading::g_clientWorkerPool.get();
         if (!workerPool) return;
@@ -920,12 +887,12 @@ namespace Client {
             snapshot->isHighPriority = (candidate.effectiveDistance < 128.0f);
             snapshot->submitTime = std::chrono::steady_clock::now();
 
-            // Cancel previous in-flight task for this section (Minecraft-style)
-            if (sectionInfo.lastMeshJob) {
-                sectionInfo.lastMeshJob->Cancel();
-            }
-
             if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
+                // Cancel previous in-flight task only after successful submission
+                // (avoids cancelling old job when new one can't be queued)
+                if (sectionInfo.lastMeshJob) {
+                    sectionInfo.lastMeshJob->Cancel();
+                }
                 sectionInfo.lastMeshJob = snapshot; // Track for cancellation
                 sectionInfo.meshingVersion = expectedVersion;
                 sectionInfo.state = SectionState::MESHING;
@@ -933,6 +900,8 @@ namespace Client {
                 chunk->dirtySections.erase(candidate.sectionY);
                 sectionsSubmitted++;
             }
+            // If submission failed (queue full), dirty flag stays true
+            // and meshingVersion is NOT updated, so it will retry next cycle
         }
 
         if (sectionsSubmitted > 0) {
@@ -945,98 +914,6 @@ namespace Client {
         // Get player position from somewhere (TODO: implement proper player tracking)
         glm::vec3 playerPos(0, 67, 0);
         ScheduleMeshBuildsWithSnapshots(playerPos);
-    }
-    
-    void ClientChunkManager::CopyNeighborData(Game::Math::ChunkPos chunkPos, int sectionY, 
-                                             Render::SectionSnapshot& snapshot) {
-        // Copy neighbor chunks (north, south, east, west)
-        auto northIt = m_chunks.find({chunkPos.x, chunkPos.z - 1});
-        if (northIt != m_chunks.end() && northIt->second && northIt->second->chunkData) {
-            auto* neighborSection = northIt->second->chunkData->GetSection(sectionY);
-            if (neighborSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[0][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[0].begin(), snapshot.neighbors[0].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[0].begin(), snapshot.neighbors[0].end(), Game::BlockID::Air);
-        }
-        
-        // South (+z)
-        auto southIt = m_chunks.find({chunkPos.x, chunkPos.z + 1});
-        if (southIt != m_chunks.end() && southIt->second && southIt->second->chunkData) {
-            auto* neighborSection = southIt->second->chunkData->GetSection(sectionY);
-            if (neighborSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[1][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[1].begin(), snapshot.neighbors[1].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[1].begin(), snapshot.neighbors[1].end(), Game::BlockID::Air);
-        }
-        
-        // East (+x)
-        auto eastIt = m_chunks.find({chunkPos.x + 1, chunkPos.z});
-        if (eastIt != m_chunks.end() && eastIt->second && eastIt->second->chunkData) {
-            auto* neighborSection = eastIt->second->chunkData->GetSection(sectionY);
-            if (neighborSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[2][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[2].begin(), snapshot.neighbors[2].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[2].begin(), snapshot.neighbors[2].end(), Game::BlockID::Air);
-        }
-        
-        // West (-x)
-        auto westIt = m_chunks.find({chunkPos.x - 1, chunkPos.z});
-        if (westIt != m_chunks.end() && westIt->second && westIt->second->chunkData) {
-            auto* neighborSection = westIt->second->chunkData->GetSection(sectionY);
-            if (neighborSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[3][i] = static_cast<Game::BlockID>(neighborSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[3].begin(), snapshot.neighbors[3].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[3].begin(), snapshot.neighbors[3].end(), Game::BlockID::Air);
-        }
-        
-        // Up (same chunk, section above)
-        auto& chunk = m_chunks[chunkPos];
-        if (sectionY < 23) {
-            auto* upSection = chunk->chunkData->GetSection(sectionY + 1);
-            if (upSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[4][i] = static_cast<Game::BlockID>(upSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[4].begin(), snapshot.neighbors[4].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[4].begin(), snapshot.neighbors[4].end(), Game::BlockID::Air);
-        }
-        
-        // Down (same chunk, section below)
-        if (sectionY > 0) {
-            auto* downSection = chunk->chunkData->GetSection(sectionY - 1);
-            if (downSection) {
-                for (int i = 0; i < 4096; ++i) {
-                    snapshot.neighbors[5][i] = static_cast<Game::BlockID>(downSection->blocks[i]);
-                }
-            } else {
-                std::fill(snapshot.neighbors[5].begin(), snapshot.neighbors[5].end(), Game::BlockID::Air);
-            }
-        } else {
-            std::fill(snapshot.neighbors[5].begin(), snapshot.neighbors[5].end(), Game::BlockID::Air);
-        }
     }
     
     bool ClientChunkManager::BuildSectionSnapshot(

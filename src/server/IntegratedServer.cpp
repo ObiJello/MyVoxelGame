@@ -15,6 +15,7 @@
 #include "common/network/PacketTypes.hpp"
 
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/world/level/World.hpp"
 #include "client/entity/Player.hpp"
 #include "world/ServerWorkerPool.hpp"
@@ -266,6 +267,7 @@ namespace Server {
     // ========================================================================
 
     void IntegratedServer::ServerLoop() {
+        PROFILE_THREAD("ServerThread");
         using clock = std::chrono::steady_clock;
         using namespace std::chrono;
         
@@ -330,6 +332,7 @@ namespace Server {
     }
 
     void IntegratedServer::ServerTick() {
+        PROFILE_ZONE;
         // Calculate delta time for this tick
         auto currentTime = std::chrono::steady_clock::now();
         auto deltaTime = std::chrono::duration<float>(currentTime - m_lastTickTime).count();
@@ -428,7 +431,7 @@ namespace Server {
         }
 
         // === 5. PERIODIC CLEANUP: unload chunks with no watchers ===
-        if (serverTick % 200 == 0) { // Every 10 seconds at 20 TPS
+        if (serverTick % 60 == 0) { // Every ~3 seconds at 20 TPS
             UnloadUnwatchedChunks();
         }
 
@@ -483,6 +486,7 @@ namespace Server {
     }
 
     void IntegratedServer::ProcessAsyncChunkResults() {
+        PROFILE_ZONE;
         // Only process if async chunk loading is enabled
         if (!m_config.enableAsyncChunkLoading) {
             return;
@@ -537,6 +541,7 @@ namespace Server {
 
 
     void IntegratedServer::ProcessWatchSetChanges() {
+        PROFILE_ZONE;
         if (!m_sessionManager || !m_world) return;
 
         // Pump the terrain generator's async pipeline (like Minecraft's runDistanceManagerUpdates)
@@ -585,23 +590,20 @@ namespace Server {
     }
 
     void IntegratedServer::UnloadUnwatchedChunks() {
+        PROFILE_ZONE;
         if (!m_world || !m_watchIndex) return;
 
         auto* chunkProvider = m_world->GetChunkProvider();
         if (!chunkProvider) return;
 
-        // Use the player's chunk position to scan a reasonable area
-        auto playerChunk = GetPlayerChunkPosition();
-        int scanRadius = 40; // Scan well beyond max view distance
+        // Iterate only actually loaded chunks instead of scanning a huge grid
+        auto loadedPositions = chunkProvider->GetLoadedChunkPositions();
 
         size_t unloaded = 0;
-        for (int dx = -scanRadius; dx <= scanRadius; ++dx) {
-            for (int dz = -scanRadius; dz <= scanRadius; ++dz) {
-                Game::Math::ChunkPos pos{playerChunk.x + dx, playerChunk.z + dz};
-                if (chunkProvider->IsChunkLoaded(pos) && !m_watchIndex->HasWatchers(pos)) {
-                    if (chunkProvider->UnloadChunk(pos)) {
-                        unloaded++;
-                    }
+        for (const auto& pos : loadedPositions) {
+            if (!m_watchIndex->HasWatchers(pos)) {
+                if (chunkProvider->UnloadChunk(pos)) {
+                    unloaded++;
                 }
             }
         }

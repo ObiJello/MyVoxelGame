@@ -7,6 +7,7 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/block/BlockModel.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 #include "common/world/math/WorldCoordinates.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include <glm/glm.hpp>
@@ -82,20 +83,47 @@ namespace Render {
         };
         const MeshStats& GetLastStats() const { return m_lastStats; }
 
+        // Block property cache: avoids per-block registry lookups during meshing.
+        // Populated once per thread from the static BlockRegistry, then reused for all
+        // subsequent mesh builds on that thread. Public so free functions
+        // (ClassifyBlock, IsBlockOpaque) in the same namespace can access them.
+        struct CachedBlockProps {
+            bool isOpaque;
+            RenderLayer renderLayer;
+        };
+        static constexpr size_t BLOCK_ID_COUNT = static_cast<size_t>(Game::BlockID::Count);
+        static thread_local std::array<CachedBlockProps, BLOCK_ID_COUNT> s_blockPropsCache;
+        static thread_local bool s_blockPropsCacheValid;
+
     private:
         MeshConfig m_config;
         mutable MeshStats m_lastStats;
-        Game::World* m_world;  // **NEW**: World reference for cross-chunk access
+        Game::World* m_world;  // World reference for cross-chunk access
         std::unique_ptr<FluidMeshBuilder> m_fluidBuilder;  // Fluid mesh builder
 
-        // UV cache: keyed by FaceDef pointer (stable in static BlockModel data)
-        // Avoids ResolveTexture string alloc + atlas hash lookup per face
-        std::unordered_map<const Game::FaceDef*, glm::vec4> m_faceUVCache;
+        void EnsureBlockPropsCache();
+
+        // Per-section opaque cache: 18x18x18 covering the 16x16x16 section plus a
+        // 1-block border on all sides. Built once at the start of BuildSectionMesh
+        // and indexed during AO and face culling to avoid redundant GetBlock +
+        // IsBlockOpaque calls (eliminates ~12 lookups per face).
+        // Index with [localX+1][localY+1][localZ+1] where local coords are in [-1,16].
+        bool m_opaqueCache[18][18][18];
+        int m_sectionBaseWorldX;
+        int m_sectionBaseWorldY;
+        int m_sectionBaseWorldZ;
+        void BuildOpaqueCache(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY);
+        bool GetCachedOpaque(int worldX, int worldY, int worldZ) const;
+
+        // UV cache: thread-local so it persists across Mesher instances on the same
+        // worker thread, avoiding ResolveTexture string allocs + atlas hash lookups
+        // on every mesh rebuild.
+        static thread_local std::unordered_map<const Game::FaceDef*, glm::vec4> s_faceUVCache;
 
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                          int localX, int localY, int localZ,
-                         int sectionY, SectionMesh& mesh);
+                         int sectionY, Game::BlockID blockId, SectionMesh& mesh);
 
         void AddBlockFace(const Game::IBlockAccess& blocks,
                          const Game::BlockModel& model, const Game::Element& element,
@@ -106,11 +134,10 @@ namespace Render {
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
                          std::vector<Vertex>& outVerts, std::vector<uint32_t>& outIndices);
 
-        // Culling and optimization
-        bool ShouldCullFace(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
-                           BlockFace face, Game::BlockID currentBlock);
+        // Culling and optimization (uses m_opaqueCache for fast neighbor lookups)
+        bool ShouldCullFace(int worldX, int worldY, int worldZ, BlockFace face);
 
-        // **UPDATED**: Now supports cross-chunk neighbor lookup via IBlockAccess
+        // Cross-chunk neighbor lookup via IBlockAccess
         Game::BlockID GetNeighborBlock(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
                                       BlockFace face);
 

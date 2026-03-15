@@ -8,6 +8,8 @@
 #include "../shader/Shader.hpp"
 #include "../texture/TextureAnimator.hpp"
 #include "../backend/RenderTypes.hpp"
+#include <glad/glad.h>
+#include <climits>
 #include <vector>
 #include <memory>
 
@@ -85,6 +87,12 @@ namespace Render {
         // Total render time
         float renderTimeMs = 0.0f;              // Total render time (build + all passes)
 
+        // GPU-side timing (from GL_TIME_ELAPSED queries, 1-2 frame latency)
+        float gpuOpaqueTimeMs = 0.0f;
+        float gpuCutoutTimeMs = 0.0f;
+        float gpuTranslucentTimeMs = 0.0f;
+        float gpuTotalTimeMs = 0.0f;
+
         void Reset() {
             sectionsRendered = sectionsSkipped = sectionsAvailable = totalDrawCalls = 0;
             opaqueSections = cutoutSections = translucentSections = 0;
@@ -93,6 +101,7 @@ namespace Render {
             frustumCullingTimeMs = sortingTimeMs = 0.0f;
             opaquePassTimeMs = cutoutPassTimeMs = translucentPassTimeMs = 0.0f;
             renderTimeMs = 0.0f;
+            gpuOpaqueTimeMs = gpuCutoutTimeMs = gpuTranslucentTimeMs = gpuTotalTimeMs = 0.0f;
         }
     };
 
@@ -118,7 +127,10 @@ namespace Render {
         // Statistics
         const RenderStats& GetStats() const { return m_stats; }
         void ResetStats() { m_stats.Reset(); }
-        
+
+        // Mark visible sections as dirty (call when sections are uploaded/removed)
+        void MarkVisibleSectionsDirty() { m_visibleSectionsDirty = true; }
+
 
         // Debug rendering options
         void SetWireframeMode(bool enable);
@@ -130,9 +142,16 @@ namespace Render {
         std::unique_ptr<Shader> m_blockShader;
         bool m_shadersLoaded = false;
 
-        // Backend handles for Vulkan rendering
-        ShaderHandle m_backendShader = INVALID_SHADER;
+        // Backend shader handles — separate programs for opaque (no discard, enables
+        // early-z) and cutout/translucent (with discard for alpha testing).
+        // Matches Minecraft's SOLID_TERRAIN vs CUTOUT_TERRAIN pipeline split.
+        ShaderHandle m_backendShader = INVALID_SHADER;       // Legacy (unused, kept for compat)
+        ShaderHandle m_opaqueShader = INVALID_SHADER;        // block.vert + block_opaque.frag (minimal discard)
+        ShaderHandle m_cutoutShader = INVALID_SHADER;        // block.vert + block.frag (alpha discard)
+        ShaderHandle m_solidShader = INVALID_SHADER;         // block.vert + block_solid.frag (zero discard)
+        ShaderHandle m_activeShader = INVALID_SHADER;        // Currently bound shader
         TextureHandle m_backendAtlasTexture = INVALID_TEXTURE;
+        glm::mat4 m_cachedMVP{1.0f};                         // Cached for shader switches
 
         // Render configuration
         bool m_enableFrustumCulling = true;
@@ -142,9 +161,28 @@ namespace Render {
 
         // Render state
         RenderStats m_stats;
-        
+
         // Visible sections cache
         std::vector<SectionRenderData> m_visibleSections;
+
+        // Visible section cache — avoids rebuilding the visible list every frame
+        // when the camera hasn't moved significantly. Matches Minecraft's approach
+        // of only recalculating visibility on chunk transitions and rotation changes.
+        bool m_visibleSectionsDirty = true;
+        int m_lastCameraChunkX = INT_MAX;
+        int m_lastCameraChunkZ = INT_MAX;
+        float m_lastCameraYaw = 0.0f;
+        float m_lastCameraPitch = 0.0f;
+
+        // Multi-draw command arrays (reused each frame to avoid allocation)
+        std::vector<GLsizei> m_multiDrawCounts;
+        std::vector<const void*> m_multiDrawOffsets;
+        std::vector<GLint> m_multiDrawBaseVertices;
+
+        // Distant cutout multi-draw arrays (rendered as solid in opaque pass)
+        std::vector<GLsizei> m_distantCutoutCounts;
+        std::vector<const void*> m_distantCutoutOffsets;
+        std::vector<GLint> m_distantCutoutBaseVertices;
 
         // Pass configurations
         RenderPassConfig m_opaqueConfig;
@@ -174,8 +212,11 @@ namespace Render {
         void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
         void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
         
+        // Bind shader, MVP, and atlas texture once per frame (shared across all 3 passes)
+        void BindSharedRenderState(const Camera& camera);
+
         // Render helpers
-        void RenderLayerPass(RenderLayer layer, const Camera& camera, uint8_t layerBit, bool reverseOrder = false);
+        void RenderLayerPass(RenderLayer layer, uint8_t layerBit, bool reverseOrder = false);
         void RenderSectionLayer(const SectionRenderData& section, RenderLayer layer);
         void RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections);
         float CalculateSectionDistance(const Camera& camera, ::Game::Math::ChunkPos chunkPos, int sectionY);

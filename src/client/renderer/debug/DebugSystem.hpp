@@ -41,6 +41,33 @@ namespace Debug {
         float textureAnimationTime = 0.0f;
         float otherTime = 0.0f;
 
+        // GPU timing (from ChunkRenderer GPU timer queries, 1-frame latency)
+        float gpuOpaqueTimeMs = 0.0f;
+        float gpuCutoutTimeMs = 0.0f;
+        float gpuTranslucentTimeMs = 0.0f;
+        float gpuTotalTimeMs = 0.0f;
+
+        // Frame spike detection
+        static constexpr int MAX_SPIKES = 8;
+        struct FrameSpike {
+            float totalMs = 0.0f;
+            float renderMs = 0.0f;
+            float meshSchedMs = 0.0f;
+            float gpuUploadMs = 0.0f;
+            float gpuTimeMs = 0.0f;
+            int drawCalls = 0;
+            int sectionsRendered = 0;
+            float secondsAgo = 0.0f;  // Updated each frame
+        };
+        FrameSpike recentSpikes[MAX_SPIKES] = {};
+        int spikeCount = 0;
+        float targetFrameTimeMs = 16.67f; // 60fps target
+
+        void RecordSpike(const FrameSpike& spike);
+        float Get99thPercentile() const;
+        float Get1PercentLow() const;
+        int CountSpikesInHistory() const;  // frames above target in frameTimes[]
+
         int meshesUploadedThisFrame = 0;
         int meshesRenderedThisFrame = 0;
         size_t totalVerticesRendered = 0;

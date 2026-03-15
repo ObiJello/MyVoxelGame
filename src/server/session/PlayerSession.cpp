@@ -306,6 +306,15 @@ namespace Server {
 
     void PlayerSession::MarkChunkReadyToSend(Game::Math::ChunkPos pos) {
         m_pendingChunkLoads.erase(pos);    // No longer waiting for load
+
+        // Don't queue for sending if the chunk was removed from the watch set
+        // while we were waiting for it to load (race condition)
+        if (m_watchSet.find(pos) == m_watchSet.end()) {
+            Log::Debug("MarkChunkReadyToSend: chunk (%d, %d) no longer in watch set, skipping",
+                      pos.x, pos.z);
+            return;
+        }
+
         m_pendingChunksToSend.insert(pos); // Ready to send to client
     }
 
@@ -343,13 +352,29 @@ namespace Server {
         std::vector<ChunkDist> candidates;
         candidates.reserve(m_pendingChunksToSend.size());
 
+        // Also collect chunks to remove from pending if they left the watch set
+        std::vector<Game::Math::ChunkPos> staleChunks;
+
         for (const auto& pos : m_pendingChunksToSend) {
+            // Skip chunks that are no longer in the watch set (race condition)
+            if (m_watchSet.find(pos) == m_watchSet.end()) {
+                staleChunks.push_back(pos);
+                continue;
+            }
+
             auto chunk = world->GetChunk(pos.x, pos.z);
             if (!chunk) continue;  // Not loaded yet — skip, will be picked up later
 
             int dx = pos.x - m_anchorChunk.x;
             int dz = pos.z - m_anchorChunk.z;
             candidates.push_back({pos, chunk, dx * dx + dz * dz});
+        }
+
+        // Remove stale chunks from pending set
+        for (const auto& pos : staleChunks) {
+            m_pendingChunksToSend.erase(pos);
+            Log::Debug("SendNextChunks: removed stale chunk (%d, %d) from pending (no longer watched)",
+                      pos.x, pos.z);
         }
 
         if (candidates.empty()) return;
