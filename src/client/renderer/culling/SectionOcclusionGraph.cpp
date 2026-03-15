@@ -6,9 +6,7 @@
 #include "client/world/ClientChunkManager.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Config.hpp"
-#include <queue>
 #include <cmath>
-#include <cstring>
 
 namespace Render {
 
@@ -41,46 +39,52 @@ namespace Render {
         int diameter = 2 * renderDistance + 1;
         int sectionsY = Game::Math::SECTIONS_PER_CHUNK;  // 24
         int gridSize = diameter * diameter * sectionsY;
-
-        // Use persistent buffers to avoid per-frame allocation
-        m_gridNodes.resize(gridSize);
-        std::memset(m_gridNodes.data(), 0, gridSize * sizeof(GridNode));
-
-        // Also cache chunk loading status to avoid per-neighbor singleton lookups
         int chunkGridSize = diameter * diameter;
-        m_chunkLoaded.resize(chunkGridSize);
-        for (int rz = 0; rz < diameter; rz++) {
-            for (int rx = 0; rx < diameter; rx++) {
-                int cx = playerChunkX - renderDistance + rx;
-                int cz = playerChunkZ - renderDistance + rz;
-                bool loaded = Client::g_clientChunkManager &&
-                              Client::g_clientChunkManager->IsChunkLoaded({cx, cz});
-                m_chunkLoaded[rz * diameter + rx] = loaded;
-            }
+
+        // Use persistent buffers to avoid per-frame allocation.
+        // Generation counter replaces memset — O(1) reset instead of zeroing the whole grid.
+        m_gridNodes.resize(gridSize);
+        m_currentGeneration++;
+        // Handle wraparound (extremely unlikely but correct)
+        if (m_currentGeneration == 0) {
+            m_currentGeneration = 1;
+            for (auto& node : m_gridNodes) node.generation = 0;
         }
+
+        // Lazy chunk loaded cache — only query chunks we actually visit in BFS
+        m_chunkLoaded.resize(chunkGridSize);
 
         auto getIdx = [&](int rx, int rz, int sy) -> int {
             return sy * chunkGridSize + rz * diameter + rx;
         };
 
-        // BFS queue stores lightweight indices instead of full Node structs
-        struct QueueEntry {
-            int16_t rx, rz;
-            int8_t sy;
-            uint8_t sourceDirections;
+        // Lazy chunk loaded lookup with caching
+        auto isChunkLoaded = [&](int rx, int rz) -> bool {
+            int ci = rz * diameter + rx;
+            auto& entry = m_chunkLoaded[ci];
+            if (entry.generation == m_currentGeneration) return entry.loaded;
+            int cx = playerChunkX - renderDistance + rx;
+            int cz = playerChunkZ - renderDistance + rz;
+            entry.loaded = Client::g_clientChunkManager &&
+                           Client::g_clientChunkManager->IsChunkLoaded({cx, cz});
+            entry.generation = m_currentGeneration;
+            return entry.loaded;
         };
-        std::queue<QueueEntry> queue;
+
+        // Double-buffered BFS queues — cache-friendly alternative to std::queue/deque
+        m_bfsCurrentQueue.clear();
+        m_bfsNextQueue.clear();
 
         // Seed with player's section
         int startRX = renderDistance;  // Player is at center of grid
         int startRZ = renderDistance;
         int startIdx = getIdx(startRX, startRZ, playerSectionY);
-        m_gridNodes[startIdx].visited = 1;
+        m_gridNodes[startIdx].generation = m_currentGeneration;
         m_gridNodes[startIdx].sourceDirections = 0x3F;  // All directions
         m_gridNodes[startIdx].gpuData = g_clientMeshManager ?
             g_clientMeshManager->GetGPUSectionData({playerChunkX, playerChunkZ}, playerSectionY) : nullptr;
 
-        queue.push({static_cast<int16_t>(startRX), static_cast<int16_t>(startRZ),
+        m_bfsCurrentQueue.push_back({static_cast<int16_t>(startRX), static_cast<int16_t>(startRZ),
                     static_cast<int8_t>(playerSectionY), 0x3F});
 
         int visitedCount = 0;
@@ -91,9 +95,8 @@ namespace Render {
         static constexpr int DIR_DZ[] = {0, 0, -1, 1, 0, 0};
         static constexpr int DIR_DSY[] = {-1, 1, 0, 0, 0, 0};
 
-        while (!queue.empty()) {
-            QueueEntry entry = queue.front();
-            queue.pop();
+        while (!m_bfsCurrentQueue.empty()) {
+          for (const auto& entry : m_bfsCurrentQueue) {
             visitedCount++;
 
             int idx = getIdx(entry.rx, entry.rz, entry.sy);
@@ -170,13 +173,13 @@ namespace Render {
                 int nIdx = getIdx(nrx, nrz, nsy);
 
                 // Already visited? Just update source directions
-                if (m_gridNodes[nIdx].visited) {
+                if (m_gridNodes[nIdx].generation == m_currentGeneration) {
                     m_gridNodes[nIdx].sourceDirections |= (1 << dir);
                     continue;
                 }
 
-                // Check if chunk is loaded (cached lookup)
-                if (!m_chunkLoaded[nrz * diameter + nrx])
+                // Check if chunk is loaded (lazy cached lookup)
+                if (!isChunkLoaded(nrx, nrz))
                     continue;
 
                 // SMART CULL: check VisibilitySet
@@ -251,7 +254,7 @@ namespace Render {
                                 losVisible = false;
                                 break;
                             }
-                            if (!m_gridNodes[getIdx(rrx, rrz, rsy)].visited) {
+                            if (m_gridNodes[getIdx(rrx, rrz, rsy)].generation != m_currentGeneration) {
                                 losVisible = false;
                                 break;
                             }
@@ -264,17 +267,20 @@ namespace Render {
                 }
 
                 // Mark visited and look up GPU data
-                m_gridNodes[nIdx].visited = 1;
+                m_gridNodes[nIdx].generation = m_currentGeneration;
                 m_gridNodes[nIdx].sourceDirections = (1 << dir);
                 int ncx = playerChunkX - renderDistance + nrx;
                 int ncz = playerChunkZ - renderDistance + nrz;
                 m_gridNodes[nIdx].gpuData = g_clientMeshManager ?
                     g_clientMeshManager->GetGPUSectionData({ncx, ncz}, nsy) : nullptr;
 
-                queue.push({static_cast<int16_t>(nrx), static_cast<int16_t>(nrz),
+                m_bfsNextQueue.push_back({static_cast<int16_t>(nrx), static_cast<int16_t>(nrz),
                             static_cast<int8_t>(nsy),
                             static_cast<uint8_t>(1 << dir)});
             }
+          }
+          m_bfsCurrentQueue.clear();
+          std::swap(m_bfsCurrentQueue, m_bfsNextQueue);
         }
 
         m_lastVisitedCount = visitedCount;

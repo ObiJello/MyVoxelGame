@@ -11,7 +11,6 @@
 #include "common/core/Config.hpp"
 #include <glm/glm.hpp>
 #include <vector>
-#include <unordered_map>
 #include <cstdint>
 
 namespace Render {
@@ -52,13 +51,30 @@ namespace Render {
 
         // Flat 3D grid for BFS visited set — avoids hash map overhead.
         // Persists between frames to avoid re-allocation.
+        // Uses generation counter to avoid zeroing the entire grid each frame.
         struct GridNode {
-            uint8_t visited;
+            uint32_t generation;        // Compared against m_currentGeneration
             uint8_t sourceDirections;
             GPUSectionData* gpuData;
         };
         std::vector<GridNode> m_gridNodes;
-        std::vector<bool> m_chunkLoaded;  // Cached chunk loading status
+        uint32_t m_currentGeneration = 0;  // Bumped each update — nodes with stale generation are "unvisited"
+
+        // Cached chunk loading status (lazy: uses generation to avoid full pre-scan)
+        struct ChunkCacheEntry {
+            uint32_t generation;
+            bool loaded;
+        };
+        std::vector<ChunkCacheEntry> m_chunkLoaded;
+
+        // Double-buffered BFS queues (cache-friendly alternative to std::queue/deque)
+        struct QueueEntry {
+            int16_t rx, rz;
+            int8_t sy;
+            uint8_t sourceDirections;
+        };
+        std::vector<QueueEntry> m_bfsCurrentQueue;
+        std::vector<QueueEntry> m_bfsNextQueue;
 
         // Get neighbor in direction
         static void getNeighbor(Game::Math::ChunkPos pos, int sectionY, int dir,
