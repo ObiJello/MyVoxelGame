@@ -41,6 +41,9 @@ depreciated/
 decompiled_net/
 decompiled_com/
 
+# Windows build number (platform-specific counter, not shared)
+tools/game_build_number_win
+
 # Boost download artifacts (from CMake FetchContent/system Boost)
 libs/
 more/
