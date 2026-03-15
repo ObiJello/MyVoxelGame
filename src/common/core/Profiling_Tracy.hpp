@@ -19,11 +19,13 @@
     #include <tracy/Tracy.hpp>
     #define PROFILE_ZONE            ZoneScoped
     #define PROFILE_ZONE_N(name)    ZoneScopedN(name)
-    #define PROFILE_FRAME_MARK      FrameMark
-    #define PROFILE_THREAD(name)    tracy::SetThreadName(name)
+    #define PROFILE_FRAME_MARK              FrameMark
+    #define PROFILE_FRAME_MARK_NAMED(name)  FrameMarkNamed(name)
+    #define PROFILE_THREAD(name)            tracy::SetThreadName(name)
 #else
     #define PROFILE_ZONE            (void)0
     #define PROFILE_ZONE_N(name)    (void)0
-    #define PROFILE_FRAME_MARK      (void)0
+    #define PROFILE_FRAME_MARK              (void)0
+    #define PROFILE_FRAME_MARK_NAMED(name)  (void)0
     #define PROFILE_THREAD(name)    (void)0
 #endif

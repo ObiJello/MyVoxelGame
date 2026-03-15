@@ -5,6 +5,7 @@
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/core/Log.hpp"
+#include <unordered_map>
 
 // Terrain library includes
 #include "levelgen/NoiseRegistry.h"
@@ -237,8 +238,11 @@ namespace Game {
         // Target chunk status for generation
         const minecraft::world::chunk::status::ChunkStatus* m_targetStatus = nullptr;
 
-        // Helper to map block types to game BlockIDs
+        // Helper to map block types to game BlockIDs.
+        // Uses m_blockIdCache to avoid repeated string lookups — Block* pointers are
+        // stable (created once in Blocks::bootstrap), so pointer equality is sufficient.
         BlockID MapBlockType(minecraft::world::BlockState* blockState) const;
+        mutable std::unordered_map<const minecraft::world::level::block::Block*, BlockID> m_blockIdCache;
     };
 
 } // namespace Game

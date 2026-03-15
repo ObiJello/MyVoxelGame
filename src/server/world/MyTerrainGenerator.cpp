@@ -268,17 +268,23 @@ namespace Game {
     BlockID MyTerrainGenerator::MapBlockType(minecraft::world::BlockState* blockState) const {
         if (!blockState) return BlockID::Stone;
 
-        // Use the unified BlockStateRegistry name-to-ID map (populated from BlockDefs.inc).
-        // This automatically handles all 1150+ blocks via string lookup.
+        // Block* pointers are stable (created once in Blocks::bootstrap, never moved).
+        // Cache the resolved BlockID per unique Block* to avoid repeated string operations.
+        const auto* block = blockState->getBlock();
+        auto it = m_blockIdCache.find(block);
+        if (it != m_blockIdCache.end()) {
+            return it->second;
+        }
+
+        // First encounter — resolve via string lookup (slow path, ~1150 unique blocks total)
         Game::BlockStateRegistry::Initialize();
+        const std::string& identifier = block->getIdentifier();
 
-        std::string identifier = blockState->getBlock()->getIdentifier();
-
-        // Create a Game::BlockState and resolve through the registry
         Game::BlockState gameState;
         gameState.name = identifier;
         gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
 
+        m_blockIdCache[block] = gameState.resolvedId;
         return gameState.resolvedId;
     }
 

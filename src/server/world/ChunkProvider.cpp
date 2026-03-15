@@ -596,6 +596,7 @@ namespace Game {
     // === INTERNAL WORKFLOWS ===
 
     std::shared_ptr<Chunk> ChunkProvider::LoadChunkInternal(Math::ChunkPos position) {
+        PROFILE_ZONE;
         if (!ValidateChunkPosition(position)) {
             Log::Error("LoadChunkInternal: Invalid chunk position (%d, %d)", position.x, position.z);
             return nullptr;
@@ -633,6 +634,7 @@ namespace Game {
     }
 
     std::shared_ptr<Chunk> ChunkProvider::TryLoadFromDisk(Math::ChunkPos position) {
+        PROFILE_ZONE_N("LoadFromDisk");
         if (!m_chunkLoader) {
             return nullptr;
         }
@@ -642,6 +644,7 @@ namespace Game {
     }
 
     std::shared_ptr<Chunk> ChunkProvider::TryGenerateChunk(Math::ChunkPos position) {
+        PROFILE_ZONE_N("GenerateChunk");
         if (!m_chunkGenerator) {
             Log::Error("TryGenerateChunk: No chunk generator available");
             return nullptr;
@@ -676,6 +679,7 @@ namespace Game {
     }
 
     std::shared_ptr<Chunk> ChunkProvider::CompleteChunkLoad(std::shared_ptr<Chunk> chunk) {
+        PROFILE_ZONE_N("CompleteChunkLoad");
         if (!chunk || !m_chunkCache) {
             return chunk;
         }

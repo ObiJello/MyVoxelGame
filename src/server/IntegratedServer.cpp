@@ -324,6 +324,8 @@ namespace Server {
             UpdateStatistics(tickExecutionTime, timeBetweenTicks);
             m_lastTickStartTime = tickStart;
 
+            PROFILE_FRAME_MARK_NAMED("ServerTick");
+
             // Advance to next tick using absolute schedule (no drift)
             nextTickTime += TICK_DURATION;
         }
