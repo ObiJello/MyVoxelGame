@@ -14,13 +14,15 @@ namespace Render {
     BlockHighlight g_blockHighlight;
 
     // Shader sources (used by GL backend's CreateShader from source)
+    // Layout matches GetBlockVertexLayout(): pos3 (loc 0), uv2 (loc 1), color4 ubyte (loc 2)
+    // UV channel repurposed to encode edge direction as a 2-bit index (packed into u).
+    // Edges are axis-aligned so only 3 directions exist: X(0), Y(1), Z(2).
     const char* BlockHighlight::vertexShaderSource = R"(
 #version 330 core
 
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aUV;
-layout(location = 3) in vec4 aColor;
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec4 aColor;
 
 uniform mat4 uProjMat;
 uniform mat4 uModelViewMat;
@@ -38,8 +40,15 @@ const mat4 VIEW_SCALE = mat4(
 );
 
 void main() {
+    // Decode edge direction from UV.x: 0=X, 1=Y, 2=Z
+    int axis = int(aUV.x + 0.5);
+    vec3 edgeDir = vec3(0.0);
+    if (axis == 0) edgeDir.x = 1.0;
+    else if (axis == 1) edgeDir.y = 1.0;
+    else edgeDir.z = 1.0;
+
     vec4 linePosStart = uProjMat * VIEW_SCALE * uModelViewMat * vec4(aPos, 1.0);
-    vec4 linePosEnd   = uProjMat * VIEW_SCALE * uModelViewMat * vec4(aPos + aNormal, 1.0);
+    vec4 linePosEnd   = uProjMat * VIEW_SCALE * uModelViewMat * vec4(aPos + edgeDir, 1.0);
 
     vec3 ndc1 = linePosStart.xyz / linePosStart.w;
     vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;
@@ -113,7 +122,16 @@ void main() {
 
         // Build screen-space quad geometry for each edge (Minecraft-style)
         // No geometric offset — z-layering in shader handles depth fighting
-        const float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.4f; // black at 40% opacity (Minecraft: ARGB.black(102))
+        // Vertex format matches GetBlockVertexLayout(): pos3 + uv2 + color4 ubyte (24 bytes)
+        // UV.x encodes axis-aligned edge direction: 0=X, 1=Y, 2=Z
+        const uint8_t cr = 0, cg = 0, cb = 0, ca = 102; // black at 40% opacity (Minecraft: ARGB.black(102))
+
+        struct Vertex {
+            float x, y, z;
+            float u, v;
+            uint8_t r, g, b, a;
+        };
+        static_assert(sizeof(Vertex) == 24, "Vertex must match GetBlockVertexLayout stride");
 
         glm::vec3 corners[8] = {
             {0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1},
@@ -126,30 +144,36 @@ void main() {
         };
 
         // 4 verts per edge (quad), 6 indices per edge (2 triangles)
-        std::vector<float> verts;
+        std::vector<Vertex> verts;
         std::vector<uint32_t> indices;
-        verts.reserve(12 * 4 * 12);
+        verts.reserve(12 * 4);
         indices.reserve(12 * 6);
 
         for (int i = 0; i < 12; i++) {
             glm::vec3 p0 = corners[edges[i][0]];
             glm::vec3 p1 = corners[edges[i][1]];
             glm::vec3 dir = glm::normalize(p1 - p0);
-            uint32_t base = i * 4;
+
+            // Encode axis direction: X=0, Y=1, Z=2
+            float axisIdx = 0.0f;
+            if (std::abs(dir.y) > 0.5f) axisIdx = 1.0f;
+            else if (std::abs(dir.z) > 0.5f) axisIdx = 2.0f;
+
+            uint32_t base = static_cast<uint32_t>(verts.size());
 
             // 4 vertices: even gl_VertexID = side -1, odd = side +1
             for (int v = 0; v < 2; v++) {
                 glm::vec3 p = (v == 0) ? p0 : p1;
                 // Two vertices at each endpoint (one per side)
-                verts.insert(verts.end(), {p.x, p.y, p.z, dir.x, dir.y, dir.z, 0,0, r,g,b,a});
-                verts.insert(verts.end(), {p.x, p.y, p.z, dir.x, dir.y, dir.z, 0,0, r,g,b,a});
+                verts.push_back({p.x, p.y, p.z, axisIdx, 0.0f, cr, cg, cb, ca});
+                verts.push_back({p.x, p.y, p.z, axisIdx, 0.0f, cr, cg, cb, ca});
             }
 
             indices.insert(indices.end(), {base+0, base+1, base+3, base+0, base+3, base+2});
         }
 
         m_vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex,
-            verts.size() * sizeof(float), verts.data());
+            verts.size() * sizeof(Vertex), verts.data());
         m_ib = g_renderBackend->CreateBuffer(BufferUsage::Index,
             indices.size() * sizeof(uint32_t), indices.data());
         m_mesh = g_renderBackend->CreateMesh(m_vb, m_ib, GetBlockVertexLayout());

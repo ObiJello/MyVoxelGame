@@ -2,6 +2,7 @@
 #include "Crosshair.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include <glad/glad.h>  // For glBindVertexArray(0) after draw
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -17,13 +18,13 @@ namespace Render {
     Crosshair g_crosshair;
 
     // Shader sources for 2D orthographic rendering
+    // Layout matches GetBlockVertexLayout(): pos3 (loc 0), uv2 (loc 1), color4 ubyte (loc 2)
     const char* Crosshair::vertexShaderSource = R"(
 #version 330 core
 
 layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec3 aNormal;
-layout(location = 2) in vec2 aTexCoord;
-layout(location = 3) in vec4 aColor;
+layout(location = 1) in vec2 aTexCoord;
+layout(location = 2) in vec4 aColor;
 
 uniform mat4 uMVP;
 
@@ -46,7 +47,10 @@ uniform sampler2D uTexture;
 void main() {
     vec4 texColor = texture(uTexture, TexCoord);
     if (texColor.a < 0.5) discard;
-    FragColor = texColor;
+    // Force alpha to 1.0 — OneMinusDstColor blending zeroes alpha against
+    // an opaque framebuffer (1 - 1 = 0), making the crosshair invisible.
+    // We only want RGB inversion; alpha must stay opaque.
+    FragColor = vec4(texColor.rgb, 1.0);
 }
 )";
 
@@ -102,12 +106,20 @@ void main() {
             return false;
         }
 
-        // Create quad geometry using 12-float vertex format (pos3 + norm3 + uv2 + color4)
-        float verts[] = {
-            0.0f, 0.0f, 0.0f, 0,0,1, 0.0f, 0.0f, 1,1,1,1,  // TL
-            1.0f, 0.0f, 0.0f, 0,0,1, 1.0f, 0.0f, 1,1,1,1,  // TR
-            1.0f, 1.0f, 0.0f, 0,0,1, 1.0f, 1.0f, 1,1,1,1,  // BR
-            0.0f, 1.0f, 0.0f, 0,0,1, 0.0f, 1.0f, 1,1,1,1,  // BL
+        // Create quad geometry matching GetBlockVertexLayout():
+        // 24 bytes per vertex: pos3 floats (12) + uv2 floats (8) + color 4 ubytes (4)
+        struct Vertex {
+            float x, y, z;
+            float u, v;
+            uint8_t r, g, b, a;
+        };
+        static_assert(sizeof(Vertex) == 24, "Vertex must match GetBlockVertexLayout stride");
+
+        Vertex verts[] = {
+            {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 255, 255, 255, 255},  // TL
+            {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 255, 255, 255, 255},  // TR
+            {1.0f, 1.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, 255},  // BR
+            {0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 255, 255, 255, 255},  // BL
         };
         uint32_t indices[] = { 0, 1, 2, 0, 2, 3 };
 
@@ -132,9 +144,6 @@ void main() {
         state.srcBlendFactor = BlendFactor::OneMinusDstColor;
         state.dstBlendFactor = BlendFactor::Zero;
         state.cullMode = CullMode::None;
-        g_renderBackend->SetPipelineState(state);
-        g_renderBackend->BindShader(m_shader);
-        g_renderBackend->BindTexture(m_texture, 0);
 
         // Orthographic projection: map [0, fbW] x [0, fbH] to clip space
         float fbW = static_cast<float>(framebufferWidth);
@@ -150,8 +159,15 @@ void main() {
         model = glm::scale(model, glm::vec3(scaledSize, scaledSize, 1.0f));
         glm::mat4 mvp = ortho * model;
 
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->BindTexture(m_texture, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
         g_renderBackend->DrawIndexed(m_mesh, 6);
+
+        // Unbind VAO so GPU uploads (which bind GL_ELEMENT_ARRAY_BUFFER directly)
+        // don't corrupt this VAO's IBO binding between frames.
+        glBindVertexArray(0);
 
         // Restore default state
         PipelineState defaultState;
