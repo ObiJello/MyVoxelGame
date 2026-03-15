@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
@@ -117,6 +118,14 @@ namespace Render {
         // GetBlock + IsBlockOpaque repeatedly.
         BuildOpaqueCache(blocks, chunkPos, sectionY);
 
+        // Build visibility graph from the opaque cache (indices offset by +1 for the border)
+        VisGraph visGraph;
+        for (int y = 0; y < 16; y++)
+            for (int z = 0; z < 16; z++)
+                for (int x = 0; x < 16; x++)
+                    if (m_opaqueCache[x + 1][y + 1][z + 1])
+                        visGraph.setOpaque(x, y, z);
+
         for (int localX = 0; localX < 16; ++localX) {
             for (int sectionLocalY = 0; sectionLocalY < 16; ++sectionLocalY) {
                 for (int localZ = 0; localZ < 16; ++localZ) {
@@ -132,6 +141,9 @@ namespace Render {
                 }
             }
         }
+
+        // Resolve visibility graph (which face pairs can see through this section)
+        outMesh.visibilitySet = visGraph.resolve();
 
         auto endTime = std::chrono::high_resolution_clock::now();
         m_lastStats.buildTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();

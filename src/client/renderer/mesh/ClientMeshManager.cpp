@@ -299,7 +299,7 @@ namespace Render {
                 }
 
                 // Upload to GPU
-                UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData);
+                UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData, result.visibilitySet);
                 
                 // Tell ClientChunkManager the upload completed successfully
                 m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY, result.neighborMask);
@@ -543,7 +543,8 @@ namespace Render {
     }
 
     void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
-                                                 const Network::MeshBuildResult::SectionMeshData& meshData) {
+                                                 const Network::MeshBuildResult::SectionMeshData& meshData,
+                                                 const VisibilitySet& visSet) {
         PROFILE_ZONE;
         std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
 
@@ -576,6 +577,7 @@ namespace Render {
         gpuData.opaqueDrawCmd = {};
         gpuData.cutoutDrawCmd = {};
         gpuData.translucentDrawCmd = {};
+        gpuData.visibilitySet = visSet;
 
         // Upload each non-empty layer into its mega-buffer and cache draw commands
         if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {

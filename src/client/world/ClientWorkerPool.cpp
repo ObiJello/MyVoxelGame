@@ -543,6 +543,9 @@ namespace Threading {
             result.meshData.translucentIndexCount = sectionMesh.translucentIdxs.size();
         }
 
+        // Occlusion culling data
+        result.visibilitySet = sectionMesh.visibilitySet;
+
         return result;
     }
 

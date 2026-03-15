@@ -47,6 +47,14 @@ namespace Debug {
         float gpuTranslucentTimeMs = 0.0f;
         float gpuTotalTimeMs = 0.0f;
 
+        // Occlusion culling stats
+        int occlusionVisited = 0;    // Sections BFS visited
+        int occlusionOccluded = 0;   // Sections blocked by solid terrain
+        bool smartCullEnabled = true;
+
+        // Thermal state (macOS NSProcessInfo thermalState: 0=nominal, 1=fair, 2=serious, 3=critical)
+        int thermalState = 0;
+
         // Frame spike detection
         static constexpr int MAX_SPIKES = 8;
         struct FrameSpike {

@@ -94,7 +94,8 @@ namespace Render {
 
         // Upload mesh build result directly to GPU data storage (stores in atomic pointers for lock-free rendering)
         void UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
-                                  const Network::MeshBuildResult::SectionMeshData& meshData);
+                                  const Network::MeshBuildResult::SectionMeshData& meshData,
+                                  const VisibilitySet& visSet = VisibilitySet());
 
         // ========================================================================
         // GPU DATA ACCESS
@@ -129,6 +130,14 @@ namespace Render {
         // Get the mega-buffer for a given render layer (opaque/cutout/translucent)
         ChunkMegaBuffer* GetMegaBuffer(RenderLayer layer);
 
+        // Direct GPU data lookup by section position (for occlusion graph BFS)
+        GPUSectionData* GetGPUSectionData(::Game::Math::ChunkPos chunkPos, int sectionY) {
+            std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
+            SectionKey key{chunkPos, sectionY};
+            auto it = m_gpuData.find(key);
+            return (it != m_gpuData.end()) ? &it->second : nullptr;
+        }
+
         // ========================================================================
         // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
         // ========================================================================
@@ -146,11 +155,11 @@ namespace Render {
         struct ClientMeshConfig {
             // Time budgets (primary controls)
             float meshBuildBudgetMs = 50.0f;        // Time budget for mesh scheduling per frame (chunks)
-            float gpuUploadBudgetMs = 4.0f;         // Time budget for GPU uploads per frame
+            float gpuUploadBudgetMs = 6.0f;         // Time budget for GPU uploads per frame
 
             // Safety caps (rarely hit when budgets are enforced)
             int maxMeshSubmitsPerFrame = 16;        // Safety cap for mesh submissions
-            int maxGPUUploadsPerFrame = 16;         // Safety cap for GPU uploads
+            int maxGPUUploadsPerFrame = 64;         // Safety cap for GPU uploads
             int maxPendingBuilds = 128;             // Max pending mesh builds (OOM guard)
             
             // Priority settings

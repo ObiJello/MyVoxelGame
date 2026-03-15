@@ -581,6 +581,29 @@ namespace Debug {
             ImGui::TextColored(gpuCol, "GPU %.1f ms", metrics.gpuTotalTimeMs);
         }
 
+        // Thermal state (macOS)
+        {
+            const char* thermalNames[] = {"Nominal", "Fair", "Serious", "Critical"};
+            int clamped = std::clamp(metrics.thermalState, 0, 3);
+            ImVec4 col = (clamped == 0) ? COL_GREEN :
+                         (clamped == 1) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                         (clamped == 2) ? COL_YELLOW : COL_RED;
+            ImGui::TextColored(col, "Thermal: %s", thermalNames[clamped]);
+            if (clamped >= 2) {
+                ImGui::SameLine();
+                ImGui::TextColored(col, "— Mac is throttling performance");
+            }
+        }
+
+        // Occlusion culling stats
+        {
+            int rendered = sectionsRendered;
+            int occluded = metrics.occlusionOccluded;
+            int visited = metrics.occlusionVisited;
+            ImGui::Text("Occlusion: %d rendered | %d BFS visited | %d edges blocked",
+                        rendered, visited, occluded);
+        }
+
         ImGui::Separator();
 
         // ── Stacked Bar Chart (kept from original) ─────────────────────────
@@ -1234,6 +1257,11 @@ namespace Debug {
             bool frustumCulling = Render::g_chunkRenderer->IsEnabledFrustumCulling();
             if (ImGui::Checkbox("Frustum Culling", &frustumCulling)) {
                 Render::g_chunkRenderer->SetEnableFrustumCulling(frustumCulling);
+            }
+
+            bool smartCull = Render::g_chunkRenderer->IsEnabledSmartCull();
+            if (ImGui::Checkbox("Occlusion Culling", &smartCull)) {
+                Render::g_chunkRenderer->SetEnableSmartCull(smartCull);
             }
 
             static int debugLayer = -1;

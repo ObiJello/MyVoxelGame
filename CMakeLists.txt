@@ -342,6 +342,8 @@ if(APPLE)
             src/client/renderer/mesh/FluidMeshBuilder.cpp
             src/client/renderer/mesh/Mesher.cpp
             src/client/renderer/mesh/GPUDataPool.cpp
+            src/client/renderer/culling/VisGraph.cpp
+            src/client/renderer/culling/SectionOcclusionGraph.cpp
             src/client/renderer/debug/Crosshair.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
@@ -469,6 +471,13 @@ else()
             src/client/renderer/mesh/SectionMesh.hpp
             src/client/renderer/mesh/MeshJobData.hpp
             src/client/renderer/mesh/SnapshotBuilder.hpp
+
+            # Client rendering - Culling
+            src/client/renderer/culling/VisibilitySet.hpp
+            src/client/renderer/culling/VisGraph.hpp
+            src/client/renderer/culling/VisGraph.cpp
+            src/client/renderer/culling/SectionOcclusionGraph.hpp
+            src/client/renderer/culling/SectionOcclusionGraph.cpp
 
             # Client rendering - Debug
             src/client/renderer/debug/Crosshair.cpp

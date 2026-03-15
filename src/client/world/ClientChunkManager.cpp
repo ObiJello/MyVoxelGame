@@ -801,9 +801,9 @@ namespace Client {
         if (!workerPool) return;
 
         // Buffer pool backpressure: only submit when pipeline has room
-        // POOL_SIZE = workerCount * 8 (keeps workers fed between frames)
+        // POOL_SIZE = workerCount * 16 (keeps workers fed between frames at high RD)
         size_t activeAndPending = workerPool->GetActiveJobCount() + workerPool->GetPendingJobCount();
-        const size_t POOL_SIZE = std::max(size_t(16), workerPool->GetWorkerCount() * 8);
+        const size_t POOL_SIZE = std::max(size_t(64), workerPool->GetWorkerCount() * 16);
         if (activeAndPending >= POOL_SIZE) return;
         size_t slotsAvailable = POOL_SIZE - activeAndPending;
 
@@ -852,7 +852,7 @@ namespace Client {
                   [](const auto& a, const auto& b) { return a.effectiveDistance < b.effectiveDistance; });
 
         // Submit up to min(slotsAvailable, 64) — fixed cap prevents pathological snapshot cost
-        const size_t MAX_SNAPSHOTS_PER_FRAME = 64;
+        const size_t MAX_SNAPSHOTS_PER_FRAME = 128;
         size_t maxToSubmit = std::min(slotsAvailable, MAX_SNAPSHOTS_PER_FRAME);
         size_t sectionsSubmitted = 0;
 
@@ -1210,12 +1210,18 @@ namespace Client {
     
     void ClientChunkManager::NotifyRenderGridChunkLoaded(Game::Math::ChunkPos pos, ClientChunk* chunk) {
         ASSERT_MAIN_THREAD();
-        // No-op: RenderGrid has been removed
+        // Notify the occlusion graph that a chunk loaded — sections deferred by
+        // hasAllNeighbors will be re-evaluated on the next BFS rebuild.
+        if (::Render::g_chunkRenderer) {
+            ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        }
     }
     
     void ClientChunkManager::NotifyRenderGridChunkUnloaded(Game::Math::ChunkPos pos) {
         ASSERT_MAIN_THREAD();
-        // No-op: RenderGrid has been removed
+        if (::Render::g_chunkRenderer) {
+            ::Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+        }
     }
     
     void ClientChunkManager::NotifyRenderGridSectionUpdated(Game::Math::ChunkPos pos, int sectionY, 

@@ -61,6 +61,8 @@
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+#include <objc/objc.h>
+#include <objc/message.h>
 #include <unistd.h>
 #endif
 
@@ -844,6 +846,10 @@ namespace PlatformMain {
                 metrics.gpuCutoutTimeMs = renderStats->gpuCutoutTimeMs;
                 metrics.gpuTranslucentTimeMs = renderStats->gpuTranslucentTimeMs;
                 metrics.gpuTotalTimeMs = renderStats->gpuTotalTimeMs;
+
+                // Occlusion culling stats
+                metrics.occlusionVisited = renderStats->sectionsAvailable;
+                metrics.occlusionOccluded = renderStats->sectionsSkipped;
             }
 
             // Render UI overlay elements
@@ -1054,6 +1060,27 @@ namespace PlatformMain {
             
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
+
+            // Query thermal state (macOS only, ~once per second to avoid overhead)
+#ifdef __APPLE__
+            static int thermalPollCounter = 0;
+            static bool thermalFirstLog = true;
+            if (++thermalPollCounter >= 60) {
+                thermalPollCounter = 0;
+                id processInfo = ((id(*)(id, SEL))objc_msgSend)(
+                    (id)objc_getClass("NSProcessInfo"), sel_registerName("processInfo"));
+                if (processInfo) {
+                    int prevState = metrics.thermalState;
+                    metrics.thermalState = static_cast<int>(
+                        ((long(*)(id, SEL))objc_msgSend)(processInfo, sel_registerName("thermalState")));
+                    if (thermalFirstLog || metrics.thermalState != prevState) {
+                        const char* names[] = {"Nominal", "Fair", "Serious", "Critical"};
+                        Log::Info("Thermal state: %s (%d)", names[std::clamp(metrics.thermalState, 0, 3)], metrics.thermalState);
+                        thermalFirstLog = false;
+                    }
+                }
+            }
+#endif
 
             // Calculate total frame time and unaccounted time
             auto frameEndTime = std::chrono::high_resolution_clock::now();

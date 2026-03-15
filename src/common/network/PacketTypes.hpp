@@ -3,6 +3,7 @@
 
 #include "../world/math/WorldMath.hpp"
 #include "../world/math/WorldCoordinates.hpp"
+#include "client/renderer/culling/VisibilitySet.hpp"
 #include "../world/block/Blocks.hpp"
 #include "../world/chunk/Chunk.hpp"
 #include "PacketRegistry.hpp"
@@ -331,6 +332,7 @@ namespace Network {
             }
         };
         SectionMeshData meshData;
+        Render::VisibilitySet visibilitySet;  // Occlusion data: which face pairs can see through
         bool success = false;
         std::chrono::steady_clock::time_point completeTime;
 

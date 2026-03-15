@@ -6,7 +6,7 @@
     #include "BuildVersion.hpp"
     #define GAME_VERSION BUILD_VERSION
 #else
-    #define GAME_VERSION "0.1.18"
+    #define GAME_VERSION "0.1.20"
 #endif
 
 namespace Config {

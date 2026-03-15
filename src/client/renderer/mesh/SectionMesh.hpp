@@ -3,6 +3,7 @@
 
 #include "../core/Vertex.hpp"
 #include "../backend/RenderTypes.hpp"
+#include "../culling/VisibilitySet.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include <vector>
 #include <cstdint>
@@ -29,6 +30,9 @@ namespace Render {
         // Section position
         Game::Math::ChunkPos chunkPos{0, 0};
         int sectionY = 0;
+
+        // Occlusion data (computed by VisGraph during mesh build)
+        VisibilitySet visibilitySet;
 
         SectionMesh() = default;
         SectionMesh(Game::Math::ChunkPos pos, int secY) : chunkPos(pos), sectionY(secY) {}
@@ -108,6 +112,9 @@ namespace Render {
         CachedDrawCmd opaqueDrawCmd;
         CachedDrawCmd cutoutDrawCmd;
         CachedDrawCmd translucentDrawCmd;
+
+        // Occlusion culling: which face pairs can see through this section
+        VisibilitySet visibilitySet;
 
         // Upload timestamp for LRU management
         uint64_t lastUploadFrame = 0;

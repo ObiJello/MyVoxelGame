@@ -260,172 +260,63 @@ namespace Render {
         auto overallStartTime = std::chrono::high_resolution_clock::now();
 
         // --- Visible section caching ---
-        // Skip full rebuild if camera hasn't moved to a new chunk or rotated significantly
-        // and no sections have been uploaded/removed since last frame.
         int currentChunkX = static_cast<int>(std::floor(camera.position.x / 16.0f));
         int currentChunkZ = static_cast<int>(std::floor(camera.position.z / 16.0f));
+        int currentSectionY = static_cast<int>(std::floor((camera.position.y - Config::MinY) / 16.0f));
 
-        bool cameraChangedChunk = (currentChunkX != m_lastCameraChunkX ||
-                                   currentChunkZ != m_lastCameraChunkZ);
+        bool cameraMoved = (currentChunkX != m_lastCameraChunkX ||
+                            currentChunkZ != m_lastCameraChunkZ ||
+                            currentSectionY != m_lastCameraSectionY);
         bool cameraRotated = (std::abs(camera.yaw - m_lastCameraYaw) > 3.0f ||
                               std::abs(camera.pitch - m_lastCameraPitch) > 3.0f);
 
-        if (!m_visibleSectionsDirty && !cameraChangedChunk && !cameraRotated && !m_visibleSections.empty()) {
-            // Reuse last frame's visible sections — just update timing stats
+        if (!m_visibleSectionsDirty && !cameraMoved && !cameraRotated && !m_visibleSections.empty()) {
+            // Preserve occlusion stats from last BFS run (Reset() cleared them)
+            m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
+            m_stats.sectionsAvailable = m_occlusionGraph.getLastVisitedCount();
+            m_stats.sectionsSkipped = m_occlusionGraph.getLastOccludedCount();
             auto overallEndTime = std::chrono::high_resolution_clock::now();
             m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
             return;
         }
 
-        // Update cache state
         m_lastCameraChunkX = currentChunkX;
         m_lastCameraChunkZ = currentChunkZ;
+        m_lastCameraSectionY = currentSectionY;
         m_lastCameraYaw = camera.yaw;
         m_lastCameraPitch = camera.pitch;
         m_visibleSectionsDirty = false;
 
-        // --- Full rebuild (existing code below) ---
         m_visibleSections.clear();
 
         if (!g_clientMeshManager) {
-            Log::Debug("PrepareVisibleSections: No client mesh manager available");
             m_stats.buildDrawListsTimeMs = 0.0f;
             return;
         }
 
-        // Get chunk manager for chunk loading status checks
-        auto* chunkManager = Client::g_clientChunkManager.get();
-        if (!chunkManager) {
-            Log::Debug("PrepareVisibleSections: No client chunk manager available");
-            m_stats.buildDrawListsTimeMs = 0.0f;
-            return;
-        }
-
-        // Calculate player chunk position for square rendering
-        glm::vec3 playerPos = camera.position;
-        int playerChunkX = static_cast<int>(std::floor(playerPos.x / ::Game::Math::CHUNK_SIZE_X));
-        int playerChunkZ = static_cast<int>(std::floor(playerPos.z / ::Game::Math::CHUNK_SIZE_Z));
-
-        // Get effective render distance: min(client setting, server cap)
+        // Get effective render distance
         int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
         if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
             renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
         }
-        int renderDistanceSquared = renderDistanceChunks * renderDistanceChunks;
 
-        int totalSectionsChecked = 0;        // Total sections we looked at
-        int sectionsWithGeometry = 0;        // Sections that passed frustum AND have geometry
-        int sectionsCulled = 0;              // Sections culled by frustum
-        int sectionsOutOfRange = 0;         // Sections outside render distance
-
-        // Iterate active sections under shared lock (zero-copy, GPU data passed directly)
+        // Run occlusion graph BFS — only sections reachable through non-solid terrain
+        // are added to m_visibleSections. Sections behind mountains/underground are skipped.
         auto iterationStart = std::chrono::high_resolution_clock::now();
-
-        // Cache chunk-level frustum results to avoid redundant per-section tests.
-        // Sections in the same chunk share XZ bounds — if the full-height chunk AABB
-        // is Outside, all 24 sections can be skipped; if Inside, per-section tests
-        // can be skipped entirely.
-        std::unordered_map<uint64_t, FrustumResult> chunkFrustumCache;
-        int cacheSize = (2 * renderDistanceChunks + 1) * (2 * renderDistanceChunks + 1);
-        chunkFrustumCache.reserve(cacheSize);
-
-        g_clientMeshManager->ForEachActiveSection([&](const auto& sectionKey, const GPUSectionData* gpuData) {
-            ::Game::Math::ChunkPos chunkPos = sectionKey.chunkPos;
-            int sectionY = sectionKey.sectionY;
-
-            totalSectionsChecked++;
-
-            // Check if chunk is within render distance (square pattern)
-            int dx = chunkPos.x - playerChunkX;
-            int dz = chunkPos.z - playerChunkZ;
-
-            // Use square distance check for square render area
-            if (std::abs(dx) > renderDistanceChunks || std::abs(dz) > renderDistanceChunks) {
-                sectionsOutOfRange++;
-                return;  // Outside render distance
-            }
-
-            // Perform frustum culling with chunk-level pre-test
-            if (m_enableFrustumCulling) {
-                // Compute or retrieve chunk-level frustum result
-                uint64_t chunkKey = (static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.x)) << 32)
-                                  | static_cast<uint64_t>(static_cast<uint32_t>(chunkPos.z));
-                auto cacheIt = chunkFrustumCache.find(chunkKey);
-                FrustumResult chunkResult;
-                if (cacheIt != chunkFrustumCache.end()) {
-                    chunkResult = cacheIt->second;
-                } else {
-                    // Test full-height chunk AABB (all 24 sections)
-                    float minX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
-                    float maxX = minX + ::Game::Math::CHUNK_SIZE_X;
-                    float minZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
-                    float maxZ = minZ + ::Game::Math::CHUNK_SIZE_Z;
-                    chunkResult = frustum.TestAABB(
-                        glm::vec3(minX, static_cast<float>(Config::MinY), minZ),
-                        glm::vec3(maxX, static_cast<float>(Config::MaxY), maxZ)
-                    );
-                    chunkFrustumCache[chunkKey] = chunkResult;
-                }
-
-                if (chunkResult == FrustumResult::Outside) {
-                    sectionsCulled++;
-                    return;  // Entire chunk is outside frustum
-                }
-
-                if (chunkResult == FrustumResult::Intersect) {
-                    // Chunk straddles frustum boundary — do per-section test
-                    float sectionMinX = static_cast<float>(chunkPos.x * ::Game::Math::CHUNK_SIZE_X);
-                    float sectionMaxX = sectionMinX + ::Game::Math::CHUNK_SIZE_X;
-                    float sectionMinY = static_cast<float>(sectionY * ::Game::Math::SECTION_HEIGHT + Config::MinY);
-                    float sectionMaxY = sectionMinY + ::Game::Math::SECTION_HEIGHT;
-                    float sectionMinZ = static_cast<float>(chunkPos.z * ::Game::Math::CHUNK_SIZE_Z);
-                    float sectionMaxZ = sectionMinZ + ::Game::Math::CHUNK_SIZE_Z;
-
-                    glm::vec3 sectionMin(sectionMinX, sectionMinY, sectionMinZ);
-                    glm::vec3 sectionMax(sectionMaxX, sectionMaxY, sectionMaxZ);
-
-                    if (!frustum.IsBoxVisible(sectionMin, sectionMax)) {
-                        sectionsCulled++;
-                        return; // Section outside frustum
-                    }
-                }
-                // If chunkResult == FrustumResult::Inside, skip per-section test
-            }
-
-            // GPU data already passed in — no separate hash lookup needed
-            if (gpuData && gpuData->HasGeometry()) {
-                sectionsWithGeometry++;
-                float sectionDistance = CalculateSectionDistance(camera, chunkPos, sectionY);
-
-                SectionRenderData renderData(chunkPos, sectionY, gpuData, sectionDistance);
-                renderData.inFrustum = true; // Already passed frustum test
-
-                // Tag with layer bitmask so render passes can filter without copying
-                uint8_t mask = 0;
-                if (gpuData->opaqueIndexCount > 0)      mask |= LayerOpaque;
-                if (gpuData->cutoutIndexCount > 0)       mask |= LayerCutout;
-                if (gpuData->translucentIndexCount > 0)  mask |= LayerTranslucent;
-                renderData.layerMask = mask;
-
-                m_visibleSections.push_back(renderData);
-            }
-        });
-
+        m_occlusionGraph.update(camera.position, frustum, m_enableSmartCull,
+                                renderDistanceChunks, m_visibleSections);
         auto iterationEnd = std::chrono::high_resolution_clock::now();
         m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
-        m_stats.frustumCullingTimeMs = m_stats.chunkIterationTimeMs; // Combined in single pass now
-        m_stats.gpuDataLoadTimeMs = 0.0f; // No separate GPU data lookup overhead
+        m_stats.frustumCullingTimeMs = m_stats.chunkIterationTimeMs;
+        m_stats.gpuDataLoadTimeMs = 0.0f;
 
-        // Track simple statistics
-        m_stats.sectionsAvailable = totalSectionsChecked;       // Total sections we checked
-        m_stats.sectionsSkipped = sectionsCulled;               // Sections culled by frustum
-        m_stats.sectionsRendered = sectionsWithGeometry;        // Sections actually being rendered
+        m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
+        m_stats.sectionsSkipped = m_occlusionGraph.getLastOccludedCount();
+        m_stats.sectionsAvailable = m_occlusionGraph.getLastVisitedCount();
 
-        // Measure sorting time if we have enough visible sections to warrant sorting
+        // Sort front-to-back for opaque early-z; translucent pass iterates in reverse
         auto sortingStart = std::chrono::high_resolution_clock::now();
         if (m_visibleSections.size() > 1) {
-            // Sort sections by distance for proper rendering order
-            // Front-to-back for opaque early-z; translucent pass iterates in reverse
             std::sort(m_visibleSections.begin(), m_visibleSections.end(),
                      [](const SectionRenderData& a, const SectionRenderData& b) {
                          return a.distanceToCamera < b.distanceToCamera;
@@ -434,12 +325,8 @@ namespace Render {
         auto sortingEnd = std::chrono::high_resolution_clock::now();
         m_stats.sortingTimeMs = std::chrono::duration<float, std::milli>(sortingEnd - sortingStart).count();
 
-        // Total build time for draw lists (entire PrepareVisibleSections time)
         auto overallEndTime = std::chrono::high_resolution_clock::now();
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
-        
-        // Note: The individual phase timings (chunkIterationTimeMs, gpuDataLoadTimeMs, frustumCullingTimeMs, sortingTimeMs)
-        // are now measured accurately and should sum to approximately buildDrawListsTimeMs
     }
 
     void ChunkRenderer::BindSharedRenderState(const Camera& camera) {

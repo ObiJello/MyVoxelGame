@@ -5,6 +5,7 @@
 #include "Mesher.hpp"
 #include "../core/Camera.hpp"
 #include "../core/Frustum.hpp"
+#include "../culling/SectionOcclusionGraph.hpp"
 #include "../shader/Shader.hpp"
 #include "../texture/TextureAnimator.hpp"
 #include "../backend/RenderTypes.hpp"
@@ -123,6 +124,8 @@ namespace Render {
 
         void SetEnableFrustumCulling(bool enable) { m_enableFrustumCulling = enable; }
         bool IsEnabledFrustumCulling() const { return m_enableFrustumCulling; }
+        void SetEnableSmartCull(bool enable) { m_enableSmartCull = enable; m_visibleSectionsDirty = true; }
+        bool IsEnabledSmartCull() const { return m_enableSmartCull; }
 
         // Statistics
         const RenderStats& GetStats() const { return m_stats; }
@@ -155,12 +158,16 @@ namespace Render {
 
         // Render configuration
         bool m_enableFrustumCulling = true;
+        bool m_enableSmartCull = true;  // Occlusion culling via VisibilitySet BFS
         bool m_wireframeMode = false;
         bool m_showSectionBounds = false;
         int m_debugLayer = -1; // -1 = all layers
 
         // Render state
         RenderStats m_stats;
+
+        // Occlusion culling graph (BFS from player, skips sections behind solid terrain)
+        SectionOcclusionGraph m_occlusionGraph;
 
         // Visible sections cache
         std::vector<SectionRenderData> m_visibleSections;
@@ -171,6 +178,7 @@ namespace Render {
         bool m_visibleSectionsDirty = true;
         int m_lastCameraChunkX = INT_MAX;
         int m_lastCameraChunkZ = INT_MAX;
+        int m_lastCameraSectionY = INT_MAX;
         float m_lastCameraYaw = 0.0f;
         float m_lastCameraPitch = 0.0f;
 
