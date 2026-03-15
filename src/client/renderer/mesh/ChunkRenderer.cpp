@@ -22,9 +22,9 @@ namespace Render {
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
         m_visibleSections.reserve(2048);
-        m_multiDrawCounts.reserve(2048);
-        m_multiDrawOffsets.reserve(2048);
-        m_multiDrawBaseVertices.reserve(2048);
+        m_perSlabCounts.reserve(16);
+        m_perSlabOffsets.reserve(16);
+        m_perSlabBaseVertices.reserve(16);
         m_distantCutoutCounts.reserve(1024);
         m_distantCutoutOffsets.reserve(1024);
         m_distantCutoutBaseVertices.reserve(1024);
@@ -494,16 +494,23 @@ namespace Render {
         if (!megaBuffer || !megaBuffer->IsInitialized()) return;
 
         // Build multi-draw command arrays from visible sections
-        m_multiDrawCounts.clear();
-        m_multiDrawOffsets.clear();
-        m_multiDrawBaseVertices.clear();
+        uint32_t slabCount = megaBuffer->GetSlabCount();
+        bool useVAB = g_clientMeshManager && g_clientMeshManager->HasVertexAttribBinding();
+
+        // Resize per-slab draw command vectors (reuse allocations across frames)
+        m_perSlabCounts.resize(slabCount);
+        m_perSlabOffsets.resize(slabCount);
+        m_perSlabBaseVertices.resize(slabCount);
+        for (uint32_t s = 0; s < slabCount; s++) {
+            m_perSlabCounts[s].clear();
+            m_perSlabOffsets[s].clear();
+            m_perSlabBaseVertices[s].clear();
+        }
 
         int layerCount = 0;
         uint32_t totalVerts = 0, totalIndices = 0;
 
-        // Lambda to process a section into the multi-draw arrays.
-        // Uses cached draw commands on GPUSectionData (populated at upload time)
-        // instead of per-frame hash lookups into the mega-buffer.
+        // Group visible sections by slab index for per-slab multi-draw.
         auto processSection = [&](const SectionRenderData& section) {
             if (!section.gpuData) return;
             if (!(section.layerMask & layerBit)) return;
@@ -511,10 +518,10 @@ namespace Render {
             const auto& cachedCmd = (layer == RenderLayer::Opaque)      ? section.gpuData->opaqueDrawCmd :
                                     (layer == RenderLayer::Cutout)       ? section.gpuData->cutoutDrawCmd :
                                                                            section.gpuData->translucentDrawCmd;
-            if (cachedCmd.valid && cachedCmd.indexCount > 0) {
-                m_multiDrawCounts.push_back(cachedCmd.indexCount);
-                m_multiDrawOffsets.push_back(reinterpret_cast<const void*>(cachedCmd.indexByteOffset));
-                m_multiDrawBaseVertices.push_back(cachedCmd.baseVertex);
+            if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
+                m_perSlabCounts[cachedCmd.slabIndex].push_back(cachedCmd.indexCount);
+                m_perSlabOffsets[cachedCmd.slabIndex].push_back(reinterpret_cast<const void*>(cachedCmd.indexByteOffset));
+                m_perSlabBaseVertices[cachedCmd.slabIndex].push_back(cachedCmd.baseVertex);
                 layerCount++;
 
                 totalIndices += cachedCmd.indexCount;
@@ -526,28 +533,25 @@ namespace Render {
             }
         };
 
-        // Process in correct order
         if (reverseOrder) {
-            for (auto it = m_visibleSections.rbegin(); it != m_visibleSections.rend(); ++it) {
+            for (auto it = m_visibleSections.rbegin(); it != m_visibleSections.rend(); ++it)
                 processSection(*it);
-            }
         } else {
-            for (const auto& section : m_visibleSections) {
+            for (const auto& section : m_visibleSections)
                 processSection(section);
-            }
         }
 
-        // Issue single multi-draw call for this layer
-        bool useVAB = g_clientMeshManager && g_clientMeshManager->HasVertexAttribBinding();
-        if (!m_multiDrawCounts.empty()) {
-            megaBuffer->BindBuffers(useVAB);
+        // Issue one multi-draw per slab that has sections
+        for (uint32_t s = 0; s < slabCount; s++) {
+            if (m_perSlabCounts[s].empty()) continue;
+            megaBuffer->BindSlab(s, useVAB);
             glMultiDrawElementsBaseVertex(
                 GL_TRIANGLES,
-                m_multiDrawCounts.data(),
+                m_perSlabCounts[s].data(),
                 GL_UNSIGNED_INT,
-                m_multiDrawOffsets.data(),
-                static_cast<GLsizei>(m_multiDrawCounts.size()),
-                m_multiDrawBaseVertices.data()
+                m_perSlabOffsets[s].data(),
+                static_cast<GLsizei>(m_perSlabCounts[s].size()),
+                m_perSlabBaseVertices[s].data()
             );
             m_stats.totalDrawCalls++;
         }
@@ -555,7 +559,6 @@ namespace Render {
         m_stats.totalVerticesRendered += totalVerts;
         m_stats.totalIndicesRendered += totalIndices;
 
-        // Update per-layer stats
         switch (layer) {
             case RenderLayer::Opaque:      m_stats.opaqueSections = layerCount; break;
             case RenderLayer::Cutout:       m_stats.cutoutSections = layerCount; break;

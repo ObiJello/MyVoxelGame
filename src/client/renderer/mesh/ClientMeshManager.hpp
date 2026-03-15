@@ -146,11 +146,11 @@ namespace Render {
         struct ClientMeshConfig {
             // Time budgets (primary controls)
             float meshBuildBudgetMs = 50.0f;        // Time budget for mesh scheduling per frame (chunks)
-            float gpuUploadBudgetMs = 2.0f;         // Time budget for GPU uploads per frame
-            
+            float gpuUploadBudgetMs = 4.0f;         // Time budget for GPU uploads per frame
+
             // Safety caps (rarely hit when budgets are enforced)
             int maxMeshSubmitsPerFrame = 16;        // Safety cap for mesh submissions
-            int maxGPUUploadsPerFrame = 8;          // Safety cap for GPU uploads
+            int maxGPUUploadsPerFrame = 16;         // Safety cap for GPU uploads
             int maxPendingBuilds = 128;             // Max pending mesh builds (OOM guard)
             
             // Priority settings

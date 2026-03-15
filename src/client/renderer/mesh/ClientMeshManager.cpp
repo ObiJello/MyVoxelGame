@@ -52,10 +52,11 @@ namespace Render {
             m_playerPosition = glm::vec3(0.0f, 67.0f, 0.0f);
         }
 
-        // Initialize mega-buffers (one per render layer)
-        m_opaqueMegaBuffer.Initialize(500000, 1000000);
-        m_cutoutMegaBuffer.Initialize(200000, 400000);
-        m_translucentMegaBuffer.Initialize(200000, 400000);
+        // Initialize mega-buffer slab pools (one pool per render layer).
+        // Slab sizes: fixed-size GPU buffers that never grow (new slabs allocated when full).
+        m_opaqueMegaBuffer.Initialize(512000, 1024000);   // 512K verts/slab (~12MB each)
+        m_cutoutMegaBuffer.Initialize(256000, 512000);     // 256K verts/slab (~6MB each)
+        m_translucentMegaBuffer.Initialize(256000, 512000);
 
         // Create the shared block VAO (GL_ARB_vertex_attrib_binding).
         // One VAO defines the vertex format; mega-buffer VBOs are switched at
@@ -142,48 +143,14 @@ namespace Render {
         // Destroy any GPU resources that were deferred during chunk unloads
         ProcessPendingDestroys();
 
-        // Periodic mega-buffer compaction to reclaim fragmented space.
-        // Runs every ~10 seconds (600 frames). Compacts if >30% fragmented.
+        // Periodic cleanup: remove empty slabs from mega-buffer pools.
+        // With slab pool architecture, this just frees unused GPU memory — no data copy.
         static int compactFrameCounter = 0;
         if (++compactFrameCounter >= 600) {
             compactFrameCounter = 0;
-            float fragBefore = std::max({m_opaqueMegaBuffer.GetFragmentation(),
-                                          m_cutoutMegaBuffer.GetFragmentation(),
-                                          m_translucentMegaBuffer.GetFragmentation()});
-            m_opaqueMegaBuffer.CompactIfNeeded(0.3f);
-            m_cutoutMegaBuffer.CompactIfNeeded(0.3f);
-            m_translucentMegaBuffer.CompactIfNeeded(0.3f);
-
-            // If any buffer was actually compacted, refresh all cached draw commands
-            // because compaction changes vertex/index offsets in the mega-buffer regions.
-            if (fragBefore >= 0.3f) {
-                std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-                for (auto& [key, gpuData] : m_gpuData) {
-                    MegaBufferSectionKey megaKey{key.chunkPos, key.sectionY};
-                    ChunkMegaBuffer::DrawCommand cmd;
-                    // Refresh opaque
-                    if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                        gpuData.opaqueDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                                 cmd.indexByteOffset, cmd.baseVertex, true};
-                    } else {
-                        gpuData.opaqueDrawCmd = {};
-                    }
-                    // Refresh cutout
-                    if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                        gpuData.cutoutDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                                 cmd.indexByteOffset, cmd.baseVertex, true};
-                    } else {
-                        gpuData.cutoutDrawCmd = {};
-                    }
-                    // Refresh translucent
-                    if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                        gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                                      cmd.indexByteOffset, cmd.baseVertex, true};
-                    } else {
-                        gpuData.translucentDrawCmd = {};
-                    }
-                }
-            }
+            m_opaqueMegaBuffer.CompactIfNeeded();
+            m_cutoutMegaBuffer.CompactIfNeeded();
+            m_translucentMegaBuffer.CompactIfNeeded();
         }
 
         m_stats.meshUploadsThisFrame = 0;
@@ -623,7 +590,7 @@ namespace Render {
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.opaqueDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                         cmd.indexByteOffset, cmd.baseVertex, true};
+                                         cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
             }
         }
         if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
@@ -637,7 +604,7 @@ namespace Render {
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.cutoutDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                         cmd.indexByteOffset, cmd.baseVertex, true};
+                                         cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
             }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
@@ -651,7 +618,7 @@ namespace Render {
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                              cmd.indexByteOffset, cmd.baseVertex, true};
+                                              cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
             }
         }
 

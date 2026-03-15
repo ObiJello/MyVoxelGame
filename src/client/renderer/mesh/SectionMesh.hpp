@@ -103,6 +103,7 @@ namespace Render {
             size_t indexByteOffset = 0;
             int32_t baseVertex = 0;
             bool valid = false;
+            uint32_t slabIndex = 0;
         };
         CachedDrawCmd opaqueDrawCmd;
         CachedDrawCmd cutoutDrawCmd;

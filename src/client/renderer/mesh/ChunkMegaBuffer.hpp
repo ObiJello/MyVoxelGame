@@ -32,19 +32,18 @@ namespace Render {
     };
 
     // ========================================================================
-    // GPU MEGA-BUFFER
+    // GPU MEGA-BUFFER (Slab Pool Architecture)
     // ========================================================================
     //
-    // Packs all chunk section vertices/indices for one render layer into a
-    // single large VBO + IBO, enabling multi-draw rendering via
-    // glMultiDrawElementsBaseVertex (3 draw calls instead of 3000+).
+    // Packs chunk section vertices/indices for one render layer into a pool of
+    // fixed-size GPU buffer slabs, enabling multi-draw rendering via
+    // glMultiDrawElementsBaseVertex without buffer grow hitches.
     //
     // One ChunkMegaBuffer is used per render layer (opaque, cutout, translucent).
-    // Sections upload their vertex/index data into the mega-buffer; indices are
-    // stored 0-based per section and baseVertex offset is used at draw time.
+    // When a slab fills up, a new empty slab is allocated (<1ms, no data copy).
+    // Sections are uploaded to whichever slab has free space.
     //
-    // Free-list allocator manages regions with first-fit and coalescing.
-    // Buffers grow automatically when capacity is exceeded.
+    // Free-list allocator per slab manages regions with first-fit and coalescing.
     //
     class ChunkMegaBuffer {
     public:
@@ -59,26 +58,20 @@ namespace Render {
         // LIFECYCLE
         // ========================================================================
 
-        void Initialize(size_t initialVertexCapacity = 500000, size_t initialIndexCapacity = 1000000);
+        // Initialize with a fixed slab size. The first slab is allocated immediately.
+        void Initialize(size_t slabVertexCapacity = 512000, size_t slabIndexCapacity = 1024000);
         void Shutdown();
-        bool IsInitialized() const { return m_vbo != 0; }
+        bool IsInitialized() const { return !m_slabs.empty(); }
 
         // ========================================================================
         // SECTION MANAGEMENT
         // ========================================================================
 
-        // Upload a section's mesh data into the mega-buffer.
-        // vertexData: raw float array (24 bytes per vertex)
-        // indexData: uint32_t indices (0-based for this section)
-        // Returns false if allocation fails after grow attempt.
         bool UploadSection(const MegaBufferSectionKey& key,
                            const float* vertexData, size_t vertexCount,
                            const uint32_t* indexData, size_t indexCount);
 
-        // Remove a section and free its region
         void RemoveSection(const MegaBufferSectionKey& key);
-
-        // Check if a section exists
         bool HasSection(const MegaBufferSectionKey& key) const;
 
         // ========================================================================
@@ -87,65 +80,68 @@ namespace Render {
 
         struct DrawCommand {
             GLsizei indexCount;
-            size_t indexByteOffset;   // Byte offset into IBO
+            size_t indexByteOffset;   // Byte offset into slab's IBO
             GLint baseVertex;         // Added to each index by GL
+            uint32_t slabIndex;       // Which slab to bind before drawing
         };
 
-        // Get draw command for a specific section (returns false if not found)
         bool GetDrawCommand(const MegaBufferSectionKey& key, DrawCommand& outCmd) const;
 
         // ========================================================================
-        // BINDING
+        // SLAB BINDING
         // ========================================================================
 
-        // Bind this mega-buffer's VBO and IBO into the currently-bound shared VAO.
-        // Two paths (matching Minecraft's VertexArrayCache):
-        //   useVertexAttribBinding=true:  glBindVertexBuffer (Separate path, Win/Linux)
-        //   useVertexAttribBinding=false: glBindBuffer + glVertexAttribPointer (Emulated path, macOS)
-        // Both avoid glBindVertexArray switches = no GPU pipeline flush.
-        void BindBuffers(bool useVertexAttribBinding) const;
+        // Bind a specific slab's VBO and IBO into the currently-bound shared VAO.
+        void BindSlab(uint32_t slabIndex, bool useVertexAttribBinding) const;
 
-        // Raw buffer accessors (for external systems that need the GL names)
-        GLuint GetVBO() const { return m_vbo; }
-        GLuint GetIBO() const { return m_ibo; }
+        uint32_t GetSlabCount() const { return static_cast<uint32_t>(m_slabs.size()); }
 
         // ========================================================================
         // STATISTICS
         // ========================================================================
 
         size_t GetSectionCount() const { return m_regions.size(); }
-        size_t GetUsedVertices() const { return m_vertexHighWater; }
-        size_t GetUsedIndices() const { return m_indexHighWater; }
-        size_t GetVertexCapacity() const { return m_vboCapacity; }
-        size_t GetIndexCapacity() const { return m_iboCapacity; }
         size_t GetMemoryUsageBytes() const;
-        float GetFragmentation() const;
+        size_t GetTotalVertexCapacity() const;
+        size_t GetTotalIndexCapacity() const;
+        size_t GetUsedVertices() const;
+        size_t GetUsedIndices() const;
 
         // ========================================================================
-        // DEFRAGMENTATION
+        // MAINTENANCE
         // ========================================================================
 
-        // Compact the buffer if fragmentation exceeds the threshold (0.0 = none, 1.0 = all freed).
-        // Performs a full rebuild: copies all live regions contiguously into new buffers.
-        void CompactIfNeeded(float threshold = 0.5f);
+        // No-copy cleanup: just deletes completely empty slabs.
+        // Returns true if any slabs were removed.
+        bool CompactIfNeeded(float threshold = 0.5f);
 
     private:
-        // OpenGL resources (no per-buffer VAO — the shared block VAO in
-        // ClientMeshManager defines the vertex format once; mega-buffers are
-        // switched with glBindVertexBuffer, avoiding GPU pipeline flushes).
-        GLuint m_vbo = 0;
-        GLuint m_ibo = 0;
+        // Per-slab GPU resources and allocator state
+        struct Slab {
+            GLuint vbo = 0;
+            GLuint ibo = 0;
+            size_t vboCapacity = 0;
+            size_t iboCapacity = 0;
+            size_t vertexHighWater = 0;
+            size_t indexHighWater = 0;
+            size_t sectionCount = 0;  // Live sections in this slab
 
-        // Capacities (in elements, not bytes)
-        size_t m_vboCapacity = 0;  // Max vertices
-        size_t m_iboCapacity = 0;  // Max indices
+            // Free-list per slab (sorted by offset for coalescing)
+            struct FreeBlock {
+                size_t offset;
+                size_t size;
+            };
+            std::vector<FreeBlock> freeVertexBlocks;
+            std::vector<FreeBlock> freeIndexBlocks;
+        };
 
-        // High-water marks (next free position at the end)
-        size_t m_vertexHighWater = 0;
-        size_t m_indexHighWater = 0;
+        std::vector<Slab> m_slabs;
+        size_t m_slabVertexCapacity = 0;
+        size_t m_slabIndexCapacity = 0;
 
-        // Per-section region tracking
+        // Per-section region tracking (which slab + offset)
         struct Region {
+            uint32_t slabIndex;
             size_t vertexOffset;
             size_t vertexCount;
             size_t indexOffset;
@@ -153,28 +149,19 @@ namespace Render {
         };
         std::unordered_map<MegaBufferSectionKey, Region, MegaBufferSectionKeyHash> m_regions;
 
-        // Free-list (sorted by offset for coalescing)
-        struct FreeBlock {
-            size_t offset;
-            size_t size;
-        };
-        std::vector<FreeBlock> m_freeVertexBlocks;
-        std::vector<FreeBlock> m_freeIndexBlocks;
+        // Slab management
+        uint32_t AllocateSlab();
+        bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
+                             const float* vertexData, size_t vertexCount,
+                             const uint32_t* indexData, size_t indexCount);
 
-        // Total freed (for fragmentation calculation)
-        size_t m_freedVertices = 0;
-        size_t m_freedIndices = 0;
+        // Internal allocation (first-fit with bump fallback, per-slab)
+        static bool AllocRegion(std::vector<Slab::FreeBlock>& freeList, size_t& highWater,
+                                size_t capacity, size_t count, size_t& outOffset);
+        static void FreeRegion(std::vector<Slab::FreeBlock>& freeList,
+                               size_t offset, size_t count);
 
-        // Internal allocation (first-fit with bump fallback)
-        bool AllocRegion(std::vector<FreeBlock>& freeList, size_t& highWater, size_t capacity,
-                         size_t count, size_t& outOffset);
-        void FreeRegion(std::vector<FreeBlock>& freeList, size_t& freedTotal, size_t offset, size_t count);
-
-        // Buffer management
-        void GrowVBO(size_t newCapacity);
-        void GrowIBO(size_t newCapacity);
-
-        static constexpr size_t VERTEX_STRIDE = 24;  // 24 bytes per vertex
+        static constexpr size_t VERTEX_STRIDE = 24;
         static constexpr size_t INDEX_SIZE = sizeof(uint32_t);
     };
 

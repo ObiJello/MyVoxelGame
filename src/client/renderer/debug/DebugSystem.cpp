@@ -1026,9 +1026,8 @@ namespace Debug {
                 if (mb && mb->IsInitialized()) {
                     float usedMB = static_cast<float>(mb->GetUsedVertices() * 24 + mb->GetUsedIndices() * 4) / (1024.0f * 1024.0f);
                     float capacityMB = static_cast<float>(mb->GetMemoryUsageBytes()) / (1024.0f * 1024.0f);
-                    float frag = mb->GetFragmentation() * 100.0f;
-                    ImGui::Text("  %-10s %5.1f / %5.1f MB  (%zu sec, %.0f%% frag)",
-                               layerNames[i], usedMB, capacityMB, mb->GetSectionCount(), frag);
+                    ImGui::Text("  %-10s %5.1f / %5.1f MB  (%zu sec, %u slabs)",
+                               layerNames[i], usedMB, capacityMB, mb->GetSectionCount(), mb->GetSlabCount());
                 }
             }
         }

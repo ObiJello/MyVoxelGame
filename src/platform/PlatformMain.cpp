@@ -663,12 +663,8 @@ namespace PlatformMain {
             PROFILE_TIMER_END(network, metrics.networkProcessingTime);
             }
 
-            // 2. Process completed mesh build results from worker threads
-            { PROFILE_ZONE_N("MeshResults");
-            PROFILE_TIMER_START(meshresults);
-            Render::ProcessClientMeshBuildResults();  // Drain MeshResultQueue
-            PROFILE_TIMER_END(meshresults, metrics.meshResultProcessingTime);
-            }
+            // 2. Mesh result uploads are handled by UploadMeshResultsWithBudget()
+            // in step 7 (GPUUpload) with a time budget to prevent frame hitches.
 
             // 3. Poll events and handle input
             bool cursorEnabled;

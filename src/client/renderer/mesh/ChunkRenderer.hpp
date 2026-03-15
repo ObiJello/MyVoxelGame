@@ -174,10 +174,10 @@ namespace Render {
         float m_lastCameraYaw = 0.0f;
         float m_lastCameraPitch = 0.0f;
 
-        // Multi-draw command arrays (reused each frame to avoid allocation)
-        std::vector<GLsizei> m_multiDrawCounts;
-        std::vector<const void*> m_multiDrawOffsets;
-        std::vector<GLint> m_multiDrawBaseVertices;
+        // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
+        std::vector<std::vector<GLsizei>> m_perSlabCounts;
+        std::vector<std::vector<const void*>> m_perSlabOffsets;
+        std::vector<std::vector<GLint>> m_perSlabBaseVertices;
 
         // Distant cutout multi-draw arrays (rendered as solid in opaque pass)
         std::vector<GLsizei> m_distantCutoutCounts;
