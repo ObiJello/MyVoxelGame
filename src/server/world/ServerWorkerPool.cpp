@@ -7,6 +7,7 @@
 #include "server/IntegratedServer.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
+#include <future>
 
 namespace Threading {
 
@@ -74,10 +75,19 @@ namespace Threading {
         m_running.store(false);
         m_jobCondition.notify_all();
 
-        // Wait for all threads to finish
-        for (auto& thread : m_workerThreads) {
-            if (thread.joinable()) {
-                thread.join();
+        // Wait for worker threads with a timeout per thread.
+        // Workers stuck inside the terrain library's blocking getChunk() loop
+        // have no abort signal, so we detach them after a grace period
+        // rather than hanging forever on shutdown.
+        for (size_t i = 0; i < m_workerThreads.size(); i++) {
+            auto& thread = m_workerThreads[i];
+            if (!thread.joinable()) continue;
+
+            // std::thread has no try_join_for, so use a helper async to implement timeout
+            auto joinTask = std::async(std::launch::async, [&thread]() { thread.join(); });
+            if (joinTask.wait_for(std::chrono::seconds(2)) == std::future_status::timeout) {
+                Log::Warning("ServerWorkerPool: Worker %zu stuck in blocking call, detaching", i);
+                thread.detach();
             }
         }
         m_workerThreads.clear();
