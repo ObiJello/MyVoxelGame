@@ -4,7 +4,7 @@ When replacing `src/my_terrain_library/` with a newer version, re-apply these pa
 
 ## Patch 1: Abort flag for clean shutdown
 
-**Problem:** `ServerChunkCache::getChunk()` has a blocking `while (!future->isDone())` loop that prevents worker threads from exiting during shutdown, causing the game to hang on close.
+**Problem:** `ServerChunkCache::getChunk()` has two blocking paths (main thread `while` loop and worker thread `future->join()`) that prevent threads from exiting during shutdown, causing the game to hang on close.
 
 **Files to modify:**
 
@@ -23,19 +23,34 @@ Add to the **private** section (after `m_taskPoller`):
 std::atomic<bool> m_abort{false};
 ```
 
-Also add `#include <atomic>` if not already present (it should be via other headers).
-
 ### `src/server/level/ServerChunkCache.cpp`
 
-In `getChunk()`, add an abort check at the top of the `while (!future->isDone())` loop:
+**Worker thread path** — replace the `future->join()` call with an abort-aware poll:
+
+```cpp
+// If not on main thread, dispatch and wait
+if (std::this_thread::get_id() != m_mainThreadId) {
+    if (m_abort.load(std::memory_order_acquire)) return nullptr;
+
+    auto future = getChunkFuture(x, z, targetStatus, loadOrGenerate);
+
+    // Poll with abort check instead of blocking join()
+    while (!future->isDone()) {
+        if (m_abort.load(std::memory_order_acquire)) return nullptr;
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    auto result = future->getNow(nullptr);
+    return result ? result->orElse(nullptr) : nullptr;
+}
+```
+
+**Main thread path** — add abort check at top of the `while (!future->isDone())` loop:
 
 ```cpp
 while (!future->isDone()) {
-    // ADD THIS:
     if (m_abort.load(std::memory_order_acquire)) {
         return nullptr;
     }
-
     // ... existing code (runDistanceManagerUpdates, taskPoller, yield) ...
 }
 ```

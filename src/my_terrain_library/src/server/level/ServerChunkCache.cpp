@@ -56,10 +56,17 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
 {
     // If not on main thread, dispatch and wait
     if (std::this_thread::get_id() != m_mainThreadId) {
-        // Note: In full implementation, would use managedBlock
-        // For now, simple synchronous call
+        if (m_abort.load(std::memory_order_acquire)) return nullptr;
+
         auto future = getChunkFuture(x, z, targetStatus, loadOrGenerate);
-        auto result = future->join();
+
+        // Poll with abort check instead of blocking join() — prevents
+        // worker threads from hanging forever during shutdown.
+        while (!future->isDone()) {
+            if (m_abort.load(std::memory_order_acquire)) return nullptr;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        auto result = future->getNow(nullptr);
         return result ? result->orElse(nullptr) : nullptr;
     }
 
