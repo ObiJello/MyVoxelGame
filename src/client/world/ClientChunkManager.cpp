@@ -1036,6 +1036,7 @@ namespace Client {
     }
     
     MeshAcceptance ClientChunkManager::AcceptMeshResult(const Network::MeshBuildResult& result) {
+        PROFILE_ZONE_N("AcceptMeshResult");
         ASSERT_MAIN_THREAD();
         
         // Check if chunk still exists

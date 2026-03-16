@@ -269,6 +269,7 @@ namespace Render {
     // ========================================================================
     
     void ClientMeshManager::ProcessMeshBuildResult(const Network::MeshBuildResult& result) {
+        PROFILE_ZONE_N("ProcessMeshResult");
         // Let ClientChunkManager decide whether to accept or drop this result
         auto decision = m_chunkManager->AcceptMeshResult(result);
         
@@ -313,7 +314,7 @@ namespace Render {
             
             case Client::MeshApplyAction::Drop_StaleVersion:
                 m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
-                Log::Info("MESH DROPPED STALE: chunk (%d,%d) section %d gen=%u",
+                Log::Debug("MESH DROPPED STALE: chunk (%d,%d) section %d gen=%u",
                          result.chunkPos.x, result.chunkPos.z, result.sectionY, result.generation);
                 break;
 
