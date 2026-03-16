@@ -2,6 +2,7 @@
 #include "ClientConnection.hpp"
 #include "NetworkClient.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
 #include "../world/ClientChunkManager.hpp"
 #include "platform/GameDirectory.hpp"
@@ -327,48 +328,41 @@ namespace Client {
     // ========================================================================
     
     void ClientConnection::DrainIncomingPackets() {
+        PROFILE_ZONE;
         if (!m_client) return;
-        
-        // Get packet handler from client
+
         auto handler = m_client->GetPacketHandler();
         if (!handler) return;
-        
-        // Process packets in batches to avoid stalling
+
+        // Budget-aware drain: process packets sequentially, but after completing
+        // a chunk batch (BatchFinished), check if we've exceeded the 7ms budget.
+        // This matches Minecraft's ChunkBatchSizeCalculator target — the batch
+        // timing accurately measures main-thread cost, and the server's adaptive
+        // rate control (back-pressure via ack) naturally limits throughput.
+        static constexpr float CHUNK_BUDGET_MS = 7.0f;
+        auto frameStart = std::chrono::steady_clock::now();
         size_t processed = 0;
-        
+
         Network::IncomingPacket packet;
         while (TryPopIncoming(packet)) {
             try {
-                // Apply packet through visitor pattern (main thread only)
                 if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
-                    // Debug log for ChunkDataS2C packets
-                    if (packet.packet->getId() == Network::PacketId::ChunkDataS2C) {
-                        Log::Info("[ClientConnection] Processing ChunkDataS2C packet from queue");
-                    }
                     s2cPacket->apply(*handler);
-                    processed++;  // Only count as processed if successfully handled
-                } else {
-                    // Debug: packet couldn't be cast to IS2CPacket
-                    if (packet.packet) {
-                        Log::Warning("[ClientConnection] Failed to cast packet ID 0x%02X to IS2CPacket", 
-                                   static_cast<int>(packet.packet->getId()));
-                    } else {
-                        Log::Warning("[ClientConnection] Null packet in queue");
+                    processed++;
+
+                    // After each batch finishes, check if budget is exceeded.
+                    // Break here rather than mid-batch to keep batch timing accurate.
+                    if (packet.packet->getId() == Network::PacketId::ChunkBatchFinishedS2C) {
+                        float elapsed = std::chrono::duration<float, std::milli>(
+                            std::chrono::steady_clock::now() - frameStart).count();
+                        if (elapsed > CHUNK_BUDGET_MS) {
+                            break;
+                        }
                     }
                 }
             } catch (const std::exception& e) {
                 Log::Error("[ClientConnection] Exception applying packet: %s", e.what());
             }
-        }
-        
-        if (processed > 0) {
-            Log::Debug("[ClientConnection] Processed %zu packets this frame", processed);
-        }
-        
-        // Log if queue is getting full
-        size_t queueSize = GetIncomingQueueSize();
-        if (queueSize > 1000) {
-            Log::Warning("[ClientConnection] Incoming packet queue large: %zu packets", queueSize);
         }
     }
 

@@ -188,13 +188,18 @@ namespace Server {
             Log::Info("✓ Server network I/O thread stopped");
         }
         
+        // Cleanup session system BEFORE destroying network resources.
+        // Sessions and SendScheduler hold ServerConnection shared_ptrs with
+        // Asio strands — these must be destroyed while io_context is still alive.
+        CleanupSessionSystem();
+
         // Now it's safe to destroy NetworkServer and io_context
         // since both the server thread and I/O thread are no longer running
         if (m_networkServer) {
             m_networkServer->Stop();
             m_networkServer.reset();
         }
-        
+
         if (m_ioContext) {
             m_ioContext.reset();
         }
@@ -218,10 +223,9 @@ namespace Server {
         
         // Clear state
         m_pendingChunkLoads.clear();
-        
-        // Cleanup session management system
-        CleanupSessionSystem();
-        
+
+        // Note: CleanupSessionSystem() already called in Stop() before io_context destruction
+
         // Shutdown and release the world
         if (m_world) {
             Log::Info("Shutting down server-owned world...");

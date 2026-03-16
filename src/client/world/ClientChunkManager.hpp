@@ -229,6 +229,15 @@ namespace Client {
         // Throttle mesh scheduling to ~30Hz instead of every frame
         std::chrono::steady_clock::time_point m_lastMeshScheduleTime{};
 
+        // Persistent candidate buffer — reused across calls to avoid per-call heap allocation
+        struct SectionCandidate {
+            Game::Math::ChunkPos chunkPos;
+            int sectionY;
+            float effectiveDistSq;  // Squared distance (no sqrt needed for sorting)
+            ClientChunk* chunk;     // Cached pointer — avoids redundant m_chunks.find() in submission
+        };
+        std::vector<SectionCandidate> m_meshCandidates;
+
 
         // ========================================================================
         // INTERNAL METHODS

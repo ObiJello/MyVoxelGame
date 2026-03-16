@@ -20,9 +20,12 @@ namespace Render {
         // Light data (sky and block light, 4 bits each)
         std::array<uint8_t, 2048> lightData;
         
-        // Neighbor section snapshots for face culling
-        // Index: 0=north, 1=south, 2=east, 3=west, 4=up, 5=down
-        std::array<std::array<Game::BlockID, 4096>, 6> neighbors;
+        // Neighbor boundary planes for face culling (16x16 = 256 blocks per face).
+        // Only the single layer adjacent to this section is needed (mesher reads 1 block into neighbors).
+        // Index: 0=north(-z, stores z=15), 1=south(+z, stores z=0),
+        //        2=east(+x, stores x=0), 3=west(-x, stores x=15),
+        //        4=up(+y, stores y=0), 5=down(-y, stores y=15)
+        std::array<std::array<Game::BlockID, 256>, 6> neighbors;
         
         // Metadata
         bool isEmpty = true;
@@ -46,13 +49,20 @@ namespace Render {
             return Game::BlockID::Air;
         }
         
-        // Get block from neighbor section
+        // Get block from neighbor boundary plane.
+        // Each face stores a 16x16 plane (256 blocks) — the single layer adjacent to this section.
+        // Coordinates are remapped to 2D based on which axis the face is perpendicular to.
         Game::BlockID GetNeighborBlock(int face, int x, int y, int z) const {
-            if (face >= 0 && face < 6 && x >= 0 && x < 16 && 
-                y >= 0 && y < 16 && z >= 0 && z < 16) {
-                return neighbors[face][y * 256 + z * 16 + x];
+            if (face < 0 || face >= 6) return Game::BlockID::Air;
+            int idx;
+            switch (face) {
+                case 0: case 1: idx = y * 16 + x; break;  // N/S: plane perpendicular to Z
+                case 2: case 3: idx = y * 16 + z; break;  // E/W: plane perpendicular to X
+                case 4: case 5: idx = z * 16 + x; break;  // U/D: plane perpendicular to Y
+                default: return Game::BlockID::Air;
             }
-            return Game::BlockID::Air;
+            if (idx < 0 || idx >= 256) return Game::BlockID::Air;
+            return neighbors[face][idx];
         }
     };
 
