@@ -334,31 +334,15 @@ namespace Client {
         auto handler = m_client->GetPacketHandler();
         if (!handler) return;
 
-        // Budget-aware drain: process packets sequentially, but after completing
-        // a chunk batch (BatchFinished), check if we've exceeded the 7ms budget.
-        // This matches Minecraft's ChunkBatchSizeCalculator target — the batch
-        // timing accurately measures main-thread cost, and the server's adaptive
-        // rate control (back-pressure via ack) naturally limits throughput.
-        static constexpr float CHUNK_BUDGET_MS = 7.0f;
-        auto frameStart = std::chrono::steady_clock::now();
-        size_t processed = 0;
-
+        // Drain ALL queued packets — matches Minecraft's PacketProcessor.processQueuedPackets().
+        // No budget check needed: the client tick (20 TPS) naturally limits how many packets
+        // accumulate per drain, and the server's ChunkBatchSizeCalculator + back-pressure
+        // limits chunk data throughput to ~7ms per tick.
         Network::IncomingPacket packet;
         while (TryPopIncoming(packet)) {
             try {
                 if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
                     s2cPacket->apply(*handler);
-                    processed++;
-
-                    // After each batch finishes, check if budget is exceeded.
-                    // Break here rather than mid-batch to keep batch timing accurate.
-                    if (packet.packet->getId() == Network::PacketId::ChunkBatchFinishedS2C) {
-                        float elapsed = std::chrono::duration<float, std::milli>(
-                            std::chrono::steady_clock::now() - frameStart).count();
-                        if (elapsed > CHUNK_BUDGET_MS) {
-                            break;
-                        }
-                    }
                 }
             } catch (const std::exception& e) {
                 Log::Error("[ClientConnection] Exception applying packet: %s", e.what());

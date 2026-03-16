@@ -670,50 +670,41 @@ namespace PlatformMain {
         Log::Info("   Client connected via TCP to localhost:%d", serverPort);
         Log::Info("=== ENTERING CLIENT RENDER LOOP (UNLOCKED FPS) ===");
 
-        // === MINECRAFT-STYLE CLIENT RENDER LOOP (UNLOCKED FPS) ===
-        
+        // === MINECRAFT-STYLE MAIN LOOP ===
+        // Matches Minecraft.java: processQueuedPackets() → tick() (20 TPS) → render() (uncapped)
+        // Packets and game logic run at fixed 20 TPS. Rendering is decoupled at uncapped FPS.
+
         // Initialize camera for client thread
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 67.0f, 0.0f);
         camera.physicsControlled = true;
-        
+
         // Network tracking
         uint32_t playerMoveSequence = 0;
-        
+
         // Performance tracking
         Debug::PerformanceMetrics metrics;
         auto frameStartTime = std::chrono::high_resolution_clock::now();
 
-        // CLIENT RENDER LOOP (like Minecraft's GameRenderer.render)
+        // Client tick timing (20 TPS, matching Minecraft and server)
+        static constexpr auto CLIENT_TICK_INTERVAL = std::chrono::milliseconds(50);
+        static constexpr int MAX_TICKS_PER_FRAME = 10;
+        auto nextClientTick = std::chrono::steady_clock::now();
+
         while (!glfwWindowShouldClose(window)) {
             frameStartTime = std::chrono::high_resolution_clock::now();
-            
-            // 1. Drain incoming network packets on main thread (Minecraft-style)
-            { PROFILE_ZONE_N("Network");
-            PROFILE_TIMER_START(network);
-            // Note: I/O is handled on dedicated thread, we just drain the queue here
-            if (networkClient) {
-                networkClient->DrainIncomingPackets();
-            }
-            PROFILE_TIMER_END(network, metrics.networkProcessingTime);
-            }
 
-            // 2. Mesh result uploads are handled by UploadMeshResultsWithBudget()
-            // in step 7 (GPUUpload) with a time budget to prevent frame hitches.
-
-            // 3. Poll events and handle input
+            // === PER-FRAME: Poll events and handle input (must be every frame for responsiveness) ===
             bool cursorEnabled;
             { PROFILE_ZONE_N("Input");
             PROFILE_TIMER_START(input);
             glfwPollEvents();
             Input::UpdateKeyStates();
 
-            // Handle escape key
             if (Input::IsKeyDown(Input::Key::Escape)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
-            // Handle fullscreen toggle (F11)
             if (Input::IsKeyPressed(Input::Key::F11)) {
                 ToggleFullscreen(window);
             }
@@ -726,8 +717,51 @@ namespace PlatformMain {
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
             frameCounter++;
-            
-            // 4. Update time and game logic
+
+            // === CLIENT TICK (20 TPS, matches Minecraft.java runTick()) ===
+            // Minecraft pattern: process ALL queued packets, then run game tick.
+            // Multiple ticks per frame if behind (catch-up, capped at 10).
+            {
+            auto now = std::chrono::steady_clock::now();
+            int ticksThisFrame = 0;
+            while (now >= nextClientTick && ticksThisFrame < MAX_TICKS_PER_FRAME) {
+                PROFILE_ZONE_N("ClientTick");
+
+                // 1. Drain ALL queued packets (Minecraft: packetProcessor.processQueuedPackets())
+                { PROFILE_ZONE_N("Network");
+                PROFILE_TIMER_START(network);
+                if (networkClient) {
+                    networkClient->DrainIncomingPackets();
+                }
+                PROFILE_TIMER_END(network, metrics.networkProcessingTime);
+                }
+
+                // 2. Schedule mesh builds (fixed-rate, not per-frame)
+                { PROFILE_ZONE_N("MeshSchedule");
+                PROFILE_TIMER_START(meshsched);
+                glm::vec3 tickPlayerPos = player.physics.position;
+                Render::ScheduleClientMeshBuilds(tickPlayerPos);
+                PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
+                }
+
+                // 3. Send player position to server (one packet per tick = 20 Hz)
+                if (networkClient->IsConnected()) {
+                    glm::vec3 playerPos = player.physics.position;
+                    Network::PlayerMoveC2SPacket movePacket;
+                    movePacket.position = playerPos;
+                    movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
+                    movePacket.onGround = player.physics.isOnGround;
+                    movePacket.sequenceNumber = ++playerMoveSequence;
+                    movePacket.timestamp = std::chrono::steady_clock::now();
+                    networkClient->GetConnection()->SendPlayerMove(movePacket);
+                }
+
+                nextClientTick += CLIENT_TICK_INTERVAL;
+                ticksThisFrame++;
+            }
+            }
+
+            // === PER-FRAME: Game logic (variable dt for smooth rendering) ===
             float dt;
             { PROFILE_ZONE_N("GameLogic");
             PROFILE_TIMER_START(gamelogic);
@@ -735,68 +769,19 @@ namespace PlatformMain {
             dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt * 1000.0f);
 
-            // Update player physics and camera
             player.UpdatePhysics(dt, world);
             camera.position = player.GetEyePosition();
             camera.Update(dt);
-
-            // Update raycast cache
             player.UpdateRaycast(camera);
-
-            // Update player controller (handles interactions)
             playerController.Tick(dt);
-
-            // Update visual smoothing
             player.UpdateVisual(dt);
-
-            // Update statistics
             player.UpdateStatistics(dt);
             PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
             }
 
-            // 5. Set player position for mesh prioritization
+            // === PER-FRAME: Set player position for mesh prioritization ===
             glm::vec3 playerPos = player.physics.position;
             Render::SetClientMeshPlayerPosition(playerPos);
-            
-            // Send player position to server via TCP (throttled to 50ms / 20Hz)
-            // Static variables MUST be outside the if block to ensure they persist
-            static auto lastPlayerSendTime = std::chrono::steady_clock::now();
-            static bool playerSendInitialized = false;
-            
-            if (networkClient->IsConnected()) {
-                auto now = std::chrono::steady_clock::now();
-                
-                // Initialize on first run
-                if (!playerSendInitialized) {
-                    lastPlayerSendTime = now;
-                    playerSendInitialized = true;
-                }
-                
-                auto timeSinceLastSend = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastPlayerSendTime);
-                
-                // Only send every 50ms (20 times per second)
-                if (timeSinceLastSend.count() >= 50) {
-                    // Send player movement packet
-                    Network::PlayerMoveC2SPacket movePacket;
-                    movePacket.position = playerPos;
-                    movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
-                    movePacket.onGround = player.physics.isOnGround;
-                    movePacket.sequenceNumber = ++playerMoveSequence;
-                    movePacket.timestamp = std::chrono::steady_clock::now();
-                    
-                    networkClient->GetConnection()->SendPlayerMove(movePacket);
-                    
-                    // Update last send time
-                    lastPlayerSendTime = now;
-                }
-            }
-
-            // 6. Schedule mesh builds for LOADED chunks
-            { PROFILE_ZONE_N("MeshSchedule");
-            PROFILE_TIMER_START(meshsched);
-            Render::ScheduleClientMeshBuilds(playerPos);
-            PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
-            }
 
             // 7. Perform GPU uploads
             { PROFILE_ZONE_N("GPUUpload");

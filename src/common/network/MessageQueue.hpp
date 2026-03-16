@@ -1,145 +1,166 @@
 // File: src/common/network/MessageQueue.hpp
+// Lock-free MPSC queue for network packet communication.
+// Based on Dmitry Vyukov's intrusive MPSC queue — the same pattern
+// underlying Java's ConcurrentLinkedQueue (used by Minecraft's PacketProcessor).
+//
+// Single consumer (main/game thread) pops. One or more producers (I/O thread) push.
+// Push is lock-free (CAS on head). Pop is wait-free (single consumer, no contention).
 #pragma once
 
-#include <queue>
-#include <mutex>
-#include <condition_variable>
 #include <atomic>
+#include <vector>
+#include <chrono>
+#include <thread>
+#include <cstddef>
 
 namespace Network {
 
-    // Thread-safe message queue template for packet communication
     template<typename T>
     class MessageQueue {
     public:
-        static constexpr size_t DEFAULT_MAX_SIZE = 1024;
-        
-        explicit MessageQueue(size_t maxSize = DEFAULT_MAX_SIZE) 
-            : m_maxSize(maxSize) {}
-        ~MessageQueue() = default;
+        static constexpr size_t DEFAULT_MAX_SIZE = 2048;
 
-        // Non-copyable, non-movable for safety
+        explicit MessageQueue(size_t maxSize = DEFAULT_MAX_SIZE)
+            : m_maxSize(maxSize) {
+            // Sentinel node — simplifies push/pop logic
+            Node* sentinel = new Node{};
+            m_head.store(sentinel, std::memory_order_relaxed);
+            m_tail = sentinel;
+        }
+
+        ~MessageQueue() {
+            // Drain remaining nodes
+            T dummy;
+            while (try_pop(dummy)) {}
+            // Delete sentinel
+            delete m_tail;
+        }
+
+        // Non-copyable, non-movable
         MessageQueue(const MessageQueue&) = delete;
         MessageQueue& operator=(const MessageQueue&) = delete;
         MessageQueue(MessageQueue&&) = delete;
         MessageQueue& operator=(MessageQueue&&) = delete;
 
-        // Try to push a message (returns false if queue is full)
+        // Push (producer side, lock-free via CAS)
         bool try_push(T&& message) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_queue.size() >= m_maxSize) {
-                m_droppedCount++;
+            size_t currentSize = m_size.load(std::memory_order_relaxed);
+            if (currentSize >= m_maxSize) {
+                m_droppedCount.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            m_queue.push(std::move(message));
-            m_condition.notify_one();
+
+            Node* node = new Node{std::move(message)};
+            Node* prev = m_head.exchange(node, std::memory_order_acq_rel);
+            prev->next.store(node, std::memory_order_release);
+            m_size.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
 
         bool try_push(const T& message) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_queue.size() >= m_maxSize) {
-                m_droppedCount++;
+            size_t currentSize = m_size.load(std::memory_order_relaxed);
+            if (currentSize >= m_maxSize) {
+                m_droppedCount.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            m_queue.push(message);
-            m_condition.notify_one();
+
+            Node* node = new Node{message};
+            Node* prev = m_head.exchange(node, std::memory_order_acq_rel);
+            prev->next.store(node, std::memory_order_release);
+            m_size.fetch_add(1, std::memory_order_relaxed);
             return true;
         }
 
-        // Try to pop a message (non-blocking, returns false if empty)
+        // Pop (consumer side, single-threaded — no CAS needed)
         bool try_pop(T& message) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_queue.empty()) {
-                return false;
-            }
-            message = std::move(m_queue.front());
-            m_queue.pop();
+            Node* tail = m_tail;
+            Node* next = tail->next.load(std::memory_order_acquire);
+            if (!next) return false;
+
+            message = std::move(next->data);
+            m_tail = next;
+            delete tail;
+            m_size.fetch_sub(1, std::memory_order_relaxed);
             return true;
         }
 
-        // Check if queue has messages without removing them
+        // Check if queue has messages (approximate)
         bool has_message() const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return !m_queue.empty();
+            return m_tail->next.load(std::memory_order_acquire) != nullptr;
         }
-        
-        // Peek at the front message and apply a function to it (for move-only types)
+
+        // Peek at front (for inspection without consuming)
         template<typename Func>
         bool peek_front(Func&& func) const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_queue.empty()) {
-                return false;
-            }
-            func(m_queue.front());
+            Node* next = m_tail->next.load(std::memory_order_acquire);
+            if (!next) return false;
+            func(next->data);
             return true;
         }
 
-        // Dequeue a message (blocking with timeout)
+        // Blocking dequeue with timeout (for compatibility — uses spin+yield)
         bool DequeueWait(T& message, std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            if (m_condition.wait_for(lock, timeout, [this] { return !m_queue.empty(); })) {
-                message = std::move(m_queue.front());
-                m_queue.pop();
-                return true;
+            auto deadline = std::chrono::steady_clock::now() + timeout;
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (try_pop(message)) return true;
+                std::this_thread::yield();
             }
             return false;
         }
 
-        // Get queue size (approximate, for debugging)
+        // Approximate size
         size_t Size() const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_queue.size();
+            return m_size.load(std::memory_order_relaxed);
         }
 
-        // Check if queue is empty
         bool Empty() const {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            return m_queue.empty();
+            return !has_message();
         }
 
-        // Clear all messages
-        void Clear() {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            std::queue<T> empty;
-            std::swap(m_queue, empty);
-        }
-
-        // Drain all messages into a vector for batch processing
+        // Drain all into vector (consumer only)
         std::vector<T> DrainAll() {
             std::vector<T> messages;
-            std::lock_guard<std::mutex> lock(m_mutex);
-            
-            messages.reserve(m_queue.size());
-            while (!m_queue.empty()) {
-                messages.push_back(std::move(m_queue.front()));
-                m_queue.pop();
+            T item;
+            while (try_pop(item)) {
+                messages.push_back(std::move(item));
             }
-            
             return messages;
         }
 
-        // Get dropped packet count
+        // Clear (consumer only)
+        void Clear() {
+            T dummy;
+            while (try_pop(dummy)) {}
+        }
+
         size_t GetDroppedCount() const {
             return m_droppedCount.load(std::memory_order_relaxed);
         }
-        
-        // Get max queue size
+
         size_t GetMaxSize() const { return m_maxSize; }
 
     private:
-        mutable std::mutex m_mutex;
-        std::condition_variable m_condition;
-        std::queue<T> m_queue;
+        struct Node {
+            T data{};
+            std::atomic<Node*> next{nullptr};
+        };
+
+        // Head: producers push here (CAS). Cache-line separated from tail.
+        alignas(64) std::atomic<Node*> m_head;
+
+        // Tail: consumer pops here (single-threaded, no CAS).
+        alignas(64) Node* m_tail;
+
+        // Approximate size for backpressure
+        std::atomic<size_t> m_size{0};
         size_t m_maxSize;
         std::atomic<size_t> m_droppedCount{0};
     };
 
-    // Server → Client packet queue
+    // Aliases for clarity
     template<typename PacketType>
     using ServerToClientQueue = MessageQueue<PacketType>;
 
-    // Client → Server packet queue  
     template<typename PacketType>
     using ClientToServerQueue = MessageQueue<PacketType>;
 
@@ -147,7 +168,6 @@ namespace Network {
     template<typename ResultType>
     class ResultQueue : public MessageQueue<ResultType> {
     public:
-        // Add result processing statistics
         void IncrementProcessed() {
             m_processedCount.fetch_add(1, std::memory_order_relaxed);
         }
@@ -164,11 +184,9 @@ namespace Network {
         std::atomic<size_t> m_processedCount{0};
     };
 
-    // Server worker threads → Server thread
     template<typename T>
     using ChunkGenResultQueue = ResultQueue<T>;
 
-    // Client worker threads → Client render thread
     template<typename T>
     using MeshResultQueue = ResultQueue<T>;
 

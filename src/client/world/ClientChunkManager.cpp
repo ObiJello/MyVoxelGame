@@ -512,10 +512,9 @@ namespace Client {
 
     // Process ChunkDataS2CPacket (new format)
     void ClientChunkManager::ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet) {
+        PROFILE_ZONE_N("ProcessChunkData");
         ASSERT_MAIN_THREAD();
-        Log::Debug("Processing ChunkDataS2CPacket for chunk (%d, %d)", packet.chunkX, packet.chunkZ);
-        
-        // Use ApplyChunkData for proper handling
+
         Game::Math::ChunkPos chunkPos{packet.chunkX, packet.chunkZ};
         ApplyChunkData(chunkPos, packet);
     }
@@ -607,69 +606,52 @@ namespace Client {
                     auto* section = chunk->chunkData->GetSection(y);
                     
                     if (section && !sectionData.IsEmpty()) {
-                        // Decode palette and data array into block IDs
+                        // Decode palette/direct data into section->blocks[] directly.
+                        // Blocks are stored in Y-Z-X order: index = y*256 + z*16 + x.
+                        // The packed data iterates linearly through this index, so we
+                        // write directly by index — no coordinate math needed.
                         bool decodedSuccessfully = false;
-                        
-                        if (sectionData.bitsPerEntry > 0 && sectionData.bitsPerEntry <= 8) {
-                            // Palette mode - decode using palette
+                        auto& blocks = section->blocks;
+
+                        if (sectionData.bitsPerEntry == 0) {
+                            // Single-value section — entire section is one block type
+                            uint16_t blockId = (!sectionData.palette.empty())
+                                ? static_cast<uint16_t>(sectionData.palette[0] & 0xFFFF)
+                                : 0;
+                            std::fill(blocks.begin(), blocks.end(), blockId);
+                            decodedSuccessfully = true;
+
+                        } else if (sectionData.bitsPerEntry <= 8) {
+                            // Palette mode
                             if (!sectionData.palette.empty() && !sectionData.dataArray.empty()) {
-                                int bitsPerBlock = sectionData.bitsPerEntry;
-                                int blocksPerLong = 64 / bitsPerBlock;
-                                uint64_t mask = (1ULL << bitsPerBlock) - 1;
-                                
-                                // Decode packed data into block IDs
+                                const int bitsPerBlock = sectionData.bitsPerEntry;
+                                const int blocksPerLong = 64 / bitsPerBlock;
+                                const uint64_t mask = (1ULL << bitsPerBlock) - 1;
+                                const size_t paletteSize = sectionData.palette.size();
+
                                 int blockIndex = 0;
                                 for (uint64_t packedLong : sectionData.dataArray) {
                                     for (int i = 0; i < blocksPerLong && blockIndex < 4096; ++i) {
                                         uint32_t paletteIndex = (packedLong >> (i * bitsPerBlock)) & mask;
-                                        
-                                        // Get block ID from palette
-                                        uint16_t blockId = 0; // Default to air
-                                        if (paletteIndex < sectionData.palette.size()) {
-                                            // For now, just use the palette value directly
-                                            // In a real implementation, this would map Minecraft block state IDs to our BlockID enum
-                                            blockId = static_cast<uint16_t>(sectionData.palette[paletteIndex] & 0xFFFF);
-                                        }
-                                        
-                                        // Calculate block position within section
-                                        int localY = blockIndex / 256;
-                                        int localZ = (blockIndex % 256) / 16;
-                                        int localX = blockIndex % 16;
-                                        
-                                        // Set the block in the section
-                                        section->Set(localX, localY, localZ, blockId);
+                                        blocks[blockIndex] = (paletteIndex < paletteSize)
+                                            ? static_cast<uint16_t>(sectionData.palette[paletteIndex] & 0xFFFF)
+                                            : 0;
                                         blockIndex++;
                                     }
                                 }
                                 decodedSuccessfully = true;
                             }
-                        } else if (sectionData.bitsPerEntry > 8) {
-                            // Direct mode - block IDs are stored directly
-                            // For Minecraft 1.16+, this means global palette (block state IDs)
-                            int bitsPerBlock = std::max(15, static_cast<int>(sectionData.bitsPerEntry)); // Minecraft uses at least 15 bits for direct
-                            int blocksPerLong = 64 / bitsPerBlock;
-                            uint64_t mask = (1ULL << bitsPerBlock) - 1;
-                            
+                        } else {
+                            // Direct mode (bitsPerEntry > 8) — global palette block state IDs
+                            const int bitsPerBlock = std::max(15, static_cast<int>(sectionData.bitsPerEntry));
+                            const int blocksPerLong = 64 / bitsPerBlock;
+                            const uint64_t mask = (1ULL << bitsPerBlock) - 1;
+
                             int blockIndex = 0;
                             for (uint64_t packedLong : sectionData.dataArray) {
                                 for (int i = 0; i < blocksPerLong && blockIndex < 4096; ++i) {
-                                    uint32_t blockStateId = (packedLong >> (i * bitsPerBlock)) & mask;
-                                    
-                                    // Map Minecraft block state ID to our BlockID
-                                    // For now, use a simple mapping
-                                    uint16_t blockId = 0; // Default to air
-                                    if (blockStateId > 0) {
-                                        // Very simplified mapping - in reality this needs a proper block state registry
-                                        blockId = static_cast<uint16_t>(blockStateId);
-                                    }
-                                    
-                                    // Calculate block position within section
-                                    int localY = blockIndex / 256;
-                                    int localZ = (blockIndex % 256) / 16;
-                                    int localX = blockIndex % 16;
-                                    
-                                    // Set the block in the section
-                                    section->Set(localX, localY, localZ, blockId);
+                                    blocks[blockIndex] = static_cast<uint16_t>(
+                                        (packedLong >> (i * bitsPerBlock)) & mask);
                                     blockIndex++;
                                 }
                             }
