@@ -557,6 +557,7 @@ namespace Client {
     }
     
     void ClientChunkManager::ApplyChunkData(Game::Math::ChunkPos chunkPos, const Network::ChunkDataS2CPacket& packet) {
+        PROFILE_ZONE_N("ApplyChunkData");
         ASSERT_MAIN_THREAD();
         
         // Get or create client chunk

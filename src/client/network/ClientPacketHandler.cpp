@@ -35,8 +35,7 @@ namespace Client {
         m_stats.chunksReceived++;
         m_stats.packetsProcessed++;
         
-        // Debug logging to verify chunks are being received
-        Log::Info("[ClientPacketHandler] Received chunk (%d, %d) with bitmask 0x%X", 
+        Log::Debug("[ClientPacketHandler] Received chunk (%d, %d) with bitmask 0x%X",
                   packet.chunkX, packet.chunkZ, packet.primaryBitmask);
     }
 

@@ -342,6 +342,7 @@ namespace Client {
         while (TryPopIncoming(packet)) {
             try {
                 if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
+                    PROFILE_ZONE_N("ApplyPacket");
                     s2cPacket->apply(*handler);
                 }
             } catch (const std::exception& e) {
