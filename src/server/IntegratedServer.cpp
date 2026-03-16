@@ -153,19 +153,13 @@ namespace Server {
             m_world->RequestStop();
         }
 
-        // IMPORTANT: Wait for server thread to finish BEFORE destroying resources
-        // This prevents the server thread from accessing destroyed objects.
-        // Use a timeout because the server thread may be stuck inside the terrain
-        // library's blocking getChunk() loop which has no abort signal.
+        // IMPORTANT: Wait for server thread to finish BEFORE destroying resources.
+        // World::RequestStop() signals the terrain library's abort flag, so blocking
+        // getChunk() loops will exit promptly.
         if (m_serverThread && m_serverThread->joinable()) {
             Log::Debug("Waiting for server thread to finish...");
-            auto joinTask = std::async(std::launch::async, [this]() { m_serverThread->join(); });
-            if (joinTask.wait_for(std::chrono::seconds(3)) == std::future_status::timeout) {
-                Log::Warning("Server thread stuck in blocking call, detaching");
-                m_serverThread->detach();
-            } else {
-                Log::Debug("Server thread finished");
-            }
+            m_serverThread->join();
+            Log::Debug("Server thread finished");
         }
         m_serverThread.reset();
 

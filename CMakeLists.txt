@@ -869,17 +869,19 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
         endif()
     endif()
 elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    # Windows: Upload PDB debug symbols to Sentry on Release builds
-    find_program(SENTRY_CLI sentry-cli)
-    if(SENTRY_CLI)
-        add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E echo "Uploading PDB to Sentry..."
-            COMMAND ${SENTRY_CLI} debug-files upload "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/MyVoxelGame.pdb" || ${CMAKE_COMMAND} -E echo "Sentry upload failed (non-fatal)"
-            WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-            COMMENT "Uploading PDB to Sentry"
-        )
-    else()
-        message(STATUS "sentry-cli not found — PDB will not be uploaded to Sentry")
+    # Windows: Upload PDB debug symbols to Sentry only when distributing (requires -DJALIN=ON)
+    if(JALIN)
+        find_program(SENTRY_CLI sentry-cli)
+        if(SENTRY_CLI)
+            add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E echo "Uploading PDB to Sentry..."
+                COMMAND ${SENTRY_CLI} debug-files upload "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/MyVoxelGame.pdb" || ${CMAKE_COMMAND} -E echo "Sentry upload failed (non-fatal)"
+                WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+                COMMENT "Uploading PDB to Sentry"
+            )
+        else()
+            message(WARNING "sentry-cli not found — PDB will not be uploaded automatically")
+        endif()
     endif()
 endif()
 

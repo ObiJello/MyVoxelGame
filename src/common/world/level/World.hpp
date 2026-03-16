@@ -90,7 +90,13 @@ namespace Game {
         ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }
 
         // Signal the world to stop all long-running operations (called from shutdown)
-        void RequestStop() { m_stopRequested.store(true); }
+        void RequestStop() {
+            m_stopRequested.store(true);
+            // Abort blocking getChunk() loops in the terrain library
+            if (m_chunkProvider && m_chunkProvider->GetGenerator()) {
+                m_chunkProvider->GetGenerator()->RequestAbort();
+            }
+        }
         bool IsStopRequested() const { return m_stopRequested.load(); }
 
         // ========================================================================

@@ -157,6 +157,12 @@ namespace Game {
         }
     }
 
+    void MyTerrainGenerator::RequestAbort() {
+        if (m_chunkCache) {
+            m_chunkCache->requestAbort();
+        }
+    }
+
     void MyTerrainGenerator::Shutdown() {
         if (!m_initialized) return;
 

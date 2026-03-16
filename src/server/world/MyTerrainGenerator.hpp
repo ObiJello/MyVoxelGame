@@ -164,6 +164,9 @@ namespace Game {
         // IChunkGenerator interface implementation
         bool Initialize() override;
         void Shutdown() override;
+
+        // Signal the terrain library to abort blocking getChunk() loops (for clean shutdown)
+        void RequestAbort();
         ChunkGenerationResult GenerateChunk(Math::ChunkPos position) override;
         std::future<ChunkGenerationResult> GenerateChunkAsync(Math::ChunkPos position) override;
         std::vector<int> GenerateHeightMap(Math::ChunkPos position) override;

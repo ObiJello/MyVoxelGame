@@ -163,6 +163,9 @@ namespace Game {
         // Shutdown the generator
         virtual void Shutdown() = 0;
 
+        // Signal abort to break blocking generation loops (for clean shutdown)
+        virtual void RequestAbort() {};
+
         // Check if ready to generate
         virtual bool IsReady() const = 0;
 

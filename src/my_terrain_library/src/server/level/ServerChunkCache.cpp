@@ -89,6 +89,11 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
     //   }
     ChunkResultType result = nullptr;
     while (!future->isDone()) {
+        // Check abort flag for clean shutdown
+        if (m_abort.load(std::memory_order_acquire)) {
+            return nullptr;
+        }
+
         // Poll task: run distance manager updates and generation tasks
         // Reference: ServerChunkCache.MainThreadExecutor.pollTask() returns true if work done
         bool didWork = runDistanceManagerUpdates();
