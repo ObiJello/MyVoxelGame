@@ -150,7 +150,7 @@ namespace Client {
     void ClientChunkManager::UnloadChunk(Game::Math::ChunkPos chunkPos) {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
-        Log::Info("CLIENT UNLOAD: chunk (%d, %d)", chunkPos.x, chunkPos.z);
+        Log::Debug("CLIENT UNLOAD: chunk (%d, %d)", chunkPos.x, chunkPos.z);
 
         // Mark neighbor chunks' sections as dirty BEFORE unloading
         // This ensures they rebuild their meshes to show previously culled faces

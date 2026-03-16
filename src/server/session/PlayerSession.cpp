@@ -491,7 +491,7 @@ namespace Server {
         // Clear any pending diffs for this chunk
         m_pendingDiffs.erase(chunk);
         
-        Log::Info("UNLOAD SENT: chunk (%d, %d) to player %u",
+        Log::Debug("UNLOAD SENT: chunk (%d, %d) to player %u",
                   chunk.x, chunk.z, m_playerId);
     }
 

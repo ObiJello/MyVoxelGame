@@ -319,7 +319,7 @@ namespace Render {
 
             case Client::MeshApplyAction::Drop_Unloaded:
                 m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
-                Log::Info("MESH DROPPED UNLOADED: chunk (%d,%d) section %d",
+                Log::Debug("MESH DROPPED UNLOADED: chunk (%d,%d) section %d",
                          result.chunkPos.x, result.chunkPos.z, result.sectionY);
                 break;
                 
@@ -647,7 +647,7 @@ namespace Render {
             // If there was old data, mark it for deferred deletion
             if (oldPtr && oldPtr != gpuDataPtr) {
                 // For now, we're reusing the same hash map entry, so this shouldn't happen
-                Log::Warning("Replacing existing GPU data for chunk (%d, %d) section %d",
+                Log::Debug("Replacing existing GPU data for chunk (%d, %d) section %d",
                            chunkPos.x, chunkPos.z, sectionY);
             }
 
