@@ -1,3 +1,4 @@
+// File: shaders/highlight_vk.frag (Vulkan version of block highlight GL shader)
 #version 450
 
 layout(location = 0) in vec4 fragColor;

@@ -9,7 +9,6 @@
 #include "../shader/Shader.hpp"
 #include "../texture/TextureAnimator.hpp"
 #include "../backend/RenderTypes.hpp"
-#include <glad/glad.h>
 #include <climits>
 #include <vector>
 #include <memory>
@@ -183,14 +182,14 @@ namespace Render {
         float m_lastCameraPitch = 0.0f;
 
         // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
-        std::vector<std::vector<GLsizei>> m_perSlabCounts;
-        std::vector<std::vector<const void*>> m_perSlabOffsets;
-        std::vector<std::vector<GLint>> m_perSlabBaseVertices;
+        std::vector<std::vector<int32_t>> m_perSlabCounts;
+        std::vector<std::vector<size_t>> m_perSlabOffsets;
+        std::vector<std::vector<int32_t>> m_perSlabBaseVertices;
 
         // Distant cutout multi-draw arrays (rendered as solid in opaque pass)
-        std::vector<GLsizei> m_distantCutoutCounts;
-        std::vector<const void*> m_distantCutoutOffsets;
-        std::vector<GLint> m_distantCutoutBaseVertices;
+        std::vector<int32_t> m_distantCutoutCounts;
+        std::vector<size_t> m_distantCutoutOffsets;
+        std::vector<int32_t> m_distantCutoutBaseVertices;
 
         // Pass configurations
         RenderPassConfig m_opaqueConfig;

@@ -382,7 +382,6 @@ namespace Render {
 
         // Build multi-draw command arrays from visible sections
         uint32_t slabCount = megaBuffer->GetSlabCount();
-        bool useVAB = g_clientMeshManager && g_clientMeshManager->HasVertexAttribBinding();
 
         // Resize per-slab draw command vectors (reuse allocations across frames)
         m_perSlabCounts.resize(slabCount);
@@ -407,7 +406,7 @@ namespace Render {
                                                                            section.gpuData->translucentDrawCmd;
             if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
                 m_perSlabCounts[cachedCmd.slabIndex].push_back(cachedCmd.indexCount);
-                m_perSlabOffsets[cachedCmd.slabIndex].push_back(reinterpret_cast<const void*>(cachedCmd.indexByteOffset));
+                m_perSlabOffsets[cachedCmd.slabIndex].push_back(cachedCmd.indexByteOffset);
                 m_perSlabBaseVertices[cachedCmd.slabIndex].push_back(cachedCmd.baseVertex);
                 layerCount++;
 
@@ -431,14 +430,12 @@ namespace Render {
         // Issue one multi-draw per slab that has sections
         for (uint32_t s = 0; s < slabCount; s++) {
             if (m_perSlabCounts[s].empty()) continue;
-            megaBuffer->BindSlab(s, useVAB);
-            glMultiDrawElementsBaseVertex(
-                GL_TRIANGLES,
+            megaBuffer->BindSlab(s);
+            g_renderBackend->MultiDrawIndexedBaseVertex(
                 m_perSlabCounts[s].data(),
-                GL_UNSIGNED_INT,
                 m_perSlabOffsets[s].data(),
-                static_cast<GLsizei>(m_perSlabCounts[s].size()),
-                m_perSlabBaseVertices[s].data()
+                m_perSlabBaseVertices[s].data(),
+                static_cast<uint32_t>(m_perSlabCounts[s].size())
             );
             m_stats.totalDrawCalls++;
         }

@@ -2,7 +2,6 @@
 #include "Crosshair.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
-#include <glad/glad.h>  // For glBindVertexArray(0) after draw
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -164,10 +163,6 @@ void main() {
         g_renderBackend->BindTexture(m_texture, 0);
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
         g_renderBackend->DrawIndexed(m_mesh, 6);
-
-        // Unbind VAO so GPU uploads (which bind GL_ELEMENT_ARRAY_BUFFER directly)
-        // don't corrupt this VAO's IBO binding between frames.
-        glBindVertexArray(0);
 
         // Restore default state
         PipelineState defaultState;

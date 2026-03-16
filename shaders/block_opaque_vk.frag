@@ -1,5 +1,5 @@
-// File: shaders/block_vk.frag (Vulkan version of block.frag)
-// Cutout shader — uniform-based alpha discard via push constant.
+// File: shaders/block_opaque_vk.frag (Vulkan version of block_opaque.frag)
+// Opaque shader — hardcoded 0.1 discard constant for early-z optimization.
 #version 450
 
 // Input from vertex shader
@@ -24,12 +24,11 @@ layout (location = 0) out vec4 FragColor;
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
 
-    // Discard transparent pixels (threshold varies per pass)
-    if (textureColor.a < pc.uAlphaTest) {
-        discard;
-    }
+    // Discard fully transparent pixels (grass side overlay, etc.)
+    // Hardcoded constant lets GPU optimize better than a push constant threshold
+    if (textureColor.a < 0.1) discard;
 
-    // Vertex color contains: biome tint * AO * directional face shade (gamma space)
+    // Vertex color contains: biome tint * AO * directional face shade
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
 }

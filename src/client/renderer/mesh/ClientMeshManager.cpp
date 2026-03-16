@@ -661,50 +661,25 @@ namespace Render {
     }
 
     // ========================================================================
-    // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
+    // SHARED BLOCK VERTEX FORMAT
     // ========================================================================
 
     void ClientMeshManager::CreateSharedBlockVAO() {
-        m_hasVertexAttribBinding = (GLAD_GL_ARB_vertex_attrib_binding != 0);
-
-        glGenVertexArrays(1, &m_sharedBlockVAO);
-        glBindVertexArray(m_sharedBlockVAO);
-
-        if (m_hasVertexAttribBinding) {
-            // Windows/Linux: vertex format decoupled from buffer binding.
-            // VBO switching uses glBindVertexBuffer — cheapest possible path.
-            // Matches Minecraft's VertexArrayCache.Separate (VertexArrayCache.java:86-152).
-            glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
-            glVertexAttribBinding(0, 0);
-            glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float));
-            glVertexAttribBinding(1, 0);
-            glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 5 * sizeof(float));
-            glVertexAttribBinding(2, 0);
-            Log::Info("Shared block VAO created (GL_ARB_vertex_attrib_binding)");
-        } else {
-            // macOS (OpenGL 4.1, no ARB_vertex_attrib_binding):
-            // VBO switching re-sets glVertexAttribPointer — still avoids VAO switch.
-            // Matches Minecraft's VertexArrayCache.Emulated (VertexArrayCache.java:25-84).
-            Log::Info("Shared block VAO created (emulated, no ARB_vertex_attrib_binding)");
+        if (g_renderBackend) {
+            g_renderBackend->SetupBlockVertexFormat();
         }
-
-        // Enable attributes once — both paths share this
-        glEnableVertexAttribArray(0);
-        glEnableVertexAttribArray(1);
-        glEnableVertexAttribArray(2);
-
-        glBindVertexArray(0);
     }
 
     void ClientMeshManager::DestroySharedBlockVAO() {
-        if (m_sharedBlockVAO) {
-            glDeleteVertexArrays(1, &m_sharedBlockVAO);
-            m_sharedBlockVAO = 0;
+        if (g_renderBackend) {
+            g_renderBackend->DestroyBlockVertexFormat();
         }
     }
 
     void ClientMeshManager::BindSharedBlockVAO() {
-        glBindVertexArray(m_sharedBlockVAO);
+        if (g_renderBackend) {
+            g_renderBackend->BindBlockVertexFormat();
+        }
     }
 
     // ========================================================================

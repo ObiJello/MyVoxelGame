@@ -16,6 +16,17 @@ namespace Render {
     // Global instance
     std::unique_ptr<RenderBackend> g_renderBackend = nullptr;
 
+    // Default multi-draw: loops individual draws (GL overrides with native call)
+    void RenderBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
+                                                    const size_t* indexByteOffsets,
+                                                    const int32_t* baseVertices,
+                                                    uint32_t drawCount) {
+        for (uint32_t i = 0; i < drawCount; i++) {
+            if (indexCounts[i] > 0)
+                DrawIndexedBaseVertex(indexCounts[i], indexByteOffsets[i], baseVertices[i]);
+        }
+    }
+
     std::unique_ptr<RenderBackend> CreateRenderBackend(BackendType type) {
         switch (type) {
             case BackendType::OpenGL:
@@ -561,6 +572,115 @@ namespace Render {
 
         glBindVertexArray(it->second.vao);
         glDrawArrays(ToGLPrimitive(m_currentState.primitiveType), firstVertex, vertexCount);
+    }
+
+    // ========================================================================
+    // MEGA-BUFFER RENDERING
+    // ========================================================================
+
+    void GLBackend::BindVertexBuffer(BufferHandle vbo, uint32_t stride) {
+        auto it = m_buffers.find(vbo);
+        if (it == m_buffers.end()) return;
+
+        if (m_hasVertexAttribBinding) {
+            glBindVertexBuffer(0, it->second.glId, 0, static_cast<GLsizei>(stride));
+        } else {
+            glBindBuffer(GL_ARRAY_BUFFER, it->second.glId);
+            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                  static_cast<GLsizei>(stride),
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(0)));
+            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
+                                  static_cast<GLsizei>(stride),
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(3 * sizeof(float))));
+            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,
+                                  static_cast<GLsizei>(stride),
+                                  reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float))));
+        }
+    }
+
+    void GLBackend::BindIndexBuffer(BufferHandle ibo) {
+        auto it = m_buffers.find(ibo);
+        if (it == m_buffers.end()) return;
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second.glId);
+    }
+
+    void GLBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) {
+        glDrawElementsBaseVertex(
+            GL_TRIANGLES,
+            static_cast<GLsizei>(indexCount),
+            GL_UNSIGNED_INT,
+            reinterpret_cast<const void*>(indexByteOffset),
+            static_cast<GLint>(baseVertex));
+    }
+
+    void GLBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
+                                                const size_t* indexByteOffsets,
+                                                const int32_t* baseVertices,
+                                                uint32_t drawCount) {
+        // Convert size_t byte offsets to const void* for GL
+        // Stack-allocate for typical draw counts, heap for large batches
+        if (drawCount <= 256) {
+            const void* offsets[256];
+            for (uint32_t i = 0; i < drawCount; i++)
+                offsets[i] = reinterpret_cast<const void*>(indexByteOffsets[i]);
+            glMultiDrawElementsBaseVertex(
+                GL_TRIANGLES,
+                reinterpret_cast<const GLsizei*>(indexCounts),
+                GL_UNSIGNED_INT,
+                offsets,
+                static_cast<GLsizei>(drawCount),
+                const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
+        } else {
+            std::vector<const void*> offsets(drawCount);
+            for (uint32_t i = 0; i < drawCount; i++)
+                offsets[i] = reinterpret_cast<const void*>(indexByteOffsets[i]);
+            glMultiDrawElementsBaseVertex(
+                GL_TRIANGLES,
+                reinterpret_cast<const GLsizei*>(indexCounts),
+                GL_UNSIGNED_INT,
+                offsets.data(),
+                static_cast<GLsizei>(drawCount),
+                const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
+        }
+    }
+
+    // ========================================================================
+    // SHARED BLOCK VERTEX FORMAT
+    // ========================================================================
+
+    void GLBackend::SetupBlockVertexFormat() {
+        m_hasVertexAttribBinding = (GLAD_GL_ARB_vertex_attrib_binding != 0);
+
+        glGenVertexArrays(1, &m_sharedBlockVAO);
+        glBindVertexArray(m_sharedBlockVAO);
+
+        if (m_hasVertexAttribBinding) {
+            // Vertex format decoupled from buffer binding.
+            // VBO switching uses glBindVertexBuffer — cheapest possible path.
+            glVertexAttribFormat(0, 3, GL_FLOAT, GL_FALSE, 0);
+            glVertexAttribBinding(0, 0);
+            glVertexAttribFormat(1, 2, GL_FLOAT, GL_FALSE, 3 * sizeof(float));
+            glVertexAttribBinding(1, 0);
+            glVertexAttribFormat(2, 4, GL_UNSIGNED_BYTE, GL_TRUE, 5 * sizeof(float));
+            glVertexAttribBinding(2, 0);
+        }
+
+        glEnableVertexAttribArray(0);
+        glEnableVertexAttribArray(1);
+        glEnableVertexAttribArray(2);
+
+        glBindVertexArray(0);
+    }
+
+    void GLBackend::BindBlockVertexFormat() {
+        glBindVertexArray(m_sharedBlockVAO);
+    }
+
+    void GLBackend::DestroyBlockVertexFormat() {
+        if (m_sharedBlockVAO) {
+            glDeleteVertexArrays(1, &m_sharedBlockVAO);
+            m_sharedBlockVAO = 0;
+        }
     }
 
     // ========================================================================

@@ -142,11 +142,9 @@ namespace Render {
         // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
         // ========================================================================
 
-        // Bind the shared block VAO (call once per frame before any mega-buffer
-        // BindBuffers calls).  The shared VAO defines the vertex format; individual
-        // mega-buffer VBOs are switched with glBindVertexBuffer — no GPU flush.
+        // Bind the shared block vertex format (call once per frame before any
+        // mega-buffer BindSlab calls). GL: binds shared VAO. VK: no-op.
         void BindSharedBlockVAO();
-        bool HasVertexAttribBinding() const { return m_hasVertexAttribBinding; }
 
         // ========================================================================
         // CONFIGURATION
@@ -252,16 +250,12 @@ namespace Render {
         std::chrono::steady_clock::time_point m_frameStartTime;
 
         // ========================================================================
-        // SHARED BLOCK VAO (GL_ARB_vertex_attrib_binding)
+        // SHARED BLOCK VERTEX FORMAT
         // ========================================================================
         //
-        // One VAO defines the vertex format for ALL block geometry.  Mega-buffer
-        // VBOs are switched at render time with glBindVertexBuffer (cheap pointer
-        // swap) instead of glBindVertexArray (expensive — triggers GPU pipeline
-        // flush on macOS).
+        // Managed by the render backend. GL: shared VAO with vertex attrib binding.
+        // VK: no-op (vertex input is part of pipeline state).
         //
-        GLuint m_sharedBlockVAO = 0;
-        bool m_hasVertexAttribBinding = false;  // Runtime: GL_ARB_vertex_attrib_binding
         void CreateSharedBlockVAO();
         void DestroySharedBlockVAO();
 

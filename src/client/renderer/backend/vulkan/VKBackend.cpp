@@ -58,7 +58,12 @@ namespace Render {
     VKBackend::VKBackend() = default;
 
     VKBackend::~VKBackend() {
-        Shutdown();
+        try {
+            Shutdown();
+        } catch (...) {
+            // Swallow exceptions during static destruction — Vulkan loader
+            // or MoltenVK may already be partially unloaded at this point.
+        }
     }
 
     bool VKBackend::Initialize(GLFWwindow* window) {
@@ -122,6 +127,17 @@ namespace Render {
             }
             queue.clear();
         }
+
+        // Destroy persistent texture staging buffer
+        if (m_texStagingBuffer != VK_NULL_HANDLE) {
+            vkUnmapMemory(m_device, m_texStagingMemory);
+            vkDestroyBuffer(m_device, m_texStagingBuffer, nullptr);
+            vkFreeMemory(m_device, m_texStagingMemory, nullptr);
+            m_texStagingBuffer = VK_NULL_HANDLE;
+            m_texStagingMapped = nullptr;
+            m_texStagingCapacity = 0;
+        }
+        m_pendingTextureUpdates.clear();
 
         // Destroy all user resources
         for (auto& [h, mesh] : m_meshes) { /* No VK objects to destroy */ }
@@ -243,6 +259,11 @@ namespace Render {
         clearValues[1].depthStencil = {1.0f, 0};
         renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
         renderPassInfo.pClearValues = clearValues.data();
+
+        // Flush queued texture updates (animated textures, etc.) into the command
+        // buffer BEFORE the render pass — transfer ops can't run inside a render pass.
+        // This replaces per-update vkQueueWaitIdle with batched pipeline barriers.
+        FlushPendingTextureUpdates(m_commandBuffers[m_currentFrame]);
 
         vkCmdBeginRenderPass(m_commandBuffers[m_currentFrame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -544,39 +565,114 @@ namespace Render {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
 
-        VkDeviceSize bufSize = static_cast<VkDeviceSize>(width) * height * 4;
-        VkBuffer stagingBuffer;
-        VkDeviceMemory stagingMemory;
-        CreateVkBuffer(bufSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        size_t dataSize = static_cast<size_t>(width) * height * 4;
+        const auto* src = static_cast<const unsigned char*>(data);
+
+        PendingTextureUpdate update;
+        update.image = it->second.image;
+        update.x = x;
+        update.y = y;
+        update.width = width;
+        update.height = height;
+        update.data.assign(src, src + dataSize);
+        m_pendingTextureUpdates.push_back(std::move(update));
+    }
+
+    void VKBackend::EnsureTexStagingBuffer(size_t requiredSize) {
+        if (requiredSize <= m_texStagingCapacity) return;
+
+        // Destroy old buffer
+        if (m_texStagingBuffer != VK_NULL_HANDLE) {
+            vkUnmapMemory(m_device, m_texStagingMemory);
+            vkDestroyBuffer(m_device, m_texStagingBuffer, nullptr);
+            vkFreeMemory(m_device, m_texStagingMemory, nullptr);
+            m_texStagingMapped = nullptr;
+        }
+
+        // Grow to at least 256KB or 2x the requirement
+        m_texStagingCapacity = std::max(requiredSize, std::max(m_texStagingCapacity * 2, size_t(256 * 1024)));
+
+        CreateVkBuffer(m_texStagingCapacity, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                      stagingBuffer, stagingMemory);
+                      m_texStagingBuffer, m_texStagingMemory);
 
-        void* mapped;
-        vkMapMemory(m_device, stagingMemory, 0, bufSize, 0, &mapped);
-        std::memcpy(mapped, data, bufSize);
-        vkUnmapMemory(m_device, stagingMemory);
+        vkMapMemory(m_device, m_texStagingMemory, 0, m_texStagingCapacity, 0, &m_texStagingMapped);
+    }
 
-        TransitionImageLayout(it->second.image, VK_FORMAT_R8G8B8A8_UNORM,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1);
+    void VKBackend::FlushPendingTextureUpdates(VkCommandBuffer cmd) {
+        if (m_pendingTextureUpdates.empty()) return;
 
-        VkCommandBuffer cmd = BeginSingleTimeCommands();
-        VkBufferImageCopy region{};
-        region.bufferOffset = 0;
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = {x, y, 0};
-        region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-        vkCmdCopyBufferToImage(cmd, stagingBuffer, it->second.image,
-                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        EndSingleTimeCommands(cmd);
+        // Calculate total staging size and ensure buffer is large enough
+        size_t totalSize = 0;
+        for (const auto& update : m_pendingTextureUpdates)
+            totalSize += update.data.size();
+        EnsureTexStagingBuffer(totalSize);
 
-        TransitionImageLayout(it->second.image, VK_FORMAT_R8G8B8A8_UNORM,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 1);
+        // Copy all pixel data into the persistent staging buffer
+        size_t offset = 0;
+        for (const auto& update : m_pendingTextureUpdates) {
+            std::memcpy(static_cast<char*>(m_texStagingMapped) + offset,
+                       update.data.data(), update.data.size());
+            offset += update.data.size();
+        }
 
-        vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-        vkFreeMemory(m_device, stagingMemory, nullptr);
+        // Collect unique images for barrier deduplication (typically just the atlas)
+        std::vector<VkImage> uniqueImages;
+        for (const auto& update : m_pendingTextureUpdates) {
+            bool found = false;
+            for (VkImage img : uniqueImages) {
+                if (img == update.image) { found = true; break; }
+            }
+            if (!found) uniqueImages.push_back(update.image);
+        }
+
+        // Transition all target images: SHADER_READ_ONLY → TRANSFER_DST (one barrier per image)
+        std::vector<VkImageMemoryBarrier> barriers(uniqueImages.size());
+        for (size_t i = 0; i < uniqueImages.size(); i++) {
+            barriers[i] = {};
+            barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[i].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barriers[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].image = uniqueImages[i];
+            barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            barriers[i].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        }
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr,
+            static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        // Record all buffer-to-image copies
+        offset = 0;
+        for (const auto& update : m_pendingTextureUpdates) {
+            VkBufferImageCopy region{};
+            region.bufferOffset = offset;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {update.x, update.y, 0};
+            region.imageExtent = {static_cast<uint32_t>(update.width),
+                                  static_cast<uint32_t>(update.height), 1};
+            vkCmdCopyBufferToImage(cmd, m_texStagingBuffer, update.image,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            offset += update.data.size();
+        }
+
+        // Transition all images back: TRANSFER_DST → SHADER_READ_ONLY
+        for (auto& barrier : barriers) {
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        }
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr,
+            static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        m_pendingTextureUpdates.clear();
     }
 
     void VKBackend::SetTextureFilter(TextureHandle handle, TextureFilter min, TextureFilter mag) {
@@ -811,6 +907,104 @@ namespace Render {
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
 
         vkCmdDraw(cmd, vertexCount, 1, firstVertex, 0);
+    }
+
+    // ========================================================================
+    // MEGA-BUFFER RENDERING
+    // ========================================================================
+
+    void VKBackend::BindVertexBuffer(BufferHandle vbo, uint32_t stride) {
+        m_megaBoundVBO = vbo;
+    }
+
+    void VKBackend::BindIndexBuffer(BufferHandle ibo) {
+        m_megaBoundIBO = ibo;
+    }
+
+    void VKBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) {
+        if (m_boundShader == INVALID_SHADER || indexCount == 0) return;
+        if (m_megaBoundVBO == INVALID_BUFFER || m_megaBoundIBO == INVALID_BUFFER) return;
+        if (!m_frameActive) return;
+
+        auto vbIt = m_buffers.find(m_megaBoundVBO);
+        auto ibIt = m_buffers.find(m_megaBoundIBO);
+        if (vbIt == m_buffers.end() || ibIt == m_buffers.end()) return;
+
+        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
+        if (pipeline == VK_NULL_HANDLE) return;
+
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+
+        if (pipeline != m_currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            m_currentPipeline = pipeline;
+        }
+
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
+
+        auto texIt = m_textures.find(m_boundTexture);
+        if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                                   0, 1, &texIt->second.descriptorSet, 0, nullptr);
+        } else {
+            return;
+        }
+
+        VkBuffer vertexBuffers[] = {vbIt->second.buffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
+        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+        uint32_t firstIndex = static_cast<uint32_t>(indexByteOffset / sizeof(uint32_t));
+        vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, baseVertex, 0);
+    }
+
+    void VKBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
+                                                const size_t* indexByteOffsets,
+                                                const int32_t* baseVertices,
+                                                uint32_t drawCount) {
+        if (m_boundShader == INVALID_SHADER || drawCount == 0) return;
+        if (m_megaBoundVBO == INVALID_BUFFER || m_megaBoundIBO == INVALID_BUFFER) return;
+        if (!m_frameActive) return;
+
+        auto vbIt = m_buffers.find(m_megaBoundVBO);
+        auto ibIt = m_buffers.find(m_megaBoundIBO);
+        if (vbIt == m_buffers.end() || ibIt == m_buffers.end()) return;
+
+        VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
+        if (pipeline == VK_NULL_HANDLE) return;
+
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+
+        if (pipeline != m_currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            m_currentPipeline = pipeline;
+        }
+
+        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
+
+        auto texIt = m_textures.find(m_boundTexture);
+        if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
+                                   0, 1, &texIt->second.descriptorSet, 0, nullptr);
+        } else {
+            return;
+        }
+
+        // Bind VBO + IBO once for the entire batch
+        VkBuffer vertexBuffers[] = {vbIt->second.buffer};
+        VkDeviceSize vbOffsets[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, vbOffsets);
+        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+        // Issue one draw per section (cheap — just command buffer recording)
+        for (uint32_t i = 0; i < drawCount; i++) {
+            if (indexCounts[i] <= 0) continue;
+            uint32_t firstIndex = static_cast<uint32_t>(indexByteOffsets[i] / sizeof(uint32_t));
+            vkCmdDrawIndexed(cmd, indexCounts[i], 1, firstIndex, baseVertices[i], 0);
+        }
     }
 
     // ========================================================================
@@ -1794,8 +1988,11 @@ namespace Render {
         pipelineInfo.subpass = 0;
 
         VkPipeline pipeline;
-        if (vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-            Log::Error("VKBackend: Failed to create graphics pipeline");
+        VkResult result = vkCreateGraphicsPipelines(m_device, m_pipelineCache, 1, &pipelineInfo, nullptr, &pipeline);
+        if (result != VK_SUCCESS) {
+            Log::Error("VKBackend: Failed to create graphics pipeline (VkResult=%d, shader=%u, cullMode=%d, blend=%d, depthTest=%d)",
+                      static_cast<int>(result), shader,
+                      static_cast<int>(state.cullMode), state.blendEnabled, state.depthTestEnabled);
             return VK_NULL_HANDLE;
         }
         return pipeline;

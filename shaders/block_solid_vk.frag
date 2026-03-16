@@ -1,5 +1,7 @@
-// File: shaders/block_vk.frag (Vulkan version of block.frag)
-// Cutout shader — uniform-based alpha discard via push constant.
+// File: shaders/block_solid_vk.frag (Vulkan version of block_solid.frag)
+// No-discard shader — ZERO discard, ZERO alpha testing.
+// Used for translucent pass (water, ice, stained glass) where blending
+// handles transparency. Full early-z and Hi-Z optimization enabled.
 #version 450
 
 // Input from vertex shader
@@ -23,13 +25,6 @@ layout (location = 0) out vec4 FragColor;
 
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
-
-    // Discard transparent pixels (threshold varies per pass)
-    if (textureColor.a < pc.uAlphaTest) {
-        discard;
-    }
-
-    // Vertex color contains: biome tint * AO * directional face shade (gamma space)
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
 }

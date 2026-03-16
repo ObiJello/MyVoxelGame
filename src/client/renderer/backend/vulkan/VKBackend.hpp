@@ -82,6 +82,13 @@ namespace Render {
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
         void DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) override;
 
+        // Mega-buffer rendering
+        void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;
+        void BindIndexBuffer(BufferHandle ibo) override;
+        void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) override;
+        void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
+                                        const int32_t* baseVertices, uint32_t drawCount) override;
+
         // GPU timers
         GPUTimerHandle BeginGPUTimer(const std::string& name) override;
         void EndGPUTimer(GPUTimerHandle handle) override;
@@ -162,6 +169,27 @@ namespace Render {
         std::array<std::vector<DeferredDeletion>, MAX_FRAMES_IN_FLIGHT> m_deletionQueues;
 
         // ====================================================================
+        // BATCHED TEXTURE UPDATES
+        // ====================================================================
+        // UpdateTexture2D queues updates here; BeginFrame flushes them into the
+        // frame command buffer before the render pass starts — zero vkQueueWaitIdle.
+        struct PendingTextureUpdate {
+            VkImage image;
+            int x, y, width, height;
+            std::vector<unsigned char> data;
+        };
+        std::vector<PendingTextureUpdate> m_pendingTextureUpdates;
+
+        // Persistent staging buffer (reused across frames, persistently mapped)
+        VkBuffer m_texStagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory m_texStagingMemory = VK_NULL_HANDLE;
+        size_t m_texStagingCapacity = 0;
+        void* m_texStagingMapped = nullptr;
+
+        void FlushPendingTextureUpdates(VkCommandBuffer cmd);
+        void EnsureTexStagingBuffer(size_t requiredSize);
+
+        // ====================================================================
         // DESCRIPTOR POOL & LAYOUT
         // ====================================================================
         VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
@@ -226,6 +254,10 @@ namespace Render {
         // Currently bound state
         ShaderHandle m_boundShader = INVALID_SHADER;
         TextureHandle m_boundTexture = INVALID_TEXTURE;
+
+        // Mega-buffer bound state
+        BufferHandle m_megaBoundVBO = INVALID_BUFFER;
+        BufferHandle m_megaBoundIBO = INVALID_BUFFER;
         PipelineState m_currentPipelineState;
         VkPipeline m_currentPipeline = VK_NULL_HANDLE;
 

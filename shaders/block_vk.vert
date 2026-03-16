@@ -1,11 +1,11 @@
 // File: shaders/block_vk.vert (Vulkan version)
+// Matches OpenGL block.vert — 24-byte compact vertex: pos + uv + RGBA8 color
 #version 450
 
-// Input vertex attributes (same layout as OpenGL version)
-layout (location = 0) in vec3 aPos;       // Vertex position
-layout (location = 1) in vec3 aNormal;    // Face normal
-layout (location = 2) in vec2 aTexCoord;  // Texture coordinates from atlas
-layout (location = 3) in vec4 aColor;     // Vertex color/tint
+// Input vertex attributes (24-byte compact vertex)
+layout (location = 0) in vec3 aPos;       // Vertex position (world-space)
+layout (location = 1) in vec2 aTexCoord;  // Texture coordinates from atlas
+layout (location = 2) in vec4 aColor;     // Vertex color (RGBA8 normalized)
 
 // Push constants (must match C++ PushConstantBlock layout exactly)
 layout (push_constant) uniform PushConstants {
@@ -16,14 +16,12 @@ layout (push_constant) uniform PushConstants {
 } pc;
 
 // Output to fragment shader
-layout (location = 0) out vec3 fragNormal;
-layout (location = 1) out vec2 fragTexCoord;
-layout (location = 2) out vec3 fragWorldPos;
-layout (location = 3) out vec4 fragColor;
+layout (location = 0) out vec2 fragTexCoord;
+layout (location = 1) out vec3 fragWorldPos;
+layout (location = 2) out vec4 fragColor;
 
 void main() {
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
-    fragNormal = aNormal;
     fragTexCoord = aTexCoord;
     fragWorldPos = aPos;
     fragColor = aColor;

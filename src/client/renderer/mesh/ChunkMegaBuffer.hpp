@@ -2,7 +2,7 @@
 #pragma once
 
 #include "common/world/math/WorldMath.hpp"
-#include <glad/glad.h>
+#include "../backend/RenderTypes.hpp"
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
@@ -37,7 +37,7 @@ namespace Render {
     //
     // Packs chunk section vertices/indices for one render layer into a pool of
     // fixed-size GPU buffer slabs, enabling multi-draw rendering via
-    // glMultiDrawElementsBaseVertex without buffer grow hitches.
+    // the render backend without buffer grow hitches.
     //
     // One ChunkMegaBuffer is used per render layer (opaque, cutout, translucent).
     // When a slab fills up, a new empty slab is allocated (<1ms, no data copy).
@@ -79,9 +79,9 @@ namespace Render {
         // ========================================================================
 
         struct DrawCommand {
-            GLsizei indexCount;
+            int32_t indexCount;
             size_t indexByteOffset;   // Byte offset into slab's IBO
-            GLint baseVertex;         // Added to each index by GL
+            int32_t baseVertex;       // Added to each index by the backend
             uint32_t slabIndex;       // Which slab to bind before drawing
         };
 
@@ -91,8 +91,8 @@ namespace Render {
         // SLAB BINDING
         // ========================================================================
 
-        // Bind a specific slab's VBO and IBO into the currently-bound shared VAO.
-        void BindSlab(uint32_t slabIndex, bool useVertexAttribBinding) const;
+        // Bind a specific slab's VBO and IBO via the render backend.
+        void BindSlab(uint32_t slabIndex) const;
 
         uint32_t GetSlabCount() const { return static_cast<uint32_t>(m_slabs.size()); }
 
@@ -118,8 +118,8 @@ namespace Render {
     private:
         // Per-slab GPU resources and allocator state
         struct Slab {
-            GLuint vbo = 0;
-            GLuint ibo = 0;
+            BufferHandle vbo = INVALID_BUFFER;
+            BufferHandle ibo = INVALID_BUFFER;
             size_t vboCapacity = 0;
             size_t iboCapacity = 0;
             size_t vertexHighWater = 0;

@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/ChunkMegaBuffer.cpp
 #include "ChunkMegaBuffer.hpp"
+#include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <algorithm>
@@ -34,9 +35,11 @@ namespace Render {
     }
 
     void ChunkMegaBuffer::Shutdown() {
-        for (auto& slab : m_slabs) {
-            if (slab.vbo) glDeleteBuffers(1, &slab.vbo);
-            if (slab.ibo) glDeleteBuffers(1, &slab.ibo);
+        if (g_renderBackend) {
+            for (auto& slab : m_slabs) {
+                if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
+                if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
+            }
         }
         m_slabs.clear();
         m_regions.clear();
@@ -46,23 +49,26 @@ namespace Render {
 
     uint32_t ChunkMegaBuffer::AllocateSlab() {
         PROFILE_ZONE;
+        if (!g_renderBackend) {
+            Log::Error("ChunkMegaBuffer::AllocateSlab: no render backend");
+            return 0;
+        }
+
         Slab slab;
         slab.vboCapacity = m_slabVertexCapacity;
         slab.iboCapacity = m_slabIndexCapacity;
 
-        glGenBuffers(1, &slab.vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, slab.vbo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(slab.vboCapacity * VERTEX_STRIDE),
-                     nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        slab.vbo = g_renderBackend->CreateBuffer(
+            BufferUsage::Vertex,
+            slab.vboCapacity * VERTEX_STRIDE,
+            nullptr,
+            BufferAccess::Dynamic);
 
-        glGenBuffers(1, &slab.ibo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, slab.ibo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                     static_cast<GLsizeiptr>(slab.iboCapacity * INDEX_SIZE),
-                     nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        slab.ibo = g_renderBackend->CreateBuffer(
+            BufferUsage::Index,
+            slab.iboCapacity * INDEX_SIZE,
+            nullptr,
+            BufferAccess::Dynamic);
 
         uint32_t index = static_cast<uint32_t>(m_slabs.size());
         m_slabs.push_back(std::move(slab));
@@ -78,26 +84,12 @@ namespace Render {
     // SLAB BINDING
     // ========================================================================
 
-    void ChunkMegaBuffer::BindSlab(uint32_t slabIndex, bool useVertexAttribBinding) const {
-        if (slabIndex >= m_slabs.size()) return;
+    void ChunkMegaBuffer::BindSlab(uint32_t slabIndex) const {
+        if (slabIndex >= m_slabs.size() || !g_renderBackend) return;
         const Slab& slab = m_slabs[slabIndex];
 
-        if (useVertexAttribBinding) {
-            glBindVertexBuffer(0, slab.vbo, 0, static_cast<GLsizei>(VERTEX_STRIDE));
-        } else {
-            glBindBuffer(GL_ARRAY_BUFFER, slab.vbo);
-            glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
-                                  static_cast<GLsizei>(VERTEX_STRIDE),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(0)));
-            glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE,
-                                  static_cast<GLsizei>(VERTEX_STRIDE),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(3 * sizeof(float))));
-            glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,
-                                  static_cast<GLsizei>(VERTEX_STRIDE),
-                                  reinterpret_cast<void*>(static_cast<uintptr_t>(5 * sizeof(float))));
-        }
-
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, slab.ibo);
+        g_renderBackend->BindVertexBuffer(slab.vbo, static_cast<uint32_t>(VERTEX_STRIDE));
+        g_renderBackend->BindIndexBuffer(slab.ibo);
     }
 
     // ========================================================================
@@ -130,6 +122,7 @@ namespace Render {
     bool ChunkMegaBuffer::TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                                            const float* vertexData, size_t vertexCount,
                                            const uint32_t* indexData, size_t indexCount) {
+        if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
 
         // Try vertex allocation
@@ -146,20 +139,16 @@ namespace Render {
         }
 
         // Upload vertex data
-        glBindBuffer(GL_ARRAY_BUFFER, slab.vbo);
-        glBufferSubData(GL_ARRAY_BUFFER,
-                        static_cast<GLintptr>(vertexOffset * VERTEX_STRIDE),
-                        static_cast<GLsizeiptr>(vertexCount * VERTEX_STRIDE),
-                        vertexData);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        g_renderBackend->UpdateBuffer(slab.vbo,
+                                       vertexOffset * VERTEX_STRIDE,
+                                       vertexCount * VERTEX_STRIDE,
+                                       vertexData);
 
         // Upload index data
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, slab.ibo);
-        glBufferSubData(GL_ELEMENT_ARRAY_BUFFER,
-                        static_cast<GLintptr>(indexOffset * INDEX_SIZE),
-                        static_cast<GLsizeiptr>(indexCount * INDEX_SIZE),
-                        indexData);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+        g_renderBackend->UpdateBuffer(slab.ibo,
+                                       indexOffset * INDEX_SIZE,
+                                       indexCount * INDEX_SIZE,
+                                       indexData);
 
         // Store region
         m_regions[key] = {slabIndex, vertexOffset, vertexCount, indexOffset, indexCount};
@@ -194,9 +183,9 @@ namespace Render {
         if (it == m_regions.end()) return false;
 
         const Region& r = it->second;
-        outCmd.indexCount = static_cast<GLsizei>(r.indexCount);
+        outCmd.indexCount = static_cast<int32_t>(r.indexCount);
         outCmd.indexByteOffset = r.indexOffset * INDEX_SIZE;
-        outCmd.baseVertex = static_cast<GLint>(r.vertexOffset);
+        outCmd.baseVertex = static_cast<int32_t>(r.vertexOffset);
         outCmd.slabIndex = r.slabIndex;
         return true;
     }
@@ -249,8 +238,10 @@ namespace Render {
         bool removed = false;
         while (!m_slabs.empty() && m_slabs.back().sectionCount == 0 && m_slabs.size() > 1) {
             Slab& slab = m_slabs.back();
-            if (slab.vbo) glDeleteBuffers(1, &slab.vbo);
-            if (slab.ibo) glDeleteBuffers(1, &slab.ibo);
+            if (g_renderBackend) {
+                if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
+                if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
+            }
             Log::Debug("ChunkMegaBuffer: freed empty slab %zu", m_slabs.size() - 1);
             m_slabs.pop_back();
             removed = true;

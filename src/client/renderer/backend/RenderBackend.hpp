@@ -126,6 +126,36 @@ namespace Render {
                                uint32_t firstVertex = 0) = 0;
 
         // ====================================================================
+        // MEGA-BUFFER RENDERING
+        // ====================================================================
+        // Low-level buffer binding + draw for the mega-buffer slab pool pattern.
+        // Use these instead of MeshHandle-based draws for chunk rendering.
+
+        // Bind a raw vertex/index buffer for subsequent DrawIndexedBaseVertex calls.
+        virtual void BindVertexBuffer(BufferHandle vbo, uint32_t stride) = 0;
+        virtual void BindIndexBuffer(BufferHandle ibo) = 0;
+
+        // Draw indexed geometry using currently-bound VBO + IBO with base vertex offset.
+        virtual void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) = 0;
+
+        // Batched multi-draw with base vertex. GL: native glMultiDrawElementsBaseVertex.
+        // Default: loops DrawIndexedBaseVertex.
+        virtual void MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
+                                                const size_t* indexByteOffsets,
+                                                const int32_t* baseVertices,
+                                                uint32_t drawCount);
+
+        // ====================================================================
+        // SHARED BLOCK VERTEX FORMAT
+        // ====================================================================
+        // GL: creates/binds a shared VAO with vertex attrib binding.
+        // VK: no-op (vertex input is part of pipeline state).
+
+        virtual void SetupBlockVertexFormat() {}
+        virtual void BindBlockVertexFormat() {}
+        virtual void DestroyBlockVertexFormat() {}
+
+        // ====================================================================
         // GPU TIMER QUERIES
         // ====================================================================
 

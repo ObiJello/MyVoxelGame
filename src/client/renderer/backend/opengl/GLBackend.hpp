@@ -73,6 +73,18 @@ namespace Render {
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
         void DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) override;
 
+        // Mega-buffer rendering
+        void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;
+        void BindIndexBuffer(BufferHandle ibo) override;
+        void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) override;
+        void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
+                                        const int32_t* baseVertices, uint32_t drawCount) override;
+
+        // Shared block vertex format (VAO)
+        void SetupBlockVertexFormat() override;
+        void BindBlockVertexFormat() override;
+        void DestroyBlockVertexFormat() override;
+
         // GPU timers
         GPUTimerHandle BeginGPUTimer(const std::string& name) override;
         void EndGPUTimer(GPUTimerHandle handle) override;
@@ -140,6 +152,10 @@ namespace Render {
 
         // Currently bound handles
         ShaderHandle m_boundShader = INVALID_SHADER;
+
+        // Shared block vertex format (GL_ARB_vertex_attrib_binding)
+        GLuint m_sharedBlockVAO = 0;
+        bool m_hasVertexAttribBinding = false;
 
         // Helpers
         GLenum ToGLBufferTarget(BufferUsage usage) const;
