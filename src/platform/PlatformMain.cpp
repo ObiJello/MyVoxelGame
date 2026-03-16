@@ -238,6 +238,34 @@ namespace PlatformMain {
         return cursorEnabled;
     }
 
+    // Fullscreen toggle state
+    static bool s_isFullscreen = false;
+    static int s_windowedX = 0, s_windowedY = 0;
+    static int s_windowedWidth = Config::WindowWidth, s_windowedHeight = Config::WindowHeight;
+
+    void ToggleFullscreen(GLFWwindow* window) {
+        if (s_isFullscreen) {
+            glfwSetWindowMonitor(window, nullptr,
+                s_windowedX, s_windowedY,
+                s_windowedWidth, s_windowedHeight, 0);
+            s_isFullscreen = false;
+            Log::Info("Switched to windowed mode (%dx%d)", s_windowedWidth, s_windowedHeight);
+        } else {
+            glfwGetWindowPos(window, &s_windowedX, &s_windowedY);
+            glfwGetWindowSize(window, &s_windowedWidth, &s_windowedHeight);
+
+            GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+            const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+            glfwSetWindowMonitor(window, monitor,
+                0, 0, mode->width, mode->height, mode->refreshRate);
+            s_isFullscreen = true;
+            Log::Info("Switched to fullscreen (%dx%d @ %dHz)", mode->width, mode->height, mode->refreshRate);
+        }
+
+        Platform::g_gameSettings.SetFullscreen(s_isFullscreen);
+        Platform::g_gameSettings.Save();
+    }
+
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam) {
         // Classify severity
@@ -511,6 +539,11 @@ namespace PlatformMain {
         Input::Init(window);
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
+        // Apply fullscreen setting from saved preferences
+        if (Platform::g_gameSettings.GetFullscreen()) {
+            ToggleFullscreen(window);
+        }
+
         // Initialize game systems BEFORE any chunk loading
         if (!InitializeGameSystems(window)) {
             Log::Error("Failure to init");
@@ -680,6 +713,11 @@ namespace PlatformMain {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             }
 
+            // Handle fullscreen toggle (F11)
+            if (Input::IsKeyPressed(Input::Key::F11)) {
+                ToggleFullscreen(window);
+            }
+
             cursorEnabled = HandleCursorToggle(window, camera);
             HandlePlayerInput(player, playerController, camera);
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
@@ -817,6 +855,9 @@ namespace PlatformMain {
 
             // Calculate view-projection matrices
             glfwGetFramebufferSize(window, &width, &height);
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->SetViewport(0, 0, width, height);
+            }
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
             int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();

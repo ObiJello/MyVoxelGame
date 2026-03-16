@@ -27,6 +27,7 @@ namespace Input {
         N,
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
         F3,
+        F11,
         Tilde,
     };
 
