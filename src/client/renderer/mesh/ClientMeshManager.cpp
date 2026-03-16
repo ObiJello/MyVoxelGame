@@ -272,43 +272,33 @@ namespace Render {
         PROFILE_ZONE_N("ProcessMeshResult");
         // Let ClientChunkManager decide whether to accept or drop this result
         auto decision = m_chunkManager->AcceptMeshResult(result);
-        
+
         switch (decision.action) {
             case Client::MeshApplyAction::Upload: {
-                // Check if the build succeeded
                 if (!result.success) {
-                    Log::Warning("Failed mesh build for chunk (%d, %d) section %d",
-                                result.chunkPos.x, result.chunkPos.z, result.sectionY);
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
 
-                // Validate result
                 if (!ValidateMeshBuildResult(result)) {
-                    Log::Error("Invalid mesh build result for chunk (%d, %d) section %d",
-                              result.chunkPos.x, result.chunkPos.z, result.sectionY);
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
 
-                // Final check: chunk may have been unloaded between AcceptMeshResult and here
                 if (m_chunkManager && !m_chunkManager->IsChunkLoaded(result.chunkPos)) {
-                    Log::Debug("Chunk (%d, %d) unloaded before GPU upload, skipping",
-                              result.chunkPos.x, result.chunkPos.z);
                     m_stats.meshBuildsSkipped.fetch_add(1, std::memory_order_relaxed);
                     return;
                 }
 
-                // Upload to GPU
+                { PROFILE_ZONE_N("GPUUpload");
                 UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData, result.visibilitySet);
-                
-                // Tell ClientChunkManager the upload completed successfully
+                }
+
+                { PROFILE_ZONE_N("FinalizeUpload");
                 m_chunkManager->FinalizeSectionUpload(result.chunkPos, result.sectionY, result.neighborMask);
-                
-                // Update statistics
+                }
+
                 m_stats.meshBuildsCompleted.fetch_add(1, std::memory_order_relaxed);
-                
-                LogMeshActivity("Uploaded mesh", result.chunkPos, result.sectionY);
                 break;
             }
             
@@ -346,13 +336,12 @@ namespace Render {
             }
 
             Network::MeshBuildResult result;
+            { PROFILE_ZONE_N("PopResult");
             if (!meshResultQueue.try_pop(result)) {
                 break;
             }
+            }
 
-            // Use the SAME processing path as ProcessMeshBuildResults()
-            // This ensures AcceptMeshResult() validation and FinalizeSectionUpload() are called,
-            // preventing sections from getting stuck in MESHING state with dirty=true forever
             ProcessMeshBuildResult(result);
             uploadsThisFrame++;
             m_stats.meshUploadsThisFrame++;
