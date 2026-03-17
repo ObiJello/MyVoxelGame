@@ -110,7 +110,12 @@ namespace Server {
         }
 
         Log::Info("NetworkServer listening on 0.0.0.0:%d", m_networkServer->GetPort());
-        
+
+        // Wire disconnect callback so we broadcast entity removal to other clients
+        m_networkServer->SetOnDisconnection([this](std::shared_ptr<ServerConnection> conn) {
+            OnPlayerDisconnected(conn);
+        });
+
         // Create work guard to keep io_context alive
         m_ioWorkGuard = std::make_unique<WorkGuard>(net::make_work_guard(*m_ioContext));
         
@@ -764,6 +769,48 @@ namespace Server {
             Log::Info("[IntegratedServer] Sent hotbar sync to client");
         } else {
             Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin for player %u", playerId);
+        }
+    }
+
+    // ========================================================================
+    // PLAYER DISCONNECT
+    // ========================================================================
+
+    void IntegratedServer::OnPlayerDisconnected(std::shared_ptr<ServerConnection> connection) {
+        uint32_t connectionId = connection->GetConnectionId();
+        uint32_t playerId = connection->GetPlayerId();
+        std::string playerName = connection->GetPlayerName();
+
+        Log::Info("[IntegratedServer] Player '%s' (ID: %u, conn: %u) disconnected",
+                  playerName.c_str(), playerId, connectionId);
+
+        // 1. Broadcast RemoveEntities to all remaining clients
+        if (m_networkServer && playerId != 0) {
+            Network::RemoveEntitiesS2CPacket removePacket(static_cast<int32_t>(playerId));
+            auto data = Network::Serialization::Serialize(removePacket);
+
+            auto connections = m_networkServer->GetConnections();
+            for (const auto& conn : connections) {
+                if (conn->GetConnectionId() != connectionId && conn->IsConnected()) {
+                    conn->SendPacket(
+                        static_cast<uint8_t>(Network::PacketId::EntityDestroy), data);
+                }
+            }
+            Log::Info("[IntegratedServer] Broadcast RemoveEntities (ID: %u) to %zu clients",
+                      playerId, connections.size());
+        }
+
+        // 2. Clean up remote ServerPlayer
+        m_remotePlayers.erase(playerId);
+
+        // 3. Unregister from SendScheduler
+        if (m_sendScheduler) {
+            m_sendScheduler->UnregisterConnection(connectionId);
+        }
+
+        // 4. Clean up session (watch index, chunk state, etc.)
+        if (m_sessionManager) {
+            m_sessionManager->OnPlayerLeave(playerId, "Disconnected");
         }
     }
 

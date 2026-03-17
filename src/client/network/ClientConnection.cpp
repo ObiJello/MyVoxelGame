@@ -285,7 +285,12 @@ namespace Client {
                 auto data = Serialization::DeserializePlayerUpdateS2C(payload);
                 return std::make_unique<PlayerUpdateS2CPacketImpl>(std::move(data));
             }
-            
+
+            case PacketId::EntityDestroy: {
+                auto data = Serialization::DeserializeRemoveEntitiesS2C(payload);
+                return std::make_unique<RemoveEntitiesS2CPacketImpl>(std::move(data));
+            }
+
             case PacketId::Disconnect: {
                 PacketReader reader(payload);
                 std::string reason = reader.ReadString();

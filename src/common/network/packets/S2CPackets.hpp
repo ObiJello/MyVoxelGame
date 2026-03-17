@@ -210,6 +210,30 @@ namespace Packets {
     };
 
     // ========================================================================
+    // REMOVE ENTITIES PACKET (Minecraft's ClientboundRemoveEntitiesPacket)
+    // ========================================================================
+
+    class RemoveEntitiesS2CPacketImpl : public IS2CPacket {
+    private:
+        RemoveEntitiesS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit RemoveEntitiesS2CPacketImpl(RemoveEntitiesS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onRemoveEntitiesS2C(m_data);
+        }
+
+        const RemoveEntitiesS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::EntityDestroy; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // SIMPLE PACKETS (no data payload)
     // ========================================================================
     

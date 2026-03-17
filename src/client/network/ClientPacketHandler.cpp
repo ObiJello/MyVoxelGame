@@ -151,6 +151,20 @@ namespace Client {
     }
 
     // ========================================================================
+    // ENTITY REMOVAL
+    // ========================================================================
+
+    void ClientPacketHandler::handleRemoveEntities(const Network::RemoveEntitiesS2CPacket& packet) {
+        if (g_remotePlayerManager) {
+            for (int32_t entityId : packet.entityIds) {
+                g_remotePlayerManager->RemovePlayer(static_cast<uint32_t>(entityId));
+                Log::Info("[ClientPacketHandler] Removed entity %d", entityId);
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
     // WORLD STATE
     // ========================================================================
 

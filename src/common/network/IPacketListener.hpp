@@ -14,6 +14,7 @@ namespace Network {
     struct ClientboundSectionBlocksUpdateS2CPacket;
     struct MultiBlockChangeS2CPacket;
     struct PlayerUpdateS2CPacket;
+    struct RemoveEntitiesS2CPacket;
     struct HotbarSyncS2CPacket;
     
     // C2S packet types
@@ -53,6 +54,9 @@ namespace Network {
         
         // Player updates
         virtual void onPlayerUpdateS2C(const PlayerUpdateS2CPacket& packet) {}
+
+        // Entity removal (Minecraft's ClientboundRemoveEntitiesPacket)
+        virtual void onRemoveEntitiesS2C(const RemoveEntitiesS2CPacket& packet) {}
 
         // Inventory sync
         virtual void onHotbarSyncS2C(const HotbarSyncS2CPacket& packet) {}

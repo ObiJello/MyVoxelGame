@@ -37,6 +37,7 @@ namespace Client {
         void onClientboundSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) override { handleSectionBlocksUpdate(packet); }
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
         void onPlayerUpdateS2C(const Network::PlayerUpdateS2CPacket& packet) override { handlePlayerUpdate(packet); }
+        void onRemoveEntitiesS2C(const Network::RemoveEntitiesS2CPacket& packet) override { handleRemoveEntities(packet); }
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
         void onChunkBatchStart() override { handleChunkBatchStart(); }
@@ -59,7 +60,10 @@ namespace Client {
         
         // Player updates
         void handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet);
-        
+
+        // Entity removal
+        void handleRemoveEntities(const Network::RemoveEntitiesS2CPacket& packet);
+
         // World state
         void handleTimeUpdate(uint64_t worldAge, uint64_t timeOfDay);
         void handleWeatherChange(uint8_t weatherType, float intensity);

@@ -131,6 +131,9 @@ namespace Server {
         // Called when a player successfully logs in and needs initial chunks
         void OnPlayerJoined(std::shared_ptr<class ServerConnection> connection);
 
+        // Called when a player disconnects (TCP close)
+        void OnPlayerDisconnected(std::shared_ptr<class ServerConnection> connection);
+
         // Called when server receives client settings (render distance, etc.)
         void OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance);
 

@@ -834,7 +834,12 @@ namespace PlatformMain {
                 PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
                 }
 
-                // 3. Send player position to server (one packet per tick = 20 Hz)
+                // 3. Interpolate remote player positions (Minecraft's InterpolationHandler)
+                if (Client::g_remotePlayerManager) {
+                    Client::g_remotePlayerManager->Tick();
+                }
+
+                // 4. Send player position to server (one packet per tick = 20 Hz)
                 if (networkClient->IsConnected()) {
                     glm::vec3 playerPos = player.physics.position;
                     Network::PlayerMoveC2SPacket movePacket;
