@@ -245,6 +245,7 @@ namespace Game {
         // Uses m_blockIdCache to avoid repeated string lookups — Block* pointers are
         // stable (created once in Blocks::bootstrap), so pointer equality is sufficient.
         BlockID MapBlockType(minecraft::world::BlockState* blockState) const;
+        mutable std::mutex m_blockIdCacheMutex;
         mutable std::unordered_map<const minecraft::world::level::block::Block*, BlockID> m_blockIdCache;
     };
 

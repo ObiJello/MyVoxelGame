@@ -277,9 +277,14 @@ namespace Game {
         // Block* pointers are stable (created once in Blocks::bootstrap, never moved).
         // Cache the resolved BlockID per unique Block* to avoid repeated string operations.
         const auto* block = blockState->getBlock();
-        auto it = m_blockIdCache.find(block);
-        if (it != m_blockIdCache.end()) {
-            return it->second;
+        if (!block) return BlockID::Stone;
+
+        {
+            std::lock_guard<std::mutex> lock(m_blockIdCacheMutex);
+            auto it = m_blockIdCache.find(block);
+            if (it != m_blockIdCache.end()) {
+                return it->second;
+            }
         }
 
         // First encounter — resolve via string lookup (slow path, ~1150 unique blocks total)
@@ -290,7 +295,10 @@ namespace Game {
         gameState.name = identifier;
         gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
 
-        m_blockIdCache[block] = gameState.resolvedId;
+        {
+            std::lock_guard<std::mutex> lock(m_blockIdCacheMutex);
+            m_blockIdCache[block] = gameState.resolvedId;
+        }
         return gameState.resolvedId;
     }
 

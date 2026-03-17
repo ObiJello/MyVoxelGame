@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Network Info
+
+- **Mac Public IP:** 74.105.150.36
+
 ## Build Policy
 
 **Do NOT build after making changes.** Instead, say "try building with new changes and if there are any errors let me know and I will try building to see them." Only run the build command when the user reports errors and asks you to build to diagnose them.
