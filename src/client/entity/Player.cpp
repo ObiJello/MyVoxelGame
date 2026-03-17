@@ -1,6 +1,7 @@
 // File: src/client/entity/Player.cpp
 #include "Player.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
 #include "common/core/Log.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include <glm/gtc/constants.hpp>
@@ -34,14 +35,14 @@ namespace Game {
                   physics.position.x, physics.position.y, physics.position.z);
     }
 
-    void ClientPlayer::UpdatePhysics(float deltaTime, World* world) {
+    void ClientPlayer::UpdatePhysics(float deltaTime, IBlockAccess* blockAccess) {
         // Update physics state based on input
         physics.isSneaking = sneakPressed;
         physics.isSprinting = sprintPressed && !sneakPressed;
 
-        // Create physics context with world block access
+        // Create physics context with block access (World, ClientBlockAccess, etc.)
         PhysicsContext context;
-        context.blockAccess = world; // World implements IBlockAccess
+        context.blockAccess = blockAccess;
 
         // Apply physics simulation with context
         UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime, context);

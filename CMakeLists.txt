@@ -368,6 +368,7 @@ if(APPLE)
             # Minecraft Java Edition Architecture files
             src/server/IntegratedServer.cpp
             src/client/world/ClientChunkManager.cpp
+            src/client/world/ClientBlockAccess.cpp
             src/client/world/PendingDiffsManager.cpp
             src/server/world/ServerWorkerPool.cpp
             src/client/world/ClientWorkerPool.cpp
@@ -500,6 +501,8 @@ else()
             # Client world
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientChunkManager.hpp
+            src/client/world/ClientBlockAccess.cpp
+            src/client/world/ClientBlockAccess.hpp
             src/client/world/ClientWorkerPool.cpp
             src/client/world/ClientWorkerPool.hpp
             src/client/world/PendingDiffsManager.cpp

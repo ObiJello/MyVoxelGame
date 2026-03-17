@@ -25,7 +25,7 @@ namespace Client {
         // ========================================================================
         
         // Initiate handshake and login
-        void StartHandshake(const std::string& playerName, uint16_t serverPort = 0);
+        void StartHandshake(const std::string& playerName, const std::string& serverHost = "127.0.0.1", uint16_t serverPort = 0);
         
         // Check if logged in
         bool IsLoggedIn() const { return m_loggedIn; }

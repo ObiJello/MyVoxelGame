@@ -79,6 +79,10 @@ namespace Client {
         // Get server address
         const std::string& GetServerHost() const { return m_serverHost; }
         uint16_t GetServerPort() const { return m_serverPort; }
+
+        // Set player name for handshake (default: "Player1")
+        void SetPlayerName(const std::string& name) { m_playerName = name; }
+        const std::string& GetPlayerName() const { return m_playerName; }
         
         // Server-sent view distance (effective render distance capped by server)
         void SetServerViewDistance(int distance) { m_serverViewDistance.store(distance); }
@@ -145,6 +149,9 @@ namespace Client {
         // Server info
         std::string m_serverHost;
         uint16_t m_serverPort = 25565;
+
+        // Player name for handshake
+        std::string m_playerName = "Player1";
         
         // Client state
         std::atomic<ClientState> m_state{ClientState::IDLE};

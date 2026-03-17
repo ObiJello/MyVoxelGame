@@ -100,7 +100,7 @@ namespace Client {
                             m_connection->Start();
                             
                             // CRITICAL: Send handshake immediately to prevent server EOF
-                            m_connection->StartHandshake("Player1", m_serverPort);
+                            m_connection->StartHandshake(m_playerName, m_serverHost, m_serverPort);
                             
                             m_stats.connectedTime = std::chrono::steady_clock::now();
                             

@@ -77,8 +77,8 @@ namespace Game {
         // Initialize player state
         void Initialize();
         
-        // Update physics simulation
-        void UpdatePhysics(float deltaTime, World* world);
+        // Update physics simulation (accepts any IBlockAccess: World*, ClientBlockAccess*, etc.)
+        void UpdatePhysics(float deltaTime, IBlockAccess* blockAccess);
         
         // Update raycast from camera position
         void UpdateRaycast(const Render::Camera& camera);

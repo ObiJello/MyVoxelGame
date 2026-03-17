@@ -43,6 +43,7 @@
 #include "server/IntegratedServer.hpp"
 #include "server/network/NetworkServer.hpp"
 #include "client/world/ClientChunkManager.hpp"
+#include "client/world/ClientBlockAccess.hpp"
 #include "server/world/ServerWorkerPool.hpp"
 #include "client/world/ClientWorkerPool.hpp"
 
@@ -357,13 +358,36 @@ namespace PlatformMain {
         // Parse command-line arguments
         bool useVulkan = false;
         bool crashTest = false;
+        bool isRemoteClient = false;
+        std::string remoteServerAddress;
+        uint16_t remoteServerPort = 25565;
+        std::string playerName = "Player1";
         for (int i = 1; i < argc; ++i) {
-            if (std::string(argv[i]) == "--vulkan") {
+            std::string arg = argv[i];
+            if (arg == "--vulkan") {
                 useVulkan = true;
                 Log::Info("Vulkan backend requested via --vulkan flag");
             }
-            if (std::string(argv[i]) == "--crash-test") {
+            if (arg == "--crash-test") {
                 crashTest = true;
+            }
+            if (arg == "--server" && i + 1 < argc) {
+                isRemoteClient = true;
+                std::string hostPort = argv[++i];
+                // Parse host:port
+                auto colonPos = hostPort.rfind(':');
+                if (colonPos != std::string::npos) {
+                    remoteServerAddress = hostPort.substr(0, colonPos);
+                    remoteServerPort = static_cast<uint16_t>(std::stoi(hostPort.substr(colonPos + 1)));
+                } else {
+                    remoteServerAddress = hostPort;
+                    // Use default port 25565
+                }
+                Log::Info("Remote server mode: connecting to %s:%d", remoteServerAddress.c_str(), remoteServerPort);
+            }
+            if (arg == "--name" && i + 1 < argc) {
+                playerName = argv[++i];
+                Log::Info("Player name set to: %s", playerName.c_str());
             }
         }
 
@@ -552,68 +576,105 @@ namespace PlatformMain {
 
         // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
         Log::Info("Initializing Minecraft Java Edition Architecture...");
-        
-        // 1. Initialize server-side systems (server creates and owns the world)
-        Server::IntegratedServerConfig serverConfig;
-        serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
-        serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
-        
-        // Automatically use local save directory if available (temporary feature)
-        if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
-            // Point to the saves/world folder (not /region, as MinecraftChunkLoader adds that)
-            serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
-            Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
+
+        // ClientBlockAccess for remote clients (physics/raycast backed by client chunk cache)
+        std::unique_ptr<Client::ClientBlockAccess> clientBlockAccess;
+        Game::World* world = nullptr;
+
+        if (!isRemoteClient) {
+            // 1. Initialize server-side systems (server creates and owns the world)
+            Server::IntegratedServerConfig serverConfig;
+            serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
+            serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
+
+            // Automatically use local save directory if available (temporary feature)
+            if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
+                // Point to the saves/world folder (not /region, as MinecraftChunkLoader adds that)
+                serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
+                Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
+            } else {
+                Log::Info("No local Minecraft save found, will use procedural generation");
+            }
+
+            Server::InitializeIntegratedServer(serverConfig);
+            Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
+
+            // Get world reference for legacy systems (temporary)
+            world = Server::g_integratedServer->GetWorld();
+            Game::g_world = world;
+
+            // 3. Initialize worker pools with dynamic thread allocation
+            Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
+            Threading::InitializeServerWorkerPool(threadAlloc.serverWorldWorkers);
+            Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
+            Log::Info("✓ Worker pools initialized - %s", threadAlloc.ToString().c_str());
         } else {
-            Log::Info("No local Minecraft save found, will use procedural generation");
+            // Remote client: no server, no server worker pool. Only client worker pool for mesh building.
+            Log::Info("Remote client mode - skipping integrated server");
+            Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
+            Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
+            Log::Info("✓ Client worker pool initialized (%d threads)", threadAlloc.clientMeshWorkers);
+
+            // Create ClientBlockAccess for physics and raycast
+            clientBlockAccess = std::make_unique<Client::ClientBlockAccess>();
         }
-        
-        Server::InitializeIntegratedServer(serverConfig);
-        Log::Info("✓ IntegratedServer initialized (20 TPS, world created on server)");
-        
-        // Get world reference for legacy systems (temporary)
-        Game::World* world = Server::g_integratedServer->GetWorld();
-        Game::g_world = world;
-        
-        // 3. Initialize worker pools with dynamic thread allocation
-        Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
-        Threading::InitializeServerWorkerPool(threadAlloc.serverWorldWorkers);
-        Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
-        Log::Info("✓ Worker pools initialized - %s", threadAlloc.ToString().c_str());
-        
-        // 4. Initialize client-side systems
+
+        // 4. Initialize client-side systems (always needed)
         Client::InitializeClientChunkManager();
         Render::InitializeClientMeshManager(Client::g_clientChunkManager.get());
         Log::Info("✓ Client systems initialized (chunk manager, mesh manager)");
-        
+
         // 5. Initialize player and controller
         Game::ClientPlayer player;
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
-        playerController.SetWorld(world);
-        
-        // 6. Configure IntegratedServer with player
-        Server::g_integratedServer->SetPlayer(&player);
-        
+        if (!isRemoteClient) {
+            playerController.SetWorld(world);
+        } else {
+            // Remote client: no World for block placement (server handles it)
+            playerController.SetWorld(nullptr);
+        }
+
+        // 6. Configure IntegratedServer with player (host only)
+        if (!isRemoteClient && Server::g_integratedServer) {
+            Server::g_integratedServer->SetPlayer(&player);
+        }
+
         // 7. Initialize rendering systems (keeping existing ones that still work)
         if (!Render::InitializeChunkRenderer()) {
             Log::Error("Failed to initialize chunk renderer");
             return -7;
         }
-        
+
         // 8. Initialize debug system
         Debug::DebugSystem::Initialize(window);
-        
-        // 9. Start the IntegratedServer thread (20 TPS)
-        Server::StartIntegratedServer();
-        Log::Info("✓ IntegratedServer thread started (20 TPS)");
+
+        // 9. Start the IntegratedServer thread (host only)
+        if (!isRemoteClient) {
+            Server::StartIntegratedServer();
+            Log::Info("✓ IntegratedServer thread started (20 TPS)");
+        }
+
+        // Set up global block access for raycast system
+        Game::IBlockAccess* blockAccessForPhysics = nullptr;
+        if (!isRemoteClient) {
+            blockAccessForPhysics = world;
+            // Note: World::Initialize already calls SetGlobalBlockAccess(this)
+        } else {
+            blockAccessForPhysics = clientBlockAccess.get();
+            Game::SetGlobalBlockAccess(clientBlockAccess.get());
+        }
         
         // 10. Initialize Network I/O Service (dedicated I/O thread like Minecraft's Netty)
         Client::InitializeNetworkIOService();
         Log::Info("✓ Network I/O Service started (dedicated I/O thread)");
         
-        // 11. Create NetworkClient and connect to localhost server
+        // 11. Create NetworkClient and connect to server
         auto networkClient = std::make_unique<Client::NetworkClient>(Client::g_networkIOService->GetIOContext());
         Client::g_networkClient = networkClient.get();  // Set global pointer for legacy systems
+
+        // Set player name for handshake
+        networkClient->SetPlayerName(playerName);
 
         // Wire up player reference for server-authoritative hotbar sync
         if (auto handler = networkClient->GetPacketHandler()) {
@@ -624,41 +685,50 @@ namespace PlatformMain {
         // Use shared_ptr to ensure atomics remain valid for async callbacks
         auto connected = std::make_shared<std::atomic<bool>>(false);
         auto connectionComplete = std::make_shared<std::atomic<bool>>(false);
-        
+
         networkClient->SetOnConnected([connected, connectionComplete]() {
             Log::Info("✓ Connection established");
             *connected = true;
             *connectionComplete = true;
         });
-        
+
         networkClient->SetOnError([connectionComplete](const std::string& error) {
             Log::Error("Connection failed: %s", error.c_str());
             *connectionComplete = true;
         });
-        
-        // Get the dynamically assigned port from the integrated server
-        uint16_t serverPort = Server::g_integratedServer->GetNetworkServer()->GetPort();
+
+        // Determine connection target
+        std::string connectHost;
+        uint16_t serverPort;
+        if (isRemoteClient) {
+            connectHost = remoteServerAddress;
+            serverPort = remoteServerPort;
+        } else {
+            connectHost = "127.0.0.1";
+            serverPort = Server::g_integratedServer->GetNetworkServer()->GetPort();
+        }
 
         // Start async connection (all socket ops on I/O thread)
-        Log::Info("Connecting to localhost:%d...", serverPort);
-        networkClient->ConnectAsync("127.0.0.1", serverPort);
-        
+        Log::Info("Connecting to %s:%d...", connectHost.c_str(), serverPort);
+        networkClient->ConnectAsync(connectHost, serverPort);
+
         // Wait for connection with timeout (using yield instead of sleep)
         auto startTime = std::chrono::steady_clock::now();
+        int timeoutSeconds = isRemoteClient ? 10 : 2;
         while (!*connectionComplete) {
-            if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(2)) {
-                Log::Error("Connection timeout after 2 seconds");
+            if (std::chrono::steady_clock::now() - startTime > std::chrono::seconds(timeoutSeconds)) {
+                Log::Error("Connection timeout after %d seconds", timeoutSeconds);
                 return -8;
             }
             std::this_thread::yield();
         }
-        
+
         if (!*connected) {
             Log::Error("Failed to connect to server");
             return -8;
         }
-        
-        Log::Info("✓ NetworkClient connected to localhost:%d", serverPort);
+
+        Log::Info("✓ NetworkClient connected to %s:%d", connectHost.c_str(), serverPort);
         Log::Info("✓ Handshake automatically sent to server");
         
         // Wire up NetworkClient to PlayerController for packet sending
@@ -666,8 +736,12 @@ namespace PlatformMain {
         Log::Info("✓ PlayerController connected to NetworkClient");
         
         Log::Info("🎮 Minecraft Java Edition Architecture fully initialized!");
-        Log::Info("   Server Thread: 20 TPS | Client Thread: Unlocked FPS | I/O Thread: Async | Workers: 6 threads");
-        Log::Info("   Client connected via TCP to localhost:%d", serverPort);
+        if (isRemoteClient) {
+            Log::Info("   Remote client mode: connected to %s:%d", connectHost.c_str(), serverPort);
+        } else {
+            Log::Info("   Server Thread: 20 TPS | Client Thread: Unlocked FPS | I/O Thread: Async");
+            Log::Info("   Client connected via TCP to localhost:%d", serverPort);
+        }
         Log::Info("=== ENTERING CLIENT RENDER LOOP (UNLOCKED FPS) ===");
 
         // === MINECRAFT-STYLE MAIN LOOP ===
@@ -769,7 +843,7 @@ namespace PlatformMain {
             dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt * 1000.0f);
 
-            player.UpdatePhysics(dt, world);
+            player.UpdatePhysics(dt, blockAccessForPhysics);
             camera.position = player.GetEyePosition();
             camera.Update(dt);
             player.UpdateRaycast(camera);
@@ -924,16 +998,18 @@ namespace PlatformMain {
                 }
 
                 // Chunk loading metrics (still on IntegratedServer)
-                srvSnap.chunksPendingLoad = Server::g_integratedServer->GetPendingChunkLoadCount();
+                if (Server::g_integratedServer) {
+                    srvSnap.chunksPendingLoad = Server::g_integratedServer->GetPendingChunkLoadCount();
+                }
 
                 // ChunkProvider loaded count
-                auto* srvWorld = Server::g_integratedServer->GetWorld();
+                auto* srvWorld = Server::g_integratedServer ? Server::g_integratedServer->GetWorld() : nullptr;
                 if (srvWorld && srvWorld->GetChunkProvider()) {
                     srvSnap.chunkProviderLoaded = srvWorld->GetChunkProvider()->GetLoadedChunkCount();
                 }
 
                 // Player session metrics (chunk sender now lives on session)
-                auto session = Server::g_integratedServer->GetPlayerSession();
+                auto session = Server::g_integratedServer ? Server::g_integratedServer->GetPlayerSession() : nullptr;
                 if (session) {
                     auto sessionStats = session->GetStats();
                     srvSnap.sessionWatchSetSize = sessionStats.chunksInWatch;
@@ -1148,40 +1224,54 @@ namespace PlatformMain {
         // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===
         Log::Info("Shutting down...");
 
+        // Clear global block access for raycast if remote client
+        if (isRemoteClient) {
+            Game::SetGlobalBlockAccess(nullptr);
+        }
+
         // 1. Disconnect NetworkClient
         Log::Info("Disconnecting NetworkClient...");
         networkClient->Disconnect();
         networkClient.reset();
         Log::Info("✓ NetworkClient disconnected");
-        
+
         // 2. Stop Network I/O Service (dedicated I/O thread)
         Log::Info("Stopping Network I/O Service...");
         Client::ShutdownNetworkIOService();
         Log::Info("✓ Network I/O Service stopped");
 
-        // 3. Stop IntegratedServer thread (20 TPS)
-        Log::Info("Stopping IntegratedServer thread...");
-        Server::StopIntegratedServer();
-        Log::Info("✓ IntegratedServer stopped");
-        
+        // 3. Stop IntegratedServer thread (host only)
+        if (!isRemoteClient) {
+            Log::Info("Stopping IntegratedServer thread...");
+            Server::StopIntegratedServer();
+            Log::Info("✓ IntegratedServer stopped");
+        }
+
         // 4. Stop worker pools (stops background threads)
         Log::Info("Stopping worker thread pools...");
-        Threading::ShutdownServerWorkerPool();
+        if (!isRemoteClient) {
+            Threading::ShutdownServerWorkerPool();
+        }
         Threading::ShutdownClientWorkerPool();
         Log::Info("✓ Worker pools stopped");
-        
+
         // 5. Note: Chunks are now saved by IntegratedServer during its shutdown
-        
+
         // 6. Shutdown client systems
         Log::Info("Shutting down client systems...");
         Render::ShutdownClientMeshManager();
         Client::ShutdownClientChunkManager();
         Log::Info("✓ Client systems shutdown");
-        
-        // 7. Shutdown server systems
-        Log::Info("Shutting down server systems...");
-        Server::ShutdownIntegratedServer();
-        Log::Info("✓ Server systems shutdown");
+
+        // 7. Shutdown server systems (host only)
+        if (!isRemoteClient) {
+            Log::Info("Shutting down server systems...");
+            Server::ShutdownIntegratedServer();
+            Log::Info("✓ Server systems shutdown");
+        }
+
+        // Clean up ClientBlockAccess (remote client only)
+        clientBlockAccess.reset();
         
         // 8. Shutdown rendering systems
         Render::ShutdownChunkRenderer();

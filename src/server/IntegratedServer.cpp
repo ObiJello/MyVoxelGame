@@ -101,15 +101,15 @@ namespace Server {
 
         // Create io_context and NetworkServer
         m_ioContext = std::make_unique<net::io_context>();
-        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 0);
+        m_networkServer = std::make_unique<NetworkServer>(*m_ioContext, 25565);
 
-        // Start NetworkServer on localhost (port 0 = OS picks a random available port)
-        if (!m_networkServer->Start("127.0.0.1")) {
-            Log::Error("Failed to start NetworkServer on 127.0.0.1");
+        // Start NetworkServer on all interfaces so remote clients can connect
+        if (!m_networkServer->Start("0.0.0.0")) {
+            Log::Error("Failed to start NetworkServer on 0.0.0.0:25565");
             return false;
         }
 
-        Log::Info("NetworkServer listening on 127.0.0.1:%d", m_networkServer->GetPort());
+        Log::Info("NetworkServer listening on 0.0.0.0:%d", m_networkServer->GetPort());
         
         // Create work guard to keep io_context alive
         m_ioWorkGuard = std::make_unique<WorkGuard>(net::make_work_guard(*m_ioContext));
