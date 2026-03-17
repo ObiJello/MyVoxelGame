@@ -200,7 +200,8 @@ namespace Server {
         std::atomic<bool> m_shouldStop{false};
 
         // New player architecture
-        std::unique_ptr<ServerPlayer> m_serverPlayer;     // Authoritative gameplay entity
+        std::unique_ptr<ServerPlayer> m_serverPlayer;     // Host player (ID 1)
+        std::unordered_map<uint32_t, std::unique_ptr<ServerPlayer>> m_remotePlayers; // Remote players by ID
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
         // Chunk management

@@ -706,67 +706,59 @@ namespace Server {
     
     void IntegratedServer::OnPlayerJoined(std::shared_ptr<ServerConnection> connection) {
         Log::Info("[IntegratedServer] Player joined! Setting up session...");
-        
+
+        if (!m_sessionManager) {
+            Log::Warning("[IntegratedServer] Session manager not available, cannot handle player join");
+            return;
+        }
+
         // Register connection with send scheduler
         if (m_sendScheduler) {
             m_sendScheduler->RegisterConnection(connection->GetConnectionId(), connection);
         }
-        
-        // Create session via SessionManager (new architecture)
-        if (m_serverPlayer && m_sessionManager) {
-            uint32_t playerId = 1;  // Single player ID for integrated server
 
-            // Create session via SessionManager
-            m_sessionManager->OnPlayerJoin(
-                playerId,
-                connection->GetConnectionId(),
-                "Player"  // Default player name
-            );
+        // Use connection ID as unique player ID, player name from login packet
+        uint32_t playerId = connection->GetConnectionId();
+        std::string playerName = connection->GetPlayerName();
+        if (playerName.empty()) playerName = "Player" + std::to_string(playerId);
 
-            // Attach ServerPlayer to the session created by manager
-            auto session = m_sessionManager->GetSession(playerId);
-            if (session) {
-                session->AttachPlayer(m_serverPlayer.get());
-                session->SetConnection(connection.get());
-                Log::Info("[IntegratedServer] Player session created and wired to connection %u",
-                          connection->GetConnectionId());
-
-                // Send server-authoritative hotbar to client (Minecraft-style inventory sync)
-                {
-                    Network::HotbarSyncS2CPacket hotbarPacket;
-                    for (int i = 0; i < 9; i++) {
-                        hotbarPacket.slots[i] = static_cast<uint16_t>(m_serverPlayer->getHotbarBlock(i));
-                    }
-                    auto hotbarData = Network::Serialization::Serialize(hotbarPacket);
-                    connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HotbarSyncS2C), hotbarData);
-                    Log::Info("[IntegratedServer] Sent hotbar sync to client");
-                }
-            } else {
-                Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin");
-            }
-        } else if (m_sessionManager) {
-            // Fallback: Create session through manager
-            uint32_t playerId = 1;  // Single player ID for integrated server
-            m_sessionManager->OnPlayerJoin(
-                playerId,
-                connection->GetConnectionId(),
-                "Player"  // Default player name
-            );
-
-            // Attach ServerPlayer to the session created by manager
-            if (m_serverPlayer) {
-                auto session = m_sessionManager->GetSession(playerId);
-                if (session) {
-                    session->AttachPlayer(m_serverPlayer.get());
-                    Log::Info("[IntegratedServer] Attached ServerPlayer to session (fallback path)");
-                } else {
-                    Log::Error("[IntegratedServer] Failed to retrieve session in fallback path");
-                }
-            }
-
-            Log::Info("[IntegratedServer] Player session created through manager");
+        // Determine which ServerPlayer to use:
+        // - Connection 1 (host): use existing m_serverPlayer
+        // - Other connections: create a new ServerPlayer
+        ServerPlayer* playerPtr = nullptr;
+        if (playerId == 1 && m_serverPlayer) {
+            playerPtr = m_serverPlayer.get();
         } else {
-            Log::Warning("[IntegratedServer] Session manager not available, cannot handle player join");
+            glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
+            auto remotePlayer = std::make_unique<ServerPlayer>(playerId, playerName);
+            remotePlayer->setPosition(glm::dvec3(spawnPos));
+            playerPtr = remotePlayer.get();
+            m_remotePlayers[playerId] = std::move(remotePlayer);
+            Log::Info("[IntegratedServer] Created ServerPlayer for remote player '%s' (ID: %u)",
+                      playerName.c_str(), playerId);
+        }
+
+        // Create session via SessionManager
+        m_sessionManager->OnPlayerJoin(playerId, connection->GetConnectionId(), playerName);
+
+        // Attach ServerPlayer to the session
+        auto session = m_sessionManager->GetSession(playerId);
+        if (session) {
+            session->AttachPlayer(playerPtr);
+            session->SetConnection(connection.get());
+            Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
+                      playerName.c_str(), playerId, connection->GetConnectionId());
+
+            // Send server-authoritative hotbar to client
+            Network::HotbarSyncS2CPacket hotbarPacket;
+            for (int i = 0; i < 9; i++) {
+                hotbarPacket.slots[i] = static_cast<uint16_t>(playerPtr->getHotbarBlock(i));
+            }
+            auto hotbarData = Network::Serialization::Serialize(hotbarPacket);
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HotbarSyncS2C), hotbarData);
+            Log::Info("[IntegratedServer] Sent hotbar sync to client");
+        } else {
+            Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin for player %u", playerId);
         }
     }
 
