@@ -164,6 +164,9 @@ void main() {
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
         g_renderBackend->DrawIndexed(m_mesh, 6);
 
+        // Unbind mesh VAO so GPU uploads don't corrupt its IBO binding
+        g_renderBackend->UnbindMesh();
+
         // Restore default state
         PipelineState defaultState;
         defaultState.depthTestEnabled = true;

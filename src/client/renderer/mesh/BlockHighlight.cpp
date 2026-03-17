@@ -224,6 +224,9 @@ void main() {
 
         g_renderBackend->DrawIndexed(m_mesh, 72); // 12 edges * 6 indices
 
+        // Unbind mesh VAO so GPU uploads don't corrupt its IBO binding
+        g_renderBackend->UnbindMesh();
+
         // Restore default pipeline state
         PipelineState defaultState;
         defaultState.depthTestEnabled = true;

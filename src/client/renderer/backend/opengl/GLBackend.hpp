@@ -72,6 +72,7 @@ namespace Render {
         // Drawing
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
         void DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) override;
+        void UnbindMesh() override;
 
         // Mega-buffer rendering
         void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;

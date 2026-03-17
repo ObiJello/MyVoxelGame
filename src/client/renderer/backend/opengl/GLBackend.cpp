@@ -574,6 +574,10 @@ namespace Render {
         glDrawArrays(ToGLPrimitive(m_currentState.primitiveType), firstVertex, vertexCount);
     }
 
+    void GLBackend::UnbindMesh() {
+        glBindVertexArray(0);
+    }
+
     // ========================================================================
     // MEGA-BUFFER RENDERING
     // ========================================================================

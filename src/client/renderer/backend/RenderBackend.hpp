@@ -125,6 +125,10 @@ namespace Render {
         virtual void DrawArrays(MeshHandle mesh, uint32_t vertexCount,
                                uint32_t firstVertex = 0) = 0;
 
+        // Unbind any currently-bound mesh/VAO to prevent state leakage.
+        // GL: glBindVertexArray(0). VK: no-op.
+        virtual void UnbindMesh() {}
+
         // ====================================================================
         // MEGA-BUFFER RENDERING
         // ====================================================================
