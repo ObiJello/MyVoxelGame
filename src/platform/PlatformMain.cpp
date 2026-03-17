@@ -697,6 +697,11 @@ namespace PlatformMain {
             *connectionComplete = true;
         });
 
+        networkClient->SetOnDisconnected([window](const std::string& reason) {
+            Log::Info("Disconnected from server: %s", reason.c_str());
+            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        });
+
         // Determine connection target
         std::string connectHost;
         uint16_t serverPort;

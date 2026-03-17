@@ -48,8 +48,7 @@ namespace Server {
     }
     
     void ServerPlayPacketListener::onBlockActionC2S(const Network::BlockActionC2SPacket& packet) {
-        Log::Debug("[ServerPlayPacketListener] Received BlockActionC2S - not implemented yet");
-        // TODO: Implement when needed
+        m_session.HandleBlockAction(packet);
     }
     
     void ServerPlayPacketListener::onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) {

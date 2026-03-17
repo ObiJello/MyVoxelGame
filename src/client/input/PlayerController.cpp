@@ -112,10 +112,24 @@ namespace Game {
     }
 
     void ClientPlayerController::FinishDig() {
-        // TODO: Send finish dig packet to server
-        // net->SendBlockDig(STOP_DESTROY_BLOCK, breakingBlockPos, 0, ++interactSeq);
-        
-        // For now, handle locally (single-player)
+        // Send block break to server (server-authoritative)
+        if (networkClient && networkClient->IsConnected()) {
+            Network::BlockActionC2SPacket packet;
+            packet.worldX = breakingBlockPos.x;
+            packet.worldY = breakingBlockPos.y;
+            packet.worldZ = breakingBlockPos.z;
+            packet.action = Network::BlockActionType::BREAK;
+            packet.face = 0;
+            packet.sequenceNumber = ++interactSeq;
+
+            auto data = Network::Serialization::Serialize(packet);
+            auto connection = networkClient->GetConnection();
+            if (connection) {
+                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
+            }
+        }
+
+        // Also handle locally for immediate feedback
         FinishBreaking();
     }
 

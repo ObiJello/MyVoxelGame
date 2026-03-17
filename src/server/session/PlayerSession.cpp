@@ -612,17 +612,35 @@ namespace Server {
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
         if (!m_player) return;
-        
-        // Delegate to player for block breaking
+
         switch (packet.action) {
-            case Network::BlockActionType::BREAK:
-                m_player->startDestroyBlock(
-                    glm::ivec3(packet.worldX, packet.worldY, packet.worldZ),
-                    packet.face
-                );
+            case Network::BlockActionType::BREAK: {
+                glm::ivec3 pos(packet.worldX, packet.worldY, packet.worldZ);
+
+                // Validate reach
+                glm::vec3 blockCenter = glm::vec3(pos) + glm::vec3(0.5f);
+                if (!m_player->canReach(blockCenter)) {
+                    Log::Warning("HandleBlockAction: Player %u cannot reach (%d,%d,%d)",
+                                m_playerId, pos.x, pos.y, pos.z);
+                    return;
+                }
+
+                // Get world and break the block (set to air)
+                IntegratedServer* server = g_integratedServer.get();
+                if (!server || !server->GetWorld()) return;
+                Game::World* world = server->GetWorld();
+
+                Game::BlockID oldBlock = world->GetBlock(pos.x, pos.y, pos.z);
+                if (oldBlock == Game::BlockID::Air || oldBlock == Game::BlockID::Bedrock) return;
+
+                if (world->SetBlock(pos.x, pos.y, pos.z, Game::BlockID::Air)) {
+                    Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
+                              m_playerId, pos.x, pos.y, pos.z);
+                }
                 break;
+            }
             case Network::BlockActionType::PLACE:
-                // Now handled by HandleUseItemOn
+                // Handled by HandleUseItemOn
                 break;
             case Network::BlockActionType::INTERACT:
                 // TODO: Implement block interaction (chests, doors, etc.)
