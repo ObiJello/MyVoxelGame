@@ -469,13 +469,10 @@ namespace Server {
         
         auto packet = Network::Serialization::DeserializeBlockActionC2S(payload);
         
-        Log::Info("[Server#%u] RECEIVED BlockActionC2S (ID: 0x%02X) - Action: %d, Pos: (%d, %d, %d)",
-                  GetConnectionId(), static_cast<uint8_t>(Network::PacketId::BlockActionC2S),
-                  static_cast<int>(packet.action), packet.worldX, packet.worldY, packet.worldZ);
-        
-        // Forward to IntegratedServer for processing
-        if (Server::g_integratedServer) {
-            Server::g_integratedServer->ProcessBlockAction(packet);
+        // Route through packet listener → PlayerSession::HandleBlockAction()
+        // (validates against THIS player's position, not the host's)
+        if (m_listener) {
+            m_listener->onBlockActionC2S(packet);
         }
     }
 
