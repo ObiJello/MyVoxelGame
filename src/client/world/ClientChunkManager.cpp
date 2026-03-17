@@ -547,13 +547,19 @@ namespace Client {
         
         // Set the block in the chunk
         chunk->chunkData->SetBlock(localX, packet.worldY, localZ, packet.newBlockId);
-        
+
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY);
-        
-        Log::Debug("Block change at (%d, %d, %d) in chunk (%d, %d) to block %d",
-                  packet.worldX, packet.worldY, packet.worldZ, 
-                  chunkPos.x, chunkPos.z, static_cast<int>(packet.newBlockId));
+
+        // Mark neighbor sections dirty when block is on a chunk/section boundary
+        // (the neighbor's mesh depends on this block for face culling)
+        int localY = (packet.worldY + 64) & 0xF;  // position within section (0-15)
+        if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY);
+        if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY);
+        if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY);
+        if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY);
+        if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1);
+        if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1);
     }
     
     void ClientChunkManager::ApplyChunkData(Game::Math::ChunkPos chunkPos, const Network::ChunkDataS2CPacket& packet) {

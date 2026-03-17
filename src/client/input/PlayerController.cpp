@@ -350,8 +350,8 @@ namespace Game {
             player->stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
             placeCooldownTimer = PLACE_COOLDOWN;
 
-            // **NEW**: Mark surrounding sections for remeshing
-            MarkSurroundingSectionsForRemesh(placePos);
+            // Remeshing triggered by server's BlockChangeS2C → ProcessBlockChange
+            // (handles neighbor boundaries correctly, avoids race conditions).
 
             const Block& block = BlockRegistry::Get(selectedBlock);
             Log::Info("Placed %s at (%d, %d, %d)",
@@ -417,8 +417,10 @@ namespace Game {
             player->stats.blocksBroken++;
             player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
 
-            // **NEW**: Mark surrounding sections for remeshing
-            MarkSurroundingSectionsForRemesh(breakingBlockPos);
+            // Remeshing is triggered by the server's BlockChangeS2C via
+            // ProcessBlockChange (which handles neighbor boundaries correctly).
+            // Don't mark here — avoids race where neighbors remesh before
+            // the client chunk cache is updated.
 
             const Block& block = BlockRegistry::Get(brokenBlock);
             Log::Info("Broke %s at (%d, %d, %d)",
