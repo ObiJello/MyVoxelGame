@@ -20,15 +20,6 @@ echo "$N" > "$NUMBER_FILE"
 
 VERSION="${MAJOR}.${MINOR}.${N}"
 
-if [ "$TYPE" = "launcher" ]; then
-    # Update LauncherConfig.hpp in source tree (for git tracking)
-    CONFIG="$SOURCE_ROOT/src/launcher/LauncherConfig.hpp"
-    sed -i '' "s|LauncherVersion = \"[^\"]*\"|LauncherVersion = \"${VERSION}\"|" "$CONFIG"
-else
-    # Update Config.hpp in source tree (for git tracking)
-    CONFIG="$SOURCE_ROOT/src/common/core/Config.hpp"
-    sed -i '' "s|GAME_VERSION \"[^\"]*\"|GAME_VERSION \"${VERSION}\"|" "$CONFIG"
-fi
 
 # Also write a generated header in the build directory.
 # CMake declares this as BYPRODUCTS so Ninja recompiles dependents.

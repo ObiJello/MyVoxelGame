@@ -14,14 +14,6 @@ Set-Content $NumberFile $N
 
 $Version = "$Major.$Minor.$N"
 
-if ($Type -eq "launcher") {
-    $Config = "$SourceRoot/src/launcher/LauncherConfig.hpp"
-    $Pattern = 'LauncherVersion = "[^"]*"'
-    $Replacement = "LauncherVersion = `"$Version`""
-    $content = [System.IO.File]::ReadAllText($Config)
-    $content = [System.Text.RegularExpressions.Regex]::Replace($content, $Pattern, $Replacement)
-    [System.IO.File]::WriteAllText($Config, $content)
-}
 
 Write-Host "[bump-version] $Type version -> $Version"
 
