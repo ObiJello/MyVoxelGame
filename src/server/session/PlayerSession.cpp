@@ -608,6 +608,9 @@ namespace Server {
 
     void PlayerSession::HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet) {
         UpdatePosition(packet.position, packet.rotation);
+        if (m_player) {
+            m_player->setSneaking(packet.isCrouching);
+        }
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {

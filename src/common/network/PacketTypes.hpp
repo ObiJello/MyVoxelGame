@@ -186,7 +186,8 @@ namespace Network {
     struct PlayerUpdateS2CPacket {
         uint32_t playerId;
         glm::vec3 position;
-        glm::vec2 rotation;
+        glm::vec2 rotation;     // yaw, pitch (head look direction)
+        bool isCrouching = false;
         uint32_t sequenceNumber;
     };
 
@@ -252,6 +253,7 @@ namespace Network {
         glm::vec3 position;
         glm::vec2 rotation; // yaw, pitch
         bool onGround = false;
+        bool isCrouching = false;
         uint32_t sequenceNumber = 0;
         std::chrono::steady_clock::time_point timestamp;
 
@@ -496,10 +498,11 @@ namespace Network {
             buffer.WriteFloat(packet.position.z);
             buffer.WriteFloat(packet.rotation.x);
             buffer.WriteFloat(packet.rotation.y);
+            buffer.WriteByte(packet.isCrouching ? 1 : 0);
             buffer.WriteVarInt(packet.sequenceNumber);
             return buffer.GetData();
         }
-        
+
         inline PlayerUpdateS2CPacket DeserializePlayerUpdateS2C(const std::vector<uint8_t>& data) {
             Network::PacketReader reader(data);
             PlayerUpdateS2CPacket packet;
@@ -509,6 +512,7 @@ namespace Network {
             packet.position.z = reader.ReadFloat();
             packet.rotation.x = reader.ReadFloat();
             packet.rotation.y = reader.ReadFloat();
+            packet.isCrouching = reader.ReadByte() != 0;
             packet.sequenceNumber = reader.ReadVarInt();
             return packet;
         }
@@ -574,11 +578,14 @@ namespace Network {
             buffer.WriteDouble(packet.position.z);
             buffer.WriteFloat(packet.rotation.x); // yaw
             buffer.WriteFloat(packet.rotation.y); // pitch
-            buffer.WriteByte(packet.onGround ? 0x01 : 0x00);
+            uint8_t flags = 0;
+            if (packet.onGround) flags |= 0x01;
+            if (packet.isCrouching) flags |= 0x02;
+            buffer.WriteByte(flags);
             buffer.WriteVarInt(packet.sequenceNumber);
             return buffer.GetData();
         }
-        
+
         inline PlayerMoveC2SPacket DeserializePlayerMoveC2S(const std::vector<uint8_t>& data) {
             Network::PacketReader reader(data);
             PlayerMoveC2SPacket packet;
@@ -587,7 +594,9 @@ namespace Network {
             packet.position.z = reader.ReadDouble();
             packet.rotation.x = reader.ReadFloat();
             packet.rotation.y = reader.ReadFloat();
-            packet.onGround = reader.ReadByte() != 0;
+            uint8_t flags = reader.ReadByte();
+            packet.onGround = (flags & 0x01) != 0;
+            packet.isCrouching = (flags & 0x02) != 0;
             packet.sequenceNumber = reader.ReadVarInt();
             packet.timestamp = std::chrono::steady_clock::now();
             return packet;

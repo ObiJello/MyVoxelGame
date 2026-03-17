@@ -144,7 +144,7 @@ namespace Client {
 
     void ClientPacketHandler::handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet) {
         if (g_remotePlayerManager) {
-            g_remotePlayerManager->UpdatePlayer(packet.playerId, packet.position, packet.rotation);
+            g_remotePlayerManager->UpdatePlayer(packet.playerId, packet.position, packet.rotation, packet.isCrouching);
         }
         m_stats.playerUpdates++;
         m_stats.packetsProcessed++;

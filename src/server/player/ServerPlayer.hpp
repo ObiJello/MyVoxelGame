@@ -155,6 +155,7 @@ namespace Server {
         void setOnGround(bool onGround) { m_onGround = onGround; }
         
         bool IsSneaking() const { return m_sneaking; }
+        void setSneaking(bool sneaking) { m_sneaking = sneaking; }
         
         Game::Math::ChunkPos getChunkPosition() const {
             return Game::Math::ChunkPos(

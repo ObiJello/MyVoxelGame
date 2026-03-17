@@ -78,40 +78,59 @@ void main() {
         }
     }
 
-    // Build stick-figure geometry for one player as a camera-facing billboard.
-    // The figure is ~1.8 blocks tall (Minecraft player height).
+    // Build stick-figure geometry for one player.
+    // Supports crouching (Minecraft's HumanoidModel body tilt) and head look direction.
+    // The figure is ~1.8 blocks tall standing, ~1.5 blocks crouching.
     static void BuildStickFigure(std::vector<StickVertex>& out,
                                  const glm::vec3& feetPos,
                                  const glm::vec3& camRight,
-                                 const glm::vec3& camUp) {
-        // Colour: bright green for good contrast on any terrain
+                                 float yawDeg, float pitchDeg,
+                                 bool isCrouching) {
         const uint8_t cr = 0, cg = 255, cb = 60, ca = 255;
+        constexpr float PI = 3.14159265f;
 
-        // All measurements in blocks, billboarded via camRight / camUp.
-        // Y-axis of the billboard is always world-up for readability.
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+
+        // Head look direction (horizontal only for the face billboard)
+        float yawRad = glm::radians(yawDeg);
+        glm::vec3 lookDir{-sinf(yawRad), 0.0f, cosf(yawRad)};
+        glm::vec3 faceRight = glm::normalize(glm::cross(lookDir, worldUp));
+
+        // Billboard right for body (still camera-facing for limbs)
         const glm::vec3& right = camRight;
 
-        // Key points (relative to feet)
-        const float headCenterY   = 1.62f;  // eye height
-        const float headRadius    = 0.18f;
-        const float neckY         = headCenterY - headRadius;
-        const float hipY          = 0.90f;
-        const float footSpreadX   = 0.20f;
-        const float handSpreadX   = 0.35f;
-        const float handY         = 1.10f;
-        const float shoulderY     = neckY;
+        // Crouching offsets (from Minecraft's HumanoidModel.java)
+        // body.xRot = 0.5 rad (~28.6 deg), head drops 4.2/16 blocks, body drops 3.2/16
+        float crouchBodyTilt = isCrouching ? 0.5f : 0.0f;  // radians forward tilt
+        float crouchHeadDrop = isCrouching ? (4.2f / 16.0f) : 0.0f;
+        float crouchBodyDrop = isCrouching ? (3.2f / 16.0f) : 0.0f;
+        float crouchLegBack  = isCrouching ? (4.0f / 16.0f) : 0.0f;
 
-        // Positions in world space
-        glm::vec3 neck     = feetPos + worldUp * neckY;
-        glm::vec3 hip      = feetPos + worldUp * hipY;
-        glm::vec3 headC    = feetPos + worldUp * headCenterY;
-        glm::vec3 footL    = feetPos + right * (-footSpreadX);
-        glm::vec3 footR    = feetPos + right * ( footSpreadX);
-        glm::vec3 shoulderL= neck + right * (-0.05f);
-        glm::vec3 shoulderR= neck + right * ( 0.05f);
-        glm::vec3 handL    = feetPos + worldUp * handY + right * (-handSpreadX);
-        glm::vec3 handR    = feetPos + worldUp * handY + right * ( handSpreadX);
+        // Forward direction for body tilt (uses look direction horizontal)
+        glm::vec3 forward = lookDir;
+
+        // Key heights
+        float neckY     = 1.44f - crouchBodyDrop;
+        float hipY      = 0.90f;
+        float headCY    = 1.62f - crouchHeadDrop;
+        float handY     = 1.10f - crouchBodyDrop;
+
+        // Body tilts forward when crouching
+        glm::vec3 neck = feetPos + worldUp * neckY + forward * sinf(crouchBodyTilt) * 0.3f;
+        glm::vec3 hip  = feetPos + worldUp * hipY;
+
+        // Head follows body tilt
+        glm::vec3 headC = feetPos + worldUp * headCY + forward * sinf(crouchBodyTilt) * 0.35f;
+
+        // Feet shift back when crouching
+        glm::vec3 footL = feetPos + right * (-0.20f) - forward * crouchLegBack;
+        glm::vec3 footR = feetPos + right * ( 0.20f) - forward * crouchLegBack;
+
+        // Shoulders and hands follow body tilt
+        glm::vec3 shoulderL = neck + right * (-0.05f);
+        glm::vec3 shoulderR = neck + right * ( 0.05f);
+        glm::vec3 handL = feetPos + worldUp * handY + right * (-0.35f) + forward * sinf(crouchBodyTilt) * 0.2f;
+        glm::vec3 handR = feetPos + worldUp * handY + right * ( 0.35f) + forward * sinf(crouchBodyTilt) * 0.2f;
 
         // --- Body ---
         PushLine(out, neck, hip, cr, cg, cb, ca);
@@ -124,25 +143,31 @@ void main() {
         PushLine(out, shoulderL, handL, cr, cg, cb, ca);
         PushLine(out, shoulderR, handR, cr, cg, cb, ca);
 
-        // --- Head circle (16 segments, full 360) ---
-        PushCircle(out, headC, right, worldUp, headRadius, 16,
-                   0.0f, 2.0f * 3.14159265f, cr, cg, cb, ca);
+        // --- Head circle (faces where player is looking, not camera) ---
+        float headRadius = 0.18f;
+        PushCircle(out, headC, faceRight, worldUp, headRadius, 16,
+                   0.0f, 2.0f * PI, cr, cg, cb, ca);
 
-        // --- Eyes (two tiny dots as short horizontal lines) ---
-        float eyeOffY  = 0.04f;
-        float eyeOffX  = 0.06f;
-        float eyeLen   = 0.03f;
-        glm::vec3 eyeL = headC + worldUp * eyeOffY + right * (-eyeOffX);
-        glm::vec3 eyeR = headC + worldUp * eyeOffY + right * ( eyeOffX);
-        PushLine(out, eyeL - right * eyeLen, eyeL + right * eyeLen, cr, cg, cb, ca);
-        PushLine(out, eyeR - right * eyeLen, eyeR + right * eyeLen, cr, cg, cb, ca);
+        // --- Eyes (on the face plane, oriented by look direction) ---
+        float eyeOffY = 0.04f;
+        float eyeOffX = 0.06f;
+        float eyeLen  = 0.03f;
+        glm::vec3 eyeL = headC + worldUp * eyeOffY + faceRight * (-eyeOffX);
+        glm::vec3 eyeR = headC + worldUp * eyeOffY + faceRight * ( eyeOffX);
+        PushLine(out, eyeL - faceRight * eyeLen, eyeL + faceRight * eyeLen, cr, cg, cb, ca);
+        PushLine(out, eyeR - faceRight * eyeLen, eyeR + faceRight * eyeLen, cr, cg, cb, ca);
 
-        // --- Smile (half-circle, 8 segments, bottom half) ---
+        // --- Smile (on the face plane) ---
         float smileRadius = 0.07f;
         glm::vec3 mouthCenter = headC - worldUp * 0.04f;
-        // Bottom half: pi to 2*pi (smile curves downward)
-        PushCircle(out, mouthCenter, right, worldUp, smileRadius, 8,
-                   3.14159265f, 2.0f * 3.14159265f, cr, cg, cb, ca);
+        PushCircle(out, mouthCenter, faceRight, worldUp, smileRadius, 8,
+                   PI, 2.0f * PI, cr, cg, cb, ca);
+
+        // --- Pitch indicator: a small line from head center showing look direction ---
+        float pitchRad = glm::radians(pitchDeg);
+        glm::vec3 gazeDir = lookDir * cosf(pitchRad) - worldUp * sinf(pitchRad);
+        glm::vec3 gazeEnd = headC + gazeDir * 0.35f;
+        PushLine(out, headC, gazeEnd, cr, cg, cb, ca);
     }
 
     // ------------------------------------------------------------------
@@ -221,7 +246,7 @@ void main() {
             float dz = rp.position.z - cameraPos.z;
             if (dx * dx + dz * dz > 256.0f * 256.0f) continue;
 
-            BuildStickFigure(verts, rp.position, camRight, glm::vec3(0, 1, 0));
+            BuildStickFigure(verts, rp.position, camRight, rp.rotation.x, rp.rotation.y, rp.isCrouching);
 
             if (verts.size() + 80 > MAX_VERTICES) break; // safety cap
         }

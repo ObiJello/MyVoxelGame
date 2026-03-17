@@ -846,6 +846,7 @@ namespace PlatformMain {
                     movePacket.position = playerPos;
                     movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
                     movePacket.onGround = player.physics.isOnGround;
+                    movePacket.isCrouching = Input::IsKeyDown(Input::Key::LeftShift);
                     movePacket.sequenceNumber = ++playerMoveSequence;
                     movePacket.timestamp = std::chrono::steady_clock::now();
                     networkClient->GetConnection()->SendPlayerMove(movePacket);

@@ -427,6 +427,7 @@ namespace Server {
             packet.playerId = srcPlayer->getPlayerId();
             packet.position = glm::vec3(srcPlayer->getPosition());
             packet.rotation = srcPlayer->getRotation();
+            packet.isCrouching = srcPlayer->IsSneaking();
             packet.sequenceNumber = 0;
 
             auto data = Network::Serialization::Serialize(packet);
