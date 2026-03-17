@@ -38,11 +38,13 @@ namespace Launcher {
     class LauncherUI {
     public:
         using ActionCallback = std::function<void()>;
+        using JoinCallback = std::function<void(const std::string& host, uint16_t port)>;
 
         void SetOnPlayClicked(ActionCallback cb) { m_onPlay = cb; }
         void SetOnUpdateClicked(ActionCallback cb) { m_onUpdate = cb; }
         void SetOnRetryClicked(ActionCallback cb) { m_onRetry = cb; }
         void SetOnRestartClicked(ActionCallback cb) { m_onRestart = cb; }
+        void SetOnJoinClicked(JoinCallback cb) { m_onJoin = cb; }
 
         void SetLogoTexture(GLuint textureId, int width, int height);
 
@@ -54,6 +56,8 @@ namespace Launcher {
         void DrawProgressBar(float progress, const std::string& sizeText);
         void DrawRestartButton();
         void DrawPlayButton(LauncherUIState& state);
+        void DrawJoinButton(LauncherUIState& state);
+        void DrawJoinPopup();
         void DrawStatusBar(const LauncherUIState& state);
         void DrawSettingsPopup();
 
@@ -61,12 +65,16 @@ namespace Launcher {
         ActionCallback m_onUpdate;
         ActionCallback m_onRetry;
         ActionCallback m_onRestart;
+        JoinCallback m_onJoin;
 
         GLuint m_logoTexture = 0;
         int m_logoWidth = 0;
         int m_logoHeight = 0;
 
         bool m_showSettings = false;
+        bool m_showJoinPopup = false;
+        char m_joinIP[64] = "";
+        char m_joinPort[8] = "25565";
     };
 
 } // namespace Launcher

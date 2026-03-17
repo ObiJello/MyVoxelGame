@@ -79,12 +79,20 @@ namespace Launcher {
             DrawPlayButton(state);
         }
 
+        // ── Join Button (below main button) ──
+        DrawJoinButton(state);
+
         // ── Bottom Status Bar ──
         DrawStatusBar(state);
 
         // ── Settings Popup ──
         if (m_showSettings) {
             DrawSettingsPopup();
+        }
+
+        // ── Join Server Popup ──
+        if (m_showJoinPopup) {
+            DrawJoinPopup();
         }
 
         ImGui::End();
@@ -244,6 +252,119 @@ namespace Launcher {
         ImGui::Checkbox("Vulkan", &state.useVulkan);
         ImGui::PopStyleColor(3);
         if (g_fontSmall) ImGui::PopFont();
+    }
+
+    void LauncherUI::DrawJoinButton(LauncherUIState& state) {
+        if (state.launcherUpdateReady) return;
+
+        float windowWidth = ImGui::GetWindowWidth();
+        float buttonWidth = 120.0f;
+        float buttonHeight = 25.0f;
+
+        ImGui::SetCursorPosX((windowWidth - buttonWidth) * 0.5f);
+
+        bool enabled = state.gameInstalled &&
+                       (state.state == LauncherState::ReadyToPlay || state.state == LauncherState::UpdateAvailable);
+
+        if (g_fontSmall) ImGui::PushFont(g_fontSmall);
+
+        if (!enabled) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.160f, 0.180f, 0.240f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.160f, 0.180f, 0.240f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.160f, 0.180f, 0.240f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.400f, 0.400f, 0.400f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.180f, 0.200f, 0.320f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.250f, 0.280f, 0.420f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.150f, 0.170f, 0.280f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.800f, 0.800f, 0.830f, 1.00f));
+        }
+
+        // Center the text within the button by computing padding
+        ImVec2 textSize = ImGui::CalcTextSize("JOIN");
+        float padX = (buttonWidth - textSize.x) * 0.5f;
+        float padY = (buttonHeight - textSize.y) * 0.5f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padX, padY));
+
+        if (ImGui::Button("JOIN", ImVec2(buttonWidth, buttonHeight)) && enabled) {
+            m_showJoinPopup = true;
+        }
+
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+        if (g_fontSmall) ImGui::PopFont();
+    }
+
+    void LauncherUI::DrawJoinPopup() {
+        ImGui::SetNextWindowSize(ImVec2(340, 220), ImGuiCond_Always);
+        ImGui::SetNextWindowPos(
+            ImVec2(static_cast<float>(WindowWidth) * 0.5f, static_cast<float>(WindowHeight) * 0.5f),
+            ImGuiCond_Always,
+            ImVec2(0.5f, 0.5f)
+        );
+
+        if (ImGui::Begin("Join Server", &m_showJoinPopup,
+                          ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse)) {
+
+            if (g_fontBody) ImGui::PushFont(g_fontBody);
+            ImGui::Text("Join Server");
+            ImGui::Separator();
+            if (g_fontBody) ImGui::PopFont();
+
+            ImGui::Spacing();
+            if (g_fontSmall) ImGui::PushFont(g_fontSmall);
+
+            ImGui::Text("IP Address");
+            ImGui::SetNextItemWidth(200.0f);
+            ImGui::InputText("##ip", m_joinIP, sizeof(m_joinIP));
+
+            ImGui::SameLine(0, 10.0f);
+            ImGui::Text("Port");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.0f);
+            ImGui::InputText("##port", m_joinPort, sizeof(m_joinPort));
+
+            ImGui::Spacing();
+            ImGui::Spacing();
+
+            // Validate: IP must not be empty, port must be a number 1-65535
+            bool valid = false;
+            uint16_t port = 0;
+            if (m_joinIP[0] != '\0') {
+                char* end = nullptr;
+                long portVal = strtol(m_joinPort, &end, 10);
+                if (end != m_joinPort && *end == '\0' && portVal >= 1 && portVal <= 65535) {
+                    port = static_cast<uint16_t>(portVal);
+                    valid = true;
+                }
+            }
+
+            if (!valid) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.200f, 0.200f, 0.260f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.200f, 0.200f, 0.260f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.200f, 0.200f, 0.260f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.500f, 0.500f, 0.500f, 1.00f));
+            }
+
+            if (ImGui::Button("CONNECT", ImVec2(120, 30)) && valid) {
+                m_showJoinPopup = false;
+                if (m_onJoin) {
+                    m_onJoin(std::string(m_joinIP), port);
+                }
+            }
+
+            if (!valid) {
+                ImGui::PopStyleColor(4);
+            }
+
+            ImGui::SameLine(0, 10.0f);
+            if (ImGui::Button("Cancel", ImVec2(80, 30))) {
+                m_showJoinPopup = false;
+            }
+
+            if (g_fontSmall) ImGui::PopFont();
+        }
+        ImGui::End();
     }
 
     void LauncherUI::DrawStatusBar(const LauncherUIState& state) {

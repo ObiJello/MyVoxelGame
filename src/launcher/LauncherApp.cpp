@@ -351,6 +351,19 @@ namespace Launcher {
             }
         });
 
+        ui.SetOnJoinClicked([&](const std::string& host, uint16_t port) {
+            uiState.state = LauncherState::LaunchingGame;
+            uiState.statusText = "Joining server...";
+            std::string serverArg = "--server " + host + ":" + std::to_string(port);
+            if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
+                glfwSetWindowShouldClose(window, GLFW_TRUE);
+            } else {
+                uiState.state = LauncherState::Error;
+                uiState.statusText = "Failed to launch game";
+                uiState.errorText = "Could not start the game executable";
+            }
+        });
+
         ui.SetOnUpdateClicked([&]() {
             uiState.state = LauncherState::Downloading;
             uiState.statusText = "Downloading update...";
