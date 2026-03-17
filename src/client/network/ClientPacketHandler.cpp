@@ -2,6 +2,7 @@
 #include "ClientPacketHandler.hpp"
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
+#include "../entity/RemotePlayerManager.hpp"
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
@@ -142,7 +143,9 @@ namespace Client {
     // ========================================================================
 
     void ClientPacketHandler::handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet) {
-        // TODO: Handle other player positions for multiplayer
+        if (g_remotePlayerManager) {
+            g_remotePlayerManager->UpdatePlayer(packet.playerId, packet.position, packet.rotation);
+        }
         m_stats.playerUpdates++;
         m_stats.packetsProcessed++;
     }

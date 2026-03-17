@@ -1,8 +1,11 @@
 // File: src/server/session/PlayerSessionManager.cpp
 #include "PlayerSessionManager.hpp"
+#include "../player/ServerPlayer.hpp"
+#include "../network/ServerConnection.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
 #include "common/core/Log.hpp"
+#include "common/network/PacketTypes.hpp"
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
 
@@ -407,11 +410,42 @@ namespace Server {
         // Implementation depends on light system
     }
 
+    // === PLAYER POSITION BROADCASTING ===
+
+    void PlayerSessionManager::BroadcastPlayerPositions() {
+        std::lock_guard<std::mutex> lock(m_sessionMutex);
+
+        // Fewer than 2 players means nothing to broadcast
+        if (m_sessions.size() < 2) return;
+
+        // For each player, send their position to every OTHER player
+        for (const auto& [srcId, srcSession] : m_sessions) {
+            auto* srcPlayer = srcSession->GetPlayer();
+            if (!srcPlayer) continue;
+
+            Network::PlayerUpdateS2CPacket packet;
+            packet.playerId = srcPlayer->getPlayerId();
+            packet.position = glm::vec3(srcPlayer->getPosition());
+            packet.rotation = srcPlayer->getRotation();
+            packet.sequenceNumber = 0;
+
+            auto data = Network::Serialization::Serialize(packet);
+
+            for (const auto& [dstId, dstSession] : m_sessions) {
+                if (dstId == srcId) continue; // don't send to self
+                auto* conn = dstSession->GetConnection();
+                if (!conn) continue;
+                conn->SendPacket(
+                    static_cast<uint8_t>(Network::PacketId::PlayerUpdateS2C), data);
+            }
+        }
+    }
+
     // === SPAWN MANAGEMENT ===
 
     void PlayerSessionManager::SetWorldSpawn(const glm::vec3& spawnPos) {
         m_config.worldSpawn = spawnPos;
-        
+
         // Update spawn chunk tickets
         InitializeSpawnChunks();
     }

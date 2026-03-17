@@ -925,14 +925,16 @@ namespace Server {
     
     void PlayerSession::SendPositionSync() {
         if (!m_player || !m_connection) return;
-        
-        // TODO: Send player position packet to client
-        // This would send the authoritative position from the server
-        // Network::PlayerUpdateS2CPacket packet;
-        // packet.playerId = m_player->getPlayerId();
-        // packet.position = m_player->getPosition();
-        // packet.rotation = m_player->getRotation();
-        // m_connection->SendPacket(packet);
+
+        Network::PlayerUpdateS2CPacket packet;
+        packet.playerId = m_player->getPlayerId();
+        packet.position = glm::vec3(m_player->getPosition()); // dvec3 -> vec3
+        packet.rotation = m_player->getRotation();
+        packet.sequenceNumber = 0; // not used for broadcast
+
+        auto data = Network::Serialization::Serialize(packet);
+        m_connection->SendPacket(
+            static_cast<uint8_t>(Network::PacketId::PlayerUpdateS2C), data);
     }
     
     void PlayerSession::SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block) {

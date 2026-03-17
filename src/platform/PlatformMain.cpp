@@ -47,6 +47,10 @@
 #include "server/world/ServerWorkerPool.hpp"
 #include "client/world/ClientWorkerPool.hpp"
 
+// Multiplayer player visibility
+#include "client/entity/RemotePlayerManager.hpp"
+#include "client/renderer/entity/PlayerRenderer.hpp"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
@@ -574,6 +578,13 @@ namespace PlatformMain {
             return 1;
         }
 
+        // Initialize remote player tracking and renderer
+        Client::g_remotePlayerManager = std::make_unique<Client::RemotePlayerManager>();
+        Render::PlayerRenderer playerRenderer;
+        if (!playerRenderer.Initialize()) {
+            Log::Warning("Failed to initialize player renderer, remote players won't be visible");
+        }
+
         // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
         Log::Info("Initializing Minecraft Java Edition Architecture...");
 
@@ -957,6 +968,11 @@ namespace PlatformMain {
                 metrics.occlusionOccluded = renderStats->sectionsSkipped;
             }
 
+            // Render remote players (stick figures) before UI overlays
+            if (Client::g_remotePlayerManager) {
+                playerRenderer.Render(proj, view, camera.position, *Client::g_remotePlayerManager);
+            }
+
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
             RenderCrosshair(window);
@@ -1282,6 +1298,8 @@ namespace PlatformMain {
         Render::ShutdownChunkRenderer();
 
         // 8a. Destroy resources that depend on the render backend BEFORE destroying it
+        playerRenderer.Shutdown();
+        Client::g_remotePlayerManager.reset();
         Render::g_crosshair.Shutdown();
         Render::g_blockHighlight.Shutdown();
         if (Render::g_atlasBuilder) {

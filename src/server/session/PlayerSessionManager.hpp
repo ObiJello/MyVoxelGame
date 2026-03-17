@@ -144,6 +144,12 @@ namespace Server {
             const std::vector<uint8_t>& sectionMask
         );
 
+        // === PLAYER POSITION BROADCASTING ===
+
+        // Send each player's position/rotation to every OTHER player.
+        // Called from ServerTick at a lower frequency (e.g. every 2 ticks).
+        void BroadcastPlayerPositions();
+
         // === SPAWN MANAGEMENT ===
 
         // Set world spawn point

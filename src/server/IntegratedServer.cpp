@@ -438,7 +438,12 @@ namespace Server {
             }
         }
 
-        // === 5. PERIODIC CLEANUP: unload chunks with no watchers ===
+        // === 5. BROADCAST PLAYER POSITIONS to other players (~10 Hz) ===
+        if (m_sessionManager && (serverTick % 2 == 0)) {
+            m_sessionManager->BroadcastPlayerPositions();
+        }
+
+        // === 6. PERIODIC CLEANUP: unload chunks with no watchers ===
         if (serverTick % 60 == 0) { // Every ~3 seconds at 20 TPS
             UnloadUnwatchedChunks();
         }

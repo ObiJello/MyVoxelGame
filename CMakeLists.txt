@@ -336,6 +336,8 @@ if(APPLE)
             src/common/entity/Inventory.cpp
             src/client/input/PlayerController.cpp
             src/client/entity/Player.cpp
+            src/client/entity/RemotePlayerManager.cpp
+            src/client/renderer/entity/PlayerRenderer.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/ChunkMegaBuffer.cpp
             src/client/renderer/mesh/ChunkRenderer.cpp
@@ -446,6 +448,12 @@ else()
             # Client entity
             src/client/entity/Player.cpp
             src/client/entity/Player.hpp
+            src/client/entity/RemotePlayerManager.cpp
+            src/client/entity/RemotePlayerManager.hpp
+
+            # Client rendering - Entity
+            src/client/renderer/entity/PlayerRenderer.cpp
+            src/client/renderer/entity/PlayerRenderer.hpp
 
             # Client rendering - Shader
             src/client/renderer/shader/Shader.cpp

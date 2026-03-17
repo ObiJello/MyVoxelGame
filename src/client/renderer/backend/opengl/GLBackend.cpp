@@ -53,7 +53,12 @@ namespace Render {
     GLBackend::GLBackend() = default;
 
     GLBackend::~GLBackend() {
-        Shutdown();
+        try {
+            Shutdown();
+        } catch (...) {
+            // Swallow exceptions during static destruction — the GL context
+            // may already be torn down by the time this destructor runs.
+        }
     }
 
     bool GLBackend::Initialize(GLFWwindow* window) {
