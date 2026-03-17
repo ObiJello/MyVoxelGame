@@ -91,9 +91,10 @@ void main() {
 
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
 
-        // Head look direction (horizontal only for the face billboard)
+        // Head look direction — matches Camera::GetHorizontalForward():
+        // forward = {cos(yaw), 0, sin(yaw)}
         float yawRad = glm::radians(yawDeg);
-        glm::vec3 lookDir{-sinf(yawRad), 0.0f, cosf(yawRad)};
+        glm::vec3 lookDir{cosf(yawRad), 0.0f, sinf(yawRad)};
         glm::vec3 faceRight = glm::normalize(glm::cross(lookDir, worldUp));
 
         // Billboard right for body (still camera-facing for limbs)
@@ -163,11 +164,19 @@ void main() {
         PushCircle(out, mouthCenter, faceRight, worldUp, smileRadius, 8,
                    PI, 2.0f * PI, cr, cg, cb, ca);
 
-        // --- Pitch indicator: a small line from head center showing look direction ---
-        float pitchRad = glm::radians(pitchDeg);
-        glm::vec3 gazeDir = lookDir * cosf(pitchRad) - worldUp * sinf(pitchRad);
-        glm::vec3 gazeEnd = headC + gazeDir * 0.35f;
-        PushLine(out, headC, gazeEnd, cr, cg, cb, ca);
+        // --- Back of head: dense horizontal lines in dark color to fill the rear half ---
+        // This makes it obvious which direction the player is facing.
+        const uint8_t br = 0, bg = 100, bb = 25, ba = 255; // darker green
+        int backLines = 5;
+        for (int i = 0; i < backLines; i++) {
+            float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(backLines); // 0.1 to 0.9
+            float yOff = headRadius * (1.0f - 2.0f * t); // top to bottom
+            float halfWidth = sqrtf(headRadius * headRadius - yOff * yOff); // chord half-length
+            glm::vec3 lineCenter = headC + worldUp * yOff - lookDir * 0.01f; // slightly behind center
+            glm::vec3 left  = lineCenter + faceRight * (-halfWidth);
+            glm::vec3 right2 = lineCenter + faceRight * ( halfWidth);
+            PushLine(out, left, right2, br, bg, bb, ba);
+        }
     }
 
     // ------------------------------------------------------------------
