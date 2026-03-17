@@ -79,59 +79,51 @@ void main() {
     }
 
     // Build stick-figure geometry for one player.
-    // Supports crouching (Minecraft's HumanoidModel body tilt) and head look direction.
-    // The figure is ~1.8 blocks tall standing, ~1.5 blocks crouching.
+    // Body uses bodyYaw for orientation; head uses headYaw (independent look direction).
+    // Crouching tilts the body forward along bodyForward.
+    // Head has front face (bright, with smiley) and back face (dark fill), offset along
+    // lookDir so depth testing separates them.
     static void BuildStickFigure(std::vector<StickVertex>& out,
                                  const glm::vec3& feetPos,
-                                 const glm::vec3& camRight,
-                                 float yawDeg, float pitchDeg,
-                                 bool isCrouching) {
+                                 float headYawDeg, float bodyYawDeg,
+                                 float pitchDeg, bool isCrouching) {
         const uint8_t cr = 0, cg = 255, cb = 60, ca = 255;
         constexpr float PI = 3.14159265f;
-
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
 
-        // Head look direction — matches Camera::GetHorizontalForward():
-        // forward = {cos(yaw), 0, sin(yaw)}
-        float yawRad = glm::radians(yawDeg);
-        glm::vec3 lookDir{cosf(yawRad), 0.0f, sinf(yawRad)};
+        // Body orientation (torso, arms, legs)
+        float bodyRad = glm::radians(bodyYawDeg);
+        glm::vec3 bodyFwd{cosf(bodyRad), 0.0f, sinf(bodyRad)};
+        glm::vec3 bodyRight = glm::normalize(glm::cross(bodyFwd, worldUp));
+
+        // Head orientation (face direction)
+        float headRad = glm::radians(headYawDeg);
+        glm::vec3 lookDir{cosf(headRad), 0.0f, sinf(headRad)};
         glm::vec3 faceRight = glm::normalize(glm::cross(lookDir, worldUp));
 
-        // Billboard right for body (still camera-facing for limbs)
-        const glm::vec3& right = camRight;
-
-        // Crouching offsets (from Minecraft's HumanoidModel.java)
-        // body.xRot = 0.5 rad (~28.6 deg), head drops 4.2/16 blocks, body drops 3.2/16
-        float crouchBodyTilt = isCrouching ? 0.5f : 0.0f;  // radians forward tilt
+        // Crouching offsets (Minecraft's HumanoidModel.java)
+        float crouchTilt    = isCrouching ? 0.5f : 0.0f;
         float crouchHeadDrop = isCrouching ? (4.2f / 16.0f) : 0.0f;
         float crouchBodyDrop = isCrouching ? (3.2f / 16.0f) : 0.0f;
         float crouchLegBack  = isCrouching ? (4.0f / 16.0f) : 0.0f;
 
-        // Forward direction for body tilt (uses look direction horizontal)
-        glm::vec3 forward = lookDir;
+        // Key positions — body parts use bodyFwd/bodyRight
+        float neckY  = 1.44f - crouchBodyDrop;
+        float hipY   = 0.90f;
+        float headCY = 1.62f - crouchHeadDrop;
+        float handY  = 1.10f - crouchBodyDrop;
 
-        // Key heights
-        float neckY     = 1.44f - crouchBodyDrop;
-        float hipY      = 0.90f;
-        float headCY    = 1.62f - crouchHeadDrop;
-        float handY     = 1.10f - crouchBodyDrop;
+        glm::vec3 neck  = feetPos + worldUp * neckY  + bodyFwd * sinf(crouchTilt) * 0.3f;
+        glm::vec3 hip   = feetPos + worldUp * hipY;
+        glm::vec3 headC = feetPos + worldUp * headCY + bodyFwd * sinf(crouchTilt) * 0.35f;
 
-        // Body tilts forward when crouching
-        glm::vec3 neck = feetPos + worldUp * neckY + forward * sinf(crouchBodyTilt) * 0.3f;
-        glm::vec3 hip  = feetPos + worldUp * hipY;
+        glm::vec3 footL = feetPos + bodyRight * (-0.20f) - bodyFwd * crouchLegBack;
+        glm::vec3 footR = feetPos + bodyRight * ( 0.20f) - bodyFwd * crouchLegBack;
 
-        // Head follows body tilt
-        glm::vec3 headC = feetPos + worldUp * headCY + forward * sinf(crouchBodyTilt) * 0.35f;
-
-        // Feet shift back when crouching
-        glm::vec3 footL = feetPos + right * (-0.20f) - forward * crouchLegBack;
-        glm::vec3 footR = feetPos + right * ( 0.20f) - forward * crouchLegBack;
-
-        // Shoulders and hands follow body tilt
-        glm::vec3 shoulderL = neck + right * (-0.05f);
-        glm::vec3 shoulderR = neck + right * ( 0.05f);
-        glm::vec3 handL = feetPos + worldUp * handY + right * (-0.35f) + forward * sinf(crouchBodyTilt) * 0.2f;
-        glm::vec3 handR = feetPos + worldUp * handY + right * ( 0.35f) + forward * sinf(crouchBodyTilt) * 0.2f;
+        glm::vec3 shoulderL = neck + bodyRight * (-0.05f);
+        glm::vec3 shoulderR = neck + bodyRight * ( 0.05f);
+        glm::vec3 handL = feetPos + worldUp * handY + bodyRight * (-0.35f) + bodyFwd * sinf(crouchTilt) * 0.2f;
+        glm::vec3 handR = feetPos + worldUp * handY + bodyRight * ( 0.35f) + bodyFwd * sinf(crouchTilt) * 0.2f;
 
         // --- Body ---
         PushLine(out, neck, hip, cr, cg, cb, ca);
@@ -144,38 +136,39 @@ void main() {
         PushLine(out, shoulderL, handL, cr, cg, cb, ca);
         PushLine(out, shoulderR, handR, cr, cg, cb, ca);
 
-        // --- Head circle (faces where player is looking, not camera) ---
+        // --- HEAD (uses lookDir/faceRight, NOT body orientation) ---
         float headRadius = 0.18f;
-        PushCircle(out, headC, faceRight, worldUp, headRadius, 16,
+        float faceOffset = 0.04f; // depth offset to separate front/back
+
+        // Front face: bright green circle + smiley, pushed forward along lookDir
+        glm::vec3 frontC = headC + lookDir * faceOffset;
+        PushCircle(out, frontC, faceRight, worldUp, headRadius, 16,
                    0.0f, 2.0f * PI, cr, cg, cb, ca);
 
-        // --- Eyes (on the face plane, oriented by look direction) ---
-        float eyeOffY = 0.04f;
-        float eyeOffX = 0.06f;
-        float eyeLen  = 0.03f;
-        glm::vec3 eyeL = headC + worldUp * eyeOffY + faceRight * (-eyeOffX);
-        glm::vec3 eyeR = headC + worldUp * eyeOffY + faceRight * ( eyeOffX);
+        // Eyes (on front face)
+        float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeLen = 0.03f;
+        glm::vec3 eyeL = frontC + worldUp * eyeOffY + faceRight * (-eyeOffX);
+        glm::vec3 eyeR = frontC + worldUp * eyeOffY + faceRight * ( eyeOffX);
         PushLine(out, eyeL - faceRight * eyeLen, eyeL + faceRight * eyeLen, cr, cg, cb, ca);
         PushLine(out, eyeR - faceRight * eyeLen, eyeR + faceRight * eyeLen, cr, cg, cb, ca);
 
-        // --- Smile (on the face plane) ---
-        float smileRadius = 0.07f;
-        glm::vec3 mouthCenter = headC - worldUp * 0.04f;
-        PushCircle(out, mouthCenter, faceRight, worldUp, smileRadius, 8,
-                   PI, 2.0f * PI, cr, cg, cb, ca);
+        // Smile (on front face)
+        glm::vec3 mouthC = frontC - worldUp * 0.04f;
+        PushCircle(out, mouthC, faceRight, worldUp, 0.07f, 8, PI, 2.0f * PI, cr, cg, cb, ca);
 
-        // --- Back of head: dense horizontal lines in dark color to fill the rear half ---
-        // This makes it obvious which direction the player is facing.
-        const uint8_t br = 0, bg = 100, bb = 25, ba = 255; // darker green
-        int backLines = 5;
+        // Back face: dark green circle + fill lines, pushed backward along lookDir
+        const uint8_t br = 0, bg = 100, bb = 25, ba = 255;
+        glm::vec3 backC = headC - lookDir * faceOffset;
+        PushCircle(out, backC, faceRight, worldUp, headRadius, 16,
+                   0.0f, 2.0f * PI, bg, bg, bb, ba);
+
+        int backLines = 6;
         for (int i = 0; i < backLines; i++) {
-            float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(backLines); // 0.1 to 0.9
-            float yOff = headRadius * (1.0f - 2.0f * t); // top to bottom
-            float halfWidth = sqrtf(headRadius * headRadius - yOff * yOff); // chord half-length
-            glm::vec3 lineCenter = headC + worldUp * yOff - lookDir * 0.01f; // slightly behind center
-            glm::vec3 left  = lineCenter + faceRight * (-halfWidth);
-            glm::vec3 right2 = lineCenter + faceRight * ( halfWidth);
-            PushLine(out, left, right2, br, bg, bb, ba);
+            float t = (static_cast<float>(i) + 0.5f) / static_cast<float>(backLines);
+            float yOff = headRadius * (1.0f - 2.0f * t);
+            float halfW = sqrtf(headRadius * headRadius - yOff * yOff);
+            glm::vec3 lc = backC + worldUp * yOff;
+            PushLine(out, lc + faceRight * (-halfW), lc + faceRight * halfW, br, bg, bb, ba);
         }
     }
 
@@ -241,23 +234,18 @@ void main() {
         const auto& players = remotePlayers.GetPlayers();
         if (players.empty()) return;
 
-        // Compute camera right vector from the view matrix
-        // view rows: right = row0, up = row1, forward = -row2
-        glm::vec3 camRight = glm::vec3(view[0][0], view[1][0], view[2][0]);
-
         // Build geometry for every remote player
         std::vector<StickVertex> verts;
-        verts.reserve(players.size() * 80); // ~80 verts per figure
+        verts.reserve(players.size() * 120); // ~120 verts per figure (front+back head)
 
         for (const auto& [id, rp] : players) {
-            // Skip players that are very far away (> 256 blocks)
             float dx = rp.position.x - cameraPos.x;
             float dz = rp.position.z - cameraPos.z;
             if (dx * dx + dz * dz > 256.0f * 256.0f) continue;
 
-            BuildStickFigure(verts, rp.position, camRight, rp.rotation.x, rp.rotation.y, rp.isCrouching);
+            BuildStickFigure(verts, rp.position, rp.rotation.x, rp.bodyYaw, rp.rotation.y, rp.isCrouching);
 
-            if (verts.size() + 80 > MAX_VERTICES) break; // safety cap
+            if (verts.size() + 120 > MAX_VERTICES) break;
         }
 
         if (verts.empty()) return;
@@ -265,10 +253,10 @@ void main() {
         // Upload vertices
         g_renderBackend->UpdateBuffer(m_vb, 0, verts.size() * sizeof(StickVertex), verts.data());
 
-        // Pipeline state: depth test on, no depth write, no blend, no cull, Lines
+        // Pipeline state: depth test + write on so front face occludes back of head
         PipelineState state;
         state.depthTestEnabled  = true;
-        state.depthWriteEnabled = false;
+        state.depthWriteEnabled = true;
         state.blendEnabled      = false;
         state.cullMode          = CullMode::None;
         state.primitiveType     = PrimitiveType::Lines;

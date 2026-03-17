@@ -5,90 +5,109 @@
 #include <unordered_map>
 #include <memory>
 #include <cstdint>
+#include <cmath>
 
 namespace Client {
 
     struct RemotePlayer {
         uint32_t playerId = 0;
 
-        // Current rendered position (interpolated each tick)
+        // Current rendered state (interpolated each tick)
         glm::vec3 position{0.0f};
-        glm::vec2 rotation{0.0f}; // yaw, pitch
+        glm::vec2 rotation{0.0f}; // head yaw, pitch
         bool isCrouching = false;
+
+        // Body yaw — follows movement direction or head with 50-degree max offset
+        // (Minecraft's LivingEntity.yBodyRot)
+        float bodyYaw = 0.0f;
+        glm::vec3 prevPosition{0.0f}; // previous tick position for velocity estimation
 
         // Interpolation target (set when server packet arrives)
         glm::vec3 targetPosition{0.0f};
         glm::vec2 targetRotation{0.0f};
-        int lerpSteps = 0; // Remaining interpolation steps (0 = at target)
+        int lerpSteps = 0;
     };
 
-    // Tracks positions of other players received from the server.
-    // Uses Minecraft's interpolation system: when a position update arrives,
-    // it sets a target and interpolates over 3 ticks (150ms) using
-    // alpha = 1/stepsRemaining (accelerating lerp that reaches target exactly).
     class RemotePlayerManager {
     public:
         void UpdatePlayer(uint32_t id, const glm::vec3& pos, const glm::vec2& rot, bool crouching) {
             auto& rp = m_players[id];
             if (rp.playerId == 0) {
-                // First update — snap directly, no previous position to lerp from
+                // First update — snap everything
                 rp.playerId = id;
                 rp.position = pos;
                 rp.rotation = rot;
                 rp.targetPosition = pos;
                 rp.targetRotation = rot;
+                rp.bodyYaw = rot.x; // start body facing same as head
+                rp.prevPosition = pos;
                 rp.lerpSteps = 0;
             } else {
-                // Subsequent updates — set target and start interpolation
                 rp.targetPosition = pos;
                 rp.targetRotation = rot;
-                rp.lerpSteps = 3; // Minecraft's DEFAULT_INTERPOLATION_STEPS
+                rp.lerpSteps = 3;
             }
             rp.isCrouching = crouching;
         }
 
-        // Apply one interpolation step. Call at 20Hz (client tick rate).
-        // Minecraft's InterpolationHandler.interpolate(): alpha = 1.0/steps,
-        // position = lerp(alpha, current, target), steps--.
+        // Apply one interpolation step + body rotation. Call at 20Hz.
         void Tick() {
             for (auto& [id, rp] : m_players) {
+                // --- Position/rotation interpolation (Minecraft's InterpolationHandler) ---
                 if (rp.lerpSteps > 0) {
                     float alpha = 1.0f / static_cast<float>(rp.lerpSteps);
-
-                    // Position: linear lerp toward target
                     rp.position = glm::mix(rp.position, rp.targetPosition, alpha);
 
-                    // Yaw: angle-wrapped lerp (Minecraft's Mth.rotLerp)
-                    float yawDiff = rp.targetRotation.x - rp.rotation.x;
-                    while (yawDiff > 180.0f) yawDiff -= 360.0f;
-                    while (yawDiff < -180.0f) yawDiff += 360.0f;
+                    float yawDiff = Wrap180(rp.targetRotation.x - rp.rotation.x);
                     rp.rotation.x += yawDiff * alpha;
-
-                    // Pitch: regular lerp
                     rp.rotation.y = glm::mix(rp.rotation.y, rp.targetRotation.y, alpha);
 
                     rp.lerpSteps--;
                 }
+
+                // --- Body rotation (Minecraft's LivingEntity.tickHeadTurn) ---
+                // Estimate horizontal velocity from position change
+                glm::vec3 vel = rp.position - rp.prevPosition;
+                float speedSq = vel.x * vel.x + vel.z * vel.z;
+                rp.prevPosition = rp.position;
+
+                float headYaw = rp.rotation.x;
+
+                // Determine body target: movement direction when moving, head when still
+                float bodyTarget;
+                if (speedSq > 0.0001f) {
+                    bodyTarget = glm::degrees(atan2f(vel.z, vel.x));
+                } else {
+                    bodyTarget = headYaw;
+                }
+
+                // Smooth body toward target at 30% per tick
+                float bodyDiff = Wrap180(bodyTarget - rp.bodyYaw);
+                rp.bodyYaw += bodyDiff * 0.3f;
+
+                // Clamp: head can't rotate more than 50 degrees from body
+                float headOffset = Wrap180(headYaw - rp.bodyYaw);
+                if (fabsf(headOffset) > 50.0f) {
+                    rp.bodyYaw += headOffset - copysignf(50.0f, headOffset);
+                }
             }
         }
 
-        void RemovePlayer(uint32_t id) {
-            m_players.erase(id);
-        }
-
-        void Clear() {
-            m_players.clear();
-        }
-
-        const std::unordered_map<uint32_t, RemotePlayer>& GetPlayers() const {
-            return m_players;
-        }
+        void RemovePlayer(uint32_t id) { m_players.erase(id); }
+        void Clear() { m_players.clear(); }
+        const std::unordered_map<uint32_t, RemotePlayer>& GetPlayers() const { return m_players; }
 
     private:
         std::unordered_map<uint32_t, RemotePlayer> m_players;
+
+        // Wrap angle to [-180, 180] range
+        static float Wrap180(float deg) {
+            deg = fmodf(deg + 180.0f, 360.0f);
+            if (deg < 0.0f) deg += 360.0f;
+            return deg - 180.0f;
+        }
     };
 
-    // Global instance (created/destroyed in PlatformMain)
     extern std::unique_ptr<RemotePlayerManager> g_remotePlayerManager;
 
 } // namespace Client
