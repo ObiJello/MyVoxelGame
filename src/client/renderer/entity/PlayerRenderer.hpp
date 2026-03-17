@@ -7,40 +7,39 @@
 
 namespace Render {
 
-    // Forward declarations
     class Camera;
 
-    // Renders a 2D stick-figure billboard for each remote player.
-    // Follows the BlockHighlight pattern: Initialize() / Shutdown() / Render().
+    // Renders stick-figure models for remote players.
+    // Two draw passes: filled triangle disc for back-of-head (GPU face-culled),
+    // then lines for body/limbs/front face features.
     class PlayerRenderer {
     public:
         PlayerRenderer();
         ~PlayerRenderer();
 
-        // Allocate GPU resources (shader, dummy texture).  Call once.
         bool Initialize();
-
-        // Release GPU resources.  Safe to call multiple times.
         void Shutdown();
 
-        // Draw stick-figure billboards for all remote players.
-        // Call after chunk rendering, before crosshair.
         void Render(const glm::mat4& projection, const glm::mat4& view,
                     const glm::vec3& cameraPos,
                     const Client::RemotePlayerManager& remotePlayers);
 
     private:
         ShaderHandle  m_shader       = INVALID_SHADER;
-        BufferHandle  m_vb           = INVALID_BUFFER;
-        MeshHandle    m_mesh         = INVALID_MESH;
         TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
-        // Shader source (GLSL 330, used by GL backend)
+        // Line geometry (body, limbs, head outline, face features)
+        BufferHandle  m_lineVB   = INVALID_BUFFER;
+        MeshHandle    m_lineMesh = INVALID_MESH;
+
+        // Triangle geometry (filled back-of-head disc)
+        BufferHandle  m_triVB    = INVALID_BUFFER;
+        MeshHandle    m_triMesh  = INVALID_MESH;
+
         static const char* s_vertSource;
         static const char* s_fragSource;
 
-        // Maximum vertices we can fit in the dynamic VB
-        static constexpr size_t MAX_VERTICES = 4096;
+        static constexpr size_t MAX_VERTICES = 8192;
     };
 
 } // namespace Render
