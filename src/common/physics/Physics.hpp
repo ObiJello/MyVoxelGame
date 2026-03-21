@@ -38,9 +38,16 @@ namespace Game {
         static constexpr float GRAVITY = -32.656f;         // Gravity acceleration
         static constexpr float TERMINAL_VELOCITY = -78.4f; // Terminal velocity
 
-        static constexpr float WATER_WALK_SPEED = 1.85f;    // Reduced speed in water
-        static constexpr float WATER_GRAVITY = -10.0f;     // Reduced gravity in water
-        static constexpr float WATER_JUMP_VELOCITY = 4.0f; // Reduced jump in water
+        // Water physics — derived from MC steady-state values, runs per-frame (no tick accumulator)
+        // MC steady states: walk=2.0 b/s, sink=-0.5 b/s, bob=+3.5 b/s, sprint=4.0 b/s
+        // Decay rate k = -20*ln(0.8) = 4.463 (continuous equivalent of MC's 0.8/tick friction)
+        static constexpr float WATER_DECAY = 4.463f;                // Continuous friction decay rate
+        static constexpr float WATER_WALK_ACCEL = 8.926f;           // 2.0 * 4.463 — gives 2.0 b/s steady state
+        static constexpr float WATER_SPRINT_ACCEL = 8.926f;         // Same accel, different friction for sprint
+        static constexpr float WATER_SPRINT_DECAY = 2.107f;         // -20*ln(0.9) — sprint friction (0.9/tick)
+        static constexpr float WATER_GRAVITY_ACCEL = 2.232f;        // 0.5 * 4.463 — gives -0.5 b/s steady state
+        static constexpr float WATER_BOB_ACCEL = 15.621f;           // 3.5 * 4.463 — gives +3.5 b/s steady state
+        static constexpr float WATER_JUMP_OUT = 6.0f;               // 0.3 blocks/tick * 20 = 6.0 b/s
 
         static constexpr float OVERHANG_MARGIN = 0.125f; // Allowable overhang distance
 
@@ -67,6 +74,9 @@ namespace Game {
         bool isSneaking = false;
         bool isSprinting = false;
         bool isInWater = false;
+        float waterDepth = 0.0f;       // How deep the player is submerged (0 = not in water)
+        bool isEyeInWater = false;     // True when eyes are submerged
+        glm::vec3 waterVelocity{0.0f};     // Water velocity in blocks/sec
         bool noclip = false;
         
         // Mutable flight speeds for noclip mode
@@ -131,10 +141,10 @@ namespace Game {
     bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
                         const PhysicsContext& context);
 
-    bool IsInWater(const glm::vec3& position, const PhysicsContext& context);
+    void UpdateWaterState(PlayerPhysics& physics, const PhysicsContext& context);
 
     // **UPDATED**: Movement helper functions now take PhysicsContext
-    void HandleJump(PlayerPhysics& physics, bool jumpPressed,
+    void HandleJump(PlayerPhysics& physics, bool jumpPressed, float deltaTime,
                    const PhysicsContext& context);
 
     void UpdateBaseSpeed(PlayerPhysics& physics);
@@ -142,6 +152,6 @@ namespace Game {
     void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context);
 
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
-                       float deltaTime, const PhysicsContext& context);
+                       bool jumpPressed, float deltaTime, const PhysicsContext& context);
 
 } // namespace Game

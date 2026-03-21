@@ -44,8 +44,12 @@ namespace Game {
         PhysicsContext context;
         context.blockAccess = blockAccess;
 
+        // In water, use held state so holding space continuously bobs upward.
+        // On land, use edge-triggered jumpPressed for single jumps.
+        bool jumpInput = physics.isInWater ? jumpHeld : jumpPressed;
+
         // Apply physics simulation with context
-        UpdatePlayerPhysics(physics, movementInput, jumpPressed, sneakPressed, deltaTime, context);
+        UpdatePlayerPhysics(physics, movementInput, jumpInput, sneakPressed, deltaTime, context);
 
         // Update predicted position from physics
         predictedPos = glm::dvec3(physics.position);

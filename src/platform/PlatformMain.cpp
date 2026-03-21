@@ -21,6 +21,12 @@
 #include "client/renderer/shader/Shader.hpp"
 #include "client/renderer/mesh/BlockHighlight.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
+#include "client/renderer/gui/GuiAtlas.hpp"
+#include "client/renderer/gui/GuiRenderState.hpp"
+#include "client/renderer/gui/GuiRenderer.hpp"
+#include "client/renderer/gui/GuiGraphics.hpp"
+#include "client/renderer/gui/FontRenderer.hpp"
+#include "client/renderer/gui/HudRenderer.hpp"
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
 #include "common/core/Profiling.hpp"
@@ -77,6 +83,12 @@ namespace Game {
 }
 
 
+// GUI system globals
+static Render::GuiAtlas g_guiAtlas;
+static Render::FontRenderer g_fontRenderer;
+static Render::GuiRenderer g_guiRenderer;
+static Render::HudRenderer g_hudRenderer;
+
 namespace PlatformMain {
 
     std::string GetAssetPath(const std::string& relativePath) {
@@ -130,6 +142,27 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
+    void RenderHUD(GLFWwindow* window, const Game::Inventory& inventory, float deltaTime) {
+        int windowWidth, windowHeight, framebufferWidth, framebufferHeight;
+        glfwGetWindowSize(window, &windowWidth, &windowHeight);
+        glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
+
+        if (framebufferWidth <= 0 || framebufferHeight <= 0) return;
+
+        // Calculate GUI scale (MC: auto scale based on window size)
+        float scaleX = static_cast<float>(framebufferWidth) / static_cast<float>(windowWidth);
+        float guiScale = std::max(1.0f, std::floor(scaleX * 2.0f)); // 2x default, higher on Retina
+
+        int guiWidth = static_cast<int>(static_cast<float>(framebufferWidth) / guiScale);
+        int guiHeight = static_cast<int>(static_cast<float>(framebufferHeight) / guiScale);
+
+        Render::GuiRenderState renderState;
+        Render::GuiGraphics graphics(guiWidth, guiHeight, &g_guiAtlas, &renderState, &g_fontRenderer);
+        g_hudRenderer.Render(graphics, inventory, deltaTime);
+        g_guiRenderer.Render(renderState, windowWidth, windowHeight,
+                            framebufferWidth, framebufferHeight, guiScale, &g_fontRenderer);
+    }
+
     Shader InitializeShaders() {
         // Use platform-specific asset paths
         std::string vertPath = GetAssetPath("shaders/block.vert");
@@ -180,6 +213,7 @@ namespace PlatformMain {
 
         // Action inputs
         player.SetJumpPressed(camera.IsJumpPressed());
+        player.SetJumpHeld(camera.IsJumpPressed());
         player.SetSprintPressed(camera.IsSprintPressed());
         player.SetSneakPressed(camera.IsSneakPressed());
 
@@ -349,6 +383,19 @@ namespace PlatformMain {
         std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
         if (!Render::g_crosshair.Initialize(crosshairPath)) {
             Log::Warning("Failed to initialize crosshair system, continuing without crosshair");
+        }
+
+        // Initialize GUI rendering system
+        std::string guiSpritesDir = GetAssetPath("assets/textures/gui/sprites");
+        if (!g_guiAtlas.Initialize(guiSpritesDir)) {
+            Log::Warning("Failed to initialize GUI atlas, continuing without HUD");
+        }
+        std::string fontPath = GetAssetPath("assets/textures/font/ascii.png");
+        if (!g_fontRenderer.Initialize(fontPath)) {
+            Log::Warning("Failed to initialize font renderer");
+        }
+        if (!g_guiRenderer.Initialize()) {
+            Log::Warning("Failed to initialize GUI renderer");
         }
 
         // Compile shaders
@@ -981,6 +1028,7 @@ namespace PlatformMain {
 
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
+            RenderHUD(window, player.inventory, dt);
             RenderCrosshair(window);
             PROFILE_TIMER_END(render, metrics.renderTime);
             }
@@ -1306,6 +1354,10 @@ namespace PlatformMain {
         // 8a. Destroy resources that depend on the render backend BEFORE destroying it
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
+        g_hudRenderer = Render::HudRenderer();
+        g_guiRenderer.Shutdown();
+        g_fontRenderer.Shutdown();
+        g_guiAtlas.Shutdown();
         Render::g_crosshair.Shutdown();
         Render::g_blockHighlight.Shutdown();
         if (Render::g_atlasBuilder) {

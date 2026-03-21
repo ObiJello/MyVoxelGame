@@ -1101,7 +1101,7 @@ namespace Debug {
             ImGui::Text("Speed:     %.2f blocks/s", glm::length(phys.velocity));
             ImGui::TextColored(phys.isOnGround ? COL_GREEN : COL_GRAY, "Ground: %s", phys.isOnGround ? "YES" : "NO");
             ImGui::SameLine();
-            ImGui::TextColored(phys.isInWater ? COL_BLUE : COL_GRAY, "Water: %s", phys.isInWater ? "YES" : "NO");
+            ImGui::TextColored(phys.isInWater ? COL_BLUE : COL_GRAY, "Water: %s (depth: %.2f)", phys.isInWater ? "YES" : "NO", phys.waterDepth);
             ImGui::TextColored(phys.isSneaking ? COL_YELLOW : COL_GRAY, "Sneak: %s", phys.isSneaking ? "YES" : "NO");
             ImGui::SameLine();
             ImGui::TextColored(phys.isSprinting ? COL_GREEN : COL_GRAY, "Sprint: %s", phys.isSprinting ? "YES" : "NO");

@@ -348,6 +348,12 @@ if(APPLE)
             src/client/renderer/culling/VisGraph.cpp
             src/client/renderer/culling/SectionOcclusionGraph.cpp
             src/client/renderer/debug/Crosshair.cpp
+            src/client/renderer/gui/GuiAtlas.cpp
+            src/client/renderer/gui/GuiRenderState.cpp
+            src/client/renderer/gui/GuiRenderer.cpp
+            src/client/renderer/gui/GuiGraphics.cpp
+            src/client/renderer/gui/FontRenderer.cpp
+            src/client/renderer/gui/HudRenderer.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/common/world/block/BlockRegistry.cpp
@@ -494,6 +500,20 @@ else()
             src/client/renderer/debug/Crosshair.hpp
             src/client/renderer/debug/DebugSystem.cpp
             src/client/renderer/debug/DebugSystem.hpp
+
+            # Client rendering - GUI
+            src/client/renderer/gui/GuiAtlas.hpp
+            src/client/renderer/gui/GuiAtlas.cpp
+            src/client/renderer/gui/GuiRenderState.hpp
+            src/client/renderer/gui/GuiRenderState.cpp
+            src/client/renderer/gui/GuiRenderer.hpp
+            src/client/renderer/gui/GuiRenderer.cpp
+            src/client/renderer/gui/GuiGraphics.hpp
+            src/client/renderer/gui/GuiGraphics.cpp
+            src/client/renderer/gui/FontRenderer.hpp
+            src/client/renderer/gui/FontRenderer.cpp
+            src/client/renderer/gui/HudRenderer.hpp
+            src/client/renderer/gui/HudRenderer.cpp
 
             # Client rendering - Core
             src/client/renderer/core/Camera.hpp

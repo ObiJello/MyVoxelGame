@@ -66,6 +66,7 @@ namespace Game {
         // === Input State ===
         glm::vec3 movementInput{0.0f};
         bool jumpPressed = false;
+        bool jumpHeld = false;         // True while space is held (for water bobbing)
         bool sprintPressed = false;
         bool sneakPressed = false;
         
@@ -98,6 +99,7 @@ namespace Game {
         // Movement input setters
         void SetMovementInput(const glm::vec3& movement) { movementInput = movement; }
         void SetJumpPressed(bool pressed);
+        void SetJumpHeld(bool held) { jumpHeld = held; }
         void SetSprintPressed(bool pressed) { sprintPressed = pressed; }
         void SetSneakPressed(bool pressed) { sneakPressed = pressed; }
         

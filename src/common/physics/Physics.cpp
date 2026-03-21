@@ -49,56 +49,55 @@ namespace Game {
         // Update base speed based on current state
         UpdateBaseSpeed(physics);
 
-        // Check if player is in water
-        physics.isInWater = IsInWater(physics.position, context);
+        // Check if player is in water (AABB scan, sets waterDepth + isEyeInWater)
+        bool wasInWater = physics.isInWater;
+        UpdateWaterState(physics, context);
 
-        // Handle jumping
-        HandleJump(physics, jumpPressed, context);
+        // Water↔land transitions: preserve momentum
+        if (physics.isInWater && !wasInWater) {
+            physics.waterVelocity = physics.velocity;
+        } else if (!physics.isInWater && wasInWater) {
+            physics.velocity.y = physics.waterVelocity.y;
+            physics.waterVelocity = glm::vec3(0.0f);
+        }
 
-        // Only apply gravity if not in noclip mode AND the chunk below player is loaded
-        if (!physics.noclip) {
-            // Check if the chunk containing the player is loaded before applying gravity
-            int chunkX = static_cast<int>(std::floor(physics.position.x / Math::CHUNK_SIZE_X));
-            int chunkZ = static_cast<int>(std::floor(physics.position.z / Math::CHUNK_SIZE_Z));
+        if (!physics.isInWater) {
+            // Land/air physics
+            HandleJump(physics, jumpPressed, deltaTime, context);
 
-            bool chunkLoaded = context.IsChunkLoaded(chunkX, chunkZ);
+            if (!physics.noclip) {
+                int chunkX = static_cast<int>(std::floor(physics.position.x / Math::CHUNK_SIZE_X));
+                int chunkZ = static_cast<int>(std::floor(physics.position.z / Math::CHUNK_SIZE_Z));
 
-            if (chunkLoaded) {
-                ApplyGravity(physics, deltaTime, context);
-            } else {
-                // Chunk not loaded yet - don't apply gravity to prevent falling through world
-                physics.velocity.y = 0.0f;
-                physics.isOnGround = false;
-
-                // Log this occasionally for debugging
-                static int gravityDelayCounter = 0;
-                if (++gravityDelayCounter % 60 == 0) { // Every second at 60fps
-                    Log::Debug("Delaying gravity - chunk not loaded at player position (%.1f, %.1f)",
-                              physics.position.x, physics.position.z);
+                if (context.IsChunkLoaded(chunkX, chunkZ)) {
+                    ApplyGravity(physics, deltaTime, context);
+                } else {
+                    physics.velocity.y = 0.0f;
+                    physics.isOnGround = false;
                 }
             }
         }
 
-        // Handle movement
-        HandleMovement(physics, movementInput, deltaTime, context);
+        // Handle movement (water uses per-frame friction model, land unchanged)
+        HandleMovement(physics, movementInput, jumpPressed, deltaTime, context);
     }
 
     void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context) {
-        // Use different gravity if in water
-        float currentGravity = physics.isInWater ? PlayerPhysics::WATER_GRAVITY : PlayerPhysics::GRAVITY;
-        physics.velocity.y += currentGravity * deltaTime;
+        // Water gravity is handled in HandleMovement's water branch
+        physics.velocity.y += PlayerPhysics::GRAVITY * deltaTime;
 
-        // Clamp vertical velocity to terminal velocity
-        float terminalVelocity = physics.isInWater ? PlayerPhysics::WATER_GRAVITY : PlayerPhysics::TERMINAL_VELOCITY;
-        if (physics.velocity.y < terminalVelocity) {
-            physics.velocity.y = terminalVelocity;
+        if (physics.velocity.y < PlayerPhysics::TERMINAL_VELOCITY) {
+            physics.velocity.y = PlayerPhysics::TERMINAL_VELOCITY;
         }
     }
 
-    void HandleJump(PlayerPhysics& physics, bool jumpPressed, const PhysicsContext& context) {
-        if (jumpPressed && physics.isOnGround && !physics.noclip) {
-            float jumpVelocity = physics.isInWater ? PlayerPhysics::WATER_JUMP_VELOCITY : PlayerPhysics::JUMP_VELOCITY;
-            physics.velocity.y = jumpVelocity;
+    void HandleJump(PlayerPhysics& physics, bool jumpPressed, float deltaTime, const PhysicsContext& context) {
+        if (physics.noclip) return;
+        // Water jump bob is handled in the fixed-tick water loop (HandleMovement)
+
+        // Normal ground jump
+        if (jumpPressed && physics.isOnGround) {
+            physics.velocity.y = PlayerPhysics::JUMP_VELOCITY;
             physics.isOnGround = false;
             physics.lastJumpTime = physics.totalTime;
 
@@ -107,25 +106,19 @@ namespace Game {
                 if (physics.lastLandingTime > 0.0f) {
                     float timeSinceLanding = physics.lastJumpTime - physics.lastLandingTime;
                     if (timeSinceLanding <= PlayerPhysics::CORRECT_JUMP_TIME_WINDOW) {
-                        // Correctly timed jump while sprinting
                         physics.consecutiveJumps++;
                         float potentialSpeed = physics.baseSpeed + physics.consecutiveJumps * PlayerPhysics::SPEED_INCREMENT;
                         float maxSpeed = physics.baseSpeed * PlayerPhysics::MAX_SPEED_MULTIPLIER;
                         physics.currentSpeed = std::min(potentialSpeed, maxSpeed);
-                        Log::Debug("Momentum increased! Current speed: %.2f", physics.currentSpeed);
                     } else {
-                        // Incorrect timing or delay too long
                         physics.consecutiveJumps = 0;
                         physics.currentSpeed = physics.baseSpeed;
-                        Log::Debug("Momentum reset. Incorrect jump timing while sprinting.");
                     }
                 } else {
-                    // First jump while sprinting
                     physics.consecutiveJumps = 0;
                     physics.currentSpeed = physics.baseSpeed;
                 }
             } else {
-                // Not sprinting, reset momentum
                 physics.consecutiveJumps = 0;
                 physics.currentSpeed = physics.baseSpeed;
             }
@@ -148,105 +141,187 @@ namespace Game {
     }
 
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
-                       float deltaTime, const PhysicsContext& context) {
+                       bool jumpPressed, float deltaTime, const PhysicsContext& context) {
 
         // Store previous onGround state
         physics.wasOnGround = physics.isOnGround;
 
-        // Calculate movement speed
-        float speed = physics.isInWater ? PlayerPhysics::WATER_WALK_SPEED : physics.currentSpeed;
-
         // In noclip mode, allow free movement in all directions including vertical
         if (physics.noclip) {
-            // Apply separate speeds for horizontal and vertical movement
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
             glm::vec3 verticalMovement = glm::vec3(0.0f, movementInput.y, 0.0f);
-            
-            // Apply horizontal speed
+
             if (glm::length(horizontalMovement) > 0.0f) {
                 horizontalMovement = glm::normalize(horizontalMovement) * physics.noclipHorizontalSpeed;
             }
-            
-            // Apply vertical speed
             verticalMovement *= physics.noclipVerticalSpeed;
-            
-            // Combine movements
-            glm::vec3 totalMovement = horizontalMovement + verticalMovement;
-            physics.position += totalMovement * deltaTime;
-            physics.velocity = glm::vec3(0.0f); // No velocity in noclip
+
+            physics.position += (horizontalMovement + verticalMovement) * deltaTime;
+            physics.velocity = glm::vec3(0.0f);
+            physics.waterVelocity = glm::vec3(0.0f);
             physics.isOnGround = false;
             return;
         }
 
-        // Normal physics mode - separate horizontal and vertical movement
-        glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
-        if (glm::length(horizontalMovement) > 0.0f) {
-            horizontalMovement = glm::normalize(horizontalMovement) * speed;
-        }
+        if (physics.isInWater) {
+            // ============================================================
+            // Water movement — per-frame continuous model
+            // Uses exponential decay: dv/dt = accel - decay * v
+            // Steady state: v_ss = accel / decay
+            // Matched to MC steady states: walk=2.0, sink=-0.5, bob=+3.5 b/s
+            // ============================================================
 
-        // Apply movement with collision detection
-        glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
-        glm::vec3 movement = totalMovement * deltaTime;
+            float decay = physics.isSprinting ?
+                PlayerPhysics::WATER_SPRINT_DECAY : PlayerPhysics::WATER_DECAY;
 
-        // Handle vertical movement first to update onGround
-        glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
-
-        if (!CheckCollision(newPosition, physics, context)) {
-            physics.position.y = newPosition.y;
-            if (movement.y != 0.0f) {
-                physics.isOnGround = false; // If we're moving vertically and no collision, we're in the air
+            // 1. Horizontal input acceleration
+            glm::vec3 inputDir(movementInput.x, 0.0f, movementInput.z);
+            if (glm::length(inputDir) > 0.0f) {
+                inputDir = glm::normalize(inputDir);
+                float accel = physics.isSprinting ?
+                    PlayerPhysics::WATER_SPRINT_ACCEL : PlayerPhysics::WATER_WALK_ACCEL;
+                physics.waterVelocity.x += inputDir.x * accel * deltaTime;
+                physics.waterVelocity.z += inputDir.z * accel * deltaTime;
             }
-        } else {
-            if (movement.y < 0.0f) {
-                physics.isOnGround = true; // Landed
-                physics.velocity.y = 0.0f;
-            }
-            if (movement.y > 0.0f) {
-                physics.velocity.y = 0.0f; // Hit ceiling
-            }
-        }
 
-        // Additional check: If movement.y == 0, we need to check if the player is on the ground
-        if (movement.y == 0.0f) {
-            glm::vec3 testPosition = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
-            if (CheckCollision(testPosition, physics, context)) {
-                physics.isOnGround = true;
+            // 2. Vertical: gravity pulls down, jump bob pushes up
+            physics.waterVelocity.y -= PlayerPhysics::WATER_GRAVITY_ACCEL * deltaTime;
+            if (jumpPressed) {
+                physics.waterVelocity.y += PlayerPhysics::WATER_BOB_ACCEL * deltaTime;
+            }
+
+            // 3. Apply exponential friction decay (all axes)
+            float frictionMul = std::exp(-decay * deltaTime);
+            physics.waterVelocity.x *= frictionMul;
+            physics.waterVelocity.z *= frictionMul;
+            physics.waterVelocity.y *= std::exp(-PlayerPhysics::WATER_DECAY * deltaTime);
+
+            // 4. Move with collision
+            glm::vec3 movement = physics.waterVelocity * deltaTime;
+
+            // Vertical collision
+            glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.y = newPosition.y;
+                if (movement.y != 0.0f) {
+                    physics.isOnGround = false;
+                }
             } else {
-                physics.isOnGround = false;
-            }
-        }
-
-        // Check if the player just landed
-        if (!physics.wasOnGround && physics.isOnGround) {
-            physics.lastLandingTime = physics.totalTime;
-        }
-
-        // Apply movement restrictions based on sneaking and onGround
-        if (physics.isSneaking && physics.isOnGround) {
-            // Check X axis movement
-            glm::vec3 testPosX = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
-            if (!HasSupportBelow(testPosX, physics, context)) {
-                movement.x = 0.0f; // No support below, prevent movement along X
+                if (movement.y < 0.0f) {
+                    physics.isOnGround = true;
+                    physics.waterVelocity.y = 0.0f;
+                }
+                if (movement.y > 0.0f) {
+                    physics.waterVelocity.y = 0.0f;
+                }
             }
 
-            // Check Z axis movement
-            glm::vec3 testPosZ = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
-            if (!HasSupportBelow(testPosZ, physics, context)) {
-                movement.z = 0.0f; // No support below, prevent movement along Z
+            // Ground check when not moving vertically
+            if (movement.y == 0.0f) {
+                glm::vec3 testPos = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
+                physics.isOnGround = CheckCollision(testPos, physics, context);
             }
-        }
 
-        // Handle horizontal movement with collision detection
-        // X axis
-        newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
-        if (!CheckCollision(newPosition, physics, context)) {
-            physics.position.x = newPosition.x;
-        }
+            if (!physics.wasOnGround && physics.isOnGround) {
+                physics.lastLandingTime = physics.totalTime;
+            }
 
-        // Z axis
-        newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
-        if (!CheckCollision(newPosition, physics, context)) {
-            physics.position.z = newPosition.z;
+            // Horizontal collision with jump-out-of-fluid
+            bool hadHorizontalCollision = false;
+
+            newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.x = newPosition.x;
+            } else {
+                hadHorizontalCollision = true;
+                physics.waterVelocity.x = 0.0f;
+            }
+
+            newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.z = newPosition.z;
+            } else {
+                hadHorizontalCollision = true;
+                physics.waterVelocity.z = 0.0f;
+            }
+
+            // 5. Jump-out-of-fluid (MC: jumpOutOfFluid)
+            // Only trigger at the water surface (partially submerged), not deep underwater.
+            // MC checks if the player can move upward to exit the fluid.
+            if (hadHorizontalCollision && physics.waterDepth < physics.GetCurrentHeight()) {
+                glm::vec3 abovePos = physics.position + glm::vec3(0.0f, 0.6f, 0.0f);
+                if (!CheckCollision(abovePos, physics, context)) {
+                    physics.waterVelocity.y = PlayerPhysics::WATER_JUMP_OUT;
+                }
+            }
+
+            // Sync velocity for external use (debug display)
+            physics.velocity = physics.waterVelocity;
+
+        } else {
+            // ============================================================
+            // Normal (land/air) movement — instant speed, no friction
+            // ============================================================
+
+            float speed = physics.currentSpeed;
+
+            glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
+            if (glm::length(horizontalMovement) > 0.0f) {
+                horizontalMovement = glm::normalize(horizontalMovement) * speed;
+            }
+
+            glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
+            glm::vec3 movement = totalMovement * deltaTime;
+
+            // Vertical collision
+            glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.y = newPosition.y;
+                if (movement.y != 0.0f) {
+                    physics.isOnGround = false;
+                }
+            } else {
+                if (movement.y < 0.0f) {
+                    physics.isOnGround = true;
+                    physics.velocity.y = 0.0f;
+                }
+                if (movement.y > 0.0f) {
+                    physics.velocity.y = 0.0f;
+                }
+            }
+
+            // Ground check when not moving vertically
+            if (movement.y == 0.0f) {
+                glm::vec3 testPosition = physics.position + glm::vec3(0.0f, -0.1f, 0.0f);
+                physics.isOnGround = CheckCollision(testPosition, physics, context);
+            }
+
+            if (!physics.wasOnGround && physics.isOnGround) {
+                physics.lastLandingTime = physics.totalTime;
+            }
+
+            // Sneaking ledge protection
+            if (physics.isSneaking && physics.isOnGround) {
+                glm::vec3 testPosX = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+                if (!HasSupportBelow(testPosX, physics, context)) {
+                    movement.x = 0.0f;
+                }
+                glm::vec3 testPosZ = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+                if (!HasSupportBelow(testPosZ, physics, context)) {
+                    movement.z = 0.0f;
+                }
+            }
+
+            // Horizontal collision
+            newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.x = newPosition.x;
+            }
+
+            newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.z = newPosition.z;
+            }
         }
     }
 
@@ -317,18 +392,59 @@ namespace Game {
         return false;
     }
 
-    bool IsInWater(const glm::vec3& position, const PhysicsContext& context) {
-        // Check if the player's position contains water
-        int blockX = static_cast<int>(std::floor(position.x));
-        int blockY = static_cast<int>(std::floor(position.y));
-        int blockZ = static_cast<int>(std::floor(position.z));
+    void UpdateWaterState(PlayerPhysics& physics, const PhysicsContext& context) {
+        // Scan the player's AABB (deflated by 0.001 like Minecraft) for water blocks.
+        // Track the highest water surface touching the player to compute waterDepth.
+        float height = physics.GetCurrentHeight();
+        float halfWidth = PlayerPhysics::WIDTH * 0.5f - 0.001f;
+        float feetY = physics.position.y + 0.001f;
+        float topY = physics.position.y + height - 0.001f;
 
-        // Check if the block at player position is water
+        int minX = static_cast<int>(std::floor(physics.position.x - halfWidth));
+        int maxX = static_cast<int>(std::floor(physics.position.x + halfWidth));
+        int minY = static_cast<int>(std::floor(feetY));
+        int maxY = static_cast<int>(std::floor(topY));
+        int minZ = static_cast<int>(std::floor(physics.position.z - halfWidth));
+        int maxZ = static_cast<int>(std::floor(physics.position.z + halfWidth));
+
+        float highestWaterSurface = 0.0f;
+        bool foundWater = false;
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int y = minY; y <= maxY; y++) {
+                    try {
+                        if (context.GetBlock(x, y, z) == BlockID::Water) {
+                            // Water surface is at the top of this block
+                            // (source blocks fill to ~0.9, but treat as full block for physics)
+                            float waterTop = static_cast<float>(y + 1);
+                            if (waterTop > highestWaterSurface) {
+                                highestWaterSurface = waterTop;
+                            }
+                            foundWater = true;
+                        }
+                    } catch (...) {}
+                }
+            }
+        }
+
+        physics.isInWater = foundWater;
+        if (foundWater) {
+            physics.waterDepth = std::max(0.0f, highestWaterSurface - physics.position.y);
+            physics.waterDepth = std::min(physics.waterDepth, height); // Clamp to player height
+        } else {
+            physics.waterDepth = 0.0f;
+        }
+
+        // Check if eyes are submerged
+        float eyeY = physics.GetEyePosition().y;
+        int eyeBlockX = static_cast<int>(std::floor(physics.position.x));
+        int eyeBlockY = static_cast<int>(std::floor(eyeY));
+        int eyeBlockZ = static_cast<int>(std::floor(physics.position.z));
         try {
-            BlockID blockId = context.GetBlock(blockX, blockY, blockZ);
-            return blockId == BlockID::Water;
+            physics.isEyeInWater = (context.GetBlock(eyeBlockX, eyeBlockY, eyeBlockZ) == BlockID::Water);
         } catch (...) {
-            return false;
+            physics.isEyeInWater = false;
         }
     }
 

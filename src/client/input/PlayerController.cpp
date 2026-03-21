@@ -284,9 +284,10 @@ namespace Game {
                 //     rightClickDelayTimer = RIGHT_CLICK_DELAY;
                 // } else
                 if (currentHit.has_value()) {
-                    // Hit a block - send UseItemOn packet ONLY
+                    // Hit a block - send UseItemOn packet and consume from inventory
                     SendUseItemOn(*currentHit, 0);  // 0 = main hand
-                    // DO NOT place blocks locally - wait for server response
+                    // Consume block from client inventory (server doesn't track counts)
+                    player->inventory.ConsumeSelectedBlock();
                     rightClickDelayTimer = RIGHT_CLICK_DELAY;  // Set delay to prevent spam
                 } else {
                     // No hit - use item in air
