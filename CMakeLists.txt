@@ -520,6 +520,10 @@ else()
             src/client/renderer/gui/FontRenderer.cpp
             src/client/renderer/gui/HudRenderer.hpp
             src/client/renderer/gui/HudRenderer.cpp
+            src/client/renderer/gui/ChatComponent.hpp
+            src/client/renderer/gui/ChatComponent.cpp
+            src/client/renderer/gui/ChatScreen.hpp
+            src/client/renderer/gui/ChatScreen.cpp
 
             # Client rendering - Core
             src/client/renderer/core/Camera.hpp
