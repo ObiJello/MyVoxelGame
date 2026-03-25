@@ -151,7 +151,8 @@ namespace PlatformMain {
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
-    void RenderHUD(GLFWwindow* window, const Game::Inventory& inventory, float deltaTime) {
+    void RenderHUD(GLFWwindow* window, const Game::Inventory& inventory, float deltaTime,
+                   const glm::mat4& proj = glm::mat4(1.0f), const glm::mat4& view = glm::mat4(1.0f)) {
         int windowWidth, windowHeight, framebufferWidth, framebufferHeight;
         glfwGetWindowSize(window, &windowWidth, &windowHeight);
         glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
@@ -173,6 +174,51 @@ namespace PlatformMain {
         g_chatComponent.Update(deltaTime);
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
+
+        // Chat bubbles above remote players (rendered in GUI space with text)
+        if (Client::g_remotePlayerManager) {
+            glm::mat4 vp = proj * view;
+            for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                if (rp.chatBubbleTimer <= 0.0f || rp.chatBubbleText.empty()) continue;
+
+                // Project player head position to screen
+                glm::vec4 worldPos(rp.position.x, rp.position.y + 2.4f, rp.position.z, 1.0f);
+                glm::vec4 clip = vp * worldPos;
+                if (clip.w <= 0.0f) continue;
+
+                // NDC to GUI-scaled coords
+                float ndcX = clip.x / clip.w;
+                float ndcY = clip.y / clip.w;
+                float sx = (ndcX * 0.5f + 0.5f) * guiWidth;
+                float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * guiHeight;
+
+                // Measure text and build bubble
+                const std::string& text = rp.chatBubbleText;
+                int textW = g_fontRenderer.GetStringWidth(text);
+                int padding = 4;
+                int bubbleW = textW + padding * 2;
+                int bubbleH = Render::FontRenderer::LINE_HEIGHT + padding * 2;
+                int bx = static_cast<int>(sx) - bubbleW / 2;
+                int by = static_cast<int>(sy) - bubbleH - 6;
+
+                // Black outline (2px border)
+                graphics.Fill(bx - 2, by - 2, bx + bubbleW + 2, by + bubbleH + 2, 0xFF000000);
+                // White fill
+                graphics.Fill(bx, by, bx + bubbleW, by + bubbleH, 0xFFFFFFFF);
+
+                // Triangle pointer (black outline + white fill)
+                int tx = static_cast<int>(sx);
+                int ty = by + bubbleH;
+                graphics.Fill(tx - 4, ty, tx + 4, ty + 2, 0xFF000000);
+                graphics.Fill(tx - 3, ty + 2, tx + 3, ty + 4, 0xFF000000);
+                graphics.Fill(tx - 2, ty + 4, tx + 2, ty + 6, 0xFF000000);
+                graphics.Fill(tx - 3, ty, tx + 3, ty + 2, 0xFFFFFFFF);
+                graphics.Fill(tx - 2, ty + 2, tx + 2, ty + 4, 0xFFFFFFFF);
+
+                // Text (black, centered in bubble)
+                graphics.DrawString(text, bx + padding, by + padding, 0xFF000000, false);
+            }
+        }
 
         g_guiRenderer.Render(renderState, windowWidth, windowHeight,
                             framebufferWidth, framebufferHeight, guiScale, &g_fontRenderer);
@@ -1115,17 +1161,12 @@ namespace PlatformMain {
             // Render remote players (stick figures) before UI overlays
             if (Client::g_remotePlayerManager) {
                 playerRenderer.Render(proj, view, camera.position, *Client::g_remotePlayerManager);
-                // Update chat bubble timers
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
-                // Render chat bubbles (screen-space billboard)
-                int fbW, fbH;
-                glfwGetFramebufferSize(window, &fbW, &fbH);
-                playerRenderer.RenderChatBubbles(proj, view, *Client::g_remotePlayerManager, fbW, fbH);
             }
 
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
-            RenderHUD(window, player.inventory, dt);
+            RenderHUD(window, player.inventory, dt, proj, view);
             RenderCrosshair(window);
             PROFILE_TIMER_END(render, metrics.renderTime);
             }
