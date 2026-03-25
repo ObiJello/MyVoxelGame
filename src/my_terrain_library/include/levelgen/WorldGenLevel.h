@@ -70,6 +70,11 @@ public:
     virtual bool isFluidAtPosition(const core::BlockPos& pos,
         std::function<bool(BlockState*)> predicate) const = 0;
 
+    virtual bool isWaterAt(const core::BlockPos& pos) const {
+        BlockState* state = getBlockState(pos);
+        return state && state->hasWaterFluid();
+    }
+
     //=========================================================================
     // Chunk Access (from ChunkSource pattern)
     //=========================================================================

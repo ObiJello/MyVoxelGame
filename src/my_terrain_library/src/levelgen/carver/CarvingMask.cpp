@@ -1,9 +1,5 @@
 #include "levelgen/carver/CarvingMask.h"
 
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
-
 namespace minecraft {
 namespace levelgen {
 namespace carver {
@@ -66,12 +62,7 @@ void CarvingMask::forEachCarvedPosition(const minecraft::world::ChunkPos& pos,
         uint64_t bits = m_mask[longIndex];
         while (bits != 0) {
             // Find lowest set bit
-#ifdef _MSC_VER
-            unsigned long bitIndex;
-            _BitScanForward64(&bitIndex, bits);
-#else
             int bitIndex = __builtin_ctzll(bits);
-#endif
             int32_t index = static_cast<int32_t>(longIndex * 64 + bitIndex);
 
             // Decode index back to x, z, y

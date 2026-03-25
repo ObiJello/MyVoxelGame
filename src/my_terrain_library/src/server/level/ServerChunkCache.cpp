@@ -56,17 +56,10 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
 {
     // If not on main thread, dispatch and wait
     if (std::this_thread::get_id() != m_mainThreadId) {
-        if (m_abort.load(std::memory_order_acquire)) return nullptr;
-
+        // Note: In full implementation, would use managedBlock
+        // For now, simple synchronous call
         auto future = getChunkFuture(x, z, targetStatus, loadOrGenerate);
-
-        // Poll with abort check instead of blocking join() — prevents
-        // worker threads from hanging forever during shutdown.
-        while (!future->isDone()) {
-            if (m_abort.load(std::memory_order_acquire)) return nullptr;
-            std::this_thread::sleep_for(std::chrono::microseconds(100));
-        }
-        auto result = future->getNow(nullptr);
+        auto result = future->join();
         return result ? result->orElse(nullptr) : nullptr;
     }
 
@@ -95,12 +88,7 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
     //       }
     //   }
     ChunkResultType result = nullptr;
-    while (!future->isDone()) {
-        // Check abort flag for clean shutdown
-        if (m_abort.load(std::memory_order_acquire)) {
-            return nullptr;
-        }
-
+    while (!future->isDone() && !m_abort.load(std::memory_order_acquire)) {
         // Poll task: run distance manager updates and generation tasks
         // Reference: ServerChunkCache.MainThreadExecutor.pollTask() returns true if work done
         bool didWork = runDistanceManagerUpdates();
@@ -255,6 +243,31 @@ bool ServerChunkCache::runDistanceManagerUpdates() {
 // Reference: ServerChunkCache.java lines 448-450
 void ServerChunkCache::addTicket(const Ticket& ticket, const world::ChunkPos& pos) {
     m_ticketStorage.addTicket(ticket, pos);
+}
+
+ServerChunkCache::ChunkRangeFutureType ServerChunkCache::addTicketAndLoadWithRadius(
+    const TicketType& type,
+    const world::ChunkPos& pos,
+    int radius
+) {
+    if (!type.doesLoad()) {
+        throw std::logic_error("Ticket type does not trigger chunk loading: " + type.name);
+    }
+    if (type.canExpireIfUnloaded()) {
+        throw std::logic_error("Ticket type can expire before it loads: " + type.name);
+    }
+
+    addTicketWithRadius(type, pos, radius);
+    runDistanceManagerUpdates();
+
+    ChunkHolder* chunkHolder = getVisibleChunkIfPresent(pos.toLong());
+    if (chunkHolder == nullptr) {
+        throw std::logic_error("No chunk was scheduled for loading");
+    }
+
+    return m_chunkMap.getChunkRangeFuture(chunkHolder, radius, [](int /*distance*/) -> const ChunkStatus& {
+        return ChunkStatus::FULL;
+    });
 }
 
 // Reference: ServerChunkCache.java lines 466-468

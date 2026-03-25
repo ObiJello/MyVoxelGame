@@ -19,11 +19,8 @@ public:
         const core::BlockPos& pos
     ) const override {
         const core::BlockPos abovePos = pos.above();
-        BlockState* aboveState = level.getBlockState(abovePos);
-        BlockState* currentState = level.getBlockState(pos);
-        return aboveState &&
-               aboveState->isCollisionShapeFullBlock(level, abovePos) &&
-               (!currentState || currentState->getIdentifier() != "minecraft:water");
+        return Block::canSupportCenter(level, abovePos, core::Direction::DOWN) &&
+               !level.isWaterAt(pos);
     }
 };
 

@@ -245,7 +245,47 @@ namespace Render {
             return m;
         }();
 
-        const auto& model = Game::BlockRegistry::GetBlockModel(slot.blockId);
+        // Try inventory-specific model first (e.g., red_mushroom_block_inventory),
+        // fall back to the regular block model. MC uses separate inventory models
+        // for blocks whose world model doesn't show all faces (mushroom blocks, etc.)
+        const Game::BlockModel* modelPtr = nullptr;
+        if (Game::BlockModelRegistry::HasModel(modelName + "_inventory")) {
+            modelPtr = &Game::BlockModelRegistry::GetModel(modelName + "_inventory");
+        } else {
+            modelPtr = &Game::BlockRegistry::GetBlockModel(slot.blockId);
+        }
+        const auto& model = *modelPtr;
+
+        // Blocks without a real model file (water_still, lava_still) get the default
+        // cube which has unresolvable textures. Render flat 2D texture instead.
+        if (!Game::BlockModelRegistry::HasModel(modelName) &&
+            !Game::BlockModelRegistry::HasModel(modelName + "_inventory")) {
+            AtlasUVRect uvRect;
+            bool found = false;
+            std::string texKey = model.ResolveTexture("#particle");
+            if (texKey != "missingno") found = g_atlasBuilder->GetUVRect(texKey, uvRect);
+            if (!found) found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
+            if (!found && modelName.size() > 6 && modelName.substr(modelName.size() - 6) == "_still") {
+                found = g_atlasBuilder->GetUVRect("block/" + modelName.substr(0, modelName.size() - 6), uvRect);
+            }
+            if (found) {
+                // For animated textures, clamp UV to first frame (square)
+                float frameHeight = uvRect.uvMax.x - uvRect.uvMin.x;
+                float clampedV1 = uvRect.uvMin.y + frameHeight;
+                if (clampedV1 < uvRect.uvMax.y) {
+                    uvRect.uvMax.y = clampedV1;
+                }
+                // Water is a greyscale texture tinted blue
+                uint32_t tint = 0xFFFFFFFF;
+                if (modelName.find("water") != std::string::npos) {
+                    tint = 0xFF4C7FFF; // R=76, G=127, B=255 (matches FluidMeshBuilder waterTint)
+                }
+                Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                     x, y, x + 16, y + 16,
+                     uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y, tint);
+            }
+            return;
+        }
 
         // Look up textures for 3 visible faces (Top, East=left, North=right)
         auto topFace = LookupFaceTexture(model, Game::FaceDir::Up, modelName);

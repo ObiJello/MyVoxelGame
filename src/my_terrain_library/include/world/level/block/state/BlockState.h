@@ -73,7 +73,7 @@ public:
 
     bool isAir() const { return m_isAir; }
     bool isFluid() const { return m_liquid; }
-    bool blocksMotion() const { return m_blocksMotion; }
+    bool blocksMotion() const;
     bool isLeaves() const { return m_isLeaves; }
     bool isLog() const { return m_isLog; }
     bool isReplaceableByTrees() const { return m_isReplaceableByTrees; }
@@ -149,6 +149,8 @@ public:
     int getLightEmission() const;
 
     bool canBeReplaced() const { return m_isReplaceable; }
+    bool hasWaterFluid() const;
+    bool hasAnyFluid() const;
 
     bool canSurvive(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const;
 

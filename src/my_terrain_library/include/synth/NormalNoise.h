@@ -1,5 +1,6 @@
 #pragma once
 
+#include "levelgen/WorldgenRandom.h"
 #include "random/LegacyRandomSource.h"
 #include "synth/PerlinNoise.h"
 #include "random/XoroshiroRandomSource.h"
@@ -47,6 +48,7 @@ public:
      */
     static NormalNoise create(XoroshiroRandomSource& random, const NoiseParameters& parameters);
     static NormalNoise create(LegacyRandomSource& random, const NoiseParameters& parameters);
+    static NormalNoise create(levelgen::WorldgenRandom& random, const NoiseParameters& parameters);
 
     /**
      * Factory method with amplitude array
@@ -54,6 +56,7 @@ public:
      */
     static NormalNoise create(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
     static NormalNoise create(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
+    static NormalNoise create(levelgen::WorldgenRandom& random, int32_t firstOctave, const std::vector<double>& amplitudes);
 
     /**
      * Factory method for legacy Nether biome noise (pre-1.18)
@@ -62,6 +65,7 @@ public:
      */
     static NormalNoise createLegacyNetherBiome(XoroshiroRandomSource& random, const NoiseParameters& parameters);
     static NormalNoise createLegacyNetherBiome(LegacyRandomSource& random, const NoiseParameters& parameters);
+    static NormalNoise createLegacyNetherBiome(levelgen::WorldgenRandom& random, const NoiseParameters& parameters);
 
     /**
      * Get noise value at position
@@ -102,6 +106,7 @@ private:
      */
     NormalNoise(XoroshiroRandomSource& random, const NoiseParameters& parameters, bool useNewInitialization);
     NormalNoise(LegacyRandomSource& random, const NoiseParameters& parameters, bool useNewInitialization);
+    NormalNoise(levelgen::WorldgenRandom& random, const NoiseParameters& parameters, bool useNewInitialization);
 
     /**
      * Calculate expected deviation based on octave span

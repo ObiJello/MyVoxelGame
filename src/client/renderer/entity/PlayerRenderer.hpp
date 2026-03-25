@@ -24,6 +24,11 @@ namespace Render {
                     const glm::vec3& cameraPos,
                     const Client::RemotePlayerManager& remotePlayers);
 
+        // Render chat bubbles above remote players (screen-space billboarded)
+        void RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,
+                               const Client::RemotePlayerManager& remotePlayers,
+                               int fbWidth, int fbHeight);
+
     private:
         ShaderHandle  m_shader       = INVALID_SHADER;
         TextureHandle m_dummyTexture = INVALID_TEXTURE;

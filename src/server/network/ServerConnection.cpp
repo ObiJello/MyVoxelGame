@@ -343,8 +343,9 @@ namespace Server {
         SendPacket(static_cast<uint8_t>(Network::PacketId::BlockChangeS2C), data);
     }
 
-    void ServerConnection::SendChatMessage(const std::string& message, uint8_t position) {
+    void ServerConnection::SendChatMessage(const std::string& message, uint8_t position, uint32_t senderId) {
         Network::PacketBuffer buffer;
+        buffer.WriteInt(static_cast<int32_t>(senderId)); // Sender player ID (0 = system)
         buffer.WriteString(message);
         buffer.WriteByte(position); // 0=chat, 1=system, 2=actionbar
         SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageS2C), buffer.GetData());
@@ -521,7 +522,7 @@ namespace Server {
             // Now safely send to all active connections
             for (auto& conn : activeConnections) {
                 try {
-                    conn->SendChatMessage(formattedMessage, 0);
+                    conn->SendChatMessage(formattedMessage, 0, m_playerId);
                 } catch (const std::exception& e) {
                     Log::Warning("Failed to send chat message to connection: %s", e.what());
                 }

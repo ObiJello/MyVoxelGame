@@ -1,6 +1,7 @@
 #ifndef IMPROVEDNOISE_H
 #define IMPROVEDNOISE_H
 
+#include "levelgen/WorldgenRandom.h"
 #include "random/LegacyRandomSource.h"
 #include "random/XoroshiroRandomSource.h"
 #include <cstdint>
@@ -47,6 +48,7 @@ public:
      */
     explicit ImprovedNoise(XoroshiroRandomSource& random);
     explicit ImprovedNoise(LegacyRandomSource& random);
+    explicit ImprovedNoise(levelgen::WorldgenRandom& random);
 
     /**
      * Generate 3D Perlin noise at position (x, y, z).

@@ -923,8 +923,9 @@ void SculkVeinBlock::onDischarged(WorldGenLevel* level, BlockState* state, const
     }
 
     if (!hasAnyFace(newState)) {
-        bool waterlogged = newState->hasProperty(WATERLOGGED) && newState->getValueOrElse(*WATERLOGGED, false);
-        newState = waterlogged ? Blocks::WATER->defaultBlockState() : Blocks::AIR->defaultBlockState();
+        newState = level->isWaterAt(pos)
+            ? Blocks::WATER->defaultBlockState()
+            : Blocks::AIR->defaultBlockState();
     }
 
     level->setBlock(pos, newState, 3);

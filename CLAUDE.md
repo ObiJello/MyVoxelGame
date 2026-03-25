@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Mac Public IP:** 74.105.150.36
 
+## Git Policy
+
+- **Never add Co-Authored-By lines** to commit messages. No Claude attribution in commits.
+- Do not build unless asked. Do not push unless asked.
+
 ## Build Policy
 
 **Do NOT build after making changes.** Instead, say "try building with new changes and if there are any errors let me know and I will try building to see them." Only run the build command when the user reports errors and asks you to build to diagnose them.
@@ -45,6 +50,24 @@ For distributing to users (uploads dSYMs to Sentry, builds universal binary):
 # Linux/Windows
 ./build/bin/MyVoxelGame
 ```
+
+## Terrain Library Patches
+
+When updating `src/my_terrain_library/` from a newer snapshot, the following patches must be re-applied:
+
+### ServerChunkCache abort support
+The game adds `requestAbort()` / `isAbortRequested()` / `m_abort` to `ServerChunkCache` for clean shutdown. Without this, `getChunk()` blocks forever on exit.
+
+**Header** (`include/server/level/ServerChunkCache.h`):
+- Add `#include <atomic>` to includes
+- Add public methods: `void requestAbort()` and `bool isAbortRequested()` using `m_abort` atomic
+- Add private member: `std::atomic<bool> m_abort{false}`
+
+**Source** (`src/server/level/ServerChunkCache.cpp`):
+- In `getChunk()`, change `while (!future->isDone())` to `while (!future->isDone() && !m_abort.load(std::memory_order_acquire))`
+
+### MapBlockType thread safety
+`MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. The `m_blockIdCache` unordered_map must be protected with `m_blockIdCacheMutex` (already in MyTerrainGenerator.hpp/cpp, not in the terrain library).
 
 ## Architecture Overview
 

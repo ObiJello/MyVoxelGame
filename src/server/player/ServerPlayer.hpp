@@ -209,7 +209,7 @@ namespace Server {
         int m_selectedHotbarSlot = 0;
         // Basic hotbar inventory (9 slots)
         std::array<Game::BlockID, 9> m_hotbarBlocks = {
-            Game::BlockID::Stone,
+            Game::BlockID::Air,
             Game::BlockID::Dirt,
             Game::BlockID::Grass,
             Game::BlockID::Lava,

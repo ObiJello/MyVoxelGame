@@ -10,6 +10,7 @@
 #include "levelgen/DensityFunctions.h"
 #include "synth/NormalNoise.h"
 #include "synth/BlendedNoise.h"
+#include "random/LegacyRandomSource.h"
 #include "random/XoroshiroRandomSource.h"
 #include "random/PositionalRandomFactory.h"
 #include <unordered_map>
@@ -69,42 +70,65 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
     // Get the base router from settings
     NoiseRouter* baseRouter = settings->noiseRouter();
 
-    // Create a noise wiring visitor that will replace NoiseHolder placeholders
-    // with actual noise instances from this RandomState
+    // Create a noise wiring visitor that will replace keyed holders and
+    // re-seed bootstrap-time unseeded functions the way Java RandomState does.
     class NoiseWiringVisitor : public density::DensityFunction::Visitor {
     public:
-        NoiseWiringVisitor(RandomState* state) : m_state(state) {}
+        NoiseWiringVisitor(RandomState* state, bool useLegacyInit, int64_t seed)
+            : m_state(state)
+            , m_useLegacyInit(useLegacyInit)
+            , m_seed(seed) {}
 
         density::DensityFunction* apply(density::DensityFunction* input) override {
-            // Pass through - we only transform NoiseHolders
-            return input;
+            auto it = m_wrapped.find(input);
+            if (it != m_wrapped.end()) {
+                return it->second;
+            }
+
+            density::DensityFunction* wrapped = wrapNew(input);
+            m_wrapped[input] = wrapped;
+            return wrapped;
         }
 
         density::DensityFunction::NoiseHolder* visitNoise(density::DensityFunction::NoiseHolder* noiseHolder) override {
-            // If the noise holder already has a noise instance, return it as-is
-            if (noiseHolder->noise() != nullptr) {
-                return noiseHolder;
+            if (!noiseHolder) {
+                return nullptr;
             }
 
-            // Get the noise name from the holder
             const char* noiseName = noiseHolder->noiseName();
             if (noiseName == nullptr || noiseName[0] == '\0') {
-                // No name, return as-is
                 return noiseHolder;
             }
 
-            // Get or create the noise from RandomState
             NormalNoise* noise = m_state->getOrCreateNoise(noiseName);
-
-            // Create a new NoiseHolder with the actual noise instance
             return new density::DensityFunction::NoiseHolder(noise);
         }
 
     private:
+        density::DensityFunction* wrapNew(density::DensityFunction* function) {
+            if (!function) {
+                return nullptr;
+            }
+
+            if (auto* noise = dynamic_cast<::minecraft::BlendedNoise*>(function)) {
+                if (!m_useLegacyInit) {
+                    XoroshiroRandomSource terrainRandom = m_state->random()->fromHashOf("minecraft:terrain");
+                    return new ::minecraft::BlendedNoise(noise->withNewRandom(terrainRandom));
+                }
+            } else if (dynamic_cast<density::EndIslandDensityFunction*>(function)) {
+                return new density::EndIslandDensityFunction(m_seed);
+            }
+
+            return function;
+        }
+
         RandomState* m_state;
+        bool m_useLegacyInit;
+        int64_t m_seed;
+        std::unordered_map<density::DensityFunction*, density::DensityFunction*> m_wrapped;
     };
 
-    NoiseWiringVisitor wireVisitor(this);
+    NoiseWiringVisitor wireVisitor(this, useLegacyInit, seed);
 
     // Wire up each density function in the router
     m_router = new NoiseRouter(
@@ -133,24 +157,50 @@ RandomState::RandomState(NoiseGeneratorSettings* settings, int64_t seed)
     // Create climate sampler by flattening density functions
     // this.sampler = new Climate.Sampler(...)
 
-    // The Java code applies a "noiseFlattener" visitor that unwraps HolderHolder and Marker
-    // For now, we'll use the density functions directly from the router
-    density::DensityFunction* temperature = m_router->temperature();
-    density::DensityFunction* vegetation = m_router->vegetation();
-    density::DensityFunction* continents = m_router->continents();
-    density::DensityFunction* erosion = m_router->erosion();
-    density::DensityFunction* depth = m_router->depth();
-    density::DensityFunction* ridges = m_router->ridges();
+    class NoiseFlattener : public density::DensityFunction::Visitor {
+    public:
+        density::DensityFunction* apply(density::DensityFunction* input) override {
+            auto it = m_wrapped.find(input);
+            if (it != m_wrapped.end()) {
+                return it->second;
+            }
+
+            density::DensityFunction* wrapped = wrapNew(input);
+            m_wrapped[input] = wrapped;
+            return wrapped;
+        }
+
+    private:
+        density::DensityFunction* wrapNew(density::DensityFunction* function) {
+            if (auto* marker = dynamic_cast<density::DensityFunctions::MarkerOrMarked*>(function)) {
+                return marker->wrapped();
+            }
+            return function;
+        }
+
+        std::unordered_map<density::DensityFunction*, density::DensityFunction*> m_wrapped;
+    };
+
+    NoiseFlattener noiseFlattener;
+
+    std::vector<world::biome::Climate::ParameterPoint> spawnTarget;
+    spawnTarget.reserve(settings->spawnTarget().size());
+    for (ClimateParameterPoint* ptr : settings->spawnTarget()) {
+        if (ptr) {
+            spawnTarget.push_back(*reinterpret_cast<world::biome::Climate::ParameterPoint*>(ptr));
+        }
+    }
 
     // Reference: RandomState.java line 119
-    // Create sampler (spawn target omitted for Phase 1)
+    // this.sampler = new Climate.Sampler(..., settings.spawnTarget())
     m_sampler = new world::biome::Climate::Sampler(
-        temperature,
-        vegetation,
-        continents,
-        erosion,
-        depth,
-        ridges
+        m_router->temperature()->mapAll(noiseFlattener),
+        m_router->vegetation()->mapAll(noiseFlattener),
+        m_router->continents()->mapAll(noiseFlattener),
+        m_router->erosion()->mapAll(noiseFlattener),
+        m_router->depth()->mapAll(noiseFlattener),
+        m_router->ridges()->mapAll(noiseFlattener),
+        spawnTarget
     );
 }
 
@@ -247,8 +297,10 @@ random::PositionalRandomFactory* RandomState::getOrCreateRandomFactory(const std
 
     // Reference: RandomState.java line 127
     // return (PositionalRandomFactory)this.positionalRandoms.computeIfAbsent(name, (key) -> this.random.fromHashOf(name).forkPositional());
-    // Java uses full ResourceKey identifier like "minecraft:ore"
-    std::string fullIdentifier = "minecraft:" + identifier;
+    std::string fullIdentifier = identifier;
+    if (fullIdentifier.rfind("minecraft:", 0) != 0) {
+        fullIdentifier = "minecraft:" + fullIdentifier;
+    }
     XoroshiroRandomSource identRandomSource = m_random->fromHashOf(fullIdentifier);
     random::PositionalRandomFactory* factory = new random::PositionalRandomFactory(identRandomSource.forkPositional());
 

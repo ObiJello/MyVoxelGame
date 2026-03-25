@@ -47,6 +47,23 @@ ImprovedNoise::ImprovedNoise(LegacyRandomSource& random) {
     }
 }
 
+ImprovedNoise::ImprovedNoise(levelgen::WorldgenRandom& random) {
+    this->xo = random.nextDouble() * static_cast<double>(256.0F);
+    this->yo = random.nextDouble() * static_cast<double>(256.0F);
+    this->zo = random.nextDouble() * static_cast<double>(256.0F);
+
+    for (int i = 0; i < 256; ++i) {
+        this->p[i] = static_cast<uint8_t>(i);
+    }
+
+    for (int i = 0; i < 256; ++i) {
+        int offset = random.nextInt(256 - i);
+        uint8_t tmp = this->p[i];
+        this->p[i] = this->p[i + offset];
+        this->p[i + offset] = tmp;
+    }
+}
+
 double ImprovedNoise::noise(double x, double y, double z) {
     // Reference: ImprovedNoise.java lines 33-34
     return this->noise(x, y, z, static_cast<double>(0.0F), static_cast<double>(0.0F));

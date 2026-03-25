@@ -52,8 +52,10 @@ namespace Game {
         static constexpr float OVERHANG_MARGIN = 0.125f; // Allowable overhang distance
 
         // Noclip mode flight speeds
-        static constexpr float NOCLIP_HORIZONTAL_SPEED = 10.0f; // Default horizontal flight speed
-        static constexpr float NOCLIP_VERTICAL_SPEED = 10.0f;   // Default vertical flight speed
+        static constexpr float NOCLIP_HORIZONTAL_SPEED = 10.0f;       // Default horizontal flight speed
+        static constexpr float NOCLIP_VERTICAL_SPEED = 10.0f;         // Default vertical flight speed
+        static constexpr float NOCLIP_SPRINT_HORIZONTAL_SPEED = 50.0f; // Sprint (Ctrl) horizontal speed
+        static constexpr float NOCLIP_SPRINT_VERTICAL_SPEED = 50.0f;   // Sprint (Ctrl) vertical speed
 
         // Player dimensions
         static constexpr float WIDTH = 0.6f;

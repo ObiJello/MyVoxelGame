@@ -235,7 +235,7 @@ protected:
         , m_parameters(parameters)
         , m_scale(scale)
         , m_noise([&]() {
-            LegacyRandomSource random(seed);
+            WorldgenRandom random{LegacyRandomSource(seed)};
             return NormalNoise::create(random, parameters);
         }()) {}
 
@@ -331,7 +331,7 @@ public:
         , m_slowNoiseParameters(slowNoiseParameters)
         , m_slowScale(slowScale)
         , m_slowNoise([&]() {
-            LegacyRandomSource random(seed);
+            WorldgenRandom random{LegacyRandomSource(seed)};
             return NormalNoise::create(random, slowNoiseParameters);
         }()) {}
 

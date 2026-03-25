@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <memory>
+#include <string>
 #include <cstdint>
 #include <cmath>
 
@@ -26,6 +27,11 @@ namespace Client {
         glm::vec3 targetPosition{0.0f};
         glm::vec2 targetRotation{0.0f};
         int lerpSteps = 0;
+
+        // Chat bubble
+        std::string chatBubbleText;
+        float chatBubbleTimer = 0.0f;
+        static constexpr float CHAT_BUBBLE_DURATION = 5.0f;
     };
 
     class RemotePlayerManager {
@@ -89,6 +95,34 @@ namespace Client {
                 float headOffset = Wrap180(headYaw - rp.bodyYaw);
                 if (fabsf(headOffset) > 50.0f) {
                     rp.bodyYaw += headOffset - copysignf(50.0f, headOffset);
+                }
+            }
+        }
+
+        void SetChatBubble(uint32_t playerId, const std::string& message) {
+            auto it = m_players.find(playerId);
+            if (it != m_players.end()) {
+                // Strip "<Name> " prefix to show just the message in the bubble
+                std::string text = message;
+                if (text.size() > 2 && text[0] == '<') {
+                    auto closeAngle = text.find("> ");
+                    if (closeAngle != std::string::npos) {
+                        text = text.substr(closeAngle + 2);
+                    }
+                }
+                it->second.chatBubbleText = text;
+                it->second.chatBubbleTimer = RemotePlayer::CHAT_BUBBLE_DURATION;
+            }
+        }
+
+        void UpdateBubbles(float deltaTime) {
+            for (auto& [id, rp] : m_players) {
+                if (rp.chatBubbleTimer > 0.0f) {
+                    rp.chatBubbleTimer -= deltaTime;
+                    if (rp.chatBubbleTimer <= 0.0f) {
+                        rp.chatBubbleText.clear();
+                        rp.chatBubbleTimer = 0.0f;
+                    }
                 }
             }
         }

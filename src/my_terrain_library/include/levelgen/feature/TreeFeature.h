@@ -81,7 +81,7 @@ public:
     bool isFluidAtPosition(const core::BlockPos& pos,
                           std::function<bool(BlockState*)> predicate) const override {
         BlockState* state = getBlockState(pos);
-        return state && state->isFluid() && predicate(state);
+        return state && state->hasAnyFluid() && predicate(state);
     }
 
     ::world::IChunk* getChunk(int chunkX, int chunkZ) override {

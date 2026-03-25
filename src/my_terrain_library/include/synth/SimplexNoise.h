@@ -1,6 +1,7 @@
 #ifndef SIMPLEXNOISE_H
 #define SIMPLEXNOISE_H
 
+#include "levelgen/WorldgenRandom.h"
 #include "random/XoroshiroRandomSource.h"
 #include "random/LegacyRandomSource.h"
 #include <cstdint>
@@ -53,6 +54,7 @@ public:
      * Reference: SimplexNoise.java lines 15-32
      */
     explicit SimplexNoise(LegacyRandomSource& random);
+    explicit SimplexNoise(levelgen::WorldgenRandom& random);
 
     /**
      * Get 2D simplex noise value.

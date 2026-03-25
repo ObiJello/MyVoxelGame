@@ -106,6 +106,13 @@ void ChunkGenerationRunner::clearChunkCache() {
     // Generate to target status (sequential phases, no recursion into phaseFeatures)
     chunk = dynamic_cast<::world::ProtoChunk*>(phaseEmpty(chunk));
 
+    if (targetStatus.isOrAfter(ChunkStatus::STRUCTURE_STARTS) && m_config.runStructures) {
+        chunk = dynamic_cast<::world::ProtoChunk*>(phaseStructureStarts(chunk));
+    }
+    if (targetStatus.isOrAfter(ChunkStatus::STRUCTURE_REFERENCES) && m_config.runStructures) {
+        chunk = dynamic_cast<::world::ProtoChunk*>(phaseStructureReferences(chunk));
+    }
+
     if (targetStatus.isOrAfter(ChunkStatus::BIOMES) && m_config.runBiomes) {
         chunk = dynamic_cast<::world::ProtoChunk*>(phaseBiomes(chunk));
     }
@@ -277,9 +284,42 @@ void ChunkGenerationRunner::clearChunkCache() {
 ::world::IChunk* ChunkGenerationRunner::phaseStructureReferences(::world::IChunk* chunk) {
     // Reference: ChunkStatusTasks.java generateStructureReferences() lines 55-60
     // Reference: context.generator().createReferences(region, structureManager, chunk)
-    //
-    // For terrain-only generation, this is a no-op.
-    // Full implementation would call generator->createReferences()
+
+    if (chunk) {
+        const world::ChunkPos targetPos = chunk->getPos();
+        const int targetMinBlockX = targetPos.getMinBlockX();
+        const int targetMinBlockZ = targetPos.getMinBlockZ();
+
+        for (int sourceX = targetPos.x() - 8; sourceX <= targetPos.x() + 8; ++sourceX) {
+            for (int sourceZ = targetPos.z() - 8; sourceZ <= targetPos.z() + 8; ++sourceZ) {
+                ::world::ProtoChunk* sourceChunk = getOrGenerateChunk(
+                    world::ChunkPos(sourceX, sourceZ),
+                    ChunkStatus::STRUCTURE_STARTS
+                );
+                if (!sourceChunk) {
+                    continue;
+                }
+
+                const auto& starts = sourceChunk->getAllStructureStarts();
+                for (const auto& [structureName, start] : starts) {
+                    if (!start.isValid()) {
+                        continue;
+                    }
+
+                    if (start.boundingBox.intersects(
+                            targetMinBlockX,
+                            targetMinBlockZ,
+                            targetMinBlockX + 15,
+                            targetMinBlockZ + 15)) {
+                        chunk->addReferenceForStructure(
+                            structureName,
+                            world::ChunkPos::asLong(start.startChunkPos.x(), start.startChunkPos.z())
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     updateChunkStatus(chunk, ChunkStatus::STRUCTURE_REFERENCES);
     return chunk;

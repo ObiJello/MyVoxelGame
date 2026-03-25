@@ -14,11 +14,11 @@ namespace Render {
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aTexCoord;
 layout(location = 2) in vec4 aColor;
-uniform mat4 uProjection;
+uniform mat4 uMVP;
 out vec2 vTexCoord;
 out vec4 vColor;
 void main() {
-    gl_Position = uProjection * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
     vTexCoord = aTexCoord;
     vColor = aColor;
 }
@@ -42,10 +42,10 @@ void main() {
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec2 aTexCoord;
 layout(location = 2) in vec4 aColor;
-uniform mat4 uProjection;
+uniform mat4 uMVP;
 out vec4 vColor;
 void main() {
-    gl_Position = uProjection * vec4(aPos, 1.0);
+    gl_Position = uMVP * vec4(aPos, 1.0);
     vColor = aColor;
 }
 )";
@@ -84,6 +84,10 @@ void main() {
             return false;
         }
 
+        // Create 1x1 white dummy texture for color-only draws (Vulkan needs a bound texture)
+        uint8_t white[] = { 255, 255, 255, 255 };
+        m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
+
         Log::Info("[GuiRenderer] Initialized successfully");
         return true;
     }
@@ -95,6 +99,7 @@ void main() {
             if (m_indexBuffer != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_indexBuffer); m_indexBuffer = INVALID_BUFFER; }
             if (m_texturedShader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_texturedShader); m_texturedShader = INVALID_SHADER; }
             if (m_colorShader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_colorShader); m_colorShader = INVALID_SHADER; }
+            if (m_dummyTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_dummyTexture); m_dummyTexture = INVALID_TEXTURE; }
         }
         m_vertexBufferCapacity = 0;
         m_indexBufferCapacity = 0;
@@ -368,11 +373,14 @@ void main() {
         for (const auto& batch : m_batches) {
             ShaderHandle shader = batch.useColorShader ? m_colorShader : m_texturedShader;
             g_renderBackend->BindShader(shader);
-            g_renderBackend->SetUniformMat4(shader, "uProjection", projection);
+            g_renderBackend->SetUniformMat4(shader, "uMVP", projection);
 
             if (!batch.useColorShader && batch.texture != INVALID_TEXTURE) {
                 g_renderBackend->BindTexture(batch.texture, 0);
                 g_renderBackend->SetUniformInt(shader, "uTexture", 0);
+            } else if (batch.useColorShader) {
+                // Vulkan requires a texture bound for every draw call — bind dummy 1x1 white
+                g_renderBackend->BindTexture(m_dummyTexture, 0);
             }
 
             // TODO: Scissor rect support via glScissor/vkCmdSetScissor

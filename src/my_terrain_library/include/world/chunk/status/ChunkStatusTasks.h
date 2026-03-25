@@ -429,8 +429,7 @@ public:
             //   WorldGenRegion region = new WorldGenRegion(level, chunks, step, chunk);
             //   context.generator().applyBiomeDecoration(region, chunk, structureManager);
             //
-            // The 'chunks' parameter is a 2D grid from ChunkMap::applyStep.
-            // For FEATURES (radius 1), it's 3x3 with neighbors at CARVERS status.
+            // The 'chunks' parameter is the full accumulated dependency grid from ChunkMap::applyStep.
             // Using WorldGenRegion allows features to read/write across chunk boundaries,
             // and those writes persist because the chunk objects are shared via ChunkMap.
 
@@ -438,72 +437,57 @@ public:
             int inputGridSize = static_cast<int>(chunks.size());
             int inputRadius = (inputGridSize - 1) / 2;
 
-            // Note: inputGridSize may be larger than 3 (e.g., 21 for accumulated deps including STRUCTURE_STARTS at radius 8)
-            // We extract only the 3x3 center for WorldGenRegion (featureRadius=1)
+            std::vector<std::unique_ptr<server::level::SimpleGenerationChunkHolder>> holderStorage;
+            std::vector<server::level::GenerationChunkHolder*> holders;
+            holderStorage.reserve(inputGridSize * inputGridSize);
+            holders.reserve(inputGridSize * inputGridSize);
 
-            // FEATURES needs radius 1 (3x3) for WorldGenRegion
-            // The input grid may be larger (e.g., 17x17 if accumulated deps include STRUCTURE_STARTS at radius 8)
-            // Extract the 3x3 center from the input grid
-            constexpr int featureRadius = 1;
-
-            // Create chunk holders for the 3x3 neighbor grid
-            std::vector<server::level::SimpleGenerationChunkHolder*> holders;
-            holders.reserve(9);
-
-            for (int dz = -featureRadius; dz <= featureRadius; ++dz) {
-                for (int dx = -featureRadius; dx <= featureRadius; ++dx) {
-                    int gridZ = dz + inputRadius;
-                    int gridX = dx + inputRadius;
-                    ::world::IChunk* neighborChunk = nullptr;
-                    if (gridZ >= 0 && gridZ < inputGridSize &&
-                        gridX >= 0 && gridX < static_cast<int>(chunks[gridZ].size())) {
-                        neighborChunk = chunks[gridZ][gridX];
-                    }
-
+            for (int gridZ = 0; gridZ < inputGridSize; ++gridZ) {
+                for (int gridX = 0; gridX < static_cast<int>(chunks[gridZ].size()); ++gridX) {
+                    ::world::IChunk* neighborChunk = chunks[gridZ][gridX];
                     if (neighborChunk) {
-                        // Prime heightmaps for neighbor chunks
-                        levelgen::Heightmap::primeHeightmaps(neighborChunk, {
-                            levelgen::Heightmap::Types::MOTION_BLOCKING,
-                            levelgen::Heightmap::Types::MOTION_BLOCKING_NO_LEAVES,
-                            levelgen::Heightmap::Types::OCEAN_FLOOR,
-                            levelgen::Heightmap::Types::WORLD_SURFACE
-                        });
-                        holders.push_back(new server::level::SimpleGenerationChunkHolder(
-                            dynamic_cast<::world::ProtoChunk*>(neighborChunk)));
+                        holderStorage.push_back(
+                            std::make_unique<server::level::SimpleGenerationChunkHolder>(neighborChunk)
+                        );
+                        holders.push_back(holderStorage.back().get());
                     } else {
                         holders.push_back(nullptr);
                     }
                 }
             }
 
-            // Build StaticCache2D for radius 1 (3x3)
+            // Build StaticCache2D for the full accumulated dependency radius.
             auto cache2d = util::StaticCache2D<server::level::GenerationChunkHolder*>::create(
-                centerPos.x(), centerPos.z(), featureRadius,
-                [&holders, &centerPos](int x, int z) -> server::level::GenerationChunkHolder* {
-                    int dx = x - centerPos.x() + 1;  // featureRadius=1
-                    int dz = z - centerPos.z() + 1;
-                    if (dx >= 0 && dx < 3 && dz >= 0 && dz < 3) {
-                        return holders[dz * 3 + dx];
+                centerPos.x(), centerPos.z(), inputRadius,
+                [&holders, &centerPos, inputRadius, inputGridSize](int x, int z) -> server::level::GenerationChunkHolder* {
+                    int gridX = x - centerPos.x() + inputRadius;
+                    int gridZ = z - centerPos.z() + inputRadius;
+                    if (gridX >= 0 && gridX < inputGridSize && gridZ >= 0 && gridZ < inputGridSize) {
+                        return holders[gridZ * inputGridSize + gridX];
                     }
                     return nullptr;
                 }
             );
 
-            // Create ServerLevel (reused across calls via static)
-            static std::unique_ptr<server::level::ServerLevel> s_serverLevel;
-            if (!s_serverLevel) {
+            server::level::ServerLevel* serverLevel =
+                static_cast<server::level::ServerLevel*>(context.level);
+            static std::unique_ptr<server::level::ServerLevel> s_fallbackServerLevel;
+            if (!serverLevel) {
                 // Get block info from chunk
                 auto* proto = dynamic_cast<::world::ProtoChunk*>(chunk);
-                s_serverLevel = std::make_unique<server::level::ServerLevel>(
-                    -64, 384, nullptr,
-                    proto ? proto->getAirBlock() : nullptr,
-                    proto ? proto->getDefaultBlock() : nullptr,
-                    context.seed
-                );
+                if (!s_fallbackServerLevel) {
+                    s_fallbackServerLevel = std::make_unique<server::level::ServerLevel>(
+                        -64, 384, nullptr,
+                        proto ? proto->getAirBlock() : nullptr,
+                        proto ? proto->getDefaultBlock() : nullptr,
+                        context.seed
+                    );
+                }
+                serverLevel = s_fallbackServerLevel.get();
             }
 
             // Create WorldGenRegion with multi-chunk access
-            server::level::WorldGenRegion region(*s_serverLevel, cache2d, step, *chunk);
+            server::level::WorldGenRegion region(*serverLevel, cache2d, step, *chunk);
             levelgen::WorldGenRegionLevel level(&region);
 
             // Apply biome decoration with multi-chunk WorldGenLevel
@@ -513,10 +497,6 @@ public:
                 featuresPerStep
             );
 
-            // Cleanup holders
-            for (auto* h : holders) {
-                delete h;
-            }
         }
 
         return completed(chunk);

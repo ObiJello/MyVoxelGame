@@ -34,7 +34,9 @@ public:
     };
 
 private:
-    XoroshiroRandomSource m_randomSource;
+    Algorithm m_algorithm;
+    XoroshiroRandomSource m_xoroshiroRandomSource;
+    LegacyRandomSource m_legacyRandomSource;
     int32_t m_count;
 
     // Gaussian cache matching Java's LegacyRandomSource.gaussianSource
@@ -47,8 +49,10 @@ private:
 
 public:
     struct DebugStateSnapshot {
+        Algorithm algorithm;
         uint64_t seedLo;
         uint64_t seedHi;
+        int64_t legacySeed;
         int32_t count;
         double nextNextGaussian;
         bool haveNextNextGaussian;
@@ -59,7 +63,18 @@ public:
      * Reference: WorldgenRandom.java lines 10-13
      */
     explicit WorldgenRandom(XoroshiroRandomSource randomSource)
-        : m_randomSource(std::move(randomSource))
+        : m_algorithm(Algorithm::XOROSHIRO)
+        , m_xoroshiroRandomSource(std::move(randomSource))
+        , m_legacyRandomSource(0L)
+        , m_count(0)
+        , m_nextNextGaussian(0.0)
+        , m_haveNextNextGaussian(false)
+    {}
+
+    explicit WorldgenRandom(LegacyRandomSource randomSource)
+        : m_algorithm(Algorithm::LEGACY)
+        , m_xoroshiroRandomSource(0L)
+        , m_legacyRandomSource(std::move(randomSource))
         , m_count(0)
         , m_nextNextGaussian(0.0)
         , m_haveNextNextGaussian(false)
@@ -70,7 +85,9 @@ public:
      * Reference: WorldgenRandom.java Algorithm.newInstance()
      */
     explicit WorldgenRandom(int64_t seed)
-        : m_randomSource(seed)
+        : m_algorithm(Algorithm::XOROSHIRO)
+        , m_xoroshiroRandomSource(seed)
+        , m_legacyRandomSource(0L)
         , m_count(0)
         , m_nextNextGaussian(0.0)
         , m_haveNextNextGaussian(false)
@@ -95,8 +112,10 @@ public:
      * Fork this random source
      * Reference: WorldgenRandom.java lines 19-21
      */
-    XoroshiroRandomSource fork() {
-        return m_randomSource.fork();
+    WorldgenRandom fork() {
+        return usesLegacyRandomSource()
+            ? WorldgenRandom(m_legacyRandomSource.fork())
+            : WorldgenRandom(m_xoroshiroRandomSource.fork());
     }
 
     /**
@@ -104,7 +123,21 @@ public:
      * Reference: WorldgenRandom.java lines 23-25
      */
     XoroshiroPositionalRandomFactory forkPositional() {
-        return m_randomSource.forkPositional();
+        if (usesLegacyRandomSource()) {
+            throw std::logic_error("Legacy-backed WorldgenRandom does not expose Xoroshiro positional random factory");
+        }
+        return m_xoroshiroRandomSource.forkPositional();
+    }
+
+    LegacyPositionalRandomFactory forkLegacyPositional() {
+        if (!usesLegacyRandomSource()) {
+            throw std::logic_error("Xoroshiro-backed WorldgenRandom does not expose legacy positional random factory");
+        }
+        return m_legacyRandomSource.forkPositional();
+    }
+
+    bool usesLegacyRandomSource() const {
+        return m_algorithm == Algorithm::LEGACY;
     }
 
     /**
@@ -112,7 +145,11 @@ public:
      * Reference: WorldgenRandom.java lines 37-41
      */
     void setSeed(int64_t seed) {
-        m_randomSource.setSeed(seed);
+        if (usesLegacyRandomSource()) {
+            m_legacyRandomSource.setSeed(seed);
+        } else {
+            m_xoroshiroRandomSource.setSeed(seed);
+        }
     }
 
     /**
@@ -190,7 +227,11 @@ public:
      */
     int32_t next(int32_t bits) {
         ++m_count;
-        int64_t raw = m_randomSource.nextLong();
+        if (usesLegacyRandomSource()) {
+            return m_legacyRandomSource.next(bits);
+        }
+
+        int64_t raw = m_xoroshiroRandomSource.nextLong();
         return static_cast<int32_t>(static_cast<uint64_t>(raw) >> (64 - bits));
     }
 
@@ -277,7 +318,7 @@ public:
         int32_t high = next(26);
         int32_t low = next(27);
         int64_t combined = (static_cast<int64_t>(high) << 27) + static_cast<int64_t>(low);
-        return static_cast<double>(combined) * static_cast<double>(1.110223E-16f);
+        return static_cast<double>(combined) * 0x1.0p-53;
     }
 
     /**
@@ -332,11 +373,31 @@ public:
      * Get the underlying random source
      */
     XoroshiroRandomSource& getRandomSource() {
-        return m_randomSource;
+        if (usesLegacyRandomSource()) {
+            throw std::logic_error("Legacy-backed WorldgenRandom does not expose Xoroshiro random source");
+        }
+        return m_xoroshiroRandomSource;
     }
 
     const XoroshiroRandomSource& getRandomSource() const {
-        return m_randomSource;
+        if (usesLegacyRandomSource()) {
+            throw std::logic_error("Legacy-backed WorldgenRandom does not expose Xoroshiro random source");
+        }
+        return m_xoroshiroRandomSource;
+    }
+
+    LegacyRandomSource& getLegacyRandomSource() {
+        if (!usesLegacyRandomSource()) {
+            throw std::logic_error("Xoroshiro-backed WorldgenRandom does not expose legacy random source");
+        }
+        return m_legacyRandomSource;
+    }
+
+    const LegacyRandomSource& getLegacyRandomSource() const {
+        if (!usesLegacyRandomSource()) {
+            throw std::logic_error("Xoroshiro-backed WorldgenRandom does not expose legacy random source");
+        }
+        return m_legacyRandomSource;
     }
 
     /**
@@ -344,7 +405,13 @@ public:
      * Returns seedLo and seedHi from the underlying Xoroshiro128PlusPlus
      */
     void getSeedState(uint64_t& seedLo, uint64_t& seedHi) const {
-        const auto& gen = m_randomSource.getGenerator();
+        if (usesLegacyRandomSource()) {
+            seedLo = static_cast<uint64_t>(m_legacyRandomSource.getInternalSeed());
+            seedHi = 0;
+            return;
+        }
+
+        const auto& gen = m_xoroshiroRandomSource.getGenerator();
         seedLo = gen.getSeedLo();
         seedHi = gen.getSeedHi();
     }
@@ -354,8 +421,10 @@ public:
         uint64_t seedHi = 0;
         getSeedState(seedLo, seedHi);
         return DebugStateSnapshot{
+            m_algorithm,
             seedLo,
             seedHi,
+            m_legacyRandomSource.getInternalSeed(),
             m_count,
             m_nextNextGaussian,
             m_haveNextNextGaussian
@@ -363,7 +432,12 @@ public:
     }
 
     void restoreDebugState(const DebugStateSnapshot& snapshot) {
-        m_randomSource.setStateDirectly(snapshot.seedLo, snapshot.seedHi);
+        m_algorithm = snapshot.algorithm;
+        if (snapshot.algorithm == Algorithm::LEGACY) {
+            m_legacyRandomSource.setInternalSeedDirectly(snapshot.legacySeed);
+        } else {
+            m_xoroshiroRandomSource.setStateDirectly(snapshot.seedLo, snapshot.seedHi);
+        }
         m_count = snapshot.count;
         m_nextNextGaussian = snapshot.nextNextGaussian;
         m_haveNextNextGaussian = snapshot.haveNextNextGaussian;
@@ -374,7 +448,12 @@ public:
      * This exists for low-level debugging; use restoreDebugState() when exact replay matters.
      */
     void setSeedState(uint64_t seedLo, uint64_t seedHi) {
-        m_randomSource.setStateDirectly(seedLo, seedHi);
+        if (usesLegacyRandomSource()) {
+            (void)seedHi;
+            m_legacyRandomSource.setInternalSeedDirectly(static_cast<int64_t>(seedLo));
+        } else {
+            m_xoroshiroRandomSource.setStateDirectly(seedLo, seedHi);
+        }
     }
 };
 

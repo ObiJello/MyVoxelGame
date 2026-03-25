@@ -195,8 +195,10 @@ namespace Game {
         if (id == BlockID::Air) {
             return false;
         }
-        const Block& block = BlockRegistry::Get(id);
-        return block.opaque; // Use opaque flag as solid indicator
+        // Raycast should hit all solid blocks, not just opaque ones.
+        // Leaves (Cutout) are solid for interaction but not opaque for rendering.
+        // Water and Lava are non-solid (can't target them).
+        return id != BlockID::Water && id != BlockID::Lava;
     }
 
 } // namespace Game

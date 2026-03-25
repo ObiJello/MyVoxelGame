@@ -1,6 +1,6 @@
 #pragma once
 
-#include "world/level/block/Block.h"
+#include "world/level/block/blocks/GrowingPlantHeadBlock.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 
 namespace minecraft {
@@ -14,13 +14,13 @@ using state::properties::BlockStateProperties;
 using state::properties::BooleanProperty;
 using state::properties::IntegerProperty;
 
-class CaveVinesBlock : public Block {
+class CaveVinesBlock : public GrowingPlantHeadBlock {
 public:
     static inline IntegerProperty* AGE = nullptr;
     static inline BooleanProperty* BERRIES = nullptr;
 
     explicit CaveVinesBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission()) {
+        : GrowingPlantHeadBlock(Properties(properties).noCollission(), core::Direction::DOWN, false, 0.1) {
         initializeProperties();
         rebuildStateDefinition();
 
@@ -34,15 +34,41 @@ public:
 
 protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
-        initializeProperties();
-        builder.add(AGE, BERRIES);
+        GrowingPlantHeadBlock::createBlockStateDefinition(builder);
+        builder.add(BERRIES);
+    }
+
+    int getBlocksToGrowWhenBonemealed(minecraft::levelgen::WorldgenRandom& /*random*/) const override {
+        return 1;
+    }
+
+    bool canGrowInto(BlockState* state) const override {
+        return state && state->isAir();
+    }
+
+    bool isHeadOrBody(BlockState* state) const override {
+        if (!state) {
+            return false;
+        }
+        const std::string& id = state->getIdentifier();
+        return id == "minecraft:cave_vines" || id == "minecraft:cave_vines_plant";
+    }
+
+    BlockState* updateBodyAfterConvertedFromHead(
+        BlockState* headState,
+        BlockState* bodyState
+    ) const override {
+        if (!headState || !bodyState) {
+            return bodyState;
+        }
+        return bodyState->setValue(*BERRIES, headState->getValue(*BERRIES));
     }
 
 private:
     static void initializeProperties() {
         if (!AGE) {
             BlockStateProperties::initialize();
-            AGE = BlockStateProperties::AGE_25;
+            AGE = GrowingPlantHeadBlock::AGE;
             BERRIES = BlockStateProperties::BERRIES;
         }
     }

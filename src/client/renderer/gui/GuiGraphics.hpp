@@ -69,6 +69,9 @@ namespace Render {
         int GuiWidth() const { return m_guiWidth; }
         int GuiHeight() const { return m_guiHeight; }
 
+        // --- Font ---
+        const FontRenderer* GetFontRenderer() const { return m_fontRenderer; }
+
     private:
         int m_guiWidth, m_guiHeight;
         GuiAtlas* m_atlas;

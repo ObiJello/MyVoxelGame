@@ -705,6 +705,10 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
 
     // Get wrapped preliminary surface level (Java line 131)
     m_preliminarySurfaceLevel = wrappedRouter.preliminarySurfaceLevel();
+    m_wrappedFinalDensityForDebug = wrappedRouter.finalDensity();
+    m_wrappedVeinToggleForDebug = wrappedRouter.veinToggle();
+    m_wrappedVeinRidgedForDebug = wrappedRouter.veinRidged();
+    m_wrappedVeinGapForDebug = wrappedRouter.veinGap();
 
     // Create aquifer based on settings (Java lines 133-138)
     // NOTE: Must create aquifer BEFORE fullNoiseValue since we need it
@@ -926,13 +930,13 @@ density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int cellIndex) {
 
 // Java lines 248-263
 // OPTIMIZATION: Use local variables and restrict pointer
-void NoiseChunk::fillAllDirectly(double* output, int count, density::DensityFunction* function) {
+void NoiseChunk::fillAllDirectly(double* __restrict__ output, int count, density::DensityFunction* function) {
     (void)count;  // Unused - we iterate based on cell dimensions
 
     // Cache dimensions in local variables for faster access
     const int cellHeight = m_cellHeight;
     const int cellWidth = m_cellWidth;
-    int arrayIndex = 0;
+    m_arrayIndex = 0;
 
     for (int yInCell = cellHeight - 1; yInCell >= 0; --yInCell) {
         m_inCellY = yInCell;
@@ -942,12 +946,10 @@ void NoiseChunk::fillAllDirectly(double* output, int count, density::DensityFunc
 
             for (int zInCell = 0; zInCell < cellWidth; ++zInCell) {
                 m_inCellZ = zInCell;
-                output[arrayIndex++] = function->compute(*this);
+                output[m_arrayIndex++] = function->compute(*this);
             }
         }
     }
-
-    m_arrayIndex = arrayIndex;
 }
 
 // Java lines 266-282

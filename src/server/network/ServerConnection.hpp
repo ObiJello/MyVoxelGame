@@ -79,7 +79,7 @@ namespace Server {
         void SendBlockChange(const Network::BlockChangeS2CPacket& packet);
         
         // Send chat message
-        void SendChatMessage(const std::string& message, uint8_t position = 0);
+        void SendChatMessage(const std::string& message, uint8_t position = 0, uint32_t senderId = 0);
         
         // Send keep-alive
         void SendKeepAlive(uint64_t id);

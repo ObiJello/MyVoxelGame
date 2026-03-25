@@ -76,8 +76,7 @@ private:
             return state;
         }
 
-        BlockState* currentState = level.getBlockState(pos);
-        bool waterlogged = currentState && currentState->getIdentifier() == "minecraft:water";
+        bool waterlogged = level.isWaterAt(pos);
         return state->setValue(*BlockStateProperties::WATERLOGGED, waterlogged);
     }
 

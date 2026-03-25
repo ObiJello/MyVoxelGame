@@ -1,4 +1,5 @@
 #include "world/level/block/Block.h"
+#include "levelgen/blockpredicates/BlockPredicate.h"
 
 namespace minecraft {
 namespace world {
@@ -81,6 +82,24 @@ BlockState* Block::stateById(int idWithData) {
     // Note: In Minecraft this returns Blocks.AIR.defaultBlockState() if null
     // We return nullptr and let caller handle it
     return state;
+}
+
+bool Block::canSupportCenter(
+    const minecraft::levelgen::WorldGenLevel& level,
+    const core::BlockPos& belowPos,
+    core::Direction direction
+) {
+    BlockState* state = level.getBlockState(belowPos);
+    if (!state) {
+        return false;
+    }
+
+    if (direction == core::Direction::DOWN &&
+        minecraft::levelgen::blockpredicates::matchesBlockTagName(state, "minecraft:unstable_bottom_center")) {
+        return false;
+    }
+
+    return state->isFaceSturdy(level, belowPos, direction);
 }
 
 void Block::rebuildStateDefinition() {

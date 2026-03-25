@@ -27,6 +27,9 @@ namespace Render {
         // Measure text width in GUI pixels
         int GetStringWidth(const std::string& text) const;
 
+        // Get width of a single character glyph (no spacing)
+        int GetCharWidth(unsigned char c) const { return m_glyphWidths[c]; }
+
         // Get font texture handle (for batching)
         TextureHandle GetFontTexture() const { return m_fontTexture; }
 

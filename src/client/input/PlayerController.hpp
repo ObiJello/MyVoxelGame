@@ -66,6 +66,7 @@ namespace Game {
         bool breakButtonHeld;
         float breakProgress;
         glm::ivec3 breakingBlockPos;
+        BlockID breakingBlockId = BlockID::Air;  // Cached at break start (server may change block before FinishBreaking)
         float mineSpeed = 1.0f;  // TODO: Calculate from tool/effects
 
         // Placing state

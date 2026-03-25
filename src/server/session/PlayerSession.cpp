@@ -651,6 +651,19 @@ namespace Server {
         }
     }
     
+    void PlayerSession::HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet) {
+        if (!m_player) return;
+        int slot = packet.slot;
+        if (slot >= 0 && slot < 9) {
+            m_player->selectHotbarSlot(slot);
+            // Also sync the block type for this slot (client-authoritative for now)
+            if (packet.blockId != 0) {
+                m_player->setHotbarBlock(slot, static_cast<Game::BlockID>(packet.blockId));
+            }
+            Log::Debug("[PlayerSession] Player %u: slot %d, block %d", m_playerId, slot, packet.blockId);
+        }
+    }
+
     void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
         // === 1. Thread safety & basic validation ===
         ASSERT_SERVER_THREAD();
@@ -901,13 +914,6 @@ namespace Server {
         
         // Send failure acknowledgment
         AckInteraction(sequence, false);
-    }
-
-    void PlayerSession::HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet) {
-        if (!m_player) return;
-        if (packet.slot >= 0 && packet.slot < 9) {
-            m_player->selectHotbarSlot(packet.slot);
-        }
     }
 
     void PlayerSession::HandleKeepAlive(const Network::KeepAliveC2SPacket& packet) {

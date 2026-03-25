@@ -295,6 +295,10 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/crosshair_vk.frag
             ${VK_SHADER_DIR}/highlight_vk.vert
             ${VK_SHADER_DIR}/highlight_vk.frag
+            ${VK_SHADER_DIR}/gui_textured_vk.vert
+            ${VK_SHADER_DIR}/gui_textured_vk.frag
+            ${VK_SHADER_DIR}/gui_color_vk.vert
+            ${VK_SHADER_DIR}/gui_color_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -354,6 +358,8 @@ if(APPLE)
             src/client/renderer/gui/GuiGraphics.cpp
             src/client/renderer/gui/FontRenderer.cpp
             src/client/renderer/gui/HudRenderer.cpp
+            src/client/renderer/gui/ChatComponent.cpp
+            src/client/renderer/gui/ChatScreen.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/common/world/block/BlockRegistry.cpp

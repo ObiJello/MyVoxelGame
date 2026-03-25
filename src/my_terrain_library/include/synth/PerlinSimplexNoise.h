@@ -1,5 +1,6 @@
 #pragma once
 
+#include "levelgen/WorldgenRandom.h"
 #include "synth/SimplexNoise.h"
 #include "random/LegacyRandomSource.h"
 #include "random/XoroshiroRandomSource.h"
@@ -26,20 +27,12 @@ private:
     double m_highestFreqValueFactor;
     double m_highestFreqInputFactor;
 
-public:
-    /**
-     * Construct with random source and list of octaves
-     * Reference: PerlinSimplexNoise.java lines 16-62
-     *
-     * @param random Random source for noise initialization
-     * @param octaveSet List of octave indices (e.g., {0} for single octave, {-1, 0, 1} for three octaves)
-     */
-    PerlinSimplexNoise(LegacyRandomSource& random, const std::vector<int>& octaveSet) {
+    template <typename RandomT>
+    void initialize(RandomT& random, const std::vector<int>& octaveSet) {
         if (octaveSet.empty()) {
             throw std::invalid_argument("Need some octaves!");
         }
 
-        // Convert to sorted set
         std::set<int> octaves(octaveSet.begin(), octaveSet.end());
 
         int lowFreqOctaves = -*octaves.begin();
@@ -50,48 +43,38 @@ public:
             throw std::invalid_argument("Total number of octaves needs to be >= 1");
         }
 
-        // Initialize noise levels array
         m_noiseLevels.resize(totalOctaves);
 
-        // Create zero octave noise
         auto zeroOctave = std::make_unique<SimplexNoise>(random);
         int zeroOctaveIndex = highFreqOctaves;
-
-        // Store reference before moving
         SimplexNoise* zeroOctavePtr = zeroOctave.get();
         double zeroXo = zeroOctavePtr->getXo();
         double zeroYo = zeroOctavePtr->getYo();
         double zeroZo = zeroOctavePtr->getZo();
 
-        // Place zero octave if in set
         if (highFreqOctaves >= 0 && highFreqOctaves < totalOctaves && octaves.count(0)) {
             m_noiseLevels[highFreqOctaves] = std::move(zeroOctave);
         }
 
-        // Create higher frequency octaves (lower indices)
         for (int i = highFreqOctaves + 1; i < totalOctaves; ++i) {
             if (i >= 0 && octaves.count(zeroOctaveIndex - i)) {
                 m_noiseLevels[i] = std::make_unique<SimplexNoise>(random);
             } else {
-                // Skip this octave's random consumption
                 random.consumeCount(262);
             }
         }
 
-        // Create lower frequency octaves (higher indices)
         if (highFreqOctaves > 0) {
-            // Get seed from zero octave value
             double seedValue = 0.0;
             if (m_noiseLevels[highFreqOctaves]) {
                 seedValue = m_noiseLevels[highFreqOctaves]->getValue(zeroXo, zeroYo, zeroZo);
             } else {
-                // Use the stored reference if zeroOctave was moved
                 SimplexNoise tempNoise(random);
                 seedValue = tempNoise.getValue(zeroXo, zeroYo, zeroZo);
             }
 
             int64_t positiveOctaveSeed = static_cast<int64_t>(seedValue * static_cast<double>(INT64_MAX));
-            LegacyRandomSource highFreqRandom(positiveOctaveSeed);
+            levelgen::WorldgenRandom highFreqRandom{LegacyRandomSource(positiveOctaveSeed)};
 
             for (int i = zeroOctaveIndex - 1; i >= 0; --i) {
                 if (i < totalOctaves && octaves.count(zeroOctaveIndex - i)) {
@@ -104,6 +87,26 @@ public:
 
         m_highestFreqInputFactor = std::pow(2.0, static_cast<double>(highFreqOctaves));
         m_highestFreqValueFactor = 1.0 / (std::pow(2.0, static_cast<double>(totalOctaves)) - 1.0);
+    }
+
+public:
+    /**
+     * Construct with random source and list of octaves
+     * Reference: PerlinSimplexNoise.java lines 16-62
+     *
+     * @param random Random source for noise initialization
+     * @param octaveSet List of octave indices (e.g., {0} for single octave, {-1, 0, 1} for three octaves)
+     */
+    PerlinSimplexNoise(LegacyRandomSource& random, const std::vector<int>& octaveSet) {
+        initialize(random, octaveSet);
+    }
+
+    PerlinSimplexNoise(levelgen::WorldgenRandom& random, const std::vector<int>& octaveSet) {
+        if (random.usesLegacyRandomSource()) {
+            initialize(random.getLegacyRandomSource(), octaveSet);
+        } else {
+            initialize(random.getRandomSource(), octaveSet);
+        }
     }
 
     /**
@@ -147,7 +150,7 @@ private:
 
     static void ensureInitialized() {
         if (!s_initialized) {
-            LegacyRandomSource random(2345L);
+            levelgen::WorldgenRandom random{LegacyRandomSource(2345L)};
             s_instance = std::make_unique<PerlinSimplexNoise>(random, std::vector<int>{0});
             s_initialized = true;
         }

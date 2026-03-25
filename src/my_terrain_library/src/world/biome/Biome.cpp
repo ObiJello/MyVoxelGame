@@ -1,4 +1,5 @@
 #include "world/biome/Biome.h"
+#include "levelgen/WorldgenRandom.h"
 #include "synth/PerlinSimplexNoise.h"
 #include "random/LegacyRandomSource.h"
 #include <iostream>
@@ -15,7 +16,7 @@ static synth::PerlinSimplexNoise* getTemperatureNoise() {
     if (!noise) {
         // Reference: Biome.java line 234
         // TEMPERATURE_NOISE = new PerlinSimplexNoise(new WorldgenRandom(new LegacyRandomSource(1234L)), ImmutableList.of(0));
-        LegacyRandomSource random(1234L);
+        levelgen::WorldgenRandom random{LegacyRandomSource(1234L)};
         noise = new synth::PerlinSimplexNoise(random, {0});
     }
     return noise;
@@ -25,7 +26,7 @@ static synth::PerlinSimplexNoise* getFrozenTemperatureNoise() {
     static synth::PerlinSimplexNoise* noise = nullptr;
     if (!noise) {
         // Reference: Biome.java line 235
-        LegacyRandomSource random(3456L);
+        levelgen::WorldgenRandom random{LegacyRandomSource(3456L)};
         noise = new synth::PerlinSimplexNoise(random, {-2, -1, 0});
     }
     return noise;
@@ -34,7 +35,7 @@ static synth::PerlinSimplexNoise* getFrozenTemperatureNoise() {
 static synth::PerlinSimplexNoise* getBiomeInfoNoise() {
     static synth::PerlinSimplexNoise* noise = nullptr;
     if (!noise) {
-        LegacyRandomSource random(2345L);
+        levelgen::WorldgenRandom random{LegacyRandomSource(2345L)};
         noise = new synth::PerlinSimplexNoise(random, {0});
     }
     return noise;

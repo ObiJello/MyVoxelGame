@@ -24,7 +24,9 @@ static thread_local int s_currentIndex = -1;
 // Detailed logging mode: 0=basic, 1=positions, 2=verbose
 static int s_detailLevel = 0;
 
-// Modifier tracing mode: when true, logs the real lazy placement path
+// Modifier tracing mode: when true, logs batch-style modifier expansion for
+// easier comparison with the Java async trace, while preserving the real lazy
+// placement semantics for generation itself.
 static bool s_modifierTracingEnabled = false;
 
 namespace minecraft {
@@ -32,13 +34,19 @@ namespace levelgen {
 namespace placement {
 namespace {
 
-struct ModifierTraceCall {
-    size_t callIndex = 0;
-    size_t modifierIndex = 0;
-    std::string typeName;
+struct BatchModifierTraceTransform {
     core::BlockPos inputPos;
     std::vector<core::BlockPos> outputPositions;
     std::string detail;
+};
+
+struct BatchModifierTraceCall {
+    size_t callIndex = 0;
+    size_t modifierIndex = 0;
+    std::string typeName;
+    std::vector<core::BlockPos> inputPositions;
+    std::vector<BatchModifierTraceTransform> transforms;
+    std::vector<core::BlockPos> outputPositions;
     WorldgenRandom::DebugStateSnapshot randomBefore{};
     WorldgenRandom::DebugStateSnapshot randomAfter{};
 };
@@ -48,6 +56,17 @@ struct PlacementTraceCall {
     core::BlockPos position;
     bool placed = false;
     std::vector<feature::BlockChangeEvent> blockChanges;
+    WorldgenRandom::DebugStateSnapshot randomBefore{};
+    WorldgenRandom::DebugStateSnapshot randomAfter{};
+};
+
+struct ActualModifierTraceCall {
+    size_t callIndex = 0;
+    size_t modifierIndex = 0;
+    core::BlockPos inputPos;
+    std::string typeName;
+    std::vector<core::BlockPos> outputPositions;
+    std::string detail;
     WorldgenRandom::DebugStateSnapshot randomBefore{};
     WorldgenRandom::DebugStateSnapshot randomAfter{};
 };
@@ -196,9 +215,11 @@ bool PlacedFeature::placeWithContext(
     WorldGenLevel* level = context.getLevel();
     ChunkGenerator* generator = context.generator();
 
-    std::vector<ModifierTraceCall> modifierTraceCalls;
+    std::vector<BatchModifierTraceCall> modifierTraceCalls;
+    std::vector<core::BlockPos> batchPlacementPositions;
+    std::vector<ActualModifierTraceCall> actualModifierTraceCalls;
     std::vector<PlacementTraceCall> placementTraceCalls;
-    size_t modifierCallIndex = 0;
+    size_t actualModifierCallIndex = 0;
     size_t placementCallIndex = 0;
 
     if (s_loggingEnabled && s_logStream && s_detailLevel >= 2 && !traceEnabled) {
@@ -209,6 +230,53 @@ bool PlacedFeature::placeWithContext(
                          << (modifier ? modifier->getTypeName() : "null")
                          << "\n";
         }
+    }
+
+    if (traceEnabled) {
+        const WorldgenRandom::DebugStateSnapshot traceStartState = random.captureDebugState();
+        std::vector<core::BlockPos> currentPositions{origin};
+
+        for (size_t modifierIdx = 0; modifierIdx < m_placement.size(); ++modifierIdx) {
+            BatchModifierTraceCall traceCall;
+            traceCall.callIndex = modifierTraceCalls.size();
+            traceCall.modifierIndex = modifierIdx;
+            traceCall.inputPositions = currentPositions;
+            traceCall.randomBefore = random.captureDebugState();
+
+            PlacementModifier* modifier = m_placement[modifierIdx];
+            traceCall.typeName = modifier ? modifier->getTypeName() : "null";
+
+            if (modifier) {
+                std::vector<core::BlockPos> nextPositions;
+                for (const core::BlockPos& inputPos : currentPositions) {
+                    BatchModifierTraceTransform transform;
+                    transform.inputPos = inputPos;
+                    transform.outputPositions = modifier->getPositions(context, random, inputPos);
+                    transform.detail = modifier->describeTrace(context, inputPos, transform.outputPositions);
+
+                    nextPositions.insert(
+                        nextPositions.end(),
+                        transform.outputPositions.begin(),
+                        transform.outputPositions.end()
+                    );
+                    traceCall.transforms.push_back(std::move(transform));
+                }
+                traceCall.outputPositions = std::move(nextPositions);
+                currentPositions = traceCall.outputPositions;
+            } else {
+                currentPositions.clear();
+            }
+
+            traceCall.randomAfter = random.captureDebugState();
+            modifierTraceCalls.push_back(std::move(traceCall));
+
+            if (currentPositions.empty()) {
+                break;
+            }
+        }
+
+        batchPlacementPositions = currentPositions;
+        random.restoreDebugState(traceStartState);
     }
 
     std::function<void(const core::BlockPos&, size_t)> processAndPlace;
@@ -250,26 +318,21 @@ bool PlacedFeature::placeWithContext(
             return;
         }
 
-        WorldgenRandom::DebugStateSnapshot before{};
-        WorldgenRandom::DebugStateSnapshot after{};
+        std::vector<core::BlockPos> newPositions;
         if (traceEnabled) {
-            before = random.captureDebugState();
-        }
-
-        std::vector<core::BlockPos> newPositions = modifier->getPositions(context, random, pos);
-
-        if (traceEnabled) {
-            after = random.captureDebugState();
-            ModifierTraceCall traceCall;
-            traceCall.callIndex = modifierCallIndex++;
+            ActualModifierTraceCall traceCall;
+            traceCall.callIndex = actualModifierCallIndex++;
             traceCall.modifierIndex = modifierIdx;
-            traceCall.typeName = modifier->getTypeName();
             traceCall.inputPos = pos;
-            traceCall.outputPositions = newPositions;
-            traceCall.detail = modifier->describeTrace(context, pos, newPositions);
-            traceCall.randomBefore = before;
-            traceCall.randomAfter = after;
-            modifierTraceCalls.push_back(std::move(traceCall));
+            traceCall.typeName = modifier->getTypeName();
+            traceCall.randomBefore = random.captureDebugState();
+            traceCall.outputPositions = modifier->getPositions(context, random, pos);
+            traceCall.detail = modifier->describeTrace(context, pos, traceCall.outputPositions);
+            traceCall.randomAfter = random.captureDebugState();
+            newPositions = traceCall.outputPositions;
+            actualModifierTraceCalls.push_back(std::move(traceCall));
+        } else {
+            newPositions = modifier->getPositions(context, random, pos);
         }
 
         for (const core::BlockPos& newPos : newPositions) {
@@ -295,8 +358,41 @@ bool PlacedFeature::placeWithContext(
         }
         *s_logStream << "  MODIFIER_CHAIN=" << modifierChain << "\n";
 
-        for (const ModifierTraceCall& traceCall : modifierTraceCalls) {
-            *s_logStream << "  MOD_CALL[" << traceCall.callIndex << "]"
+        *s_logStream << "  TRACE_STYLE=batch_modifiers+actual_recursive_calls+actual_placements\n";
+
+        for (const BatchModifierTraceCall& traceCall : modifierTraceCalls) {
+            *s_logStream << "  BATCH_MOD_CALL[" << traceCall.callIndex << "]"
+                         << " idx=" << traceCall.modifierIndex
+                         << " type=" << traceCall.typeName
+                         << " input_count=" << traceCall.inputPositions.size()
+                         << " out_count=" << traceCall.outputPositions.size()
+                         << " " << formatRandomState(traceCall.randomBefore)
+                         << " -> " << formatRandomState(traceCall.randomAfter)
+                         << "\n";
+            for (size_t transformIdx = 0; transformIdx < traceCall.transforms.size(); ++transformIdx) {
+                const BatchModifierTraceTransform& transform = traceCall.transforms[transformIdx];
+                *s_logStream << "    INPUT[" << transformIdx << "]="
+                             << formatPos(transform.inputPos)
+                             << " out_count=" << transform.outputPositions.size()
+                             << "\n";
+                if (!transform.detail.empty()) {
+                    *s_logStream << "      DETAIL=" << transform.detail << "\n";
+                }
+                for (size_t i = 0; i < transform.outputPositions.size(); ++i) {
+                    *s_logStream << "      OUT[" << i << "]="
+                                 << formatPos(transform.outputPositions[i]) << "\n";
+                }
+            }
+        }
+
+        *s_logStream << "  BATCH_TRACE_FINAL=" << batchPlacementPositions.size() << "\n";
+        for (size_t i = 0; i < batchPlacementPositions.size(); ++i) {
+            *s_logStream << "    BATCH_PLACE[" << i << "]="
+                         << formatPos(batchPlacementPositions[i]) << "\n";
+        }
+
+        for (const ActualModifierTraceCall& traceCall : actualModifierTraceCalls) {
+            *s_logStream << "  ACTUAL_MOD_CALL[" << traceCall.callIndex << "]"
                          << " idx=" << traceCall.modifierIndex
                          << " type=" << traceCall.typeName
                          << " input=" << formatPos(traceCall.inputPos)
@@ -308,12 +404,13 @@ bool PlacedFeature::placeWithContext(
                 *s_logStream << "    DETAIL=" << traceCall.detail << "\n";
             }
             for (size_t i = 0; i < traceCall.outputPositions.size(); ++i) {
-                *s_logStream << "    OUT[" << i << "]=" << formatPos(traceCall.outputPositions[i]) << "\n";
+                *s_logStream << "    OUT[" << i << "]="
+                             << formatPos(traceCall.outputPositions[i]) << "\n";
             }
         }
 
         for (const PlacementTraceCall& traceCall : placementTraceCalls) {
-            *s_logStream << "  PLACE[" << traceCall.callIndex << "]"
+            *s_logStream << "  ACTUAL_PLACE[" << traceCall.callIndex << "]"
                          << " pos=" << formatPos(traceCall.position)
                          << " placed=" << (traceCall.placed ? "true" : "false")
                          << " block_changes=" << traceCall.blockChanges.size()

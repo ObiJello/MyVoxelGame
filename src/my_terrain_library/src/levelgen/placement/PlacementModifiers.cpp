@@ -51,13 +51,13 @@ bool BiomeFilter::shouldPlace(
     // PlacedFeature feature = (PlacedFeature)context.topFeature().orElseThrow(...)
     auto topFeature = context.topFeature();
     if (!topFeature.has_value()) {
-        // In Java, this throws IllegalStateException
-        // "Tried to biome check an unregistered feature, or a feature that should not restrict the biome"
-        // For safety in C++, allow placement
+        // Java throws IllegalStateException here. We do not throw from the
+        // feature path, but we must not silently allow placement.
         if (s_debugBiomeFilter) {
-            std::cerr << "BiomeFilter: NO TOP FEATURE at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << ") -> ALLOW (no feature)" << std::endl;
+            std::cerr << "BiomeFilter: NO TOP FEATURE at (" << origin.getX() << ", " << origin.getY() << ", " << origin.getZ() << ") -> DENY (no feature)" << std::endl;
         }
-        return true;
+        s_biomeFilterFiltered++;
+        return false;
     }
 
     // Reference: BiomeFilter.java line 22

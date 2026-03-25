@@ -39,6 +39,7 @@ namespace Render {
 
         ShaderHandle m_texturedShader = INVALID_SHADER;
         ShaderHandle m_colorShader = INVALID_SHADER;
+        TextureHandle m_dummyTexture = INVALID_TEXTURE; // 1x1 white pixel for color-only draws on Vulkan
 
         // Dynamic vertex buffer — rebuilt each frame
         BufferHandle m_vertexBuffer = INVALID_BUFFER;

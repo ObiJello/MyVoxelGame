@@ -73,8 +73,7 @@ private:
             return true;
         }
 
-        BlockState* aboveState = level.getBlockState(belowPos.above());
-        return aboveState && aboveState->getIdentifier() == "minecraft:water" && BushBlock::mayPlaceOn(stateBelow);
+        return level.isWaterAt(belowPos.above()) && BushBlock::mayPlaceOn(stateBelow);
     }
 
     static void initializeProperties() {

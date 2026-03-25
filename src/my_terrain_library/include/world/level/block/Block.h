@@ -177,6 +177,12 @@ public:
      */
     static BlockState* stateById(int idWithData);
 
+    static bool canSupportCenter(
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& belowPos,
+        core::Direction direction
+    );
+
     /**
      * Create the block state definition
      * Reference: Block.java createBlockStateDefinition(Builder) line 465

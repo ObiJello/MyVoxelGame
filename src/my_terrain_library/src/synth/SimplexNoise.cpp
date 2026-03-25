@@ -58,6 +58,23 @@ SimplexNoise::SimplexNoise(LegacyRandomSource& random) {
     }
 }
 
+SimplexNoise::SimplexNoise(levelgen::WorldgenRandom& random) {
+    this->xo = random.nextDouble() * static_cast<double>(256.0F);
+    this->yo = random.nextDouble() * static_cast<double>(256.0F);
+    this->zo = random.nextDouble() * static_cast<double>(256.0F);
+
+    for (int i = 0; i < 256; ++i) {
+        this->p[i] = static_cast<uint8_t>(i);
+    }
+
+    for (int i = 0; i < 256; ++i) {
+        int offset = random.nextInt(256 - i);
+        uint8_t tmp = this->p[i];
+        this->p[i] = this->p[i + offset];
+        this->p[i + offset] = tmp;
+    }
+}
+
 int SimplexNoise::pLookup(int x) const {
     // Reference: SimplexNoise.java lines 34-36
     return static_cast<int>(this->p[x & 255]);

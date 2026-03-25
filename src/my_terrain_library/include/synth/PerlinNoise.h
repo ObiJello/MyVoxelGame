@@ -1,6 +1,7 @@
 #ifndef PERLINNOISE_H
 #define PERLINNOISE_H
 
+#include "levelgen/WorldgenRandom.h"
 #include "random/LegacyRandomSource.h"
 #include "synth/ImprovedNoise.h"
 #include "random/XoroshiroRandomSource.h"
@@ -29,6 +30,7 @@ public:
      */
     static PerlinNoise create(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
     static PerlinNoise create(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
+    static PerlinNoise create(levelgen::WorldgenRandom& random, int32_t firstOctave, const std::vector<double>& amplitudes);
 
     /**
      * Create PerlinNoise from firstOctave and amplitudes.
@@ -41,6 +43,7 @@ public:
      */
     static PerlinNoise create(XoroshiroRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes = {});
     static PerlinNoise create(LegacyRandomSource& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes = {});
+    static PerlinNoise create(levelgen::WorldgenRandom& random, int32_t firstOctave, double firstAmplitude, const std::vector<double>& additionalAmplitudes = {});
 
     /**
      * Create PerlinNoise with legacy initialization for Nether biomes (pre-1.18).
@@ -53,6 +56,7 @@ public:
      */
     static PerlinNoise createLegacyForLegacyNetherBiome(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
     static PerlinNoise createLegacyForLegacyNetherBiome(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes);
+    static PerlinNoise createLegacyForLegacyNetherBiome(levelgen::WorldgenRandom& random, int32_t firstOctave, const std::vector<double>& amplitudes);
 
     /**
      * Create PerlinNoise with legacy initialization for BlendedNoise.
@@ -122,6 +126,7 @@ private:
      */
     PerlinNoise(XoroshiroRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization);
     PerlinNoise(LegacyRandomSource& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization);
+    PerlinNoise(levelgen::WorldgenRandom& random, int32_t firstOctave, const std::vector<double>& amplitudes, bool useNewInitialization);
 
     /**
      * Calculate edge value for max value computation.
@@ -137,6 +142,7 @@ private:
      */
     static void skipOctave(XoroshiroRandomSource& random);
     static void skipOctave(LegacyRandomSource& random);
+    static void skipOctave(levelgen::WorldgenRandom& random);
 
     // Member variables (Reference: PerlinNoise.java lines 23-29)
     std::vector<ImprovedNoise*> m_noiseLevels;  // Can contain nullptrs

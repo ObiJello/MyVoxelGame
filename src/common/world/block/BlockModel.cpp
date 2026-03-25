@@ -201,6 +201,51 @@ namespace Game {
         // Clear parent reference to avoid confusion
         result.parent = "";
 
+        // **FIX**: Expand template_single_face child models into full cubes.
+        // MC uses blockstate multipart to rotate a single face to all 6 directions.
+        // Since this game has no blockstate system, we expand child models that
+        // inherit from template_single_face into full cubes at resolution time.
+        // Only apply to children (not template_single_face itself) by checking
+        // the parent reference in the JSON.
+        if (j.contains("parent")) {
+            std::string parentCanon = CanonicalizeModelName(j["parent"].get<std::string>());
+            if (parentCanon == "template_single_face" && result.elements.size() == 1) {
+                const auto& elem = result.elements[0];
+                if (elem.faces.size() == 1 && elem.faces.count(FaceDir::North)) {
+
+                    std::string texRef = elem.faces.at(FaceDir::North).textureRef;
+
+                    // For mushroom stems, MC shows mushroom_block_inside on top/bottom
+                    std::string resolvedTex = result.ResolveTexture(texRef);
+                    bool isStem = (resolvedTex.find("mushroom_stem") != std::string::npos);
+
+                    std::string topBottomRef = texRef;
+                    if (isStem) {
+                        result.textures["_inside"] = "block/mushroom_block_inside";
+                        topBottomRef = "#_inside";
+                    }
+
+                    Element fullCube;
+                    fullCube.from = glm::vec3(0, 0, 0);
+                    fullCube.to = glm::vec3(16, 16, 16);
+                    glm::vec4 defaultUV(0, 0, 16, 16);
+
+                    fullCube.faces[FaceDir::North] = FaceDef(defaultUV, texRef, -1, "north");
+                    fullCube.faces[FaceDir::South] = FaceDef(defaultUV, texRef, -1, "south");
+                    fullCube.faces[FaceDir::East]  = FaceDef(defaultUV, texRef, -1, "east");
+                    fullCube.faces[FaceDir::West]  = FaceDef(defaultUV, texRef, -1, "west");
+                    fullCube.faces[FaceDir::Up]    = FaceDef(defaultUV, topBottomRef, -1, "up");
+                    fullCube.faces[FaceDir::Down]  = FaceDef(defaultUV, topBottomRef, -1, "down");
+
+                    result.elements.clear();
+                    result.elements.push_back(fullCube);
+
+                    Log::Debug("Expanded template_single_face child '%s' to full cube%s",
+                              name.c_str(), isStem ? " (stem: inside top/bottom)" : "");
+                }
+            }
+        }
+
         //Log::Debug("Resolved model '%s': %zu elements, %zu textures", name.c_str(), result.elements.size(), result.textures.size());
 
         // **OPTIMIZATION**: Cache the resolved model immediately to avoid redundant work

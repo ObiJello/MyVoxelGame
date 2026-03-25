@@ -309,4 +309,88 @@ void main() {
         g_renderBackend->SetPipelineState(defaultState);
     }
 
+    void PlayerRenderer::RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,
+                                           const Client::RemotePlayerManager& remotePlayers,
+                                           int fbWidth, int fbHeight) {
+        if (!g_renderBackend || fbWidth <= 0 || fbHeight <= 0) return;
+
+        glm::mat4 vp = projection * view;
+        glm::mat4 ortho = glm::ortho(0.0f, static_cast<float>(fbWidth),
+                                      static_cast<float>(fbHeight), 0.0f, -1.0f, 1.0f);
+
+        for (const auto& [id, rp] : remotePlayers.GetPlayers()) {
+            if (rp.chatBubbleTimer <= 0.0f || rp.chatBubbleText.empty()) continue;
+
+            // Project player head position to screen
+            glm::vec4 worldPos(rp.position.x, rp.position.y + 2.4f, rp.position.z, 1.0f);
+            glm::vec4 clip = vp * worldPos;
+            if (clip.w <= 0.0f) continue;
+
+            float ndcX = clip.x / clip.w;
+            float ndcY = clip.y / clip.w;
+            float screenX = (ndcX * 0.5f + 0.5f) * fbWidth;
+            float screenY = (1.0f - (ndcY * 0.5f + 0.5f)) * fbHeight;
+
+            // Approximate text width (6px per char)
+            const std::string& text = rp.chatBubbleText;
+            int textWidth = static_cast<int>(text.size()) * 6;
+            int padding = 5;
+            int bubbleW = textWidth + padding * 2;
+            int bubbleH = 14;
+            int bx = static_cast<int>(screenX) - bubbleW / 2;
+            int by = static_cast<int>(screenY) - bubbleH - 8;
+
+            PipelineState state;
+            state.depthTestEnabled = false;
+            state.depthWriteEnabled = false;
+            state.blendEnabled = true;
+            state.srcBlendFactor = BlendFactor::SrcAlpha;
+            state.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+            state.cullMode = CullMode::None;
+            g_renderBackend->SetPipelineState(state);
+            g_renderBackend->BindShader(m_shader);
+            g_renderBackend->BindTexture(m_dummyTexture, 0);
+
+            struct V { float x,y,z,u,v; uint8_t r,g,b,a; };
+            auto drawRect = [&](int x0, int y0, int x1, int y1, uint8_t cr, uint8_t cg, uint8_t cb, uint8_t ca) {
+                V verts[] = {
+                    {(float)x0,(float)y0,0,0,0,cr,cg,cb,ca},
+                    {(float)x1,(float)y0,0,0,0,cr,cg,cb,ca},
+                    {(float)x1,(float)y1,0,0,0,cr,cg,cb,ca},
+                    {(float)x0,(float)y1,0,0,0,cr,cg,cb,ca},
+                };
+                uint32_t idx[] = {0,1,2,0,2,3};
+                auto vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, sizeof(verts), verts);
+                auto ib = g_renderBackend->CreateBuffer(BufferUsage::Index, sizeof(idx), idx);
+                auto mesh = g_renderBackend->CreateMesh(vb, ib, GetBlockVertexLayout());
+                g_renderBackend->SetUniformMat4(m_shader, "uMVP", ortho);
+                g_renderBackend->DrawIndexed(mesh, 6);
+                g_renderBackend->UnbindMesh();
+                g_renderBackend->DestroyMesh(mesh);
+                g_renderBackend->DestroyBuffer(vb);
+                g_renderBackend->DestroyBuffer(ib);
+            };
+
+            // Black outline
+            drawRect(bx-1, by-1, bx+bubbleW+1, by+bubbleH+1, 0,0,0,255);
+            // White fill
+            drawRect(bx, by, bx+bubbleW, by+bubbleH, 255,255,255,255);
+            // Triangle pointer
+            int tx = static_cast<int>(screenX);
+            int ty = by + bubbleH;
+            drawRect(tx-3, ty, tx+3, ty+1, 0,0,0,255);
+            drawRect(tx-2, ty+1, tx+2, ty+2, 0,0,0,255);
+            drawRect(tx-1, ty+2, tx+1, ty+3, 0,0,0,255);
+            drawRect(tx-2, ty, tx+2, ty+1, 255,255,255,255);
+            drawRect(tx-1, ty+1, tx+1, ty+2, 255,255,255,255);
+
+            PipelineState def;
+            def.depthTestEnabled = true;
+            def.depthWriteEnabled = true;
+            def.blendEnabled = false;
+            def.cullMode = CullMode::Back;
+            g_renderBackend->SetPipelineState(def);
+        }
+    }
+
 } // namespace Render

@@ -151,10 +151,14 @@ namespace Game {
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
             glm::vec3 verticalMovement = glm::vec3(0.0f, movementInput.y, 0.0f);
 
+            // Ctrl (sprint) boosts noclip speed to 50 blocks/sec
+            float hSpeed = physics.isSprinting ? PlayerPhysics::NOCLIP_SPRINT_HORIZONTAL_SPEED : physics.noclipHorizontalSpeed;
+            float vSpeed = physics.isSprinting ? PlayerPhysics::NOCLIP_SPRINT_VERTICAL_SPEED : physics.noclipVerticalSpeed;
+
             if (glm::length(horizontalMovement) > 0.0f) {
-                horizontalMovement = glm::normalize(horizontalMovement) * physics.noclipHorizontalSpeed;
+                horizontalMovement = glm::normalize(horizontalMovement) * hSpeed;
             }
-            verticalMovement *= physics.noclipVerticalSpeed;
+            verticalMovement *= vSpeed;
 
             physics.position += (horizontalMovement + verticalMovement) * deltaTime;
             physics.velocity = glm::vec3(0.0f);

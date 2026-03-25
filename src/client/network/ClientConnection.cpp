@@ -6,6 +6,19 @@
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
 #include "../world/ClientChunkManager.hpp"
 #include "platform/GameDirectory.hpp"
+#include <functional>
+
+// Chat message callback — set by PlatformMain to route messages to ChatComponent
+static std::function<void(const std::string&)> s_chatCallback;
+static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
+
+void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
+    s_chatCallback = std::move(callback);
+}
+
+void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback) {
+    s_chatBubbleCallback = std::move(callback);
+}
 
 namespace Client {
 
@@ -209,17 +222,28 @@ namespace Client {
 
     void ClientConnection::HandleChatMessage(const std::vector<uint8_t>& payload) {
         Network::PacketReader reader(payload);
+        uint32_t senderId = static_cast<uint32_t>(reader.ReadInt());
         std::string message = reader.ReadString();
         uint8_t position = reader.ReadByte();
-        
+
         const char* positionStr = "";
         switch (position) {
             case 0: positionStr = "[CHAT]"; break;
             case 1: positionStr = "[SYSTEM]"; break;
             case 2: positionStr = "[ACTION]"; break;
         }
-        
+
         Log::Info("%s %s", positionStr, message.c_str());
+
+        // Add to chat HUD
+        if (s_chatCallback) {
+            s_chatCallback(message);
+        }
+
+        // Set chat bubble on the remote player (not on self)
+        if (s_chatBubbleCallback && senderId != 0) {
+            s_chatBubbleCallback(senderId, message);
+        }
     }
 
     void ClientConnection::HandleTimeUpdate(const std::vector<uint8_t>& payload) {

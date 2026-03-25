@@ -72,6 +72,11 @@ private:
     // Reference: ChunkAccess.java inhabitedTime field
     int64_t m_inhabitedTime;
 
+    // Structure starts and references
+    // Reference: ChunkAccess.java startsForStructure / referencesForStructure storage
+    levelgen::structure::StructureStartMap m_structureStarts;
+    levelgen::structure::StructureReferenceMap m_structureReferences;
+
 public:
     // Convert Y to section index
     int32_t getSectionIndex(int32_t y) const {
@@ -287,10 +292,27 @@ public:
         int32_t localY = y & 15;
         BlockState* oldState = section.setBlockState(localX, localY, localZ, state, !moved);
 
-        // Update heightmaps
-        // Reference: ProtoChunk.java lines 144-146
-        for (auto& [type, heightmap] : m_heightmaps) {
-            heightmap->update(localX, y, localZ, state);
+        // Prime and update exactly the heightmaps tracked by the persisted status.
+        // Reference: ChunkAccess.java / ProtoChunk.java setBlockState()
+        const chunk::status::ChunkStatus* persistedStatus = getPersistedStatus();
+        if (persistedStatus != nullptr) {
+            std::set<levelgen::Heightmap::Types> toPrime;
+            for (auto type : persistedStatus->heightmapsAfter()) {
+                if (m_heightmaps.find(type) == m_heightmaps.end()) {
+                    toPrime.insert(type);
+                }
+            }
+
+            if (!toPrime.empty()) {
+                levelgen::Heightmap::primeHeightmaps(this, toPrime);
+            }
+
+            for (auto type : persistedStatus->heightmapsAfter()) {
+                auto it = m_heightmaps.find(type);
+                if (it != m_heightmaps.end()) {
+                    it->second->update(localX, y, localZ, state);
+                }
+            }
         }
 
         return oldState;
@@ -317,15 +339,21 @@ public:
 
     /**
      * Get height at position
-     * Reference: ChunkAccess.java getHeight() returns getFirstAvailable() - 1
-     * This returns the Y of the highest solid block (not the air above)
+     * Reference: ChunkAccess.java getHeight()
      */
     int getHeight(int heightmapType, int localX, int localZ) const override {
         auto type = static_cast<levelgen::Heightmap::Types>(heightmapType);
-        auto it = m_heightmaps.find(type);
-        if (it != m_heightmaps.end()) {
+        auto* self = const_cast<ProtoChunk*>(this);
+        auto it = self->m_heightmaps.find(type);
+        if (it == self->m_heightmaps.end()) {
+            levelgen::Heightmap::primeHeightmaps(self, {type});
+            it = self->m_heightmaps.find(type);
+        }
+
+        if (it != self->m_heightmaps.end()) {
             return it->second->getHighestTaken(localX, localZ);
         }
+
         return m_minY;
     }
 
@@ -456,6 +484,25 @@ public:
      */
     void setInhabitedTime(int64_t time) override {
         m_inhabitedTime = time;
+    }
+
+    const levelgen::structure::StructureStartMap& getAllStructureStarts() const override {
+        return m_structureStarts;
+    }
+
+    void setStartForStructure(
+        const std::string& structureName,
+        const levelgen::structure::StructureStartData& start
+    ) override {
+        m_structureStarts[structureName] = start;
+    }
+
+    const levelgen::structure::StructureReferenceMap& getAllStructureReferences() const override {
+        return m_structureReferences;
+    }
+
+    void addReferenceForStructure(const std::string& structureName, int64_t reference) override {
+        m_structureReferences[structureName].insert(reference);
     }
 
     //=========================================================================

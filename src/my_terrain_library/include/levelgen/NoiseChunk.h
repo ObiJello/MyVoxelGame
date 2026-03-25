@@ -147,6 +147,10 @@ public:
     size_t getInterpolatorCount() const { return m_interpolators.size(); }
     const std::vector<std::vector<double>>& getInterpolatorSlice0(size_t index) const;
     const std::vector<std::vector<double>>& getInterpolatorSlice1(size_t index) const;
+    density::DensityFunction* getWrappedFinalDensityForDebug() const { return m_wrappedFinalDensityForDebug; }
+    density::DensityFunction* getWrappedVeinToggleForDebug() const { return m_wrappedVeinToggleForDebug; }
+    density::DensityFunction* getWrappedVeinRidgedForDebug() const { return m_wrappedVeinRidgedForDebug; }
+    density::DensityFunction* getWrappedVeinGapForDebug() const { return m_wrappedVeinGapForDebug; }
 
     /**
      * Get the aquifer for this noise chunk
@@ -390,6 +394,10 @@ private:
 
     // Block state rule for determining block types (Java line 39)
     BlockStateFiller* m_blockStateRule;  // Aquifer + OreVeinifier chain
+    density::DensityFunction* m_wrappedFinalDensityForDebug = nullptr;
+    density::DensityFunction* m_wrappedVeinToggleForDebug = nullptr;
+    density::DensityFunction* m_wrappedVeinRidgedForDebug = nullptr;
+    density::DensityFunction* m_wrappedVeinGapForDebug = nullptr;
 
     // Beardifier for structure density modification (Java line 43)
     Beardifier* m_beardifier;

@@ -365,27 +365,23 @@ protected:
     bool test(BlockState* state) const override {
         if (!state) return false;
 
-        std::string name = state->getIdentifier();
-        bool isFluid = state->isFluid();
+        const bool hasWater = state->hasWaterFluid();
+        const bool hasLava = state->getIdentifier() == "minecraft:lava";
+        const bool hasAnyFluid = state->hasAnyFluid();
 
         // Check if empty fluid
-        if (m_fluids.find("minecraft:empty") != m_fluids.end() && !isFluid) {
+        if (m_fluids.find("minecraft:empty") != m_fluids.end() && !hasAnyFluid) {
             return true;
         }
 
         // Check for water
-        if (m_fluids.find("minecraft:water") != m_fluids.end()) {
-            if (name == "minecraft:water") {
-                return true;
-            }
-            // TODO: Check waterlogged property when properties are implemented
+        if (m_fluids.find("minecraft:water") != m_fluids.end() && hasWater) {
+            return true;
         }
 
         // Check for lava
-        if (m_fluids.find("minecraft:lava") != m_fluids.end()) {
-            if (name == "minecraft:lava") {
-                return true;
-            }
+        if (m_fluids.find("minecraft:lava") != m_fluids.end() && hasLava) {
+            return true;
         }
 
         return false;
@@ -426,40 +422,7 @@ protected:
      * Reference: ReplaceablePredicate.java lines 14-16
      */
     bool test(BlockState* state) const override {
-        if (!state) return false;
-        const std::string& name = state->getIdentifier();
-
-        // Air blocks
-        if (name == "minecraft:air" ||
-            name == "minecraft:cave_air" ||
-            name == "minecraft:void_air") {
-            return true;
-        }
-
-        // Fluids
-        if (name == "minecraft:water" || name == "minecraft:lava") {
-            return true;
-        }
-
-        // Vegetation that can be replaced
-        if (name == "minecraft:tall_grass" ||
-            name == "minecraft:grass" ||
-            name == "minecraft:fern" ||
-            name == "minecraft:large_fern" ||
-            name == "minecraft:dead_bush" ||
-            name == "minecraft:bush" ||
-            name == "minecraft:seagrass" ||
-            name == "minecraft:tall_seagrass" ||
-            name == "minecraft:kelp" ||
-            name == "minecraft:kelp_plant" ||
-            name == "minecraft:vine" ||
-            name == "minecraft:glow_lichen" ||
-            name == "minecraft:hanging_roots" ||
-            name == "minecraft:snow") {
-            return true;
-        }
-
-        return false;
+        return state && state->canBeReplaced();
     }
 };
 
@@ -472,29 +435,6 @@ class WouldSurvivePredicate : public BlockPredicate {
 private:
     core::Vec3i m_offset;
     BlockState* m_state;
-
-    bool mayPlaceOn(BlockState* stateBelow) const {
-        if (!stateBelow) return false;
-
-        const std::string& name = stateBelow->getIdentifier();
-        bool canPlaceOnDirt = name == "minecraft:grass_block" ||
-                              name == "minecraft:dirt" ||
-                              name == "minecraft:coarse_dirt" ||
-                              name == "minecraft:podzol" ||
-                              name == "minecraft:rooted_dirt" ||
-                              name == "minecraft:mycelium" ||
-                              name == "minecraft:moss_block" ||
-                              name == "minecraft:mud" ||
-                              name == "minecraft:muddy_mangrove_roots" ||
-                              name == "minecraft:farmland";
-        if (canPlaceOnDirt) {
-            return true;
-        }
-
-        return m_state &&
-               m_state->getIdentifier() == "minecraft:mangrove_propagule" &&
-               name == "minecraft:clay";
-    }
 
 public:
     WouldSurvivePredicate(const core::Vec3i& offset, BlockState* state)
@@ -511,15 +451,7 @@ public:
             return false;
         }
 
-        core::BlockPos testPos = pos.offset(m_offset);
-
-        // Check if within world bounds
-        if (level.isOutsideBuildHeight(testPos)) {
-            return false;
-        }
-
-        core::BlockPos belowPos(testPos.getX(), testPos.getY() - 1, testPos.getZ());
-        return mayPlaceOn(level.getBlockState(belowPos));
+        return m_state->canSurvive(level, pos.offset(m_offset));
     }
 };
 
@@ -677,7 +609,7 @@ public:
     bool isFluidAtPosition(const core::BlockPos& pos,
         std::function<bool(BlockState*)> predicate) const override {
         BlockState* state = getBlockState(pos);
-        return state && predicate(state);
+        return state && state->hasAnyFluid() && predicate(state);
     }
 
     //=========================================================================

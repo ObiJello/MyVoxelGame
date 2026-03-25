@@ -4,6 +4,10 @@
 #include "core/BlockPos.h"
 #include "world/ChunkPos.h"
 #include "world/biome/Biome.h"
+#include "levelgen/structure/StructureStartData.h"
+#include <map>
+#include <set>
+#include <string>
 
 // Forward declare to avoid circular dependencies
 namespace minecraft {
@@ -188,6 +192,60 @@ public:
      * @return Pointer to the heightmap
      */
     virtual levelgen::Heightmap* getOrCreateHeightmapUnprimed(int heightmapType) = 0;
+
+    /**
+     * Structure start storage
+     * Reference: ChunkAccess.java getAllStarts()/getStartForStructure()/setStartForStructure()
+     */
+    virtual const levelgen::structure::StructureStartMap& getAllStructureStarts() const {
+        static const levelgen::structure::StructureStartMap kEmptyStarts;
+        return kEmptyStarts;
+    }
+
+    virtual const levelgen::structure::StructureStartData* getStartForStructure(
+        const std::string& structureName
+    ) const {
+        const auto& starts = getAllStructureStarts();
+        auto it = starts.find(structureName);
+        return it != starts.end() ? &it->second : nullptr;
+    }
+
+    virtual void setStartForStructure(
+        const std::string& structureName,
+        const levelgen::structure::StructureStartData& start
+    ) {
+        (void)structureName;
+        (void)start;
+    }
+
+    /**
+     * Structure reference storage
+     * Reference: ChunkAccess.java getAllReferences()/getReferencesForStructure()/addReferenceForStructure()
+     */
+    virtual const levelgen::structure::StructureReferenceMap& getAllStructureReferences() const {
+        static const levelgen::structure::StructureReferenceMap kEmptyReferences;
+        return kEmptyReferences;
+    }
+
+    virtual const std::set<int64_t>& getReferencesForStructure(const std::string& structureName) const {
+        const auto& references = getAllStructureReferences();
+        auto it = references.find(structureName);
+        if (it != references.end()) {
+            return it->second;
+        }
+
+        static const std::set<int64_t> kEmptyReferenceSet;
+        return kEmptyReferenceSet;
+    }
+
+    virtual void addReferenceForStructure(const std::string& structureName, int64_t reference) {
+        (void)structureName;
+        (void)reference;
+    }
+
+    virtual bool hasAnyStructureReferences() const {
+        return !getAllStructureReferences().empty();
+    }
 };
 
 } // namespace world

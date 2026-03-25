@@ -1,6 +1,6 @@
 #pragma once
 
-#include "world/level/block/Block.h"
+#include "world/level/block/blocks/GrowingPlantBodyBlock.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 
 namespace minecraft {
@@ -13,12 +13,12 @@ using state::StateDefinition;
 using state::properties::BlockStateProperties;
 using state::properties::BooleanProperty;
 
-class CaveVinesPlantBlock : public Block {
+class CaveVinesPlantBlock : public GrowingPlantBodyBlock {
 public:
     static inline BooleanProperty* BERRIES = nullptr;
 
     explicit CaveVinesPlantBlock(const Properties& properties)
-        : Block(Properties(properties).noCollission()) {
+        : GrowingPlantBodyBlock(Properties(properties).noCollission(), core::Direction::DOWN, false) {
         initializeProperties();
         rebuildStateDefinition();
 
@@ -33,6 +33,24 @@ protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();
         builder.add(BERRIES);
+    }
+
+    bool isHeadOrBody(BlockState* state) const override {
+        if (!state) {
+            return false;
+        }
+        const std::string& id = state->getIdentifier();
+        return id == "minecraft:cave_vines" || id == "minecraft:cave_vines_plant";
+    }
+
+    BlockState* updateHeadAfterConvertedFromBody(
+        BlockState* bodyState,
+        BlockState* headState
+    ) const override {
+        if (!bodyState || !headState) {
+            return headState;
+        }
+        return headState->setValue(*BERRIES, bodyState->getValue(*BERRIES));
     }
 
 private:

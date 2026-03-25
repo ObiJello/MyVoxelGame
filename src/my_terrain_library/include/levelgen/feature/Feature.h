@@ -6,6 +6,7 @@
 #include "world/level/block/blocks/DoublePlantBlock.h"
 #include "world/level/block/blocks/MultifaceSpreadeableBlock.h"
 #include "world/level/block/blocks/SculkVeinBlock.h"
+#include "world/level/block/blocks/BuddingAmethystBlock.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 #include "levelgen/WorldgenRandom.h"
@@ -14,6 +15,7 @@
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
 #include "levelgen/feature/BlockChangeTrace.h"
+#include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
 #include "util/IntProvider.h"
@@ -23,6 +25,7 @@
 #include "world/level/chunk/BulkSectionAccess.h"
 #include "core/SectionPos.h"
 #include "math/Mth.h"
+#include "synth/NormalNoise.h"
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -31,6 +34,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 // Alias for Direction in the core namespace for backwards compatibility
 namespace minecraft { namespace core { using Direction = levelgen::blockpredicates::Direction; } }
@@ -185,6 +189,70 @@ inline bool isDirt(BlockState* state) {
            name == "minecraft:moss_block";
 }
 
+inline bool isMushroomGrowBlock(BlockState* state) {
+    if (!state) return false;
+    const std::string& name = state->getIdentifier();
+    return name == "minecraft:mycelium" ||
+           name == "minecraft:podzol" ||
+           name == "minecraft:crimson_nylium" ||
+           name == "minecraft:warped_nylium";
+}
+
+inline bool isReplaceableByMushrooms(BlockState* state) {
+    if (!state) return false;
+
+    if (state->isLeaves()) {
+        return true;
+    }
+
+    const std::string& name = state->getIdentifier();
+    return name == "minecraft:dandelion" ||
+           name == "minecraft:open_eyeblossom" ||
+           name == "minecraft:poppy" ||
+           name == "minecraft:blue_orchid" ||
+           name == "minecraft:allium" ||
+           name == "minecraft:azure_bluet" ||
+           name == "minecraft:red_tulip" ||
+           name == "minecraft:orange_tulip" ||
+           name == "minecraft:white_tulip" ||
+           name == "minecraft:pink_tulip" ||
+           name == "minecraft:oxeye_daisy" ||
+           name == "minecraft:cornflower" ||
+           name == "minecraft:lily_of_the_valley" ||
+           name == "minecraft:wither_rose" ||
+           name == "minecraft:torchflower" ||
+           name == "minecraft:closed_eyeblossom" ||
+           name == "minecraft:pale_moss_carpet" ||
+           name == "minecraft:short_grass" ||
+           name == "minecraft:fern" ||
+           name == "minecraft:dead_bush" ||
+           name == "minecraft:vine" ||
+           name == "minecraft:glow_lichen" ||
+           name == "minecraft:sunflower" ||
+           name == "minecraft:lilac" ||
+           name == "minecraft:rose_bush" ||
+           name == "minecraft:peony" ||
+           name == "minecraft:tall_grass" ||
+           name == "minecraft:large_fern" ||
+           name == "minecraft:hanging_roots" ||
+           name == "minecraft:pitcher_plant" ||
+           name == "minecraft:water" ||
+           name == "minecraft:seagrass" ||
+           name == "minecraft:tall_seagrass" ||
+           name == "minecraft:brown_mushroom" ||
+           name == "minecraft:red_mushroom" ||
+           name == "minecraft:brown_mushroom_block" ||
+           name == "minecraft:red_mushroom_block" ||
+           name == "minecraft:warped_roots" ||
+           name == "minecraft:nether_sprouts" ||
+           name == "minecraft:crimson_roots" ||
+           name == "minecraft:leaf_litter" ||
+           name == "minecraft:short_dry_grass" ||
+           name == "minecraft:tall_dry_grass" ||
+           name == "minecraft:bush" ||
+           name == "minecraft:firefly_bush";
+}
+
 /**
  * Check if position has grass or dirt
  * Reference: Feature.java lines 166-168
@@ -228,27 +296,48 @@ inline bool isAdjacentToAir(BlockGetter blockGetter, const core::BlockPos& pos) 
 }
 
 /**
+ * Check if a block state matches a supported block tag
+ */
+inline bool matchesBlockTag(BlockState* state, const std::string& tagName) {
+    if (!state) return false;
+
+    std::string normalizedTag = tagName;
+    if (!normalizedTag.empty() && normalizedTag.front() == '#') {
+        normalizedTag.erase(0, 1);
+    }
+
+    const std::string& name = state->getIdentifier();
+
+    if (normalizedTag == "minecraft:features_cannot_replace") {
+        return name == "minecraft:bedrock" ||
+               name == "minecraft:spawner" ||
+               name == "minecraft:chest" ||
+               name == "minecraft:end_portal_frame" ||
+               name == "minecraft:reinforced_deepslate" ||
+               name == "minecraft:trial_spawner" ||
+               name == "minecraft:vault";
+    }
+
+    if (normalizedTag == "minecraft:geode_invalid_blocks") {
+        return name == "minecraft:bedrock" ||
+               name == "minecraft:water" ||
+               name == "minecraft:lava" ||
+               name == "minecraft:ice" ||
+               name == "minecraft:packed_ice" ||
+               name == "minecraft:blue_ice";
+    }
+
+    return false;
+}
+
+/**
  * Create a predicate that returns true if block is NOT in tag
  * Reference: Feature.java lines 141-143
  */
 inline std::function<bool(BlockState*)> isReplaceable(const std::string& cannotReplaceTag) {
     return [cannotReplaceTag](BlockState* state) {
         if (!state) return false;
-        // Block should be replaceable if it's NOT in the cannot-replace tag
-        // For now, implement common tag checks
-        const std::string& name = state->getIdentifier();
-
-        if (cannotReplaceTag == "minecraft:features_cannot_replace") {
-            // Blocks that features cannot replace
-            if (name == "minecraft:bedrock" ||
-                name == "minecraft:spawner" ||
-                name == "minecraft:chest" ||
-                name == "minecraft:end_portal_frame") {
-                return false;
-            }
-        }
-
-        return true;
+        return !matchesBlockTag(state, cannotReplaceTag);
     };
 }
 
@@ -1079,8 +1168,13 @@ public:
 
         // Reference: SpringFeature.java lines 70-76
         if (rockCount == config.rockCount && holeCount == config.holeCount) {
-            // Place fluid - would need fluid block type registry
-            // For now, skip actual placement logic as we don't have fluid scheduling
+            BlockState* fluidState = minecraft::world::level::block::Blocks::getDefaultState(config.fluidState);
+            if (!fluidState) {
+                return false;
+            }
+
+            level->setBlock(origin, fluidState, 2);
+            level->scheduleTick(origin, config.fluidState, 0);
             return true;
         }
 
@@ -1344,7 +1438,25 @@ public:
         const core::BlockPos& origin = context.origin();
         int xRadius = config.xzRadius->sample(random) + 1;
         int zRadius = config.xzRadius->sample(random) + 1;
+        std::ostream* traceStream =
+            placement::PlacedFeature::isLoggingEnabled() &&
+            placement::PlacedFeature::getLogStream()
+                ? placement::PlacedFeature::getLogStream()
+                : nullptr;
+        if (traceStream) {
+            *traceStream << "    VEG_PATCH_RADII x=" << xRadius
+                         << " z=" << zRadius << "\n";
+        }
         util::JavaHashSet<core::BlockPos> surface = placeGroundPatch(level, config, random, origin, xRadius, zRadius);
+        if (traceStream) {
+            *traceStream << "    VEG_PATCH_SURFACE_COUNT=" << surface.size() << "\n";
+            int surfaceIndex = 0;
+            for (const auto& surfacePos : surface) {
+                *traceStream << "    VEG_PATCH_SURFACE[" << surfaceIndex << "]="
+                             << surfacePos.getX() << "," << surfacePos.getY() << "," << surfacePos.getZ() << "\n";
+                ++surfaceIndex;
+            }
+        }
         distributeVegetation(context, level, config, random, surface, xRadius, zRadius);
         return !surface.empty();
     }
@@ -1367,6 +1479,12 @@ protected:
         core::Direction inwards = CaveSurfaceHelper::getDirectionEnum(config.surface);
         core::Direction outwards = core::getOpposite(inwards);
         util::JavaHashSet<core::BlockPos> surface;
+        std::ostream* traceStream =
+            placement::PlacedFeature::isLoggingEnabled() &&
+            placement::PlacedFeature::getLogStream()
+                ? placement::PlacedFeature::getLogStream()
+                : nullptr;
+        int columnIndex = 0;
 
         for (int dx = -xRadius; dx <= xRadius; ++dx) {
             bool isXEdge = dx == -xRadius || dx == xRadius;
@@ -1376,39 +1494,96 @@ protected:
                 bool isEdge = isXEdge || isZEdge;
                 bool isCorner = isXEdge && isZEdge;
                 bool isEdgeButNotCorner = isEdge && !isCorner;
+                float edgeRoll = std::numeric_limits<float>::quiet_NaN();
                 if (isCorner) {
+                    if (traceStream) {
+                        *traceStream << "    VEG_PATCH_COLUMN[" << columnIndex << "] dx=" << dx
+                                     << " dz=" << dz << " skipped=corner\n";
+                    }
+                    ++columnIndex;
                     continue;
                 }
-                if (isEdgeButNotCorner &&
-                    (config.extraEdgeColumnChance == 0.0f || random.nextFloat() > config.extraEdgeColumnChance)) {
-                    continue;
+                if (isEdgeButNotCorner) {
+                    if (config.extraEdgeColumnChance == 0.0f) {
+                        if (traceStream) {
+                            *traceStream << "    VEG_PATCH_COLUMN[" << columnIndex << "] dx=" << dx
+                                         << " dz=" << dz << " skipped=edge_chance_zero\n";
+                        }
+                        ++columnIndex;
+                        continue;
+                    }
+
+                    edgeRoll = random.nextFloat();
+                    if (edgeRoll > config.extraEdgeColumnChance) {
+                        if (traceStream) {
+                            *traceStream << "    VEG_PATCH_COLUMN[" << columnIndex << "] dx=" << dx
+                                         << " dz=" << dz
+                                         << " skipped=edge_roll roll=" << edgeRoll
+                                         << " chance=" << config.extraEdgeColumnChance << "\n";
+                        }
+                        ++columnIndex;
+                        continue;
+                    }
                 }
 
                 pos.setWithOffset(origin, dx, 0, dz);
+                int airMoves = 0;
 
                 for (int offset = 0; offset < config.verticalRange && level->isStateAtPosition(pos, [](BlockState* state) {
                     return state && state->isAir();
                 }); ++offset) {
                     pos.move(core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
+                    ++airMoves;
                 }
 
+                int solidMoves = 0;
                 for (int offset = 0; offset < config.verticalRange && level->isStateAtPosition(pos, [](BlockState* state) {
                     return state && !state->isAir();
                 }); ++offset) {
                     pos.move(core::getStepX(outwards), core::getStepY(outwards), core::getStepZ(outwards));
+                    ++solidMoves;
                 }
 
                 belowPos.setWithOffset(pos, core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
                 BlockState* belowState = level->getBlockState(belowPos);
-                if (level->isEmptyBlock(pos) && belowState &&
-                    belowState->isFaceSturdy(*level, belowPos, core::getOpposite(inwards))) {
-                    int sampledDepth = config.depth->sample(random) +
+                core::BlockPos surfacePos(pos.getX(), pos.getY(), pos.getZ());
+                core::BlockPos groundPosBefore(belowPos.getX(), belowPos.getY(), belowPos.getZ());
+                bool empty = level->isEmptyBlock(pos);
+                bool sturdy = empty && belowState &&
+                    belowState->isFaceSturdy(*level, belowPos, core::getOpposite(inwards));
+                int sampledDepth = -1;
+                bool groundPlaced = false;
+                bool surfaceAdded = false;
+                if (empty && sturdy) {
+                    sampledDepth = config.depth->sample(random) +
                         ((config.extraBottomBlockChance > 0.0f && random.nextFloat() < config.extraBottomBlockChance) ? 1 : 0);
                     core::BlockPos groundPos(belowPos.getX(), belowPos.getY(), belowPos.getZ());
-                    if (placeGround(level, config, random, belowPos, sampledDepth)) {
-                        surface.add(groundPos);
+                    groundPlaced = placeGround(level, config, random, belowPos, sampledDepth, traceStream, columnIndex);
+                    if (groundPlaced) {
+                        surfaceAdded = surface.add(groundPos);
                     }
                 }
+                if (traceStream) {
+                    *traceStream << "    VEG_PATCH_COLUMN[" << columnIndex << "] dx=" << dx
+                                 << " dz=" << dz
+                                 << " edge_roll=";
+                    if (std::isnan(edgeRoll)) {
+                        *traceStream << "NaN";
+                    } else {
+                        *traceStream << edgeRoll;
+                    }
+                    *traceStream << " air_moves=" << airMoves
+                                 << " solid_moves=" << solidMoves
+                                 << " pos=" << surfacePos.getX() << "," << surfacePos.getY() << "," << surfacePos.getZ()
+                                 << " below=" << groundPosBefore.getX() << "," << groundPosBefore.getY() << "," << groundPosBefore.getZ()
+                                 << " below_block=" << (belowState ? belowState->getIdentifier() : "null")
+                                 << " empty=" << (empty ? "true" : "false")
+                                 << " sturdy=" << (sturdy ? "true" : "false")
+                                 << " depth=" << sampledDepth
+                                 << " ground=" << (groundPlaced ? "true" : "false")
+                                 << " surface_add=" << (surfaceAdded ? "true" : "false") << "\n";
+                }
+                ++columnIndex;
             }
         }
 
@@ -1428,10 +1603,36 @@ protected:
         int xRadius,
         int zRadius
     ) {
+        std::ostream* traceStream =
+            placement::PlacedFeature::isLoggingEnabled() &&
+            placement::PlacedFeature::getLogStream()
+                ? placement::PlacedFeature::getLogStream()
+                : nullptr;
+        int surfaceIndex = 0;
         for (const auto& surfacePos : surface) {
-            if (config.vegetationChance > 0.0f && random.nextFloat() < config.vegetationChance) {
-                placeVegetation(level, config, context.chunkGenerator(), random, surfacePos);
+            float roll = std::numeric_limits<float>::quiet_NaN();
+            bool attempt = false;
+            bool placed = false;
+            if (config.vegetationChance > 0.0f) {
+                roll = random.nextFloat();
+                attempt = roll < config.vegetationChance;
+                if (attempt) {
+                    placed = placeVegetation(level, config, context.chunkGenerator(), random, surfacePos);
+                }
             }
+            if (traceStream) {
+                *traceStream << "    VEG_PATCH_VEG[" << surfaceIndex << "] surface="
+                             << surfacePos.getX() << "," << surfacePos.getY() << "," << surfacePos.getZ()
+                             << " roll=";
+                if (std::isnan(roll)) {
+                    *traceStream << "NaN";
+                } else {
+                    *traceStream << roll;
+                }
+                *traceStream << " attempt=" << (attempt ? "true" : "false")
+                             << " placed=" << (placed ? "true" : "false") << "\n";
+            }
+            ++surfaceIndex;
         }
     }
 
@@ -1467,7 +1668,9 @@ protected:
         const VegetationPatchConfiguration& config,
         WorldgenRandom& random,
         core::BlockPos::MutableBlockPos& belowPos,
-        int depth
+        int depth,
+        std::ostream* traceStream = nullptr,
+        int columnIndex = -1
     ) {
         core::Direction inwards = CaveSurfaceHelper::getDirectionEnum(config.surface);
 
@@ -1482,13 +1685,36 @@ protected:
                 continue;
             }
 
+            core::BlockPos currentPos(belowPos.getX(), belowPos.getY(), belowPos.getZ());
+            const std::string belowBlockName = belowState->getIdentifier();
+            const std::string placeBlockName = stateToPlace->getIdentifier();
             if (!stateToPlace->is(belowState->getBlock())) {
                 if (!blockpredicates::matchesBlockTagName(belowState, config.replaceable)) {
+                    if (traceStream) {
+                        *traceStream << "    VEG_PATCH_GROUND[" << columnIndex << "][" << i << "] pos="
+                                     << currentPos.getX() << "," << currentPos.getY() << "," << currentPos.getZ()
+                                     << " below_block=" << belowBlockName
+                                     << " place_block=" << placeBlockName
+                                     << " action=stop_not_replaceable\n";
+                    }
                     return i != 0;
                 }
 
+                if (traceStream) {
+                    *traceStream << "    VEG_PATCH_GROUND[" << columnIndex << "][" << i << "] pos="
+                                 << currentPos.getX() << "," << currentPos.getY() << "," << currentPos.getZ()
+                                 << " below_block=" << belowBlockName
+                                 << " place_block=" << placeBlockName
+                                 << " action=replace\n";
+                }
                 level->setBlock(belowPos, stateToPlace, 2);
                 belowPos.move(core::getStepX(inwards), core::getStepY(inwards), core::getStepZ(inwards));
+            } else if (traceStream) {
+                *traceStream << "    VEG_PATCH_GROUND[" << columnIndex << "][" << i << "] pos="
+                             << currentPos.getX() << "," << currentPos.getY() << "," << currentPos.getZ()
+                             << " below_block=" << belowBlockName
+                             << " place_block=" << placeBlockName
+                             << " action=same_block\n";
             }
         }
 
@@ -2138,11 +2364,19 @@ public:
         // Reference: GeodeFeature.java lines 42-44
         std::vector<std::pair<core::BlockPos, int>> points;
         int numPoints = config.distributionPoints ? config.distributionPoints->sample(random) : 4;
+        int outerWallMax = config.outerWallDistance ? config.outerWallDistance->getMaxValue() : 1;
+        if (outerWallMax <= 0) {
+            outerWallMax = 1;
+        }
+
+        minecraft::levelgen::WorldgenRandom noiseRandom{LegacyRandomSource(level->getSeed())};
+        NormalNoise noise = NormalNoise::create(noiseRandom, -4, std::vector<double>{1.0});
 
         // Reference: GeodeFeature.java lines 51-54
+        const GeodeBlockSettings& blockSettings = config.geodeBlockSettings;
         const GeodeLayerSettings& layerSettings = config.geodeLayerSettings;
         const GeodeCrackSettings& crackSettings = config.geodeCrackSettings;
-        double crackSizeAdjustment = static_cast<double>(numPoints) / 10.0;
+        double crackSizeAdjustment = static_cast<double>(numPoints) / static_cast<double>(outerWallMax);
 
         double innerAir = 1.0 / std::sqrt(layerSettings.filling);
         double innermostBlockLayer = 1.0 / std::sqrt(layerSettings.innerLayer + crackSizeAdjustment);
@@ -2151,6 +2385,49 @@ public:
         double crackSize = 1.0 / std::sqrt(crackSettings.baseCrackSize + random.nextDouble() / 2.0 +
             (numPoints > 3 ? crackSizeAdjustment : 0.0));
         bool shouldGenerateCrack = random.nextFloat() < crackSettings.generateCrackChance;
+        bool geodeDebug =
+            feature::BlockChangeTrace::enabled &&
+            feature::BlockChangeTrace::stream;
+
+        if (geodeDebug) {
+            auto logNoiseOctave = [&](const char* label, const ImprovedNoise* octaveNoise) {
+                if (!octaveNoise) {
+                    *feature::BlockChangeTrace::stream << " " << label << "=null";
+                    return;
+                }
+
+                *feature::BlockChangeTrace::stream
+                    << " " << label
+                    << "{xo=" << octaveNoise->getXo()
+                    << ",yo=" << octaveNoise->getYo()
+                    << ",zo=" << octaveNoise->getZo()
+                    << ",perm=";
+                const uint8_t* perm = octaveNoise->getPermutationTable();
+                for (int permIndex = 0; permIndex < 16; ++permIndex) {
+                    if (permIndex != 0) {
+                        *feature::BlockChangeTrace::stream << ",";
+                    }
+                    *feature::BlockChangeTrace::stream << static_cast<int>(perm[permIndex]);
+                }
+                *feature::BlockChangeTrace::stream << "}";
+            };
+
+            *feature::BlockChangeTrace::stream
+                << "GEODE_DEBUG STEP=" << feature::BlockChangeTrace::currentStep
+                << " IDX=" << feature::BlockChangeTrace::currentIndex
+                << " ORIGIN=" << origin.getX() << "," << origin.getY() << "," << origin.getZ()
+                << " NUM_POINTS=" << numPoints
+                << " OUTER_WALL_MAX=" << outerWallMax
+                << " INNER_AIR=" << innerAir
+                << " INNERMOST=" << innermostBlockLayer
+                << " INNER_CRUST=" << innerCrust
+                << " OUTER_CRUST=" << outerCrust
+                << " CRACK_SIZE=" << crackSize
+                << " SHOULD_CRACK=" << shouldGenerateCrack;
+            logNoiseOctave(" first", noise.firstNoise().getOctaveNoise(0));
+            logNoiseOctave(" second", noise.secondNoise().getOctaveNoise(0));
+            *feature::BlockChangeTrace::stream << "\n";
+        }
 
         // Reference: GeodeFeature.java lines 59-73
         int numInvalidPoints = 0;
@@ -2162,8 +2439,7 @@ public:
 
             BlockState* block = level->getBlockState(pos);
             if (block) {
-                BlockState* state = static_cast<BlockState*>(block);
-                if (state->isAir()) {
+                if (block->isAir() || FeatureHelpers::matchesBlockTag(block, blockSettings.invalidBlocks)) {
                     ++numInvalidPoints;
                     if (numInvalidPoints > config.invalidBlocksThreshold) {
                         return false;
@@ -2173,6 +2449,14 @@ public:
 
             int pointOff = config.pointOffset ? config.pointOffset->sample(random) : 1;
             points.push_back({pos, pointOff});
+
+            if (geodeDebug) {
+                *feature::BlockChangeTrace::stream
+                    << "  GEODE_POINT[" << i << "]="
+                    << pos.getX() << "," << pos.getY() << "," << pos.getZ()
+                    << " offset=" << pointOff
+                    << "\n";
+            }
         }
 
         // Reference: GeodeFeature.java lines 75-95
@@ -2180,6 +2464,13 @@ public:
         if (shouldGenerateCrack) {
             int offsetIndex = random.nextInt(4);
             int crackOffset = numPoints * 2 + 1;
+
+            if (geodeDebug) {
+                *feature::BlockChangeTrace::stream
+                    << "  GEODE_CRACK_OFFSET_INDEX=" << offsetIndex
+                    << " CRACK_OFFSET=" << crackOffset
+                    << "\n";
+            }
 
             if (offsetIndex == 0) {
                 crackPoints.push_back(origin.offset(crackOffset, 7, 0));
@@ -2198,99 +2489,173 @@ public:
                 crackPoints.push_back(origin.offset(0, 5, 0));
                 crackPoints.push_back(origin.offset(0, 1, 0));
             }
+
+            if (geodeDebug) {
+                for (const core::BlockPos& crackPoint : crackPoints) {
+                    *feature::BlockChangeTrace::stream
+                        << "  GEODE_CRACK_POINT="
+                        << crackPoint.getX() << "," << crackPoint.getY() << "," << crackPoint.getZ()
+                        << "\n";
+                }
+            }
         }
 
         // Reference: GeodeFeature.java lines 100-143
-        // Collect potential crystal placements
         std::vector<core::BlockPos> potentialCrystalPlacements;
+        std::function<bool(BlockState*)> canReplace = FeatureHelpers::isReplaceable(blockSettings.cannotReplace);
+        static const std::array<core::Direction, 6> DIRECTIONS = {
+            core::Direction::DOWN,
+            core::Direction::UP,
+            core::Direction::NORTH,
+            core::Direction::SOUTH,
+            core::Direction::WEST,
+            core::Direction::EAST
+        };
 
-        // Iterate through bounding box and place blocks based on distance sums
-        for (int x = origin.getX() + minGenOffset; x <= origin.getX() + maxGenOffset; ++x) {
+        for (int z = origin.getZ() + minGenOffset; z <= origin.getZ() + maxGenOffset; ++z) {
             for (int y = origin.getY() + minGenOffset; y <= origin.getY() + maxGenOffset; ++y) {
-                for (int z = origin.getZ() + minGenOffset; z <= origin.getZ() + maxGenOffset; ++z) {
+                for (int x = origin.getX() + minGenOffset; x <= origin.getX() + maxGenOffset; ++x) {
                     core::BlockPos pointInside(x, y, z);
+                    double noiseOffset = noise.getValue(
+                        static_cast<double>(pointInside.getX()),
+                        static_cast<double>(pointInside.getY()),
+                        static_cast<double>(pointInside.getZ())
+                    ) * config.noiseMultiplier;
 
-                    // Calculate distance sum for shell
                     double distSumShell = 0.0;
                     for (const auto& [pointPos, offset] : points) {
-                        double dx = pointInside.getX() - pointPos.getX();
-                        double dy = pointInside.getY() - pointPos.getY();
-                        double dz = pointInside.getZ() - pointPos.getZ();
-                        double distSqr = dx * dx + dy * dy + dz * dz + static_cast<double>(offset);
-                        distSumShell += 1.0 / std::sqrt(distSqr);
+                        distSumShell += 1.0 / std::sqrt(
+                            pointInside.distSqr(pointPos) + static_cast<double>(offset)
+                        ) + noiseOffset;
                     }
 
-                    // Calculate distance sum for crack
                     double distSumCrack = 0.0;
                     for (const auto& crackPoint : crackPoints) {
-                        double dx = pointInside.getX() - crackPoint.getX();
-                        double dy = pointInside.getY() - crackPoint.getY();
-                        double dz = pointInside.getZ() - crackPoint.getZ();
-                        double distSqr = dx * dx + dy * dy + dz * dz + crackSettings.crackPointOffset;
-                        distSumCrack += 1.0 / std::sqrt(distSqr);
+                        distSumCrack += 1.0 / std::sqrt(
+                            pointInside.distSqr(crackPoint) + static_cast<double>(crackSettings.crackPointOffset)
+                        ) + noiseOffset;
                     }
 
-                    // Place blocks based on distance thresholds
-                    // Reference: GeodeFeature.java lines 113-142
-                    if (distSumShell >= outerCrust) {
+                    if (!(distSumShell < outerCrust)) {
+                        const char* geodeBranch = "outer";
                         if (shouldGenerateCrack && distSumCrack >= crackSize && distSumShell < innerAir) {
-                            // Place air (crack)
-                            level->setBlock(pointInside, world::level::block::Blocks::AIR->defaultBlockState(), 2);
+                            geodeBranch = "crack_air";
                         } else if (distSumShell >= innerAir) {
-                            // Place filling (air inside geode)
-                            level->setBlock(pointInside, world::level::block::Blocks::AIR->defaultBlockState(), 2);
+                            geodeBranch = "filling";
                         } else if (distSumShell >= innermostBlockLayer) {
-                            // Place inner layer (budding amethyst area)
-                            // CRITICAL: Must consume random for parity
-                            bool useAlternate = random.nextFloat() < config.useAlternateLayer0Chance;
-                            BlockState* innerState = useAlternate ?
-                                world::level::block::Blocks::BUDDING_AMETHYST->defaultBlockState() :
-                                world::level::block::Blocks::AMETHYST_BLOCK->defaultBlockState();
-                            level->setBlock(pointInside, innerState, 2);
+                            geodeBranch = "inner";
+                        } else if (distSumShell >= innerCrust) {
+                            geodeBranch = "middle";
+                        }
 
-                            // Reference: GeodeFeature.java lines 134-136
-                            // Collect potential crystal placement positions
+                        if (geodeDebug) {
+                            *feature::BlockChangeTrace::stream
+                                << "  GEODE_SAMPLE pos="
+                                << pointInside.getX() << "," << pointInside.getY() << "," << pointInside.getZ()
+                                << " noise=" << noiseOffset
+                                << " shell=" << distSumShell
+                                << " crack=" << distSumCrack
+                                << " branch=" << geodeBranch
+                                << "\n";
+                        }
+
+                        if (shouldGenerateCrack && distSumCrack >= crackSize && distSumShell < innerAir) {
+                            this->safeSetBlock(
+                                level,
+                                pointInside,
+                                world::level::block::Blocks::AIR->defaultBlockState(),
+                                canReplace
+                            );
+
+                            for (core::Direction direction : DIRECTIONS) {
+                                core::BlockPos adjacentPos = pointInside.relative(direction);
+                                BlockState* adjacentState = level->getBlockState(adjacentPos);
+                                if (adjacentState && adjacentState->hasAnyFluid()) {
+                                    if (adjacentState->hasWaterFluid()) {
+                                        level->scheduleTick(adjacentPos, "minecraft:water", 0);
+                                    } else if (adjacentState->getIdentifier() == "minecraft:lava") {
+                                        level->scheduleTick(adjacentPos, "minecraft:lava", 0);
+                                    }
+                                }
+                            }
+                        } else if (distSumShell >= innerAir) {
+                            this->safeSetBlock(
+                                level,
+                                pointInside,
+                                blockSettings.fillingProvider->getState(random, pointInside),
+                                canReplace
+                            );
+                        } else if (distSumShell >= innermostBlockLayer) {
+                            bool useAlternate = random.nextFloat() < config.useAlternateLayer0Chance;
+                            if (useAlternate) {
+                                this->safeSetBlock(
+                                    level,
+                                    pointInside,
+                                    blockSettings.alternateInnerLayerProvider->getState(random, pointInside),
+                                    canReplace
+                                );
+                            } else {
+                                this->safeSetBlock(
+                                    level,
+                                    pointInside,
+                                    blockSettings.innerLayerProvider->getState(random, pointInside),
+                                    canReplace
+                                );
+                            }
+
                             if ((!config.placementsRequireLayer0Alternate || useAlternate) &&
                                 random.nextFloat() < config.usePotentialPlacementsChance) {
                                 potentialCrystalPlacements.push_back(pointInside);
                             }
                         } else if (distSumShell >= innerCrust) {
-                            // Place middle layer (calcite)
-                            level->setBlock(pointInside, world::level::block::Blocks::CALCITE->defaultBlockState(), 2);
-                        } else {
-                            // Place outer layer (smooth basalt)
-                            level->setBlock(pointInside, world::level::block::Blocks::SMOOTH_BASALT->defaultBlockState(), 2);
+                            this->safeSetBlock(
+                                level,
+                                pointInside,
+                                blockSettings.middleLayerProvider->getState(random, pointInside),
+                                canReplace
+                            );
+                        } else if (distSumShell >= outerCrust) {
+                            this->safeSetBlock(
+                                level,
+                                pointInside,
+                                blockSettings.outerLayerProvider->getState(random, pointInside),
+                                canReplace
+                            );
                         }
                     }
                 }
             }
         }
 
-        // Reference: GeodeFeature.java lines 145-166
-        // Place amethyst buds/clusters on inner surfaces
-        const std::vector<BlockState*>& innerPlacements = config.geodeBlockSettings.innerPlacements;
+        const std::vector<BlockState*>& innerPlacements = blockSettings.innerPlacements;
         if (!innerPlacements.empty()) {
-            static const std::vector<core::Direction> DIRECTIONS = {
-                core::Direction::UP, core::Direction::DOWN,
-                core::Direction::NORTH, core::Direction::SOUTH,
-                core::Direction::EAST, core::Direction::WEST
-            };
-
             for (const core::BlockPos& crystalPos : potentialCrystalPlacements) {
-                // Pick random inner placement (amethyst bud type)
-                int budIndex = random.nextInt(static_cast<int>(innerPlacements.size()));
-                BlockState* budState = innerPlacements[budIndex];
-
-                // Try each direction to place the bud
+                BlockState* budState = innerPlacements[random.nextInt(static_cast<int>(innerPlacements.size()))];
                 for (core::Direction dir : DIRECTIONS) {
+                    BlockState* placementState = budState;
+                    if (placementState &&
+                        BlockStateProperties::FACING &&
+                        placementState->hasProperty(BlockStateProperties::FACING)) {
+                        placementState = placementState->setValue(*BlockStateProperties::FACING, dir);
+                    }
+
                     core::BlockPos placePos = crystalPos.relative(dir);
                     BlockState* placeState = level->getBlockState(placePos);
+                    if (!placeState) {
+                        continue;
+                    }
 
-                    // Can place if the target position is air or water
-                    // Reference: BuddingAmethystBlock.canClusterGrowAtState()
-                    if (placeState && (placeState->isAir() ||
-                        placeState->getIdentifier() == "minecraft:water")) {
-                        level->setBlock(placePos, budState, 2);
+                    if (placementState &&
+                        BlockStateProperties::WATERLOGGED &&
+                        placementState->hasProperty(BlockStateProperties::WATERLOGGED)) {
+                        placementState = placementState->setValue(
+                            *BlockStateProperties::WATERLOGGED,
+                            placeState->hasWaterFluid()
+                        );
+                    }
+
+                    if (world::level::block::BuddingAmethystBlock::canClusterGrowAtState(placeState)) {
+                        this->safeSetBlock(level, placePos, placementState, canReplace);
                         break;
                     }
                 }
@@ -3135,23 +3500,7 @@ protected:
 
         BlockState* currentBlock = level->getBlockState(pos);
         if (currentBlock) {
-            // Check block properties via BlockState
-            // Check if block is air or replaceable by mushroom
-            // Reference: BlockTags.REPLACEABLE_BY_MUSHROOMS
-            const std::string& name = currentBlock->getIdentifier();
-            if (currentBlock->isAir() ||
-                currentBlock->isLeaves() ||
-                name == "minecraft:brown_mushroom_block" ||
-                name == "minecraft:red_mushroom_block" ||
-                name == "minecraft:mushroom_stem" ||
-                name == "minecraft:short_grass" ||
-                name == "minecraft:fern" ||
-                name == "minecraft:dead_bush" ||
-                name == "minecraft:bush" ||
-                name == "minecraft:vine" ||
-                name == "minecraft:tall_grass" ||
-                name == "minecraft:large_fern" ||
-                name == "minecraft:snow") {
+            if (currentBlock->isAir() || FeatureHelpers::isReplaceableByMushrooms(currentBlock)) {
                 // Use WorldGenLevel.setBlock() for cross-chunk support
                 level->setBlock(pos, newState, 3);  // flags = 3 like Java
             }
@@ -3186,14 +3535,7 @@ protected:
         core::BlockPos below = origin.below();
         BlockState* belowBlock = level->getBlockState(below);
         if (belowBlock) {
-            // Check block properties via BlockState
-            // Original: !belowState.isDirt() && !belowState.is("minecraft:mycelium")
-            const std::string& name = belowBlock->getIdentifier();
-            bool isDirt = name == "minecraft:dirt" ||
-                          name == "minecraft:grass_block" ||
-                          name == "minecraft:coarse_dirt" ||
-                          name == "minecraft:podzol";
-            if (!isDirt && name != "minecraft:mycelium") {
+            if (!FeatureHelpers::isDirt(belowBlock) && !FeatureHelpers::isMushroomGrowBlock(belowBlock)) {
                 return false;
             }
         }
@@ -3290,12 +3632,16 @@ protected:
                     bool south = maxZ || (xEdge && dz == radius - 1);
 
                     BlockState* state = config.capProvider->getState(random, origin);
-                    // TODO: Set properties when property system is implemented
-                    // state = state->setValue(WEST, west);
-                    // state = state->setValue(EAST, east);
-                    // state = state->setValue(NORTH, north);
-                    // state = state->setValue(SOUTH, south);
-                    (void)west; (void)east; (void)north; (void)south; // Suppress unused warnings
+                    if (state &&
+                        state->hasProperty(BlockStateProperties::WEST) &&
+                        state->hasProperty(BlockStateProperties::EAST) &&
+                        state->hasProperty(BlockStateProperties::NORTH) &&
+                        state->hasProperty(BlockStateProperties::SOUTH)) {
+                        state = state->setValue(*BlockStateProperties::WEST, west);
+                        state = state->setValue(*BlockStateProperties::EAST, east);
+                        state = state->setValue(*BlockStateProperties::NORTH, north);
+                        state = state->setValue(*BlockStateProperties::SOUTH, south);
+                    }
 
                     placeMushroomBlock(level, blockPos, state);
                 }
@@ -3348,12 +3694,18 @@ protected:
                         blockPos.set(origin.getX() + dx, origin.getY() + dy, origin.getZ() + dz);
 
                         BlockState* state = config.capProvider->getState(random, origin);
-                        // TODO: Set properties when property system is implemented
-                        // bool up = dy >= treeHeight - 1;
-                        // state = state->setValue(UP, up);
-                        // state = state->setValue(WEST, dx < -center);
-                        // etc.
-                        (void)center; // Suppress unused warning
+                        if (state &&
+                            state->hasProperty(BlockStateProperties::WEST) &&
+                            state->hasProperty(BlockStateProperties::EAST) &&
+                            state->hasProperty(BlockStateProperties::NORTH) &&
+                            state->hasProperty(BlockStateProperties::SOUTH) &&
+                            state->hasProperty(BlockStateProperties::UP)) {
+                            state = state->setValue(*BlockStateProperties::UP, dy >= treeHeight - 1);
+                            state = state->setValue(*BlockStateProperties::WEST, dx < -center);
+                            state = state->setValue(*BlockStateProperties::EAST, dx > center);
+                            state = state->setValue(*BlockStateProperties::NORTH, dz < -center);
+                            state = state->setValue(*BlockStateProperties::SOUTH, dz > center);
+                        }
 
                         placeMushroomBlock(level, blockPos, state);
                     }
@@ -5587,9 +5939,9 @@ public:
         int placed = 0;
 
         // Place magma blocks - Reference: lines 39-42
-        for (int dx = -radius; dx <= radius; ++dx) {
+        for (int dz = -radius; dz <= radius; ++dz) {
             for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dz = -radius; dz <= radius; ++dz) {
+                for (int dx = -radius; dx <= radius; ++dx) {
                     core::BlockPos pos = floorPos.offset(dx, dy, dz);
                     if (random.nextFloat() < config.placementProbabilityPerValidPosition) {
                         if (isValidPlacement(level, pos)) {
@@ -5609,69 +5961,49 @@ public:
 
 private:
     // Reference: UnderwaterMagmaFeature.java getFloorY() which uses Column.scan()
-    // Column.scan first checks if origin is inside the column (water)
-    // Reference: Column.java lines 23-24: if (!level.isStateAtPosition(pos, insideColumn)) return Optional.empty()
     int getFloorY(WorldGenLevel* level, const core::BlockPos& origin, const UnderwaterMagmaConfiguration& config) {
-        // CRITICAL: First check if origin is in water - if not, return immediately
-        // This is what Column.scan does in Java
-        BlockState* originState = level->getBlockState(origin);
-        if (!originState || originState->getIdentifier() != "minecraft:water") {
-            return INT_MIN;  // Not in water, no valid floor
+        auto waterColumn = ColumnScan::scan(
+            level,
+            origin,
+            config.floorSearchRange,
+            [](BlockState* state) {
+                return state && state->getIdentifier() == "minecraft:water";
+            },
+            [](BlockState* state) {
+                return state && state->getIdentifier() != "minecraft:water";
+            }
+        );
+        if (!waterColumn || !waterColumn->getFloor().has_value()) {
+            return INT_MIN;
         }
 
-        core::BlockPos::MutableBlockPos pos(origin.getX(), origin.getY(), origin.getZ());
-
-        // Search down through water to find the floor
-        for (int i = 0; i < config.floorSearchRange; ++i) {
-            pos.move(0, -1, 0);  // Move down first
-            BlockState* block = level->getBlockState(pos);
-            if (!block) {
-                continue;
-            }
-
-            BlockState* state = static_cast<BlockState*>(block);
-            if (state->getIdentifier() != "minecraft:water") {
-                // Found the floor (non-water block below water)
-                return pos.getY();
-            }
-        }
-
-        return INT_MIN;  // No floor found within search range
+        return *waterColumn->getFloor();
     }
 
     // Reference: UnderwaterMagmaFeature.java isValidPlacement() lines 53-64
     bool isValidPlacement(WorldGenLevel* level, const core::BlockPos& pos) {
-        BlockState* block = level->getBlockState(pos);
-        if (!block) return false;
-
-        BlockState* state = static_cast<BlockState*>(block);
-        if (state->isAir() || state->getIdentifier() == "minecraft:water") {
+        BlockState* state = level->getBlockState(pos);
+        if (!state || isWaterOrAir(state) || isVisibleFromOutside(level, pos.below(), core::Direction::UP)) {
             return false;
         }
 
-        // Check if not visible from below
-        BlockState* belowBlock = level->getBlockState(pos.below());
-        if (belowBlock) {
-            BlockState* belowState = static_cast<BlockState*>(belowBlock);
-            if (belowState->isAir() || belowState->getIdentifier() == "minecraft:water") {
+        for (int dir = 0; dir < 4; ++dir) {
+            core::Direction direction = blockpredicates::fromHorizontalIndex(dir);
+            if (isVisibleFromOutside(level, pos.relative(direction), core::getOpposite(direction))) {
                 return false;
             }
         }
 
-        // Check horizontal directions
-        for (int dir = 0; dir < 4; ++dir) {
-            core::Direction direction = blockpredicates::fromHorizontalIndex(dir);
-            core::BlockPos neighborPos = pos.relative(direction);
-            BlockState* neighborBlock = level->getBlockState(neighborPos);
-            if (neighborBlock) {
-                BlockState* neighborState = static_cast<BlockState*>(neighborBlock);
-                if (neighborState->isAir() || neighborState->getIdentifier() == "minecraft:water") {
-                    return false;
-                }
-            }
-        }
-
         return true;
+    }
+
+    static bool isWaterOrAir(BlockState* state) {
+        return state && (state->isAir() || state->getIdentifier() == "minecraft:water");
+    }
+
+    bool isVisibleFromOutside(WorldGenLevel* level, const core::BlockPos& pos, core::Direction /*coveredDirection*/) {
+        BlockState* state = level->getBlockState(pos);
+        return !state || !state->isCollisionShapeFullBlock(*level, pos);
     }
 };
 
@@ -6902,9 +7234,11 @@ public:
     bool place(FeaturePlaceContext<NoneFeatureConfiguration>& context) override {
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
+        ChunkGenerator* chunkGenerator = context.chunkGenerator();
 
         core::BlockPos::MutableBlockPos topPos;
         core::BlockPos::MutableBlockPos belowPos;
+        int32_t seaLevel = chunkGenerator ? chunkGenerator->getSeaLevel() : 64;
 
         // Reference: SnowAndFreezeFeature.java lines 23-42
         for (int dx = 0; dx < 16; ++dx) {
@@ -6912,46 +7246,48 @@ public:
                 int x = origin.getX() + dx;
                 int z = origin.getZ() + dz;
 
-                // Get height at MOTION_BLOCKING (or WORLD_SURFACE)
-                int y = level->getHeight(Heightmap::Types::MOTION_BLOCKING, x, z) + 1;
+                int y = level->getHeight(Heightmap::Types::MOTION_BLOCKING, x, z);
 
                 topPos.set(x, y, z);
                 belowPos.set(x, y - 1, z);
 
-                // Get biome at this position using BlockPos
-                // Note: BiomeHolder is typedef for const Biome*
                 const world::biome::Biome* biome = level->getBiome(topPos);
-
                 if (!biome) continue;
 
-                // Check temperature - cold biomes have temp < 0.15
-                // Reference: Biome.shouldFreeze() / shouldSnow()
-                float temperature = biome->getTemperature(topPos);
-
-                // Reference: Biome.shouldFreeze() - freeze water if temp < 0.15
-                if (temperature < 0.15f) {
+                if (!level->isOutsideBuildHeight(belowPos) &&
+                    biome->coldEnoughToSnow(belowPos, seaLevel)) {
                     BlockState* belowState = level->getBlockState(belowPos);
                     if (belowState && belowState->getIdentifier() == "minecraft:water") {
-                        // Freeze water to ice
-                        level->setBlock(belowPos,
+                        level->setBlock(
+                            belowPos,
                             static_cast<BlockState*>(world::level::block::Blocks::getDefaultState("minecraft:ice")),
-                            2);
+                            2
+                        );
                     }
                 }
 
-                // Reference: Biome.shouldSnow() - place snow if temp < 0.15 and not in water
-                if (temperature < 0.15f) {
+                if (!level->isOutsideBuildHeight(topPos) &&
+                    biome->getPrecipitationAt(topPos, seaLevel) == world::biome::Precipitation::SNOW) {
                     BlockState* topState = level->getBlockState(topPos);
                     BlockState* belowState = level->getBlockState(belowPos);
 
-                    // Only place snow if air above and solid below
-                    if (topState && topState->isAir() && belowState && !belowState->isAir() &&
-                        belowState->getIdentifier() != "minecraft:water" &&
-                        belowState->getIdentifier() != "minecraft:ice") {
-                        // Place snow layer
-                        level->setBlock(topPos,
+                    if (topState && topState->isAir()) {
+                        level->setBlock(
+                            topPos,
                             static_cast<BlockState*>(world::level::block::Blocks::getDefaultState("minecraft:snow")),
-                            2);
+                            2
+                        );
+
+                        belowState = level->getBlockState(belowPos);
+                        if (belowState &&
+                            BlockStateProperties::SNOWY &&
+                            belowState->hasProperty(BlockStateProperties::SNOWY)) {
+                            level->setBlock(
+                                belowPos,
+                                belowState->setValue(*BlockStateProperties::SNOWY, true),
+                                2
+                            );
+                        }
                     }
                 }
             }

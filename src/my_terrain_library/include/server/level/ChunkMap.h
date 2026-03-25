@@ -28,6 +28,8 @@ namespace minecraft {
 namespace server {
 namespace level {
 
+class ServerLevel;
+
 /**
  * ChunkMap - Central coordinator for chunk management and generation
  * Reference: ChunkMap.java (~1500 lines)
@@ -258,6 +260,7 @@ private:
     // Storage
     std::unique_ptr<world::level::chunk::storage::IOWorker> m_chunkIo;
     std::string m_storagePath;
+    std::unique_ptr<ServerLevel> m_serverLevel;
 
     // World parameters for chunk creation
     world::BlockRegistry* m_blockRegistry;

@@ -1,4 +1,5 @@
 #include "server/level/ChunkMap.h"
+#include "server/level/ServerLevel.h"
 #include "server/level/WorldGenRegion.h"
 #include "world/chunk/status/ChunkPyramid.h"
 #include "world/chunk/status/ChunkStatusTasks.h"
@@ -36,6 +37,9 @@ ChunkMap::ChunkMap(
     , m_backgroundExecutor(backgroundExecutor)
     , m_mainThreadExecutor(std::move(mainThreadExecutor))
     , m_storagePath(storagePath)
+    , m_serverLevel(std::make_unique<ServerLevel>(
+        minY, worldHeight, blockRegistry, airBlock, defaultBlock, seed
+    ))
     , m_blockRegistry(blockRegistry)
     , m_airBlock(airBlock)
     , m_defaultBlock(defaultBlock)
@@ -45,6 +49,7 @@ ChunkMap::ChunkMap(
     // Initialize world gen context
     // Reference: ChunkMap.java - worldGenContext includes executors for async work
     m_worldGenContext = WorldGenContext(generator, randomState, seed);
+    m_worldGenContext.level = m_serverLevel.get();
     m_worldGenContext.mainThreadExecutor = m_mainThreadExecutor;
     // Wire background executor for async tasks (NOISE, BIOMES use supplyAsync)
     // Reference: NoiseBasedChunkGenerator.fillFromNoise() uses Util.backgroundExecutor()

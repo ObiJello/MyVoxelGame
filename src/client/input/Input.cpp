@@ -3,6 +3,7 @@
 #include "common/core/Log.hpp"
 #include <GLFW/glfw3.h>
 #include <unordered_map>
+#include <queue>
 
 namespace Input {
     static GLFWwindow* gWindow = nullptr;
@@ -25,6 +26,14 @@ namespace Input {
     // Key press tracking for single-frame press detection
     static std::unordered_map<Key, bool> previousKeyStates;
     static std::unordered_map<Key, bool> currentKeyStates;
+
+    // Character input queue for text entry
+    static std::queue<unsigned int> charInputQueue;
+
+    // Character callback: queues typed characters
+    static void CharCallback(GLFWwindow* /*window*/, unsigned int codepoint) {
+        charInputQueue.push(codepoint);
+    }
 
     // Scroll callback: accumulates scroll deltas
     static void ScrollCallback(GLFWwindow* /*window*/, double xoffset, double yoffset) {
@@ -58,6 +67,7 @@ namespace Input {
         // Register callbacks
         glfwSetScrollCallback(gWindow, ScrollCallback);
         glfwSetCursorPosCallback(gWindow, MouseCallback);
+        glfwSetCharCallback(gWindow, CharCallback);
 
         // Initialize key state tracking
         previousKeyStates.clear();
@@ -82,6 +92,9 @@ namespace Input {
             case Key::LeftShift:   glfwKey = GLFW_KEY_LEFT_SHIFT; break;
             case Key::Tab:         glfwKey = GLFW_KEY_TAB; break;
             case Key::N:           glfwKey = GLFW_KEY_N; break;
+            case Key::P:           glfwKey = GLFW_KEY_P; break;
+            case Key::T:           glfwKey = GLFW_KEY_T; break;
+            case Key::Slash:       glfwKey = GLFW_KEY_SLASH; break;
             case Key::Alpha1:      glfwKey = GLFW_KEY_1; break;
             case Key::Alpha2:      glfwKey = GLFW_KEY_2; break;
             case Key::Alpha3:      glfwKey = GLFW_KEY_3; break;
@@ -165,6 +178,9 @@ namespace Input {
         currentKeyStates[Key::LeftShift] = IsKeyDown(Key::LeftShift);
         currentKeyStates[Key::Tab] = IsKeyDown(Key::Tab);
         currentKeyStates[Key::N] = IsKeyDown(Key::N);
+        currentKeyStates[Key::P] = IsKeyDown(Key::P);
+        currentKeyStates[Key::T] = IsKeyDown(Key::T);
+        currentKeyStates[Key::Slash] = IsKeyDown(Key::Slash);
         currentKeyStates[Key::Alpha1] = IsKeyDown(Key::Alpha1);
         currentKeyStates[Key::Alpha2] = IsKeyDown(Key::Alpha2);
         currentKeyStates[Key::Alpha3] = IsKeyDown(Key::Alpha3);
@@ -179,5 +195,16 @@ namespace Input {
         currentKeyStates[Key::F3] = IsKeyDown(Key::F3);
         currentKeyStates[Key::F11] = IsKeyDown(Key::F11);
         currentKeyStates[Key::Tilde] = IsKeyDown(Key::Tilde);
+    }
+
+    bool HasCharInput() {
+        return !charInputQueue.empty();
+    }
+
+    unsigned int PopCharInput() {
+        if (charInputQueue.empty()) return 0;
+        unsigned int c = charInputQueue.front();
+        charInputQueue.pop();
+        return c;
     }
 }

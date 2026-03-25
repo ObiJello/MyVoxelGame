@@ -1,5 +1,6 @@
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/Block.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 
 namespace minecraft {
 namespace world {
@@ -69,6 +70,13 @@ bool BlockState::is(const Block* block) const {
     return m_owner == block;
 }
 
+bool BlockState::blocksMotion() const {
+    // Reference: BlockBehaviour.BlockStateBase.blocksMotion()
+    return m_identifier != "minecraft:cobweb" &&
+           m_identifier != "minecraft:bamboo_sapling" &&
+           isSolid();
+}
+
 bool BlockState::equals(const BlockState* other) const {
     // Check if same identifier
     if (!other || getIdentifier() != other->getIdentifier()) {
@@ -124,6 +132,22 @@ int BlockState::getLightEmission() const {
     return 0;
 }
 
+bool BlockState::hasWaterFluid() const {
+    using world::level::block::state::properties::BlockStateProperties;
+
+    if (m_identifier == "minecraft:water") {
+        return true;
+    }
+
+    return BlockStateProperties::WATERLOGGED &&
+           hasProperty(BlockStateProperties::WATERLOGGED) &&
+           getValueOrElse(*BlockStateProperties::WATERLOGGED, false);
+}
+
+bool BlockState::hasAnyFluid() const {
+    return m_liquid || hasWaterFluid();
+}
+
 bool BlockState::canSurvive(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const {
     return m_owner && m_owner->canSurvive(const_cast<BlockState*>(this), level, pos);
 }
@@ -132,7 +156,10 @@ bool BlockState::isCollisionShapeFullBlock(
     const minecraft::levelgen::WorldGenLevel& /*level*/,
     const core::BlockPos& /*pos*/
 ) const {
-    return isSolidRender();
+    // Reference: BlockBehaviour.BlockStateBase.isCollisionShapeFullBlock()
+    // We do not model voxel shapes yet, so use the solid/collision proxy rather
+    // than render occlusion. This matches Java more closely than isSolidRender().
+    return isSolid();
 }
 
 bool BlockState::isFaceSturdy(
@@ -140,7 +167,14 @@ bool BlockState::isFaceSturdy(
     const core::BlockPos& /*pos*/,
     core::Direction /*direction*/
 ) const {
-    return isSolidRender();
+    // Reference: BlockBehaviour.BlockStateBase.isFaceSturdy()
+    // Leaves override getBlockSupportShape() to Shapes.empty() in Java.
+    if (m_isLeaves) {
+        return false;
+    }
+
+    // Support checks are collision-based in Java, not render-based.
+    return isSolid();
 }
 
 } // namespace state

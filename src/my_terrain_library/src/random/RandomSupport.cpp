@@ -83,11 +83,11 @@ int32_t RandomSupport::javaStringHashCode(const std::string& str) {
     //
     // This uses int32_t arithmetic with wraparound (same as Java int)
 
-    int32_t hash = 0;
-    for (char c : str) {
-        hash = 31 * hash + static_cast<int32_t>(c);
+    uint32_t hash = 0;
+    for (unsigned char c : str) {
+        hash = 31u * hash + static_cast<uint32_t>(c);
     }
-    return hash;
+    return static_cast<int32_t>(hash);
 }
 
 Seed128bit RandomSupport::generateUniqueSeed() {

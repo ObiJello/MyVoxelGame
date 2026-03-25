@@ -45,6 +45,8 @@ public:
      */
     void setSeed(int64_t seed) {
         m_seed = (seed ^ MULTIPLIER) & MODULUS_MASK;
+        m_nextNextGaussian = 0.0;
+        m_haveNextNextGaussian = false;
     }
 
     /**
@@ -95,6 +97,14 @@ public:
      */
     int64_t nextLong() {
         return (static_cast<int64_t>(next(32)) << 32) + next(32);
+    }
+
+    int64_t getInternalSeed() const {
+        return m_seed;
+    }
+
+    void setInternalSeedDirectly(int64_t seed) {
+        m_seed = seed & MODULUS_MASK;
     }
 
     /**
@@ -196,11 +206,11 @@ public:
 
 private:
     static int32_t javaStringHash(const std::string& value) {
-        int32_t hash = 0;
+        uint32_t hash = 0;
         for (unsigned char ch : value) {
-            hash = 31 * hash + static_cast<int32_t>(ch);
+            hash = 31u * hash + static_cast<uint32_t>(ch);
         }
-        return hash;
+        return static_cast<int32_t>(hash);
     }
 
     int64_t m_seed;

@@ -265,8 +265,9 @@ namespace Network {
     // Held item (hotbar slot) change from client to server
     struct HeldItemChangeC2SPacket {
         int16_t slot = 0;
+        uint16_t blockId = 0;  // Block type in the selected slot (for server sync)
         HeldItemChangeC2SPacket() = default;
-        HeldItemChangeC2SPacket(int16_t s) : slot(s) {}
+        HeldItemChangeC2SPacket(int16_t s, uint16_t block = 0) : slot(s), blockId(block) {}
     };
 
     // Chat messages and commands
@@ -856,12 +857,16 @@ namespace Network {
         inline std::vector<uint8_t> Serialize(const HeldItemChangeC2SPacket& packet) {
             PacketBuffer buffer;
             buffer.WriteShort(packet.slot);
+            buffer.WriteShort(static_cast<int16_t>(packet.blockId));
             return buffer.GetData();
         }
         inline HeldItemChangeC2SPacket DeserializeHeldItemChangeC2S(const std::vector<uint8_t>& data) {
             PacketReader reader(data);
             HeldItemChangeC2SPacket packet;
             packet.slot = reader.ReadShort();
+            if (reader.Remaining() >= 2) {
+                packet.blockId = static_cast<uint16_t>(reader.ReadShort());
+            }
             return packet;
         }
 

@@ -27,6 +27,13 @@
 #include "client/renderer/gui/GuiGraphics.hpp"
 #include "client/renderer/gui/FontRenderer.hpp"
 #include "client/renderer/gui/HudRenderer.hpp"
+#include "client/renderer/gui/ChatComponent.hpp"
+#include "client/renderer/gui/ChatScreen.hpp"
+#include <functional>
+
+// Declared in ClientConnection.cpp
+extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
+extern void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback);
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
 #include "common/core/Profiling.hpp"
@@ -88,6 +95,8 @@ static Render::GuiAtlas g_guiAtlas;
 static Render::FontRenderer g_fontRenderer;
 static Render::GuiRenderer g_guiRenderer;
 static Render::HudRenderer g_hudRenderer;
+static Render::ChatComponent g_chatComponent;
+static Render::ChatScreen g_chatScreen;
 
 namespace PlatformMain {
 
@@ -159,6 +168,12 @@ namespace PlatformMain {
         Render::GuiRenderState renderState;
         Render::GuiGraphics graphics(guiWidth, guiHeight, &g_guiAtlas, &renderState, &g_fontRenderer);
         g_hudRenderer.Render(graphics, inventory, deltaTime);
+
+        // Chat: update timer and render messages + input field
+        g_chatComponent.Update(deltaTime);
+        g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
+        g_chatScreen.Render(graphics);
+
         g_guiRenderer.Render(renderState, windowWidth, windowHeight,
                             framebufferWidth, framebufferHeight, guiScale, &g_fontRenderer);
     }
@@ -242,6 +257,19 @@ namespace PlatformMain {
         if (Input::IsKeyPressed(Input::Key::Alpha7)) controller.OnHotbarChanged(6);
         if (Input::IsKeyPressed(Input::Key::Alpha8)) controller.OnHotbarChanged(7);
         if (Input::IsKeyPressed(Input::Key::Alpha9)) controller.OnHotbarChanged(8);
+
+        // Pick block (P key) — set selected slot to the block being looked at
+        if (Input::IsKeyPressed(Input::Key::P)) {
+            if (player.lastBlockHit.has_value()) {
+                Game::BlockID pickedBlock = player.lastBlockHit->blockId;
+                if (pickedBlock != Game::BlockID::Air) {
+                    int slot = player.inventory.GetSelectedSlot();
+                    player.inventory.SetSlot(slot, pickedBlock, 64);
+                    // Sync with server (sends slot + block type)
+                    controller.OnHotbarChanged(slot);
+                }
+            }
+        }
 
         // Mouse wheel for inventory scrolling
         auto [scrollX, scrollY] = Input::GetScrollOffset();
@@ -397,6 +425,16 @@ namespace PlatformMain {
         if (!g_guiRenderer.Initialize()) {
             Log::Warning("Failed to initialize GUI renderer");
         }
+
+        // Set up chat message callback
+        SetChatMessageCallback([](const std::string& msg) {
+            g_chatComponent.AddMessage(msg);
+        });
+        SetChatBubbleCallback([](uint32_t senderId, const std::string& msg) {
+            if (Client::g_remotePlayerManager) {
+                Client::g_remotePlayerManager->SetChatBubble(senderId, msg);
+            }
+        });
 
         // Compile shaders
         Shader blockShader = InitializeShaders();
@@ -847,7 +885,60 @@ namespace PlatformMain {
             }
 
             cursorEnabled = HandleCursorToggle(window, camera);
-            HandlePlayerInput(player, playerController, camera);
+
+            // Chat system: open on T or /, route input when open
+            if (g_chatScreen.IsOpen()) {
+                // Route character input to chat
+                while (Input::HasCharInput()) {
+                    g_chatScreen.OnCharInput(Input::PopCharInput());
+                }
+                // Route key input (Enter, Escape, Backspace, arrows)
+                if (Input::IsKeyPressed(Input::Key::Escape)) {
+                    g_chatScreen.OnKeyDown(GLFW_KEY_ESCAPE);
+                }
+                // Check raw GLFW keys for Enter/Backspace (need glfwGetKey for repeat)
+                static bool enterHeld = false, backspaceHeld = false;
+                bool enterDown = glfwGetKey(window, GLFW_KEY_ENTER) == GLFW_PRESS;
+                bool backspaceDown = glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS;
+                if (enterDown && !enterHeld) g_chatScreen.OnKeyDown(GLFW_KEY_ENTER);
+                if (backspaceDown && !backspaceHeld) g_chatScreen.OnKeyDown(GLFW_KEY_BACKSPACE);
+                enterHeld = enterDown;
+                backspaceHeld = backspaceDown;
+                // Up/down for history
+                static bool upHeld = false, downHeld = false;
+                bool upDown = glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
+                bool downDown = glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
+                if (upDown && !upHeld) g_chatScreen.OnKeyDown(GLFW_KEY_UP);
+                if (downDown && !downHeld) g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
+                upHeld = upDown;
+                downHeld = downDown;
+
+                g_chatScreen.Update(1.0f / 60.0f); // Approximate frame dt for cursor blink
+
+                // Handle submitted message
+                std::string submitted = g_chatScreen.ConsumeSubmittedMessage();
+                if (!submitted.empty() && networkClient && networkClient->IsConnected()) {
+                    auto conn = networkClient->GetConnection();
+                    if (conn) {
+                        conn->SendChatMessage(submitted);
+                    }
+                }
+
+                // Drain char queue to prevent stale input
+                // Skip player input — chat has focus
+            } else {
+                // Drain char queue when chat is closed (prevent buildup)
+                while (Input::HasCharInput()) Input::PopCharInput();
+
+                // Open chat on T or /
+                if (Input::IsKeyPressed(Input::Key::T)) {
+                    g_chatScreen.Open(false);
+                } else if (Input::IsKeyPressed(Input::Key::Slash)) {
+                    g_chatScreen.Open(true);
+                }
+
+                HandlePlayerInput(player, playerController, camera);
+            }
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
             }
 
@@ -1024,6 +1115,12 @@ namespace PlatformMain {
             // Render remote players (stick figures) before UI overlays
             if (Client::g_remotePlayerManager) {
                 playerRenderer.Render(proj, view, camera.position, *Client::g_remotePlayerManager);
+                // Update chat bubble timers
+                Client::g_remotePlayerManager->UpdateBubbles(dt);
+                // Render chat bubbles (screen-space billboard)
+                int fbW, fbH;
+                glfwGetFramebufferSize(window, &fbW, &fbH);
+                playerRenderer.RenderChatBubbles(proj, view, *Client::g_remotePlayerManager, fbW, fbH);
             }
 
             // Render UI overlay elements

@@ -104,11 +104,9 @@ private:
         m_threshold = std::max<size_t>(1, static_cast<size_t>(static_cast<float>(newCapacity) * LOAD_FACTOR));
     }
 
-    void ensureCapacityForInsert() {
+    void ensureInitialized() {
         if (m_table.empty()) {
             initialize();
-        } else if (m_size + 1 > m_threshold) {
-            rehash(m_table.size() << 1);
         }
     }
 
@@ -190,7 +188,7 @@ public:
     };
 
     bool add(const T& value) {
-        ensureCapacityForInsert();
+        ensureInitialized();
 
         int32_t hash = spread(value.hashCode());
         size_t idx = bucketIndex(hash, m_table.size());
@@ -201,6 +199,9 @@ public:
             bucketHead = node.get();
             m_nodes.push_back(std::move(node));
             ++m_size;
+            if (m_size > m_threshold) {
+                rehash(m_table.size() << 1);
+            }
             return true;
         }
 
@@ -220,6 +221,9 @@ public:
         current->next = node.get();
         m_nodes.push_back(std::move(node));
         ++m_size;
+        if (m_size > m_threshold) {
+            rehash(m_table.size() << 1);
+        }
         return true;
     }
 

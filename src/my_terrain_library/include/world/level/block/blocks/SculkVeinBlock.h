@@ -185,10 +185,7 @@ public:
         }
 
         if (placementState->hasProperty(WATERLOGGED)) {
-            bool waterlogged = oldState && (
-                oldState->getIdentifier() == "minecraft:water" ||
-                oldState->getValueOrElse(*WATERLOGGED, false)
-            );
+            bool waterlogged = oldState && oldState->hasAnyFluid();
             placementState = placementState->setValue(*WATERLOGGED, waterlogged);
         }
 
@@ -218,10 +215,8 @@ public:
             return false;
         }
 
-        if (existing) {
-            bool waterlogged = existing->getIdentifier() == "minecraft:water" ||
-                (existing->hasProperty(WATERLOGGED) && existing->getValueOrElse(*WATERLOGGED, false));
-            newState = newState->setValue(*WATERLOGGED, waterlogged);
+        if (existing && existing->hasAnyFluid()) {
+            newState = newState->setValue(*WATERLOGGED, true);
         }
 
         return level->setBlock(pos, newState, 3);

@@ -1,4 +1,6 @@
 #include "world/level/block/Blocks.h"
+#include "world/level/block/blocks/AmethystClusterBlock.h"
+#include "world/level/block/blocks/BuddingAmethystBlock.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 
 namespace minecraft {
@@ -434,13 +436,11 @@ Block* minecraft::world::level::block::Blocks::createReplaceableByTreesBlock(con
 }
 
 LeavesBlock* minecraft::world::level::block::Blocks::createLeavesBlock(const std::string& name) {
-    // TEMPORARY: Using simple Block to avoid state system issues
-    // TODO: Fix std::any_cast issue in StateDefinition and use LeavesBlock
     Block::Properties props;
-    props.setId(name).leaves().replaceableByTrees();
-    auto block = new Block(props);
+    props.setId(name).leaves().noOcclusion().replaceableByTrees();
+    auto block = new LeavesBlock(props);
     registerBlock(name, block);
-    return reinterpret_cast<LeavesBlock*>(block);
+    return block;
 }
 
 RotatedPillarBlock* minecraft::world::level::block::Blocks::createLogBlock(const std::string& name) {
@@ -527,13 +527,38 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     // Reference: Used in amethyst geode feature
     // =========================================================================
     AMETHYST_BLOCK = createSimpleBlock("minecraft:amethyst_block");
-    BUDDING_AMETHYST = createSimpleBlock("minecraft:budding_amethyst");
+    {
+        Block::Properties props;
+        props.setId("minecraft:budding_amethyst");
+        BUDDING_AMETHYST = new BuddingAmethystBlock(props);
+        registerBlock("minecraft:budding_amethyst", BUDDING_AMETHYST);
+    }
     CALCITE = createSimpleBlock("minecraft:calcite");
     SMOOTH_BASALT = createSimpleBlock("minecraft:smooth_basalt");
-    SMALL_AMETHYST_BUD = createPlantBlock("minecraft:small_amethyst_bud");
-    MEDIUM_AMETHYST_BUD = createPlantBlock("minecraft:medium_amethyst_bud");
-    LARGE_AMETHYST_BUD = createPlantBlock("minecraft:large_amethyst_bud");
-    AMETHYST_CLUSTER = createPlantBlock("minecraft:amethyst_cluster");
+    {
+        Block::Properties props;
+        props.setId("minecraft:small_amethyst_bud").forceSolidOn().noOcclusion();
+        SMALL_AMETHYST_BUD = new AmethystClusterBlock(props);
+        registerBlock("minecraft:small_amethyst_bud", SMALL_AMETHYST_BUD);
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:medium_amethyst_bud").forceSolidOn().noOcclusion();
+        MEDIUM_AMETHYST_BUD = new AmethystClusterBlock(props);
+        registerBlock("minecraft:medium_amethyst_bud", MEDIUM_AMETHYST_BUD);
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:large_amethyst_bud").forceSolidOn().noOcclusion();
+        LARGE_AMETHYST_BUD = new AmethystClusterBlock(props);
+        registerBlock("minecraft:large_amethyst_bud", LARGE_AMETHYST_BUD);
+    }
+    {
+        Block::Properties props;
+        props.setId("minecraft:amethyst_cluster").forceSolidOn().noOcclusion();
+        AMETHYST_CLUSTER = new AmethystClusterBlock(props);
+        registerBlock("minecraft:amethyst_cluster", AMETHYST_CLUSTER);
+    }
 
     // =========================================================================
     // Clay and mud blocks
@@ -727,15 +752,15 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     MELON = createSimpleBlock("minecraft:melon");
     COCOA = createReplaceablePlantBlock("minecraft:cocoa");
     MANGROVE_ROOTS = createSimpleBlock("minecraft:mangrove_roots");
-    OAK_SAPLING = createReplaceablePlantBlock("minecraft:oak_sapling");
-    SPRUCE_SAPLING = createReplaceablePlantBlock("minecraft:spruce_sapling");
-    BIRCH_SAPLING = createReplaceablePlantBlock("minecraft:birch_sapling");
-    JUNGLE_SAPLING = createReplaceablePlantBlock("minecraft:jungle_sapling");
-    ACACIA_SAPLING = createReplaceablePlantBlock("minecraft:acacia_sapling");
-    CHERRY_SAPLING = createReplaceablePlantBlock("minecraft:cherry_sapling");
-    DARK_OAK_SAPLING = createReplaceablePlantBlock("minecraft:dark_oak_sapling");
-    PALE_OAK_SAPLING = createReplaceablePlantBlock("minecraft:pale_oak_sapling");
-    MANGROVE_PROPAGULE = createReplaceablePlantBlock("minecraft:mangrove_propagule");
+    OAK_SAPLING = createBushBlock("minecraft:oak_sapling");
+    SPRUCE_SAPLING = createBushBlock("minecraft:spruce_sapling");
+    BIRCH_SAPLING = createBushBlock("minecraft:birch_sapling");
+    JUNGLE_SAPLING = createBushBlock("minecraft:jungle_sapling");
+    ACACIA_SAPLING = createBushBlock("minecraft:acacia_sapling");
+    CHERRY_SAPLING = createBushBlock("minecraft:cherry_sapling");
+    DARK_OAK_SAPLING = createBushBlock("minecraft:dark_oak_sapling");
+    PALE_OAK_SAPLING = createBushBlock("minecraft:pale_oak_sapling");
+    MANGROVE_PROPAGULE = createBushBlock("minecraft:mangrove_propagule");
 
     // =========================================================================
     // Dungeon blocks
@@ -743,6 +768,23 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     SPAWNER = createSimpleBlock("minecraft:spawner");
     CHEST = createSimpleBlock("minecraft:chest");
     BEE_NEST = createSimpleBlock("minecraft:bee_nest");
+
+    // =========================================================================
+    // Structure blocks
+    // Reference: Used by mineshafts, shipwrecks, and other generated structures
+    // =========================================================================
+    createSimpleBlock("minecraft:oak_planks");
+    createSimpleBlock("minecraft:spruce_planks");
+    createSimpleBlock("minecraft:dark_oak_planks");
+    createSimpleBlock("minecraft:spruce_stairs");
+    createSimpleBlock("minecraft:dark_oak_stairs");
+    createSimpleBlock("minecraft:spruce_fence");
+    createSimpleBlock("minecraft:dark_oak_fence");
+    createSimpleBlock("minecraft:oak_trapdoor");
+    createSimpleBlock("minecraft:rail");
+    createSimpleBlock("minecraft:cobweb");
+    createSimpleBlock("minecraft:chain");
+    createSimpleBlock("minecraft:wall_torch");
 
     // =========================================================================
     // Stairs - TEMPORARY: Using simple Block to avoid state system issues

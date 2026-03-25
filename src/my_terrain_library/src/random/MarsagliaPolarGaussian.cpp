@@ -33,7 +33,7 @@ static double bitRandomSourceNextDouble(XoroshiroRandomSource* source) {
     int32_t high = static_cast<int32_t>(static_cast<uint64_t>(source->nextLong()) >> (64 - 26));
     int32_t low = static_cast<int32_t>(static_cast<uint64_t>(source->nextLong()) >> (64 - 27));
     int64_t combined = (static_cast<int64_t>(high) << 27) + static_cast<int64_t>(low);
-    return static_cast<double>(combined) * static_cast<double>(1.110223E-16F);
+    return static_cast<double>(combined) * 0x1.0p-53;
 }
 
 double MarsagliaPolarGaussian::nextGaussian() {

@@ -12,9 +12,11 @@
 #include "levelgen/feature/BlockChangeTrace.h"
 #include "server/level/WorldGenRegion.h"
 #include "core/BlockPos.h"
+#include "core/QuartPos.h"
 #include "world/ChunkPos.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/biome/Biome.h"
+#include "world/biome/BiomeManager.h"
 
 namespace minecraft {
 namespace levelgen {
@@ -88,7 +90,7 @@ public:
     bool isFluidAtPosition(const core::BlockPos& pos,
                           std::function<bool(BlockState*)> predicate) const override {
         BlockState* state = getBlockState(pos);
-        return state && state->isFluid() && predicate(state);
+        return state && state->hasAnyFluid() && predicate(state);
     }
 
     //=========================================================================
@@ -133,12 +135,41 @@ public:
 
     const world::biome::Biome* getBiome(const core::BlockPos& pos) const override {
         try {
-            int chunkX = pos.getX() >> 4;
-            int chunkZ = pos.getZ() >> 4;
-            ::world::IChunk* chunk = const_cast<server::level::WorldGenRegion*>(m_region)->getChunk(chunkX, chunkZ);
-            if (chunk) {
-                return chunk->getBiome(pos);
-            }
+            class RegionBiomeSource : public world::biome::BiomeManager::NoiseBiomeSource {
+            public:
+                explicit RegionBiomeSource(const server::level::WorldGenRegion* region)
+                    : m_region(region) {}
+
+                world::biome::BiomeHolder getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const override {
+                    int32_t blockX = core::QuartPos::toBlock(quartX);
+                    int32_t blockY = core::QuartPos::toBlock(quartY);
+                    int32_t blockZ = core::QuartPos::toBlock(quartZ);
+                    int chunkX = blockX >> 4;
+                    int chunkZ = blockZ >> 4;
+
+                    ::world::IChunk* chunk = const_cast<server::level::WorldGenRegion*>(m_region)->getChunk(
+                        chunkX,
+                        chunkZ,
+                        world::chunk::status::ChunkStatus::BIOMES,
+                        false
+                    );
+                    if (chunk) {
+                        return chunk->getBiome(core::BlockPos(blockX, blockY, blockZ));
+                    }
+
+                    return world::biome::Biomes::get(world::biome::BiomeKeys::PLAINS);
+                }
+
+            private:
+                const server::level::WorldGenRegion* m_region;
+            };
+
+            RegionBiomeSource biomeSource(m_region);
+            world::biome::BiomeManager biomeManager(
+                &biomeSource,
+                world::biome::BiomeManager::obfuscateSeed(m_region->getSeed())
+            );
+            return biomeManager.getBiome(pos);
         } catch (...) {}
         return nullptr;
     }

@@ -10,6 +10,7 @@
 #include "world/chunk/status/ChunkStatus.h"
 #include "world/ChunkPos.h"
 #include "util/CompletableFuture.h"
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
@@ -35,6 +36,8 @@ public:
     using ChunkAccess = ::world::IChunk;
     using ChunkResultType = std::shared_ptr<ChunkResult<ChunkAccess*>>;
     using FutureType = std::shared_ptr<util::CompletableFuture<ChunkResultType>>;
+    using ChunkRangeResultType = std::shared_ptr<ChunkResult<std::vector<ChunkAccess*>>>;
+    using ChunkRangeFutureType = std::shared_ptr<util::CompletableFuture<ChunkRangeResultType>>;
     using Executor = std::function<void(std::function<void()>)>;
 
     static constexpr int CACHE_SIZE = 4;
@@ -124,6 +127,13 @@ public:
     void addTicket(const Ticket& ticket, const world::ChunkPos& pos);
 
     /**
+     * Add a loading ticket and return a future that completes when the full
+     * chunk range required by that ticket has reached FULL status.
+     * Reference: ServerChunkCache.java lines 452-462
+     */
+    ChunkRangeFutureType addTicketAndLoadWithRadius(const TicketType& type, const world::ChunkPos& pos, int radius);
+
+    /**
      * Add a ticket with radius
      * Reference: ServerChunkCache.java lines 466-468
      */
@@ -172,7 +182,7 @@ public:
 
     /**
      * Signal the chunk cache to abort all blocking getChunk() loops.
-     * Called during shutdown to prevent worker threads from hanging forever.
+     * Used for clean shutdown so worker threads don't block forever.
      */
     void requestAbort() { m_abort.store(true, std::memory_order_release); }
     bool isAbortRequested() const { return m_abort.load(std::memory_order_acquire); }

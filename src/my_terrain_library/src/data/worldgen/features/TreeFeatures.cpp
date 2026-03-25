@@ -1079,7 +1079,7 @@ void TreeFeatures::bootstrap() {
     // DARK_OAK_LEAF_LITTER
     {
         auto builder = createDarkOak();
-        builder.decorators({sparseLeafLitter, thickLeafLitter});
+        builder.ignoreVines().decorators({sparseLeafLitter, thickLeafLitter});
         auto config = std::make_unique<TreeConfiguration>(builder.build());
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);

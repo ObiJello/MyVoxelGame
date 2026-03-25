@@ -23,7 +23,7 @@ public:
     // Constants from XoroshiroRandomSource.java lines 9-10
     static constexpr float FLOAT_UNIT = 5.9604645E-8F;
     // CRITICAL: Java uses (double)1.110223E-16F - float literal cast to double!
-    static constexpr double DOUBLE_UNIT = static_cast<double>(1.110223E-16F);
+    static constexpr double DOUBLE_UNIT = 0x1.0p-53;
 
     /**
      * Construct from a 64-bit seed.

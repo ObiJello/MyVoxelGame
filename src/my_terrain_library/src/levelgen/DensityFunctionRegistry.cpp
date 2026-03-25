@@ -10,6 +10,7 @@
 #include "random/RandomSupport.h"
 #include <cmath>
 #include <iostream>
+#include <unordered_set>
 
 // For accessing Spline::Point and Spline::Coordinate
 using Spline = minecraft::density::DensityFunctions::Spline;
@@ -66,56 +67,25 @@ void DensityFunctionRegistry::clear() {
     m_functions.clear();
 }
 
-// Static variables to cache the positional random factory seeds
-// These are initialized once per bootstrap and reused for all noises
-static uint64_t g_positionalSeedLo = 0;
-static uint64_t g_positionalSeedHi = 0;
-
-// Static cache for NoiseHolder instances (matches Java's RandomState.noiseIntances)
-// Each noise name maps to exactly ONE NormalNoise instance
+// Static cache for NoiseHolder instances. The routed density graph keeps keyed
+// holders and RandomState wires them to concrete noises later.
 static std::unordered_map<std::string, DensityFunction::NoiseHolder*> g_noiseCache;
+static std::unordered_set<std::string> g_noiseNamePool;
 
-// Helper: Create NormalNoise and wrap in DensityFunction::NoiseHolder
-// This matches Java's RandomState.getOrCreateNoise() with caching
+// Helper: Create an unseeded NoiseHolder keyed by registry name.
 DensityFunction::NoiseHolder* DensityFunctionRegistry::createNoiseHolder(const std::string& noiseName, int64_t worldSeed) {
+    (void)worldSeed;
+
     // Check cache first (matches Java's computeIfAbsent)
     auto it = g_noiseCache.find(noiseName);
     if (it != g_noiseCache.end()) {
         return it->second;
     }
 
-    NoiseRegistry& noiseReg = NoiseRegistry::instance();
-    const NoiseRegistry::NoiseParameters& params = noiseReg.getOrThrow(noiseName);
+    const std::string& pooledName = *g_noiseNamePool.insert(noiseName).first;
+    DensityFunction::NoiseHolder* holder = new DensityFunction::NoiseHolder(pooledName.c_str());
 
-    // Minecraft's noise seeding process:
-    // 1. Create XoroshiroRandomSource from world seed (done ONCE per bootstrap)
-    // 2. Fork it positionally to get PositionalRandomFactory (done ONCE per bootstrap)
-    // 3. Use fromHashOf("minecraft:noise_name") to get noise-specific random
-    // Reference: RandomState.java getOrCreateNoise() -> Noises.instantiate()
-
-    // Use cached positional seeds (initialized in bootstrap())
-    // These are the same for ALL noises from the same world seed
-    uint64_t seedLo = g_positionalSeedLo;
-    uint64_t seedHi = g_positionalSeedHi;
-
-
-    // Step 3: Use fromHashOf with full resource identifier "minecraft:noise_name"
-    std::string resourceId = "minecraft:" + noiseName;
-    Seed128bit hashSeed = RandomSupport::seedFromHashOf(resourceId);
-    Seed128bit xoredSeed = hashSeed.xor_(seedLo, seedHi);
-
-    // Create the noise-specific random source
-    XoroshiroRandomSource noiseRandom(xoredSeed.seedLo, xoredSeed.seedHi);
-
-    // Create the noise
-    NormalNoise* noise = new NormalNoise(NormalNoise::create(noiseRandom, params.firstOctave, params.amplitudes));
-
-    // Wrap in holder
-    DensityFunction::NoiseHolder* holder = new DensityFunction::NoiseHolder(noise);
-
-    // Cache it (matches Java's noiseIntances.put())
     g_noiseCache[noiseName] = holder;
-
     return holder;
 }
 
@@ -213,7 +183,6 @@ static void registerTerrainNoises(
  */
 void DensityFunctionRegistry::bootstrap(int64_t worldSeed) {
     DensityFunctionRegistry& registry = instance();
-    NoiseRegistry& noiseReg = NoiseRegistry::instance();
 
     // Store world seed for later use (e.g., NoiseRouterData::overworld())
     registry.m_worldSeed = worldSeed;
@@ -223,14 +192,6 @@ void DensityFunctionRegistry::bootstrap(int64_t worldSeed) {
 
     // Clear noise cache (matches Java's RandomState constructor creating new noiseIntances map)
     g_noiseCache.clear();
-
-    // Initialize positional random factory seeds (used by ALL noises)
-    // This matches Java's RandomState.random.forkPositional()
-    XoroshiroRandomSource baseRandom(worldSeed);
-    g_positionalSeedLo = baseRandom.nextLong();
-    g_positionalSeedHi = baseRandom.nextLong();
-
-    // Positional seeds initialized for all noises
 
     // Line 76: ZERO = DensityFunctions.zero()
     registry.registerFunction("zero", zero());
@@ -256,33 +217,20 @@ void DensityFunctionRegistry::bootstrap(int64_t worldSeed) {
     // Line 82-84: BASE_3D_NOISE for different dimensions
     // Reference: NoiseRouterData.java lines 82-84
     //
-    // IMPORTANT: In Java, BlendedNoise.createUnseeded() creates with seed 0L during bootstrap,
-    // but RandomState.create() runs a visitor that re-seeds BlendedNoise with:
-    //   random.fromHashOf("minecraft:terrain")
-    // where random = XoroshiroRandomSource(worldSeed).forkPositional()
-    //
-    // We apply the same seeding here directly to get correct terrain noise.
-
-    // Create the positional random factory from world seed (like RandomState does)
-    Seed128bit terrainSeedPair = RandomSupport::upgradeSeedTo128bit(worldSeed);
-    XoroshiroRandomSource terrainBaseRandom(terrainSeedPair.seedLo, terrainSeedPair.seedHi);
-    XoroshiroPositionalRandomFactory terrainFactory = terrainBaseRandom.forkPositional();
-
-    // Get terrain random: random.fromHashOf("minecraft:terrain")
-    XoroshiroRandomSource terrainRandom = terrainFactory.fromHashOf("minecraft:terrain");
+    // RandomState re-seeds BlendedNoise later via random.fromHashOf("minecraft:terrain").
+    XoroshiroRandomSource unseededTerrainRandom(0L);
 
     // Overworld BlendedNoise: xzScale=0.25, yScale=0.125, xzFactor=80.0, yFactor=160.0, smearScaleMultiplier=8.0
-    BlendedNoise* overworldBase3dNoise = new BlendedNoise(terrainRandom, 0.25, 0.125, 80.0, 160.0, 8.0);
+    BlendedNoise* overworldBase3dNoise = new BlendedNoise(unseededTerrainRandom, 0.25, 0.125, 80.0, 160.0, 8.0);
     registry.registerFunction("overworld/base_3d_noise", overworldBase3dNoise);
 
-    // Nether and End also use terrain random (same visitor applies to all BlendedNoise)
-    // Re-create terrain random for each (consuming random state like Java does)
-    XoroshiroRandomSource terrainRandomNether = terrainFactory.fromHashOf("minecraft:terrain");
-    BlendedNoise* netherBase3dNoise = new BlendedNoise(terrainRandomNether, 0.25, 0.375, 80.0, 60.0, 8.0);
+    // Nether and End are also registered unseeded and rewritten in RandomState.
+    XoroshiroRandomSource unseededNetherTerrainRandom(0L);
+    BlendedNoise* netherBase3dNoise = new BlendedNoise(unseededNetherTerrainRandom, 0.25, 0.375, 80.0, 60.0, 8.0);
     registry.registerFunction("nether/base_3d_noise", netherBase3dNoise);
 
-    XoroshiroRandomSource terrainRandomEnd = terrainFactory.fromHashOf("minecraft:terrain");
-    BlendedNoise* endBase3dNoise = new BlendedNoise(terrainRandomEnd, 0.25, 0.25, 80.0, 160.0, 4.0);
+    XoroshiroRandomSource unseededEndTerrainRandom(0L);
+    BlendedNoise* endBase3dNoise = new BlendedNoise(unseededEndTerrainRandom, 0.25, 0.25, 80.0, 160.0, 4.0);
     registry.registerFunction("end/base_3d_noise", endBase3dNoise);
 
     // Line 85: CONTINENTS = flatCache(shiftedNoise2d(shiftX, shiftZ, 0.25, continentalness noise))

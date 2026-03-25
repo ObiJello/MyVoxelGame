@@ -92,9 +92,19 @@ namespace Game {
         isBreaking = true;
         breakProgress = 0.0f;
         breakingBlockPos = pos;
-        
-        Log::Debug("Started breaking block at (%d, %d, %d)",
-                  breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+
+        // Cache block ID now — by the time FinishBreaking runs, the server
+        // may have already set this position to Air via BlockChangeS2C.
+        breakingBlockId = BlockID::Air;
+        if (world) {
+            try {
+                breakingBlockId = world->GetBlock(pos.x, pos.y, pos.z);
+            } catch (...) {}
+        }
+
+        Log::Debug("Started breaking block at (%d, %d, %d) type=%d",
+                  breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z,
+                  static_cast<int>(breakingBlockId));
         
         // TODO: Send packet
         // net->SendBlockDig(START_DESTROY_BLOCK, pos, face, ++interactSeq);
@@ -231,8 +241,12 @@ namespace Game {
 
         player->SelectSlot(slot);
 
+        // Send slot change + block type to server (MC: ServerboundSetCarriedItemPacket)
         if (networkClient && networkClient->IsConnected()) {
-            Network::HeldItemChangeC2SPacket packet(static_cast<int16_t>(slot));
+            BlockID block = player->GetSelectedBlock();
+            Network::HeldItemChangeC2SPacket packet(
+                static_cast<int16_t>(slot),
+                static_cast<uint16_t>(block));
             auto data = Network::Serialization::Serialize(packet);
             auto connection = networkClient->GetConnection();
             if (connection) {
@@ -283,10 +297,12 @@ namespace Game {
                 //     SendUseEntity(*player->lastEntityHit, 0);  // Interact with entity
                 //     rightClickDelayTimer = RIGHT_CLICK_DELAY;
                 // } else
-                if (currentHit.has_value()) {
-                    // Hit a block - send UseItemOn packet and consume from inventory
+                if (currentHit.has_value() && player->GetSelectedBlock() != BlockID::Air) {
+                    // Ensure server knows what block we're holding BEFORE the place request
+                    OnHotbarChanged(player->inventory.GetSelectedSlot());
+                    // Send place request to server
                     SendUseItemOn(*currentHit, 0);  // 0 = main hand
-                    // Consume block from client inventory (server doesn't track counts)
+                    // Consume block from client inventory
                     player->inventory.ConsumeSelectedBlock();
                     rightClickDelayTimer = RIGHT_CLICK_DELAY;  // Set delay to prevent spam
                 } else {
@@ -375,15 +391,9 @@ namespace Game {
             return;
         }
 
-        BlockID brokenBlock = BlockID::Air;
-        try {
-            brokenBlock = world->GetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
-        } catch (const std::exception& e) {
-            Log::Error("Exception getting block for breaking: %s", e.what());
-            isBreaking = false;
-            breakProgress = 0.0f;
-            return;
-        }
+        // Use the cached block ID from StartDig — the world position may already
+        // be Air if the server processed BlockActionC2S before we got here.
+        BlockID brokenBlock = breakingBlockId;
 
         if (brokenBlock == BlockID::Bedrock) {
             Log::Debug("Cannot break bedrock");
@@ -414,6 +424,9 @@ namespace Game {
                 Log::Warning("Inventory full - dropped %d %s",
                            remaining, BlockRegistry::Get(brokenBlock).name.c_str());
             }
+
+            // Sync server with updated inventory (block was added to a slot)
+            OnHotbarChanged(player->inventory.GetSelectedSlot());
 
             player->stats.blocksBroken++;
             player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
