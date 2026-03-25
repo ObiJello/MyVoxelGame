@@ -930,7 +930,13 @@ density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int cellIndex) {
 
 // Java lines 248-263
 // OPTIMIZATION: Use local variables and restrict pointer
-void NoiseChunk::fillAllDirectly(double* __restrict__ output, int count, density::DensityFunction* function) {
+void NoiseChunk::fillAllDirectly(double*
+#ifdef _MSC_VER
+    __restrict
+#else
+    __restrict__
+#endif
+    output, int count, density::DensityFunction* function) {
     (void)count;  // Unused - we iterate based on cell dimensions
 
     // Cache dimensions in local variables for faster access

@@ -66,6 +66,15 @@ The game adds `requestAbort()` / `isAbortRequested()` / `m_abort` to `ServerChun
 **Source** (`src/server/level/ServerChunkCache.cpp`):
 - In `getChunk()`, change `while (!future->isDone())` to `while (!future->isDone() && !m_abort.load(std::memory_order_acquire))`
 
+### MSVC compatibility fixes (Windows build)
+The terrain library uses GCC/Clang-specific features that need MSVC equivalents:
+
+**`CarvingMask.cpp`**: Replace `__builtin_ctzll(bits)` with `#ifdef _MSC_VER` block using `_BitScanForward64`. Add `#include <intrin.h>` for MSVC.
+
+**`Climate.h`, `Palette.h`, `SimpleBitStorage.h`**: Add `#include <string>` — MSVC doesn't include it transitively like GCC/Clang, so `std::to_string` fails.
+
+**`NoiseChunk.cpp`**: Replace `__restrict__` with `#ifdef _MSC_VER __restrict` (MSVC uses different keyword).
+
 ### MapBlockType thread safety
 `MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. The `m_blockIdCache` unordered_map must be protected with `m_blockIdCacheMutex` (already in MyTerrainGenerator.hpp/cpp, not in the terrain library).
 
