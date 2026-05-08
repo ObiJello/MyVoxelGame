@@ -31,14 +31,22 @@ namespace Server {
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& sessionManager) {
+        // Preserve current rotation across teleport — matches MC's
+        // teleportToPos(...) which passes entity.getYRot(), entity.getXRot() when no
+        // rotation argument is supplied to /tp.
+        const float keepYaw   = sender.getYaw();
+        const float keepPitch = sender.getPitch();
+
         if (args.size() == 3) {
             // /tp <x> <y> <z>
             try {
-                float x = std::stof(args[0]);
-                float y = std::stof(args[1]);
-                float z = std::stof(args[2]);
+                double x = std::stod(args[0]);
+                double y = std::stod(args[1]);
+                double z = std::stod(args[2]);
 
-                sender.setPosition(glm::dvec3(x, y, z));
+                // MC: connection.teleport(x, y, z, yRot, xRot) — sets ServerPlayer position,
+                // sends ClientboundPlayerPosition with awaiting-teleport id, client snaps + acks.
+                connection.Teleport(x, y, z, keepYaw, keepPitch);
 
                 connection.SendChatMessage(
                     "Teleported to " + args[0] + " " + args[1] + " " + args[2], 1);
@@ -65,7 +73,7 @@ namespace Server {
 
             if (target) {
                 glm::dvec3 targetPos = target->getPosition();
-                sender.setPosition(targetPos);
+                connection.Teleport(targetPos.x, targetPos.y, targetPos.z, keepYaw, keepPitch);
 
                 connection.SendChatMessage(
                     "Teleported to " + target->getName(), 1);

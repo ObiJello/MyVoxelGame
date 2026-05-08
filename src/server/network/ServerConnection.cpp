@@ -7,7 +7,10 @@
 #include "listeners/LoginPacketListener.hpp"
 #include "listeners/ServerPlayPacketListener.hpp"
 #include "../session/PlayerSession.hpp"
+#include "../player/ServerPlayer.hpp"
+#include "../IntegratedServer.hpp"
 #include "common/core/Log.hpp"
+#include <limits>
 #include "common/network/packets/HandshakeC2S.hpp"
 #include "common/network/packets/LoginStartC2S.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
@@ -55,6 +58,8 @@ namespace Server {
                                          [this](const std::vector<uint8_t>& p) { HandleClientSettings(p); });
         m_packetRegistry.RegisterHandler(PacketId::HeldItemChange,
                                          [this](const std::vector<uint8_t>& p) { HandleHeldItemChange(p); });
+        m_packetRegistry.RegisterHandler(PacketId::ServerboundAcceptTeleportation,
+                                         [this](const std::vector<uint8_t>& p) { HandleAcceptTeleportation(p); });
     }
 
     ServerConnection::~ServerConnection() {
@@ -574,6 +579,54 @@ namespace Server {
         auto packet = Network::Serialization::DeserializeHeldItemChangeC2S(payload);
         if (m_listener) {
             m_listener->onHeldItemChangeC2S(packet);
+        }
+    }
+
+    void ServerConnection::Teleport(double x, double y, double z, float yRot, float xRot) {
+        // Match MC's ServerGamePacketListenerImpl.teleport(PositionMoveRotation, Set<Relative>):
+        //   1. Bump the awaiting-teleport id (wrap on int max)
+        //   2. Snap the server-side player position
+        //   3. Send ClientboundPlayerPosition to the client; client snaps and acks
+        if (++m_awaitingTeleport == std::numeric_limits<int32_t>::max()) {
+            m_awaitingTeleport = 0;
+        }
+
+        // Locate this connection's ServerPlayer via session manager and snap its position
+        if (Server::g_integratedServer) {
+            auto* sessionManager = Server::g_integratedServer->GetSessionManager();
+            if (sessionManager) {
+                auto session = sessionManager->GetSession(m_playerId);
+                if (session && session->GetPlayer()) {
+                    session->GetPlayer()->setPosition(glm::dvec3(x, y, z));
+                }
+            }
+        }
+
+        Network::ClientboundPlayerPositionPacket packet;
+        packet.id = m_awaitingTeleport;
+        packet.x = x;  packet.y = y;  packet.z = z;
+        packet.dx = 0.0; packet.dy = 0.0; packet.dz = 0.0; // MC's helper passes Vec3.ZERO — kills velocity
+        packet.yRot = yRot;
+        packet.xRot = xRot;
+        packet.relatives = 0; // empty Set<Relative> — fully absolute teleport
+        auto data = Network::Serialization::Serialize(packet);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::ClientboundPlayerPosition), data);
+
+        Log::Info("[ServerConnection %u] Teleport id=%d → (%.2f, %.2f, %.2f)",
+                  GetConnectionId(), m_awaitingTeleport, x, y, z);
+    }
+
+    void ServerConnection::HandleAcceptTeleportation(const std::vector<uint8_t>& payload) {
+        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+
+        auto packet = Network::Serialization::DeserializeServerboundAcceptTeleportation(payload);
+        if (packet.id == m_awaitingTeleport) {
+            // MC: this is where awaitingPositionFromClient gets cleared so subsequent C2S position
+            // packets are accepted again. Our server doesn't use that gate yet — log and move on.
+            Log::Info("[ServerConnection %u] Teleport id=%d acked", GetConnectionId(), packet.id);
+        } else {
+            Log::Warning("[ServerConnection %u] Stale teleport ack: got %d, expected %d",
+                         GetConnectionId(), packet.id, m_awaitingTeleport);
         }
     }
 

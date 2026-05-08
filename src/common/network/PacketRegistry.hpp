@@ -51,6 +51,7 @@
             HotbarSyncS2C         = 0x25,  // Server-authoritative hotbar contents
             SetChunkCacheRadiusS2C = 0x26, // Server tells client the effective view distance
             PlayerInfoS2C          = 0x27, // Player list updates (join/leave with name)
+            ClientboundPlayerPosition = 0x28, // Authoritative position snap (MC: ClientboundPlayerPositionPacket)
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -73,6 +74,7 @@
             EntityAction        = 0x8E,
             SteerVehicle        = 0x8F,
             ChunkBatchAckC2S    = 0x90,  // Client acknowledges batch with desired send rate
+            ServerboundAcceptTeleportation = 0x91, // Echo of teleport id (MC: ServerboundAcceptTeleportationPacket)
         };
 
         // Convert PacketId to string for logging
@@ -111,6 +113,7 @@
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
                 case PacketId::HotbarSyncS2C: return "HotbarSyncS2C";
                 case PacketId::PlayerInfoS2C: return "PlayerInfoS2C";
+                case PacketId::ClientboundPlayerPosition: return "ClientboundPlayerPosition";
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";
@@ -131,6 +134,7 @@
                 case PacketId::EntityAction: return "EntityAction";
                 case PacketId::SteerVehicle: return "SteerVehicle";
                 case PacketId::ChunkBatchAckC2S: return "ChunkBatchAckC2S";
+                case PacketId::ServerboundAcceptTeleportation: return "ServerboundAcceptTeleportation";
 
                 default: return "Unknown";
             }

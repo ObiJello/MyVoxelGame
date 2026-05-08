@@ -281,6 +281,40 @@ namespace Network {
         std::string playerName;  // Only meaningful for ADD
     };
 
+    // Relative-flag bitmask matching MC's net.minecraft.world.entity.Relative.
+    // Each bit, when set, marks that field as a delta added to the entity's current value
+    // instead of replaced. An empty mask (0) means a fully absolute teleport.
+    namespace Relative {
+        constexpr int32_t X            = 1 << 0;
+        constexpr int32_t Y            = 1 << 1;
+        constexpr int32_t Z            = 1 << 2;
+        constexpr int32_t Y_ROT        = 1 << 3;
+        constexpr int32_t X_ROT        = 1 << 4;
+        constexpr int32_t DELTA_X      = 1 << 5;
+        constexpr int32_t DELTA_Y      = 1 << 6;
+        constexpr int32_t DELTA_Z      = 1 << 7;
+        constexpr int32_t ROTATE_DELTA = 1 << 8;
+    }
+
+    // Authoritative position snap from server to a single player.
+    // MC: ClientboundPlayerPositionPacket (record { int id; PositionMoveRotation; Set<Relative> }).
+    // Client must echo the id back via ServerboundAcceptTeleportationPacket so the server can
+    // ignore stale client-side position updates that were in flight before the teleport.
+    struct ClientboundPlayerPositionPacket {
+        int32_t id = 0;
+        // PositionMoveRotation: position + deltaMovement + yRot + xRot
+        double x = 0.0, y = 0.0, z = 0.0;
+        double dx = 0.0, dy = 0.0, dz = 0.0;
+        float yRot = 0.0f;
+        float xRot = 0.0f;
+        int32_t relatives = 0; // bitmask of Relative::* — 0 means fully absolute
+    };
+
+    // Client → server ack for a ClientboundPlayerPosition. MC: ServerboundAcceptTeleportationPacket.
+    struct ServerboundAcceptTeleportationPacket {
+        int32_t id = 0;
+    };
+
     // Chat messages and commands
     struct ChatMessageC2SPacket {
         std::string message;
@@ -912,6 +946,53 @@ namespace Network {
             PacketReader reader(data);
             HotbarSyncS2CPacket packet;
             for (int i = 0; i < 9; i++) packet.slots[i] = static_cast<uint16_t>(reader.ReadShort());
+            return packet;
+        }
+
+        // ---- ClientboundPlayerPositionPacket Serialization ----
+        // Wire format mirrors MC's ClientboundPlayerPositionPacket:
+        // VarInt(id) + Vec3(pos) + Vec3(delta) + Float(yRot) + Float(xRot) + Int(relatives bitmask)
+        // We use fixed-size int32 instead of VarInt for simplicity (our buffer doesn't have VarInt).
+        inline std::vector<uint8_t> Serialize(const ClientboundPlayerPositionPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteInt(packet.id);
+            buffer.WriteDouble(packet.x);
+            buffer.WriteDouble(packet.y);
+            buffer.WriteDouble(packet.z);
+            buffer.WriteDouble(packet.dx);
+            buffer.WriteDouble(packet.dy);
+            buffer.WriteDouble(packet.dz);
+            buffer.WriteFloat(packet.yRot);
+            buffer.WriteFloat(packet.xRot);
+            buffer.WriteInt(packet.relatives);
+            return buffer.GetData();
+        }
+        inline ClientboundPlayerPositionPacket DeserializeClientboundPlayerPosition(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            ClientboundPlayerPositionPacket packet;
+            packet.id = static_cast<int32_t>(reader.ReadInt());
+            packet.x  = reader.ReadDouble();
+            packet.y  = reader.ReadDouble();
+            packet.z  = reader.ReadDouble();
+            packet.dx = reader.ReadDouble();
+            packet.dy = reader.ReadDouble();
+            packet.dz = reader.ReadDouble();
+            packet.yRot = reader.ReadFloat();
+            packet.xRot = reader.ReadFloat();
+            packet.relatives = static_cast<int32_t>(reader.ReadInt());
+            return packet;
+        }
+
+        // ---- ServerboundAcceptTeleportationPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const ServerboundAcceptTeleportationPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteInt(packet.id);
+            return buffer.GetData();
+        }
+        inline ServerboundAcceptTeleportationPacket DeserializeServerboundAcceptTeleportation(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            ServerboundAcceptTeleportationPacket packet;
+            packet.id = static_cast<int32_t>(reader.ReadInt());
             return packet;
         }
 

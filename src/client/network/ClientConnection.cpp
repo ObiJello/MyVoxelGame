@@ -12,6 +12,8 @@
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
 static std::function<void(const std::string&)> s_chatCallback;
 static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
+// Teleport callback — set by PlatformMain to snap the local Player on /tp
+static std::function<void(double, double, double, float, float)> s_teleportCallback;
 
 void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
     s_chatCallback = std::move(callback);
@@ -19,6 +21,10 @@ void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
 
 void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback) {
     s_chatBubbleCallback = std::move(callback);
+}
+
+void SetTeleportCallback(std::function<void(double, double, double, float, float)> callback) {
+    s_teleportCallback = std::move(callback);
 }
 
 namespace Client {
@@ -51,6 +57,8 @@ namespace Client {
             [this](const std::vector<uint8_t>& p) { HandleWorldSpawn(p); });
         m_packetRegistry.RegisterHandler(PacketId::PlayerInfoS2C,
             [this](const std::vector<uint8_t>& p) { HandlePlayerInfo(p); });
+        m_packetRegistry.RegisterHandler(PacketId::ClientboundPlayerPosition,
+            [this](const std::vector<uint8_t>& p) { HandleClientboundPlayerPosition(p); });
     }
 
     ClientConnection::~ClientConnection() {
@@ -276,6 +284,29 @@ namespace Client {
 
         Log::Info("[ClientConnection] World spawn set to (%.0f, %.0f, %.0f)",
             m_spawnPosition.x, m_spawnPosition.y, m_spawnPosition.z);
+    }
+
+    void ClientConnection::HandleClientboundPlayerPosition(const std::vector<uint8_t>& payload) {
+        auto packet = Network::Serialization::DeserializeClientboundPlayerPosition(payload);
+
+        // MC's client computes absolute values from current player state when relative bits are
+        // set. Our /tp only ever sends absolute (relatives == 0), so the snap is straightforward.
+        // If we ever support relative teleport, this is where to apply Relative bit logic.
+        if (s_teleportCallback) {
+            s_teleportCallback(packet.x, packet.y, packet.z, packet.yRot, packet.xRot);
+        } else {
+            Log::Warning("[ClientConnection] Got teleport packet but no callback registered");
+        }
+
+        // Echo the id back so the server's awaiting-teleport gate clears
+        // (MC: ServerboundAcceptTeleportationPacket).
+        Network::ServerboundAcceptTeleportationPacket ack;
+        ack.id = packet.id;
+        auto data = Network::Serialization::Serialize(ack);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::ServerboundAcceptTeleportation), data);
+
+        Log::Info("[ClientConnection] Teleport id=%d → (%.2f, %.2f, %.2f), acked",
+                  packet.id, packet.x, packet.y, packet.z);
     }
 
     void ClientConnection::HandlePlayerInfo(const std::vector<uint8_t>& payload) {

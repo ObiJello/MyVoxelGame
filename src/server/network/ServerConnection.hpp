@@ -96,6 +96,12 @@ namespace Server {
         // Send player abilities
         void SendPlayerAbilities(uint8_t flags, float flySpeed, float walkSpeed);
 
+        // Authoritative teleport (matches MC's ServerGamePacketListenerImpl.teleport overload).
+        // Increments awaiting-teleport id, snaps the player's ServerPlayer position, and sends
+        // ClientboundPlayerPosition to the client. The client must echo the id back via
+        // ServerboundAcceptTeleportation so the server can ignore stale C2S position packets.
+        void Teleport(double x, double y, double z, float yRot, float xRot);
+
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)
         // ========================================================================
@@ -136,6 +142,10 @@ namespace Server {
         // Handle held item change
         void HandleHeldItemChange(const std::vector<uint8_t>& payload);
 
+        // Handle ack for a previously sent ClientboundPlayerPosition (MC: handleAcceptTeleportPacket).
+        // Validates the id matches m_awaitingTeleport — stale acks are ignored.
+        void HandleAcceptTeleportation(const std::vector<uint8_t>& payload);
+
         // ========================================================================
         // INTERNAL HELPERS
         // ========================================================================
@@ -160,6 +170,11 @@ namespace Server {
         std::string m_playerName;
         uint32_t m_playerId = 0;
         bool m_authenticated = false;
+
+        // Teleport tracking — matches MC's awaitingTeleport. Incremented per Teleport() call;
+        // client must echo this id back so we can ignore stale C2S position packets that
+        // were in flight before the teleport.
+        int32_t m_awaitingTeleport = 0;
         
         // Connection state
         ConnectionPhase m_phase = ConnectionPhase::HANDSHAKING;

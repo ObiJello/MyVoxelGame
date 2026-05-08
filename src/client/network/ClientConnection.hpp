@@ -100,6 +100,11 @@ namespace Client {
         // Handle player info update (join/leave with name) — MC: ClientboundPlayerInfoUpdatePacket
         void HandlePlayerInfo(const std::vector<uint8_t>& payload);
 
+        // Handle authoritative position snap from server (MC: ClientboundPlayerPositionPacket).
+        // Calls the teleport callback registered by PlatformMain to snap the local Player,
+        // then sends ServerboundAcceptTeleportation back with the same id.
+        void HandleClientboundPlayerPosition(const std::vector<uint8_t>& payload);
+
     private:
         // Client reference
         NetworkClient* m_client;

@@ -35,6 +35,7 @@
 // Declared in ClientConnection.cpp
 extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
 extern void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback);
+extern void SetTeleportCallback(std::function<void(double, double, double, float, float)> callback);
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
 #include "common/core/Profiling.hpp"
@@ -798,6 +799,20 @@ namespace PlatformMain {
         if (!isRemoteClient && Server::g_integratedServer) {
             Server::g_integratedServer->SetPlayer(&player);
         }
+
+        // Wire teleport packet → local player snap (matches MC client's handleMovePlayer:
+        // always snap, no prediction-error threshold; also zero velocity to match server's
+        // Vec3.ZERO delta in connection.teleport(x,y,z,yRot,xRot)).
+        SetTeleportCallback([&player](double x, double y, double z, float yRot, float xRot) {
+            glm::dvec3 dpos(x, y, z);
+            player.physics.position = glm::vec3(dpos);
+            player.physics.velocity = glm::vec3(0.0f);
+            player.predictedPos = dpos;
+            player.serverPos    = dpos;
+            player.visualPos    = dpos;
+            player.yaw   = yRot;
+            player.pitch = xRot;
+        });
 
         // 7. Initialize rendering systems (keeping existing ones that still work)
         if (!Render::InitializeChunkRenderer()) {
