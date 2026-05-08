@@ -270,6 +270,17 @@ namespace Network {
         HeldItemChangeC2SPacket(int16_t s, uint16_t block = 0) : slot(s), blockId(block) {}
     };
 
+    // Player info (join/leave notifications with name) — MC: ClientboundPlayerInfoUpdatePacket
+    struct PlayerInfoS2CPacket {
+        enum class Action : uint8_t {
+            ADD = 0,     // Player joined
+            REMOVE = 1,  // Player left
+        };
+        Action action = Action::ADD;
+        uint32_t playerId = 0;
+        std::string playerName;  // Only meaningful for ADD
+    };
+
     // Chat messages and commands
     struct ChatMessageC2SPacket {
         std::string message;
@@ -866,6 +877,27 @@ namespace Network {
             packet.slot = reader.ReadShort();
             if (reader.Remaining() >= 2) {
                 packet.blockId = static_cast<uint16_t>(reader.ReadShort());
+            }
+            return packet;
+        }
+
+        // ---- PlayerInfoS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const PlayerInfoS2CPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteByte(static_cast<uint8_t>(packet.action));
+            buffer.WriteInt(static_cast<int32_t>(packet.playerId));
+            if (packet.action == PlayerInfoS2CPacket::Action::ADD) {
+                buffer.WriteString(packet.playerName);
+            }
+            return buffer.GetData();
+        }
+        inline PlayerInfoS2CPacket DeserializePlayerInfoS2C(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            PlayerInfoS2CPacket packet;
+            packet.action = static_cast<PlayerInfoS2CPacket::Action>(reader.ReadByte());
+            packet.playerId = static_cast<uint32_t>(reader.ReadInt());
+            if (packet.action == PlayerInfoS2CPacket::Action::ADD && reader.Remaining() > 0) {
+                packet.playerName = reader.ReadString();
             }
             return packet;
         }

@@ -97,6 +97,9 @@ namespace Client {
         // Handle world spawn
         void HandleWorldSpawn(const std::vector<uint8_t>& payload);
 
+        // Handle player info update (join/leave with name) — MC: ClientboundPlayerInfoUpdatePacket
+        void HandlePlayerInfo(const std::vector<uint8_t>& payload);
+
     private:
         // Client reference
         NetworkClient* m_client;

@@ -7,11 +7,13 @@
 #include <string>
 #include <cstdint>
 #include <cmath>
+#include <cctype>
 
 namespace Client {
 
     struct RemotePlayer {
         uint32_t playerId = 0;
+        std::string name;  // Player name (populated from PlayerInfoS2C ADD action)
 
         // Current rendered state (interpolated each tick)
         glm::vec3 position{0.0f};
@@ -125,6 +127,32 @@ namespace Client {
                     }
                 }
             }
+        }
+
+        // Set the player's name. Creates an entry if the player isn't tracked yet so that
+        // PlayerInfoS2C ADD can arrive before the first position update (matching MC, where
+        // ClientboundPlayerInfoUpdatePacket arrives before the player entity is spawned).
+        void SetPlayerName(uint32_t id, const std::string& name) {
+            auto& rp = m_players[id];
+            rp.playerId = id;
+            rp.name = name;
+        }
+
+        // Case-insensitive name lookup (matching MC's PlayerList.getPlayerByName)
+        const RemotePlayer* FindPlayerByName(const std::string& name) const {
+            for (const auto& [id, rp] : m_players) {
+                if (rp.name.size() == name.size()) {
+                    bool equal = true;
+                    for (size_t i = 0; i < name.size(); i++) {
+                        if (std::tolower(static_cast<unsigned char>(rp.name[i])) !=
+                            std::tolower(static_cast<unsigned char>(name[i]))) {
+                            equal = false; break;
+                        }
+                    }
+                    if (equal) return &rp;
+                }
+            }
+            return nullptr;
         }
 
         void RemovePlayer(uint32_t id) { m_players.erase(id); }

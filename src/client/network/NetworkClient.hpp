@@ -150,8 +150,8 @@ namespace Client {
         std::string m_serverHost;
         uint16_t m_serverPort = 25565;
 
-        // Player name for handshake
-        std::string m_playerName = "Player1";
+        // Player name for handshake (empty → server auto-assigns "PlayerN")
+        std::string m_playerName;
         
         // Client state
         std::atomic<ClientState> m_state{ClientState::IDLE};

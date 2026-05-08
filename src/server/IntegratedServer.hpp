@@ -7,6 +7,7 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/world/level/World.hpp"
 #include "common/network/AsioInclude.hpp"
+#include "commands/CommandDispatcher.hpp"
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -105,6 +106,9 @@ namespace Server {
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
 
+        // Get command dispatcher for server-side command execution
+        CommandDispatcher& GetCommandDispatcher() { return m_commandDispatcher; }
+
         // Get status manager for chunk generation tracking
         ChunkStatusManager* GetStatusManager() const { return m_statusManager.get(); }
 
@@ -189,6 +193,7 @@ namespace Server {
         std::unique_ptr<ChunkStatusManager> m_statusManager;
         std::unique_ptr<SendScheduler> m_sendScheduler;
         std::unique_ptr<PlayerSessionManager> m_sessionManager;
+        CommandDispatcher m_commandDispatcher;
         
         // Block change accumulation and broadcasting
         std::unique_ptr<SectionChangeAccumulator> m_changeAccumulator;

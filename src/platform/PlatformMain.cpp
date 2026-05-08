@@ -30,6 +30,7 @@
 #include "client/renderer/gui/ChatComponent.hpp"
 #include "client/renderer/gui/ChatScreen.hpp"
 #include <functional>
+#include <sstream>
 
 // Declared in ClientConnection.cpp
 extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
@@ -331,24 +332,40 @@ namespace PlatformMain {
         }
     }
 
-    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera) {
-        static bool cursorEnabled = false;
+    // Cursor visibility is the OR of two independent sources:
+    //   - manual: toggled by Tab (user preference)
+    //   - overlay: forced visible by UI screens that need pointer input (chat, future menus)
+    // The effective state is applied to GLFW only on transition so opening chat while the
+    // cursor is already up via Tab doesn't fight the manual toggle (and vice versa).
+    bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera, bool overlayWantsCursor) {
+        static bool s_manualCursorVisible = false;
+        static bool s_lastEffective = false;
+        static bool s_initialized = false;
 
-        if (Input::IsKeyPressed(Input::Key::Tab)) {
-            cursorEnabled = !cursorEnabled;
+        // Ignore Tab while an overlay holds the cursor — otherwise pressing Tab inside chat
+        // would flip the manual state and leave the cursor visible after chat closes.
+        if (!overlayWantsCursor && Input::IsKeyPressed(Input::Key::Tab)) {
+            s_manualCursorVisible = !s_manualCursorVisible;
+            Log::Info(s_manualCursorVisible
+                      ? "Manual cursor enabled (Tab)"
+                      : "Manual cursor disabled (Tab)");
+        }
 
-            if (cursorEnabled) {
+        bool effective = s_manualCursorVisible || overlayWantsCursor;
+
+        if (!s_initialized || effective != s_lastEffective) {
+            if (effective) {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
                 camera.enableMouseLook = false;
-                Log::Info("Cursor enabled - camera mouse look disabled");
             } else {
                 glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                 camera.enableMouseLook = true;
-                Log::Info("Cursor disabled - camera mouse look enabled");
             }
+            s_lastEffective = effective;
+            s_initialized = true;
         }
 
-        return cursorEnabled;
+        return effective;
     }
 
     // Fullscreen toggle state
@@ -496,7 +513,7 @@ namespace PlatformMain {
         bool isRemoteClient = false;
         std::string remoteServerAddress;
         uint16_t remoteServerPort = 25565;
-        std::string playerName = "Player1";
+        std::string playerName; // Empty → server auto-assigns "PlayerN" based on connection ID
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--vulkan") {
@@ -922,15 +939,11 @@ namespace PlatformMain {
             glfwPollEvents();
             Input::UpdateKeyStates();
 
-            if (Input::IsKeyDown(Input::Key::Escape)) {
-                glfwSetWindowShouldClose(window, GLFW_TRUE);
-            }
+            // Escape no longer closes the game — use the window close button instead
 
             if (Input::IsKeyPressed(Input::Key::F11)) {
                 ToggleFullscreen(window);
             }
-
-            cursorEnabled = HandleCursorToggle(window, camera);
 
             // Chat system: open on T or /, route input when open
             if (g_chatScreen.IsOpen()) {
@@ -961,11 +974,14 @@ namespace PlatformMain {
 
                 g_chatScreen.Update(1.0f / 60.0f); // Approximate frame dt for cursor blink
 
-                // Handle submitted message
+                // Handle submitted message or command
                 std::string submitted = g_chatScreen.ConsumeSubmittedMessage();
                 if (!submitted.empty() && networkClient && networkClient->IsConnected()) {
                     auto conn = networkClient->GetConnection();
                     if (conn) {
+                        // Send everything to server — server decides if it's a command or chat
+                        // The ChatMessageC2SPacket.isCommand flag tells the server to route
+                        // to the CommandDispatcher instead of broadcasting as chat.
                         conn->SendChatMessage(submitted);
                     }
                 }
@@ -985,6 +1001,11 @@ namespace PlatformMain {
 
                 HandlePlayerInput(player, playerController, camera);
             }
+
+            // Resolve cursor state AFTER chat handling so opening/closing chat this frame
+            // takes effect immediately (and Tab toggles can't be lost behind a closed chat).
+            cursorEnabled = HandleCursorToggle(window, camera, g_chatScreen.IsOpen());
+
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
             }
 

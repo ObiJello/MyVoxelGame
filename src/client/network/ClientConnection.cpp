@@ -5,6 +5,7 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
 #include "../world/ClientChunkManager.hpp"
+#include "../entity/RemotePlayerManager.hpp"
 #include "platform/GameDirectory.hpp"
 #include <functional>
 
@@ -48,6 +49,8 @@ namespace Client {
             [this](const std::vector<uint8_t>& p) { HandlePlayerAbilities(p); });
         m_packetRegistry.RegisterHandler(PacketId::WorldSpawn,
             [this](const std::vector<uint8_t>& p) { HandleWorldSpawn(p); });
+        m_packetRegistry.RegisterHandler(PacketId::PlayerInfoS2C,
+            [this](const std::vector<uint8_t>& p) { HandlePlayerInfo(p); });
     }
 
     ClientConnection::~ClientConnection() {
@@ -270,9 +273,32 @@ namespace Client {
         m_spawnPosition.x = reader.ReadInt();
         m_spawnPosition.y = reader.ReadInt();
         m_spawnPosition.z = reader.ReadInt();
-        
+
         Log::Info("[ClientConnection] World spawn set to (%.0f, %.0f, %.0f)",
             m_spawnPosition.x, m_spawnPosition.y, m_spawnPosition.z);
+    }
+
+    void ClientConnection::HandlePlayerInfo(const std::vector<uint8_t>& payload) {
+        auto packet = Network::Serialization::DeserializePlayerInfoS2C(payload);
+
+        // Don't track our own player ID in the remote player manager — it's only for OTHER players
+        // (matching MC: the local player is in PlayerInfo for tab-list purposes, but we don't render
+        // ourselves as a remote entity).
+        if (packet.playerId == m_playerId) {
+            Log::Info("[ClientConnection] PlayerInfo: ignoring entry for self (ID: %u)", packet.playerId);
+            return;
+        }
+
+        if (!Client::g_remotePlayerManager) return;
+
+        if (packet.action == Network::PlayerInfoS2CPacket::Action::ADD) {
+            Client::g_remotePlayerManager->SetPlayerName(packet.playerId, packet.playerName);
+            Log::Info("[ClientConnection] PlayerInfo ADD: '%s' (ID: %u)",
+                      packet.playerName.c_str(), packet.playerId);
+        } else if (packet.action == Network::PlayerInfoS2CPacket::Action::REMOVE) {
+            Client::g_remotePlayerManager->RemovePlayer(packet.playerId);
+            Log::Info("[ClientConnection] PlayerInfo REMOVE: ID %u", packet.playerId);
+        }
     }
 
     // ========================================================================

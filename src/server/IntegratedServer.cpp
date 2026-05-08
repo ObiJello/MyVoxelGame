@@ -1,5 +1,6 @@
 // File: src/server/IntegratedServer.cpp
 #include "IntegratedServer.hpp"
+#include "commands/TeleportCommand.hpp"
 #include "network/NetworkServer.hpp"
 #include "network/ServerConnection.hpp"
 #include "network/SendScheduler.hpp"
@@ -110,6 +111,10 @@ namespace Server {
         }
 
         Log::Info("NetworkServer listening on 0.0.0.0:%d", m_networkServer->GetPort());
+
+        // Register server commands (MC: Commands.java constructor)
+        TeleportCommand::Register(m_commandDispatcher);
+        Log::Info("Server commands registered");
 
         // Wire disconnect callback so we broadcast entity removal to other clients
         m_networkServer->SetOnDisconnection([this](std::shared_ptr<ServerConnection> conn) {
@@ -729,8 +734,35 @@ namespace Server {
 
         // Use connection ID as unique player ID, player name from login packet
         uint32_t playerId = connection->GetConnectionId();
-        std::string playerName = connection->GetPlayerName();
-        if (playerName.empty()) playerName = "Player" + std::to_string(playerId);
+        std::string requestedName = connection->GetPlayerName();
+
+        // Auto-assign default if client didn't pass --name (matching MC: PlayerN sequence)
+        if (requestedName.empty()) {
+            requestedName = "Player" + std::to_string(playerId);
+        }
+
+        // Resolve name collisions against active sessions (MC: PlayerList rejects duplicate
+        // names in online mode; in offline mode it kicks the existing player. We append _2,
+        // _3, etc. so two clients passing --name Bob both get usable distinct names.)
+        std::string playerName = requestedName;
+        {
+            auto isNameTaken = [&](const std::string& candidate) {
+                for (const auto& session : m_sessionManager->GetAllSessions()) {
+                    if (session && session->GetPlayer() &&
+                        session->GetPlayer()->getName() == candidate) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            int suffix = 2;
+            while (isNameTaken(playerName)) {
+                playerName = requestedName + "_" + std::to_string(suffix++);
+            }
+        }
+
+        // Update connection so chat (<name> message) and disconnect logs use the resolved name
+        connection->SetPlayerName(playerName);
 
         // Determine which ServerPlayer to use:
         // - Connection 1 (host): use existing m_serverPlayer
@@ -746,6 +778,19 @@ namespace Server {
             m_remotePlayers[playerId] = std::move(remotePlayer);
             Log::Info("[IntegratedServer] Created ServerPlayer for remote player '%s' (ID: %u)",
                       playerName.c_str(), playerId);
+        }
+
+        // PlayerInfo: send all existing players to the new client BEFORE adding it
+        // (matching MC's PlayerList.placeNewPlayer line 185 — connection.send(createPlayerInitializing(this.players)))
+        for (const auto& existing : m_sessionManager->GetAllSessions()) {
+            if (existing && existing->GetPlayer()) {
+                Network::PlayerInfoS2CPacket addExisting;
+                addExisting.action = Network::PlayerInfoS2CPacket::Action::ADD;
+                addExisting.playerId = existing->GetPlayerId();
+                addExisting.playerName = existing->GetPlayer()->getName();
+                auto data = Network::Serialization::Serialize(addExisting);
+                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerInfoS2C), data);
+            }
         }
 
         // Create session via SessionManager
@@ -767,6 +812,24 @@ namespace Server {
             auto hotbarData = Network::Serialization::Serialize(hotbarPacket);
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HotbarSyncS2C), hotbarData);
             Log::Info("[IntegratedServer] Sent hotbar sync to client");
+
+            // PlayerInfo: broadcast new player to ALL clients (including the new one, so they see
+            // themselves in the player list — matching MC's PlayerList.placeNewPlayer line 188)
+            if (m_networkServer) {
+                Network::PlayerInfoS2CPacket addNew;
+                addNew.action = Network::PlayerInfoS2CPacket::Action::ADD;
+                addNew.playerId = playerId;
+                addNew.playerName = playerName;
+                auto data = Network::Serialization::Serialize(addNew);
+
+                for (const auto& conn : m_networkServer->GetConnections()) {
+                    if (conn && conn->IsConnected()) {
+                        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerInfoS2C), data);
+                    }
+                }
+                Log::Info("[IntegratedServer] Broadcast PlayerInfo ADD for '%s' (ID: %u)",
+                          playerName.c_str(), playerId);
+            }
         } else {
             Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin for player %u", playerId);
         }
@@ -798,6 +861,21 @@ namespace Server {
             }
             Log::Info("[IntegratedServer] Broadcast RemoveEntities (ID: %u) to %zu clients",
                       playerId, connections.size());
+
+            // PlayerInfo: broadcast REMOVE to all remaining clients
+            // (matching MC's PlayerList.remove line 308 — broadcastAll(new ClientboundPlayerInfoRemovePacket(...)))
+            Network::PlayerInfoS2CPacket removeInfo;
+            removeInfo.action = Network::PlayerInfoS2CPacket::Action::REMOVE;
+            removeInfo.playerId = playerId;
+            auto removeData = Network::Serialization::Serialize(removeInfo);
+
+            for (const auto& conn : connections) {
+                if (conn->GetConnectionId() != connectionId && conn->IsConnected()) {
+                    conn->SendPacket(
+                        static_cast<uint8_t>(Network::PacketId::PlayerInfoS2C), removeData);
+                }
+            }
+            Log::Info("[IntegratedServer] Broadcast PlayerInfo REMOVE for player %u", playerId);
         }
 
         // 2. Clean up remote ServerPlayer

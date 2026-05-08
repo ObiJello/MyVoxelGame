@@ -381,6 +381,8 @@ if(APPLE)
             src/common/world/math/WorldCoordinates.cpp
             # Minecraft Java Edition Architecture files
             src/server/IntegratedServer.cpp
+            src/server/commands/CommandDispatcher.cpp
+            src/server/commands/TeleportCommand.cpp
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientBlockAccess.cpp
             src/client/world/PendingDiffsManager.cpp
@@ -609,6 +611,10 @@ else()
             # Server
             src/server/IntegratedServer.cpp
             src/server/IntegratedServer.hpp
+            src/server/commands/CommandDispatcher.hpp
+            src/server/commands/CommandDispatcher.cpp
+            src/server/commands/TeleportCommand.hpp
+            src/server/commands/TeleportCommand.cpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp

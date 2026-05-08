@@ -50,6 +50,7 @@
             ChunkBatchFinishedS2C = 0x24,  // Signals end of batch (includes chunk count)
             HotbarSyncS2C         = 0x25,  // Server-authoritative hotbar contents
             SetChunkCacheRadiusS2C = 0x26, // Server tells client the effective view distance
+            PlayerInfoS2C          = 0x27, // Player list updates (join/leave with name)
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -109,6 +110,7 @@
                 case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
                 case PacketId::HotbarSyncS2C: return "HotbarSyncS2C";
+                case PacketId::PlayerInfoS2C: return "PlayerInfoS2C";
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";

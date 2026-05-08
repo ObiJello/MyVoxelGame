@@ -1,6 +1,8 @@
 // File: src/server/network/ServerConnection.cpp
 #include "ServerConnection.hpp"
 #include "NetworkServer.hpp"
+#include "../commands/CommandDispatcher.hpp"
+#include "../session/PlayerSessionManager.hpp"
 #include "listeners/HandshakePacketListener.hpp"
 #include "listeners/LoginPacketListener.hpp"
 #include "listeners/ServerPlayPacketListener.hpp"
@@ -494,32 +496,48 @@ namespace Server {
         if (m_phase != ConnectionPhase::PLAY || !m_authenticated) {
             return;
         }
-        
+
         auto packet = Network::Serialization::DeserializeChatMessageC2S(payload);
-        
-        Log::Info("[Server#%u] RECEIVED ChatMessageC2S (ID: 0x%02X) - Message: %s",
+
+        Log::Info("[Server#%u] RECEIVED ChatMessageC2S (ID: 0x%02X) - Message: %s (isCommand=%d)",
                   GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ChatMessageC2S),
-                  packet.message.c_str());
-        
+                  packet.message.c_str(), packet.isCommand);
+
+        // Route commands to the dispatcher (MC: separate ServerboundChatCommandPacket)
+        if (packet.isCommand && Server::g_integratedServer) {
+            // Strip leading '/' if present
+            std::string cmdLine = packet.message;
+            if (!cmdLine.empty() && cmdLine[0] == '/') {
+                cmdLine = cmdLine.substr(1);
+            }
+
+            auto* sessionManager = Server::g_integratedServer->GetSessionManager();
+            if (!sessionManager) return;
+            auto session = sessionManager->GetSession(m_playerId);
+            if (session && session->GetPlayer()) {
+                Server::g_integratedServer->GetCommandDispatcher().ExecuteCommand(
+                    cmdLine, *session->GetPlayer(), *this, *sessionManager);
+            }
+            return; // Commands are NOT broadcast as chat
+        }
+
         // Forward to IntegratedServer for processing
         if (Server::g_integratedServer) {
             Server::g_integratedServer->ProcessChatMessage(packet);
         }
-        
-        // Also broadcast to all connected players
+
+        // Broadcast chat to all connected players
         if (m_server) {
             std::string formattedMessage = "<" + m_playerName + "> " + packet.message;
             auto connections = m_server->GetConnections();
-            
-            // Create a vector of active connections to safely iterate
+
             std::vector<ServerConnectionPtr> activeConnections;
             for (auto& conn : connections) {
                 if (conn && conn->GetState() != Network::ConnectionState::DISCONNECTED && conn->IsAuthenticated()) {
                     activeConnections.push_back(conn);
                 }
             }
-            
-            // Now safely send to all active connections
+
             for (auto& conn : activeConnections) {
                 try {
                     conn->SendChatMessage(formattedMessage, 0, m_playerId);
