@@ -14,6 +14,7 @@ namespace Client {
     struct RemotePlayer {
         uint32_t playerId = 0;
         std::string name;  // Player name (populated from PlayerInfoS2C ADD action)
+        bool positionInitialized = false;  // True after first UpdatePlayer call
 
         // Current rendered state (interpolated each tick)
         glm::vec3 position{0.0f};
@@ -40,8 +41,9 @@ namespace Client {
     public:
         void UpdatePlayer(uint32_t id, const glm::vec3& pos, const glm::vec2& rot, bool crouching) {
             auto& rp = m_players[id];
-            if (rp.playerId == 0) {
-                // First update — snap everything
+            if (!rp.positionInitialized) {
+                // First position packet for this player — snap everything (PlayerInfo may have
+                // already created the entry to set the name, so we can't use playerId == 0).
                 rp.playerId = id;
                 rp.position = pos;
                 rp.rotation = rot;
@@ -50,6 +52,7 @@ namespace Client {
                 rp.bodyYaw = rot.x; // start body facing same as head
                 rp.prevPosition = pos;
                 rp.lerpSteps = 0;
+                rp.positionInitialized = true;
             } else {
                 rp.targetPosition = pos;
                 rp.targetRotation = rot;
