@@ -219,19 +219,35 @@ namespace PlatformMain {
                 int textW = g_fontRenderer.GetStringWidth(rp.name);
                 const int lineH = Render::FontRenderer::LINE_HEIGHT;
 
-                // PushMatrix lets us draw the text + bg with a uniform scale that DrawString /
-                // Fill don't otherwise support, while keeping the rest of the HUD at scale=1.
+                // MC NameTagFeatureRenderer adds two passes (lines 49-54):
+                //   Visible (in front of geometry):  solid white text, NO background  (line 53)
+                //   Occluded (behind blocks):        50% white + 25% black bg          (line 51)
+                // We approximate the depth test by raycasting from the camera to the tag's
+                // world position — a hit means the player is behind something.
+                glm::vec3 tagWorld(worldPos.x, worldPos.y, worldPos.z);
+                glm::vec3 ray = tagWorld - cameraPos;
+                float rayLen = glm::length(ray);
+                bool occluded = false;
+                if (rayLen > 0.001f) {
+                    auto hit = Game::Raycast::CastRay(cameraPos, ray / rayLen, rayLen);
+                    occluded = hit.has_value();
+                }
+
                 graphics.PushMatrix();
                 graphics.Translate(sx, sy);
                 graphics.Scale(scale, scale);
-                // Origin (0,0) is now the feet of the centered text. Center horizontally.
                 int tagX = -textW / 2;
                 int tagY = 0;
-                // 25% alpha black background — MC line 48: (int)(0.25 * 255) << 24 = 0x40000000
-                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
-                // 50% alpha white text — MC line 51/53 uses color -2130706433 = 0x80FFFFFF,
-                // which composites to a soft grey against the translucent black background.
-                graphics.DrawString(rp.name, tagX, tagY, 0x80FFFFFF, true);
+
+                if (occluded) {
+                    // See-through pass — MC line 48 bg = (int)(0.25 * 255) << 24 = 0x40000000;
+                    // line 51 color = -2130706433 = 0x80FFFFFF (50% white reads as grey on black bg).
+                    graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
+                    graphics.DrawString(rp.name, tagX, tagY, 0x80FFFFFF, true);
+                } else {
+                    // Normal pass — MC line 53 color = -1 = 0xFFFFFFFF (solid white), no background.
+                    graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
+                }
                 graphics.PopMatrix();
             }
         }
