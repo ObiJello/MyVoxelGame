@@ -774,6 +774,10 @@ namespace Server {
         ServerPlayer* playerPtr = nullptr;
         if (playerId == 1 && m_serverPlayer) {
             playerPtr = m_serverPlayer.get();
+            // Host's m_serverPlayer was constructed with the placeholder "Player" before we
+            // knew the resolved name. Sync it now so /tp <name> and the PlayerInfo broadcast
+            // both see the same name as chat does.
+            playerPtr->setName(playerName);
         } else {
             glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
             auto remotePlayer = std::make_unique<ServerPlayer>(playerId, playerName);

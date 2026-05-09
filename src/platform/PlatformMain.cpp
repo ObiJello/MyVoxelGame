@@ -177,6 +177,46 @@ namespace PlatformMain {
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
 
+        // ── Nametags above remote players (matches MC's EntityRenderer.submitNameTag:
+        //    Font.drawInBatch with backgroundColor = 0x40000000 = 25% alpha black,
+        //    text centered horizontally on the entity origin) ─────────────────────
+        if (Client::g_remotePlayerManager) {
+            glm::mat4 nameVp = proj * view;
+            // Camera position in world space — last column of inverse(view).
+            glm::mat4 invView = glm::inverse(view);
+            glm::vec3 cameraPos = glm::vec3(invView[3]);
+
+            for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                if (rp.name.empty()) continue;
+
+                // MC default render distance for nametags is 64 blocks (squared = 4096).
+                float dx = rp.position.x - cameraPos.x;
+                float dz = rp.position.z - cameraPos.z;
+                if (dx * dx + dz * dz > 64.0f * 64.0f) continue;
+
+                // MC: nameTagAttachment is at the top of the entity's bounding box
+                // (~entity height + 0.5). Player height ≈ 1.8, so y + ~2.0 sits just above head.
+                glm::vec4 worldPos(rp.position.x, rp.position.y + 2.0f, rp.position.z, 1.0f);
+                glm::vec4 clip = nameVp * worldPos;
+                if (clip.w <= 0.0f) continue;
+
+                float ndcX = clip.x / clip.w;
+                float ndcY = clip.y / clip.w;
+                float sx = (ndcX * 0.5f + 0.5f) * guiWidth;
+                float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * guiHeight;
+
+                int textW = g_fontRenderer.GetStringWidth(rp.name);
+                int tagX = static_cast<int>(sx) - textW / 2;
+                int tagY = static_cast<int>(sy);
+
+                // 25%-alpha black background extending 1px past the text (MC: -1, -1, +width, +height)
+                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1,
+                              tagY + Render::FontRenderer::LINE_HEIGHT, 0x40000000);
+                // White text with drop shadow (MC default for nametags)
+                graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
+            }
+        }
+
         // Chat bubbles above remote players (rendered in GUI space with text)
         if (Client::g_remotePlayerManager) {
             glm::mat4 vp = proj * view;
@@ -978,14 +1018,27 @@ namespace PlatformMain {
                 if (backspaceDown && !backspaceHeld) g_chatScreen.OnKeyDown(GLFW_KEY_BACKSPACE);
                 enterHeld = enterDown;
                 backspaceHeld = backspaceDown;
-                // Up/down for history
+                // Up/down for history, Left/Right for cursor, Home/End for jump, Delete
                 static bool upHeld = false, downHeld = false;
-                bool upDown = glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
-                bool downDown = glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
-                if (upDown && !upHeld) g_chatScreen.OnKeyDown(GLFW_KEY_UP);
-                if (downDown && !downHeld) g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
-                upHeld = upDown;
-                downHeld = downDown;
+                static bool leftHeld = false, rightHeld = false;
+                static bool homeHeld = false, endHeld = false, deleteHeld = false;
+                bool upDown    = glfwGetKey(window, GLFW_KEY_UP)    == GLFW_PRESS;
+                bool downDown  = glfwGetKey(window, GLFW_KEY_DOWN)  == GLFW_PRESS;
+                bool leftDown  = glfwGetKey(window, GLFW_KEY_LEFT)  == GLFW_PRESS;
+                bool rightDown = glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
+                bool homeDown  = glfwGetKey(window, GLFW_KEY_HOME)  == GLFW_PRESS;
+                bool endDown   = glfwGetKey(window, GLFW_KEY_END)   == GLFW_PRESS;
+                bool deleteDown = glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS;
+                if (upDown    && !upHeld)    g_chatScreen.OnKeyDown(GLFW_KEY_UP);
+                if (downDown  && !downHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
+                if (leftDown  && !leftHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_LEFT);
+                if (rightDown && !rightHeld) g_chatScreen.OnKeyDown(GLFW_KEY_RIGHT);
+                if (homeDown  && !homeHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_HOME);
+                if (endDown   && !endHeld)   g_chatScreen.OnKeyDown(GLFW_KEY_END);
+                if (deleteDown && !deleteHeld) g_chatScreen.OnKeyDown(GLFW_KEY_DELETE);
+                upHeld = upDown; downHeld = downDown;
+                leftHeld = leftDown; rightHeld = rightDown;
+                homeHeld = homeDown; endHeld = endDown; deleteHeld = deleteDown;
 
                 g_chatScreen.Update(1.0f / 60.0f); // Approximate frame dt for cursor blink
 

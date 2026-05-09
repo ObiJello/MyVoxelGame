@@ -135,6 +135,7 @@ namespace Server {
         
         uint32_t getPlayerId() const { return m_playerId; }
         const std::string& getName() const { return m_name; }
+        void setName(const std::string& name) { m_name = name; }
         
         const glm::dvec3& getPosition() const { return m_position; }
         float getYaw() const { return m_rotation.x; }

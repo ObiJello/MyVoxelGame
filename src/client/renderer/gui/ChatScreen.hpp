@@ -35,12 +35,20 @@ namespace Render {
         bool m_open = false;
         std::string m_inputText;
         std::string m_submittedMessage;
+        int m_cursorPos = 0;          // Caret position in m_inputText (0..size())
         float m_cursorTimer = 0.0f;
         bool m_cursorVisible = true;
 
         // Chat history
         std::vector<std::string> m_history;
         int m_historyIndex = -1;
+
+        // Helpers — MC's EditBox.setCursorPosition / moveCursor / moveCursorToStart / End
+        void SetCursorPosition(int pos);
+        void MoveCursor(int dir);
+        void MoveCursorToStart();
+        void MoveCursorToEnd();
+        void ResetCursorBlink() { m_cursorTimer = 0.0f; m_cursorVisible = true; }
     };
 
 } // namespace Render

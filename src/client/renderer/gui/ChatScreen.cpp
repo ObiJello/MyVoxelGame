@@ -10,15 +10,27 @@ namespace Render {
         m_open = true;
         m_inputText = withSlash ? "/" : "";
         m_submittedMessage.clear();
-        m_cursorTimer = 0.0f;
-        m_cursorVisible = true;
+        m_cursorPos = static_cast<int>(m_inputText.size()); // Caret at end (after '/' if present)
+        ResetCursorBlink();
         m_historyIndex = -1;
     }
 
     void ChatScreen::Close() {
         m_open = false;
         m_inputText.clear();
+        m_cursorPos = 0;
     }
+
+    void ChatScreen::SetCursorPosition(int pos) {
+        // MC: Mth.clamp(pos, 0, value.length())
+        const int n = static_cast<int>(m_inputText.size());
+        m_cursorPos = std::clamp(pos, 0, n);
+        ResetCursorBlink();
+    }
+
+    void ChatScreen::MoveCursor(int dir) { SetCursorPosition(m_cursorPos + dir); }
+    void ChatScreen::MoveCursorToStart() { SetCursorPosition(0); }
+    void ChatScreen::MoveCursorToEnd()   { SetCursorPosition(static_cast<int>(m_inputText.size())); }
 
     void ChatScreen::OnCharInput(unsigned int codepoint) {
         if (!m_open) return;
@@ -26,9 +38,9 @@ namespace Render {
 
         // Only accept printable ASCII for now
         if (codepoint >= 32 && codepoint < 127) {
-            m_inputText += static_cast<char>(codepoint);
-            m_cursorTimer = 0.0f;
-            m_cursorVisible = true;
+            // MC: EditBox.insertText splices at cursor and advances by length inserted.
+            m_inputText.insert(m_inputText.begin() + m_cursorPos, static_cast<char>(codepoint));
+            SetCursorPosition(m_cursorPos + 1);
         }
     }
 
@@ -55,13 +67,27 @@ namespace Render {
         }
 
         if (glfwKey == GLFW_KEY_BACKSPACE) {
-            if (!m_inputText.empty()) {
-                m_inputText.pop_back();
-                m_cursorTimer = 0.0f;
-                m_cursorVisible = true;
+            // MC: EditBox.deleteText(-1) — remove the char before the cursor and step back.
+            if (m_cursorPos > 0) {
+                m_inputText.erase(m_inputText.begin() + (m_cursorPos - 1));
+                SetCursorPosition(m_cursorPos - 1);
             }
             return true;
         }
+
+        if (glfwKey == GLFW_KEY_DELETE) {
+            // MC: EditBox.deleteText(+1) — remove the char at the cursor.
+            if (m_cursorPos < static_cast<int>(m_inputText.size())) {
+                m_inputText.erase(m_inputText.begin() + m_cursorPos);
+                ResetCursorBlink();
+            }
+            return true;
+        }
+
+        if (glfwKey == GLFW_KEY_LEFT)  { MoveCursor(-1); return true; }
+        if (glfwKey == GLFW_KEY_RIGHT) { MoveCursor(+1); return true; }
+        if (glfwKey == GLFW_KEY_HOME)  { MoveCursorToStart(); return true; }
+        if (glfwKey == GLFW_KEY_END)   { MoveCursorToEnd();   return true; }
 
         if (glfwKey == GLFW_KEY_UP) {
             // Navigate history (older)
@@ -72,6 +98,7 @@ namespace Render {
                     m_historyIndex--;
                 }
                 m_inputText = m_history[m_historyIndex];
+                MoveCursorToEnd();
             }
             return true;
         }
@@ -86,6 +113,7 @@ namespace Render {
                 } else {
                     m_inputText = m_history[m_historyIndex];
                 }
+                MoveCursorToEnd();
             }
             return true;
         }
@@ -112,12 +140,17 @@ namespace Render {
         int inputY = guiHeight - INPUT_HEIGHT - 2;
         graphics.Fill(0, inputY, guiWidth, guiHeight, 0x80000000);
 
-        // Render input text
-        std::string displayText = m_inputText;
+        // Render the full input text (no trailing underscore — cursor is drawn separately)
+        graphics.DrawString(m_inputText, 4, inputY + 2, 0xFFFFFFFF, true);
+
+        // Cursor: draw at the actual caret position. MC uses a vertical bar at end-of-text
+        // and a blinking underscore mid-text; we use a vertical bar in both cases for clarity.
         if (m_cursorVisible) {
-            displayText += "_";
+            std::string before = m_inputText.substr(0, m_cursorPos);
+            int cursorX = 4 + graphics.GetStringWidth(before);
+            // 1px wide, 9px tall white bar (MC font glyphs are 8px tall + 1px shadow)
+            graphics.Fill(cursorX, inputY + 1, cursorX + 1, inputY + 1 + 9, 0xFFFFFFFF);
         }
-        graphics.DrawString(displayText, 4, inputY + 2, 0xFFFFFFFF, true);
     }
 
     std::string ChatScreen::ConsumeSubmittedMessage() {
