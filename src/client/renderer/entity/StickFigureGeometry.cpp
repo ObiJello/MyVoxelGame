@@ -59,11 +59,14 @@ namespace Render {
                 glm::vec3 o0 = vertAt(a0, rOut);
                 glm::vec3 i1 = vertAt(a1, rIn);
                 glm::vec3 o1 = vertAt(a1, rOut);
-                // Two triangles per segment: (i0, o0, o1) and (i0, o1, i1).
-                // CCW winding when viewed from cross(right, up) (== lookDir for
-                // the head outline, == lookDir for the smile arc).
-                push(i0); push(o0); push(o1);
-                push(i0); push(o1); push(i1);
+                // For the head outline / smile, callers pass right=faceRight,
+                // up=worldUp. The natural CCW normal from cross(right, up) is
+                // -lookDir (behind the player), but we want the ring visible
+                // from in FRONT of the player, so wind the triangles the other
+                // way: CCW when viewed from +lookDir, which means each triangle
+                // gets reversed compared to the natural cross(right, up) side.
+                push(i0); push(o1); push(o0);
+                push(i0); push(i1); push(o1);
             }
         }
 
