@@ -299,6 +299,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/gui_textured_vk.frag
             ${VK_SHADER_DIR}/gui_color_vk.vert
             ${VK_SHADER_DIR}/gui_color_vk.frag
+            ${VK_SHADER_DIR}/player_billboard_vk.vert
+            ${VK_SHADER_DIR}/player_billboard_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
