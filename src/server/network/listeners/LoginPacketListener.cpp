@@ -16,22 +16,29 @@ namespace Server {
 
     void LoginPacketListener::onLoginStart(const Network::LoginStartC2SPacket& packet) {
         // DIAGNOSTIC: Log method entry
-        Log::Info("[LoginPacketListener] *** onLoginStart() CALLED *** for player: %s", packet.username.c_str());
+        Log::Info("[LoginPacketListener] *** onLoginStart() CALLED *** for player: %s (color id=%u)",
+                  packet.username.c_str(), static_cast<unsigned>(packet.colorId));
         Log::Debug("[LoginPacketListener] Connection ID: %u", m_connection.GetConnectionId());
-        
+
         // Enable compression if configured (Minecraft uses 256 bytes by default)
         if (m_compressionThreshold > 0) {
             // Send SetCompression packet
             Network::PacketBuffer buffer;
             buffer.WriteVarInt(m_compressionThreshold);
             m_connection.SendPacket(static_cast<uint8_t>(Network::PacketId::SetCompression), buffer.GetData());
-            
+
             // Enable compression on the connection (posted to I/O thread)
             // TODO: m_connection.postEnableCompression(m_compressionThreshold);
-            
+
             Log::Info("[LoginPacketListener] Enabled compression with threshold: %d", m_compressionThreshold);
         }
-        
+
+        // Stash the player's chosen colour on the connection BEFORE finalizeLogin
+        // calls IntegratedServer::OnPlayerJoined — that method reads
+        // connection->GetPlayerColor() to populate the new ServerPlayer's colour
+        // and to populate the PlayerInfoS2C ADD broadcasts other clients receive.
+        m_connection.SetPlayerColor(packet.colorId);
+
         // For offline/integrated mode, skip encryption and finalize login directly
         finalizeLogin(packet.username);
     }

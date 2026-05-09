@@ -38,6 +38,7 @@ namespace Server {
         void SetPlayerName(const std::string& name) { m_playerName = name; }
         const std::string& GetPlayerName() const { return m_playerName; }
         uint8_t GetPlayerColor() const { return m_playerColor; }
+        void    SetPlayerColor(uint8_t id) { m_playerColor = id; }
         
         // Get/set player ID
         void SetPlayerId(uint32_t id) { m_playerId = id; }
