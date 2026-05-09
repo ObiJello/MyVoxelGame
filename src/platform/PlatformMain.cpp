@@ -193,6 +193,8 @@ namespace PlatformMain {
 
             for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (rp.name.empty()) continue;
+                // Hide nametag entirely when the player is shifting/sneaking
+                if (rp.isCrouching) continue;
 
                 // MC default render distance for nametags is 64 blocks
                 float dx = rp.position.x - cameraPos.x;
@@ -239,13 +241,13 @@ namespace PlatformMain {
                 int tagX = -textW / 2;
                 int tagY = 0;
 
+                // Background is always drawn (25% alpha black, MC: 0x40000000).
+                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
                 if (occluded) {
-                    // See-through pass — MC line 48 bg = (int)(0.25 * 255) << 24 = 0x40000000;
-                    // line 51 color = -2130706433 = 0x80FFFFFF (50% white reads as grey on black bg).
-                    graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
+                    // See-through (MC line 51): -2130706433 = 0x80FFFFFF, 50% white reads as grey.
                     graphics.DrawString(rp.name, tagX, tagY, 0x80FFFFFF, true);
                 } else {
-                    // Normal pass — MC line 53 color = -1 = 0xFFFFFFFF (solid white), no background.
+                    // Normal (MC line 53): -1 = 0xFFFFFFFF solid white.
                     graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
                 }
                 graphics.PopMatrix();
