@@ -115,11 +115,15 @@ namespace Render {
         effective.isCrouching  = false;
 
         // ─── Build the stick figure ──────────────────────────────────────────
+        // ringTris holds the head outline + smile as flat annular ring triangles
+        // (gap-free at any angle); discTris holds the back-of-head disc which we
+        // skip in the inventory preview (always a front-facing view, no need).
         const auto& colorEntry = Game::LookupPlayerColor(colorId);
         PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
         std::vector<StickVertex> lineVerts;
-        std::vector<StickVertex> triVerts;
-        BuildStickFigure(lineVerts, triVerts,
+        std::vector<StickVertex> ringTris;
+        std::vector<StickVertex> discTris;
+        BuildStickFigure(lineVerts, ringTris, discTris,
                          /*feetPos*/ glm::vec3(0.0f),
                          effective.headYawDeg, effective.bodyYawDeg,
                          effective.headPitchDeg, effective.isCrouching,
@@ -161,13 +165,29 @@ namespace Render {
             EmitThickLineQuad(rs, p0, p1, kLineWidth, color, scissor);
         }
 
-        // The back-of-head triangle disc (in `triVerts`) is intentionally NOT
+        // ─── Project + emit ring triangles (head outline + smile) ────────────
+        // ringTris is a triangle list (a, b, c, a, b, c, ...). Each triangle is
+        // submitted as a degenerate QuadCommand (corner 3 == corner 2). The ring
+        // already has consistent perpendiculars in model space, so projection
+        // never breaks it — no per-segment gaps possible at any view angle.
+        for (size_t i = 0; i + 2 < ringTris.size(); i += 3) {
+            const auto& va = ringTris[i];
+            const auto& vb = ringTris[i + 1];
+            const auto& vc = ringTris[i + 2];
+            glm::vec2 pa = ProjectToScreen(glm::vec3(va.x, va.y, va.z), model, centerX, centerY, sz);
+            glm::vec2 pb = ProjectToScreen(glm::vec3(vb.x, vb.y, vb.z), model, centerX, centerY, sz);
+            glm::vec2 pc = ProjectToScreen(glm::vec3(vc.x, vc.y, vc.z), model, centerX, centerY, sz);
+            uint32_t color = PackColorRGBA(va.r, va.g, va.b, va.a);
+            EmitTriangleQuad(rs, pa, pb, pc, color, scissor);
+        }
+
+        // The back-of-head triangle disc (in `discTris`) is intentionally NOT
         // rendered here. In the world, the disc relies on GPU back-face culling
         // (`CullMode::Back`) to be invisible from the front — but the GUI quad
         // path has no culling. Submitting the disc would draw a green circle
         // over the eyes/mouth line features. The line head outline alone gives
         // an acceptable face read in the preview.
-        (void)triVerts;
+        (void)discTris;
     }
 
 } // namespace Render

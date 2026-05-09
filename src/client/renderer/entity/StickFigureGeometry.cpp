@@ -28,6 +28,45 @@ namespace Render {
             }
         }
 
+        // Push a filled annular ring (or arc) as triangle pairs. Two triangles
+        // per segment, all in the plane spanned by `right` × `up`, between an
+        // inner and outer radius. Wound CCW when viewed from `right × up`'s
+        // positive-normal side — that way back-face culling hides the ring
+        // when the camera is on the opposite side of the head.
+        //
+        // This replaces the old N-line-segment "stroke" approach for circles.
+        // Because there are no separate quads, there are no per-segment joins
+        // and no possible gaps regardless of view angle.
+        void PushArcRing(std::vector<StickVertex>& out,
+                         const glm::vec3& center, const glm::vec3& right,
+                         const glm::vec3& up, float radius, float halfWidth,
+                         int segments, float startAngle, float endAngle,
+                         uint8_t r, uint8_t g, uint8_t bl, uint8_t al) {
+            if (segments < 1) return;
+            const float rIn  = radius - halfWidth;
+            const float rOut = radius + halfWidth;
+            const float step = (endAngle - startAngle) / static_cast<float>(segments);
+            auto vertAt = [&](float angle, float rad) -> glm::vec3 {
+                return center + right * (std::cos(angle) * rad) + up * (std::sin(angle) * rad);
+            };
+            auto push = [&](const glm::vec3& p) {
+                out.push_back({p.x, p.y, p.z, 0.0f, 0.0f, r, g, bl, al});
+            };
+            for (int i = 0; i < segments; ++i) {
+                float a0 = startAngle + step * static_cast<float>(i);
+                float a1 = startAngle + step * static_cast<float>(i + 1);
+                glm::vec3 i0 = vertAt(a0, rIn);
+                glm::vec3 o0 = vertAt(a0, rOut);
+                glm::vec3 i1 = vertAt(a1, rIn);
+                glm::vec3 o1 = vertAt(a1, rOut);
+                // Two triangles per segment: (i0, o0, o1) and (i0, o1, i1).
+                // CCW winding when viewed from cross(right, up) (== lookDir for
+                // the head outline, == lookDir for the smile arc).
+                push(i0); push(o0); push(o1);
+                push(i0); push(o1); push(i1);
+            }
+        }
+
         // Push a filled disc as a triangle fan. The disc normal faces along `normal`.
         // With CullMode::Back, the disc is only visible from the side `normal` points at.
         void PushDisc(std::vector<StickVertex>& out,
@@ -52,7 +91,8 @@ namespace Render {
     } // namespace
 
     void BuildStickFigure(std::vector<StickVertex>& lineVerts,
-                          std::vector<StickVertex>& triVerts,
+                          std::vector<StickVertex>& ringTris,
+                          std::vector<StickVertex>& discTris,
                           const glm::vec3& feetPos,
                           float headYawDeg, float bodyYawDeg,
                           float /*pitchDeg*/, bool isCrouching,
@@ -101,36 +141,42 @@ namespace Render {
         PushLine(lineVerts, shoulderL, handL, cr, cg, cb, ca);
         PushLine(lineVerts, shoulderR, handR, cr, cg, cb, ca);
 
-        // --- LINES: Front head outline + face features ---
-        // Segment counts chosen so the per-segment angle change is the same on
-        // both the full-circle outline (2π / 64 = 5.625°) and the half-circle
-        // smile (π / 32 = 5.625°). That lets the renderers use ONE miter
-        // extension factor (≈ tan(2.8°) ≈ 0.049) to perfectly fill the gap
-        // between adjacent thick-line quads on both shapes.
-        constexpr int kHeadCircleSegments = 64;
-        constexpr int kSmileSegments      = 32;
-        float headRadius = 0.18f;
-        glm::vec3 frontC = headC;
+        // --- RING TRIANGLES: head outline + smile arc ---
+        // Built as flat annular rings in the head's local plane, NOT as N
+        // separate thick-line quads. There are no per-segment joins so there
+        // are no possible gaps regardless of camera angle. The ring half-width
+        // matches the body-line thickness used in the world renderer.
+        constexpr int   kHeadCircleSegments = 64;
+        constexpr int   kSmileSegments      = 32;
+        // 0.025 m ≈ 1 px in the inventory preview (size=20 px/m). Smaller would
+        // sub-pixel-rasterize as nothing in the GUI. In the world this gives a
+        // ~5 cm full-width ring, slightly chunkier than the 3.6 cm body limbs
+        // but visually consistent.
+        constexpr float kRingHalfWidth      = 0.025f;
+        const float headRadius = 0.18f;
+        const glm::vec3 frontC = headC;
 
-        PushCircle(lineVerts, frontC, faceRight, worldUp, headRadius, kHeadCircleSegments,
-                   0.0f, 2.0f * PI, cr, cg, cb, ca);
+        PushArcRing(ringTris, frontC, faceRight, worldUp,
+                    headRadius, kRingHalfWidth, kHeadCircleSegments,
+                    0.0f, 2.0f * PI, cr, cg, cb, ca);
 
-        // Eyes
-        float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeLen = 0.03f;
+        // Smile (lower half of a small circle)
+        const glm::vec3 mouthC = frontC - worldUp * 0.04f;
+        PushArcRing(ringTris, mouthC, faceRight, worldUp,
+                    0.07f, kRingHalfWidth, kSmileSegments,
+                    PI, 2.0f * PI, cr, cg, cb, ca);
+
+        // --- LINES: Eyes (short straight segments, no join issues) ---
+        const float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeLen = 0.03f;
         glm::vec3 eyeL = frontC + worldUp * eyeOffY + faceRight * (-eyeOffX);
         glm::vec3 eyeR = frontC + worldUp * eyeOffY + faceRight * ( eyeOffX);
         PushLine(lineVerts, eyeL - faceRight * eyeLen, eyeL + faceRight * eyeLen, cr, cg, cb, ca);
         PushLine(lineVerts, eyeR - faceRight * eyeLen, eyeR + faceRight * eyeLen, cr, cg, cb, ca);
 
-        // Smile
-        glm::vec3 mouthC = frontC - worldUp * 0.04f;
-        PushCircle(lineVerts, mouthC, faceRight, worldUp, 0.07f, kSmileSegments,
-                   PI, 2.0f * PI, cr, cg, cb, ca);
-
         // --- TRIANGLES: Back-of-head filled disc (GPU face-culled) ---
         // Placed at headC (no offset) so it lines up with the neck/body connection.
         // Front features are offset forward, so they still render in front of this disc.
-        PushDisc(triVerts, headC, faceRight, worldUp, -lookDir,
+        PushDisc(discTris, headC, faceRight, worldUp, -lookDir,
                  headRadius, 16, cr, cg, cb, ca);
     }
 

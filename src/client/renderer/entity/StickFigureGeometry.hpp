@@ -34,12 +34,25 @@ namespace Render {
     };
     inline constexpr PlayerColor kDefaultPlayerColor{0, 255, 60, 255};
 
-    // Build line geometry (body, limbs, head outline, face features) into `lineVerts`,
-    // and triangle geometry (filled back-of-head disc) into `triVerts`. Vertices come
-    // out as line-pair lists and triangle-list, both in world space relative to
-    // `feetPos` (so feet sit at feetPos and head at feetPos + Y*~1.62m).
+    // Build geometry for a stick-figure player at the given pose. Output goes
+    // into three lists:
+    //
+    //   lineVerts: body, limbs, eyes — line-pair list. Caller decides thickness
+    //              (PlayerRenderer expands to camera-facing thick world strips,
+    //              PlayerInventoryPreview projects + emits 1 px screen quads).
+    //   ringTris : front-face outline + smile, as filled annular ring triangles
+    //              in the head's local plane. Triangle list. Same colour as
+    //              lineVerts. Wound CCW from the head's lookDir so back-face
+    //              culling hides it when viewing the player from behind.
+    //   discTris : filled back-of-head disc. Triangle list. Wound CCW from
+    //              -lookDir so back-face culling hides it from in front.
+    //
+    // Splitting ring vs disc lets the inventory preview render only the ring
+    // (it always views the player from the front and shouldn't see the disc),
+    // while the world renderer batches both into one draw call.
     void BuildStickFigure(std::vector<StickVertex>& lineVerts,
-                          std::vector<StickVertex>& triVerts,
+                          std::vector<StickVertex>& ringTris,
+                          std::vector<StickVertex>& discTris,
                           const glm::vec3& feetPos,
                           float headYawDeg, float bodyYawDeg,
                           float pitchDeg, bool isCrouching,

@@ -160,9 +160,10 @@ void main() {
         if (players.empty()) return;
 
         std::vector<StickVertex> lineVerts;
-        std::vector<StickVertex> triVerts;
-        lineVerts.reserve(players.size() * 80);
-        triVerts.reserve(players.size() * 48); // 16 segments * 3 verts per tri
+        std::vector<StickVertex> triVerts; // ringTris + discTris combined; both back-face-culled
+        lineVerts.reserve(players.size() * 36);
+        // Ring: 64 segs * 6 verts = 384, smile: 32 * 6 = 192, disc: 16 * 3 = 48 → ~624/player.
+        triVerts.reserve(players.size() * 640);
 
         for (const auto& [id, rp] : players) {
             float dx = rp.position.x - cameraPos.x;
@@ -171,14 +172,19 @@ void main() {
 
             const auto& colorEntry = Game::LookupPlayerColor(rp.color);
             PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
-            BuildStickFigure(lineVerts, triVerts, rp.position,
+            // Append ring + disc into one shared list — both render with the
+            // same triangles + CullMode::Back pipeline, so batching is fine.
+            BuildStickFigure(lineVerts, triVerts, triVerts, rp.position,
                              rp.rotation.x, rp.bodyYaw, rp.rotation.y, rp.isCrouching,
                              color);
         }
 
         glm::mat4 mvp = projection * view;
 
-        // --- Pass 1: Filled back-of-head discs (triangles, back-face culled) ---
+        // --- Pass 1: Triangles (head outline ring + back-of-head disc), all
+        // back-face-culled. Ring is wound CCW from lookDir → visible from in
+        // front of the player; disc is wound CCW from -lookDir → visible from
+        // behind. CullMode::Back hides whichever side the camera isn't on.
         if (!triVerts.empty() && m_triMesh != INVALID_MESH) {
             g_renderBackend->UpdateBuffer(m_triVB, 0, triVerts.size() * sizeof(StickVertex), triVerts.data());
 
