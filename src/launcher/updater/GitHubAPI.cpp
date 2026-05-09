@@ -134,8 +134,11 @@ namespace Launcher {
             if (gt == std::string::npos) break;
             size_t semi = line.find(';', gt);
             size_t comma = line.find(',', gt);
-            size_t segEnd = std::min(comma == std::string::npos ? line.size() : comma,
-                                     line.size());
+            // `comma` is either npos (no further entries) or a valid position
+            // within `line`, so it's always <= line.size() — no clamp needed.
+            // Using std::min here would collide with the Windows `min` macro
+            // unless we wrap it in extra parens; just inline the conditional.
+            size_t segEnd = (comma == std::string::npos) ? line.size() : comma;
             const std::string segParams = line.substr(gt + 1,
                                                       (segEnd > gt + 1) ? (segEnd - gt - 1) : 0);
             const std::string segLower = toLowerCopy(segParams);

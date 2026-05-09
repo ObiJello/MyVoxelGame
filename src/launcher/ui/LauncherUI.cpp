@@ -474,8 +474,12 @@ namespace Launcher {
                 if (i % 5 != 0) ImGui::SameLine();
                 const auto& c = palette[i];
                 ImVec4 col(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, 1.0f);
-                ImVec4 hover(std::min(1.0f, col.x + 0.15f), std::min(1.0f, col.y + 0.15f),
-                             std::min(1.0f, col.z + 0.15f), 1.0f);
+                // Inline saturation clamp instead of std::min — Windows' min/max
+                // macros from windows.h would mangle the call here.
+                auto clampHi = [](float v) { return v > 1.0f ? 1.0f : v; };
+                ImVec4 hover(clampHi(col.x + 0.15f),
+                             clampHi(col.y + 0.15f),
+                             clampHi(col.z + 0.15f), 1.0f);
                 bool selected = (state.playerColor == c.slug)
                               || (state.playerColor.empty() && c.id == Game::PlayerColorId::Default);
                 ImGui::PushStyleColor(ImGuiCol_Button, col);
