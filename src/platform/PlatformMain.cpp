@@ -199,10 +199,10 @@ namespace PlatformMain {
                 float dz = rp.position.z - cameraPos.z;
                 if (dx * dx + dz * dz > 64.0f * 64.0f) continue;
 
-                // MC: translate to nameTagAttachment.y + 0.5 (top of bounding box + half block).
-                // Our remote player position is at feet, model height ~1.8, so feet + 2.0 sits
-                // just above the head (matching the visible attachment point).
-                glm::vec4 worldPos(rp.position.x, rp.position.y + 2.0f, rp.position.z, 1.0f);
+                // MC NameTagFeatureRenderer line 43: translate(x, nameTagAttachment.y + 0.5, z)
+                // where nameTagAttachment is at the top of the player's bbox (~1.8 high).
+                // Our remote player position is at feet, so feet + 1.8 + 0.5 = feet + 2.3.
+                glm::vec4 worldPos(rp.position.x, rp.position.y + 2.3f, rp.position.z, 1.0f);
                 glm::vec4 clip = nameVp * worldPos;
                 if (clip.w <= 0.0f) continue;
 
@@ -227,9 +227,11 @@ namespace PlatformMain {
                 // Origin (0,0) is now the feet of the centered text. Center horizontally.
                 int tagX = -textW / 2;
                 int tagY = 0;
-                // 25% alpha black background, MC: 0x40000000
+                // 25% alpha black background — MC line 48: (int)(0.25 * 255) << 24 = 0x40000000
                 graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
-                graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
+                // 50% alpha white text — MC line 51/53 uses color -2130706433 = 0x80FFFFFF,
+                // which composites to a soft grey against the translucent black background.
+                graphics.DrawString(rp.name, tagX, tagY, 0x80FFFFFF, true);
                 graphics.PopMatrix();
             }
         }
