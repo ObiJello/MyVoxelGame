@@ -542,6 +542,15 @@ else()
             src/client/renderer/gui/ChatComponent.cpp
             src/client/renderer/gui/ChatScreen.hpp
             src/client/renderer/gui/ChatScreen.cpp
+            src/client/renderer/gui/InventoryScreen.hpp
+            src/client/renderer/gui/InventoryScreen.cpp
+
+            # Client rendering - GUI items (3D-in-GUI renderers)
+            src/client/renderer/gui/items/ItemLighting.hpp
+            src/client/renderer/gui/items/ChestItemRenderer.hpp
+            src/client/renderer/gui/items/ChestItemRenderer.cpp
+            src/client/renderer/gui/items/PlayerInventoryPreview.hpp
+            src/client/renderer/gui/items/PlayerInventoryPreview.cpp
 
             # Client rendering - Core
             src/client/renderer/core/Camera.hpp
