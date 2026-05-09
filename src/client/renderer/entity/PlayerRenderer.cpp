@@ -74,10 +74,10 @@ void main() {
             // Extend each endpoint along the line direction by the "miter
             // factor" — exactly halfWidth * tan(angleChange/2) — so adjacent
             // chained segments meet cleanly with no outer gap and no visible
-            // diamond spike past the curve. Our 16-segment head circle and
-            // 8-segment half-smile both have a 22.5° per-segment angle change,
-            // so tan(11.25°) ≈ 0.199 is the right factor.
-            constexpr float kMiterFactor = 0.199f;
+            // diamond spike past the curve. StickFigureGeometry's 64-segment
+            // head circle and 32-segment half-smile both share a 5.625° per-
+            // segment angle change → tan(2.8125°) ≈ 0.049 is correct for both.
+            constexpr float kMiterFactor = 0.049f;
             glm::vec3 along = glm::normalize(d) * (halfWidth * kMiterFactor);
             glm::vec3 ae = a - along; // slightly pulled-back start
             glm::vec3 be = b + along; // slightly pushed-forward end

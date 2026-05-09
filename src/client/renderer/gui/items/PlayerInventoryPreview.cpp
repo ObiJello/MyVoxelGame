@@ -26,10 +26,10 @@ namespace Render {
         // We also extend each endpoint slightly along the line direction so adjacent
         // chained segments (head circle, smile arc) overlap at their shared point
         // and the outer-edge gap disappears. The exact "perfect miter" extension is
-        // halfWidth * tan(angleChange/2). For our 16-segment circle and 8-segment
-        // half-smile both have a per-segment angle change of 22.5° → tan(11.25°) ≈
-        // 0.199. We use that factor; it's tiny for limbs (so they're not visibly
-        // longer) but exactly right for the chained shapes.
+        // halfWidth * tan(angleChange/2). StickFigureGeometry's head circle (64
+        // segments) and smile (32 segments) both share a 5.625° per-segment angle,
+        // so tan(2.8125°) ≈ 0.049 perfectly fills the gap on both. Tiny enough that
+        // standalone limbs/eyes don't get visibly extended.
         void EmitThickLineQuad(GuiRenderState* rs,
                                const glm::vec2& p0, const glm::vec2& p1,
                                float width, uint32_t color,
@@ -39,7 +39,7 @@ namespace Render {
             if (len < 1e-4f) return; // degenerate
             glm::vec2 dir = d / len;
             float half = width * 0.5f;
-            constexpr float kMiterFactor = 0.199f; // tan(11.25°)
+            constexpr float kMiterFactor = 0.049f; // tan(2.8125°), matches the 64/32-segment circle/smile
             glm::vec2 ext = dir * (half * kMiterFactor);
             glm::vec2 perp(-dir.y * half, dir.x * half); // perpendicular offset
             glm::vec2 a = p0 - ext;                // slightly pulled-back start

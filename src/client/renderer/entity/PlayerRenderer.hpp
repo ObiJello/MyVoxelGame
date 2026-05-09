@@ -44,10 +44,11 @@ namespace Render {
         static const char* s_vertSource;
         static const char* s_fragSource;
 
-        // Up to ~30 line segments per player are converted to camera-facing thick
-        // triangle strips (6 verts per line). With ~50 segments per player including
-        // head circle and face features, that's ~300 verts/player → fits ~100 players.
-        static constexpr size_t MAX_VERTICES = 32768;
+        // Each line segment becomes a 6-vert camera-facing thick triangle strip.
+        // Per player: head circle (64) + smile (32) + eyes (2) + body/limbs (~6) ≈
+        // 100 segments × 6 ≈ 620 verts/player. 65 536 / 620 ≈ 105 players concurrent
+        // before this buffer fills.
+        static constexpr size_t MAX_VERTICES = 65536;
     };
 
 } // namespace Render

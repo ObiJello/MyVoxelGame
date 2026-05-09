@@ -102,10 +102,17 @@ namespace Render {
         PushLine(lineVerts, shoulderR, handR, cr, cg, cb, ca);
 
         // --- LINES: Front head outline + face features ---
+        // Segment counts chosen so the per-segment angle change is the same on
+        // both the full-circle outline (2π / 64 = 5.625°) and the half-circle
+        // smile (π / 32 = 5.625°). That lets the renderers use ONE miter
+        // extension factor (≈ tan(2.8°) ≈ 0.049) to perfectly fill the gap
+        // between adjacent thick-line quads on both shapes.
+        constexpr int kHeadCircleSegments = 64;
+        constexpr int kSmileSegments      = 32;
         float headRadius = 0.18f;
         glm::vec3 frontC = headC;
 
-        PushCircle(lineVerts, frontC, faceRight, worldUp, headRadius, 16,
+        PushCircle(lineVerts, frontC, faceRight, worldUp, headRadius, kHeadCircleSegments,
                    0.0f, 2.0f * PI, cr, cg, cb, ca);
 
         // Eyes
@@ -117,7 +124,8 @@ namespace Render {
 
         // Smile
         glm::vec3 mouthC = frontC - worldUp * 0.04f;
-        PushCircle(lineVerts, mouthC, faceRight, worldUp, 0.07f, 8, PI, 2.0f * PI, cr, cg, cb, ca);
+        PushCircle(lineVerts, mouthC, faceRight, worldUp, 0.07f, kSmileSegments,
+                   PI, 2.0f * PI, cr, cg, cb, ca);
 
         // --- TRIANGLES: Back-of-head filled disc (GPU face-culled) ---
         // Placed at headC (no offset) so it lines up with the neck/body connection.
