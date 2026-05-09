@@ -736,29 +736,33 @@ namespace Server {
         uint32_t playerId = connection->GetConnectionId();
         std::string requestedName = connection->GetPlayerName();
 
-        // Auto-assign default if client didn't pass --name (matching MC: PlayerN sequence)
-        if (requestedName.empty()) {
-            requestedName = "Player" + std::to_string(playerId);
-        }
-
-        // Resolve name collisions against active sessions (MC: PlayerList rejects duplicate
-        // names in online mode; in offline mode it kicks the existing player. We append _2,
-        // _3, etc. so two clients passing --name Bob both get usable distinct names.)
-        std::string playerName = requestedName;
-        {
-            auto isNameTaken = [&](const std::string& candidate) {
-                for (const auto& session : m_sessionManager->GetAllSessions()) {
-                    if (session && session->GetPlayer() &&
-                        session->GetPlayer()->getName() == candidate) {
-                        return true;
-                    }
+        // Helper: is this name already taken by an active session?
+        auto isNameTaken = [&](const std::string& candidate) {
+            for (const auto& session : m_sessionManager->GetAllSessions()) {
+                if (session && session->GetPlayer() &&
+                    session->GetPlayer()->getName() == candidate) {
+                    return true;
                 }
-                return false;
-            };
-            int suffix = 2;
-            while (isNameTaken(playerName)) {
-                playerName = requestedName + "_" + std::to_string(suffix++);
             }
+            return false;
+        };
+
+        // Default name = "PlayerN" using connection id (matches MC's offline-mode pattern).
+        // The default is always unique because connection ids are monotonically increasing
+        // and never reused by an existing session.
+        std::string defaultName = "Player" + std::to_string(playerId);
+
+        // Resolution rules (per user spec):
+        //   - Empty requested name → use default
+        //   - Requested name not taken → use it
+        //   - Requested name collides with an existing player → fall back to default
+        //     (instead of suffix-mangling, so "Bob" trying to join while "Bob" is here
+        //     becomes "Player2" rather than "Bob_2")
+        std::string playerName;
+        if (requestedName.empty() || isNameTaken(requestedName)) {
+            playerName = defaultName;
+        } else {
+            playerName = requestedName;
         }
 
         // Update connection so chat (<name> message) and disconnect logs use the resolved name

@@ -33,6 +33,11 @@ namespace Launcher {
         bool gameInstalled = false;
         bool launcherUpdateReady = false;  // true when a launcher update has been installed
         bool useVulkan = false;            // launch game with --vulkan
+
+        // Persisted across launcher runs (loaded from / saved to launcher.json by LauncherApp)
+        std::string playerName;             // Empty → server auto-assigns "PlayerN"
+        std::string lastJoinIP;             // Pre-fills the Join Server dialog IP field
+        std::string lastJoinPort = "25565"; // Pre-fills the Join Server dialog port field
     };
 
     class LauncherUI {
@@ -57,9 +62,9 @@ namespace Launcher {
         void DrawRestartButton();
         void DrawPlayButton(LauncherUIState& state);
         void DrawJoinButton(LauncherUIState& state);
-        void DrawJoinPopup();
+        void DrawJoinPopup(LauncherUIState& state);
         void DrawStatusBar(const LauncherUIState& state);
-        void DrawSettingsPopup();
+        void DrawSettingsPopup(LauncherUIState& state);
 
         ActionCallback m_onPlay;
         ActionCallback m_onUpdate;
@@ -73,8 +78,10 @@ namespace Launcher {
 
         bool m_showSettings = false;
         bool m_showJoinPopup = false;
+        bool m_joinPopupSeeded = false; // True after pre-filling m_joinIP/m_joinPort from state
         char m_joinIP[64] = "";
         char m_joinPort[8] = "25565";
+        char m_playerName[32] = "";     // Bound to LauncherUIState::playerName via Render()
     };
 
 } // namespace Launcher

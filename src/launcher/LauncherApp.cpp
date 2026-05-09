@@ -37,6 +37,9 @@ namespace Launcher {
         std::string launcherVersion;
         bool autoUpdate = true;
         bool useVulkan = false;
+        std::string playerName;             // Empty → server auto-assigns "PlayerN"
+        std::string lastJoinIP;             // Pre-fill the Join Server dialog
+        std::string lastJoinPort = "25565"; // Pre-fill the Join Server dialog
 
         void Load(const std::string& path) {
             try {
@@ -47,6 +50,9 @@ namespace Launcher {
                 launcherVersion = json.value("launcher_version", "");
                 autoUpdate = json.value("auto_update", true);
                 useVulkan = json.value("use_vulkan", false);
+                playerName = json.value("player_name", "");
+                lastJoinIP = json.value("last_join_ip", "");
+                lastJoinPort = json.value("last_join_port", std::string("25565"));
             } catch (...) {
                 Log::Warning("Failed to load launcher config");
             }
@@ -59,6 +65,9 @@ namespace Launcher {
                 json["launcher_version"] = launcherVersion;
                 json["auto_update"] = autoUpdate;
                 json["use_vulkan"] = useVulkan;
+                json["player_name"] = playerName;
+                json["last_join_ip"] = lastJoinIP;
+                json["last_join_port"] = lastJoinPort;
                 std::ofstream file(path);
                 file << json.dump(2);
             } catch (...) {
@@ -213,6 +222,9 @@ namespace Launcher {
 
         uiState.gameInstalled = std::filesystem::exists(gameExePath);
         uiState.useVulkan = config.useVulkan;
+        uiState.playerName = config.playerName;
+        uiState.lastJoinIP = config.lastJoinIP;
+        uiState.lastJoinPort = config.lastJoinPort;
         if (!config.installedVersion.empty()) {
             uiState.installedVersion = config.installedVersion;
         }
@@ -338,10 +350,22 @@ namespace Launcher {
             // RelaunchSelf calls _exit(0), so we never get here
         });
 
+        // Build "--name <X>" arg fragment if a non-empty username is set. Game's PlatformMain
+        // accepts an empty/missing name and lets the server auto-assign "PlayerN".
+        auto buildNameArg = [&]() -> std::string {
+            if (uiState.playerName.empty()) return "";
+            return " --name " + uiState.playerName;
+        };
+
         ui.SetOnPlayClicked([&]() {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Launching game...";
-            if (LaunchGame(gameExePath, uiState.useVulkan)) {
+            // Persist any settings changes (username) before launching, so a crash
+            // before clean exit still keeps what the user typed.
+            config.playerName = uiState.playerName;
+            config.Save(configPath);
+            std::string args = buildNameArg();
+            if (LaunchGame(gameExePath, uiState.useVulkan, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -354,7 +378,12 @@ namespace Launcher {
         ui.SetOnJoinClicked([&](const std::string& host, uint16_t port) {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Joining server...";
-            std::string serverArg = "--server " + host + ":" + std::to_string(port);
+            // Persist username + IP/port so re-opening the launcher pre-fills both
+            config.playerName = uiState.playerName;
+            config.lastJoinIP = uiState.lastJoinIP;
+            config.lastJoinPort = uiState.lastJoinPort;
+            config.Save(configPath);
+            std::string serverArg = "--server " + host + ":" + std::to_string(port) + buildNameArg();
             if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -524,6 +553,9 @@ namespace Launcher {
 
         // ── Cleanup ──
         config.useVulkan = uiState.useVulkan;
+        config.playerName = uiState.playerName;
+        config.lastJoinIP = uiState.lastJoinIP;
+        config.lastJoinPort = uiState.lastJoinPort;
         config.Save(configPath);
 
         if (logoTexture != 0) {

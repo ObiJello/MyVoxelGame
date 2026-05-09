@@ -87,12 +87,24 @@ namespace Launcher {
 
         // ── Settings Popup ──
         if (m_showSettings) {
-            DrawSettingsPopup();
+            DrawSettingsPopup(state);
         }
 
         // ── Join Server Popup ──
         if (m_showJoinPopup) {
-            DrawJoinPopup();
+            // Seed the input buffers with the last-used values the FIRST time the popup opens
+            // this session, so users don't have to retype the IP they joined last.
+            if (!m_joinPopupSeeded) {
+                std::snprintf(m_joinIP, sizeof(m_joinIP), "%s", state.lastJoinIP.c_str());
+                if (!state.lastJoinPort.empty()) {
+                    std::snprintf(m_joinPort, sizeof(m_joinPort), "%s", state.lastJoinPort.c_str());
+                }
+                m_joinPopupSeeded = true;
+            }
+            DrawJoinPopup(state);
+        } else {
+            // Reset so the next open re-seeds from state (which the app may have updated)
+            m_joinPopupSeeded = false;
         }
 
         ImGui::End();
@@ -295,7 +307,7 @@ namespace Launcher {
         if (g_fontSmall) ImGui::PopFont();
     }
 
-    void LauncherUI::DrawJoinPopup() {
+    void LauncherUI::DrawJoinPopup(LauncherUIState& state) {
         ImGui::SetNextWindowSize(ImVec2(340, 220), ImGuiCond_Always);
         ImGui::SetNextWindowPos(
             ImVec2(static_cast<float>(WindowWidth) * 0.5f, static_cast<float>(WindowHeight) * 0.5f),
@@ -348,6 +360,10 @@ namespace Launcher {
 
             if (ImGui::Button("CONNECT", ImVec2(120, 30)) && valid) {
                 m_showJoinPopup = false;
+                // Persist the IP/port so the next open of this dialog (and the next launch
+                // of the launcher) pre-fills with what the user just typed.
+                state.lastJoinIP = m_joinIP;
+                state.lastJoinPort = m_joinPort;
                 if (m_onJoin) {
                     m_onJoin(std::string(m_joinIP), port);
                 }
@@ -408,8 +424,8 @@ namespace Launcher {
         if (g_fontSmall) ImGui::PopFont();
     }
 
-    void LauncherUI::DrawSettingsPopup() {
-        ImGui::SetNextWindowSize(ImVec2(400, 250), ImGuiCond_FirstUseEver);
+    void LauncherUI::DrawSettingsPopup(LauncherUIState& state) {
+        ImGui::SetNextWindowSize(ImVec2(400, 320), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(
             ImVec2(static_cast<float>(WindowWidth) * 0.5f, static_cast<float>(WindowHeight) * 0.5f),
             ImGuiCond_FirstUseEver,
@@ -425,6 +441,23 @@ namespace Launcher {
 
             if (g_fontBody) ImGui::PopFont();
             if (g_fontSmall) ImGui::PushFont(g_fontSmall);
+
+            // ── Username (passed to the game as --name <X>; empty → server auto-assigns) ──
+            // Sync the char buffer from state on first paint and whenever state was loaded.
+            // We keep them in sync by writing back into state on every edit.
+            if (m_playerName[0] == '\0' && !state.playerName.empty()) {
+                std::snprintf(m_playerName, sizeof(m_playerName), "%s", state.playerName.c_str());
+            }
+            ImGui::Text("Username");
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::InputText("##username", m_playerName, sizeof(m_playerName))) {
+                state.playerName = m_playerName;
+            }
+            ImGui::TextDisabled("Leave blank to use the default (Player1, Player2, ...)");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
 
             ImGui::TextDisabled("Launcher v%s", LauncherVersion);
             ImGui::Spacing();
