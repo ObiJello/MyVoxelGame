@@ -326,5 +326,51 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // ========================================================================
+    // INVENTORY SYNC PACKETS
+    // ========================================================================
+
+    class InventoryFullS2CPacketImpl : public IS2CPacket {
+    private:
+        InventoryFullS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit InventoryFullS2CPacketImpl(InventoryFullS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onInventoryFullS2C(m_data); }
+        const InventoryFullS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::InventoryFullS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class InventorySetSlotS2CPacketImpl : public IS2CPacket {
+    private:
+        InventorySetSlotS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit InventorySetSlotS2CPacketImpl(InventorySetSlotS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onInventorySetSlotS2C(m_data); }
+        const InventorySetSlotS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::InventorySetSlotS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class InventorySetCarriedS2CPacketImpl : public IS2CPacket {
+    private:
+        InventorySetCarriedS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit InventorySetCarriedS2CPacketImpl(InventorySetCarriedS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onInventorySetCarriedS2C(m_data); }
+        const InventorySetCarriedS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::InventorySetCarriedS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network

@@ -7,6 +7,12 @@
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
 
+// Forward declaration: defined in src/client/renderer/gui/InventoryScreen.cpp.
+// Lets the inventory carried-item update flow without pulling the GUI header here.
+namespace Render {
+    void SetInventoryScreenCarriedItem(Game::ItemID id, int count);
+}
+
 namespace Client {
 
     // Global client systems (defined elsewhere)
@@ -289,10 +295,45 @@ namespace Client {
 
         for (int i = 0; i < 9; i++) {
             auto blockId = static_cast<Game::BlockID>(packet.slots[i]);
-            m_player->inventory.SetSlot(i, blockId, 64);
+            // Air slots get count=0; non-Air gets a default stack so the hotbar shows them.
+            // (HotbarSync is the legacy path; InventoryFullS2C carries real counts.)
+            int count = (blockId == Game::BlockID::Air) ? 0 : 64;
+            m_player->inventory.SetSlot(Game::Inventory::HotbarToIndex(i), blockId, count);
             Log::Debug("[ClientPacketHandler] Hotbar slot %d = block %d", i, packet.slots[i]);
         }
 
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleInventoryFull(const Network::InventoryFullS2CPacket& packet) {
+        if (!m_player) return;
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+            m_player->inventory.SetSlot(i,
+                                        static_cast<Game::ItemID>(packet.itemIds[i]),
+                                        static_cast<int>(packet.counts[i]));
+        }
+        m_player->inventory.SetSelectedSlot(packet.selectedHotbarSlot);
+        Log::Debug("[ClientPacketHandler] Inventory full sync: selected=%d carried=%u(%u)",
+                   packet.selectedHotbarSlot, packet.carriedItemId, packet.carriedCount);
+        // Push the carried portion through the same path so it lands on the screen.
+        Network::InventorySetCarriedS2CPacket carried{packet.carriedItemId, packet.carriedCount};
+        handleInventorySetCarried(carried);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet) {
+        if (!m_player) return;
+        m_player->inventory.SetSlot(packet.slotIndex,
+                                    static_cast<Game::ItemID>(packet.itemId),
+                                    static_cast<int>(packet.count));
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet) {
+        // Defined in InventoryScreen.cpp; forward-declared at file scope at the top of this file
+        // (avoids pulling in the GUI header from the network handler).
+        ::Render::SetInventoryScreenCarriedItem(static_cast<Game::ItemID>(packet.itemId),
+                                                static_cast<int>(packet.count));
         m_stats.packetsProcessed++;
     }
 

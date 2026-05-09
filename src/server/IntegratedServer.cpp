@@ -812,14 +812,11 @@ namespace Server {
             Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
                       playerName.c_str(), playerId, connection->GetConnectionId());
 
-            // Send server-authoritative hotbar to client
-            Network::HotbarSyncS2CPacket hotbarPacket;
-            for (int i = 0; i < 9; i++) {
-                hotbarPacket.slots[i] = static_cast<uint16_t>(playerPtr->getHotbarBlock(i));
-            }
-            auto hotbarData = Network::Serialization::Serialize(hotbarPacket);
-            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::HotbarSyncS2C), hotbarData);
-            Log::Info("[IntegratedServer] Sent hotbar sync to client");
+            // Send full 46-slot inventory snapshot. Replaces the old HotbarSyncS2C path —
+            // InventoryFullS2C carries real per-slot counts so the client doesn't have to
+            // synthesize them.
+            session->SendInventoryFull();
+            Log::Info("[IntegratedServer] Sent full inventory sync to client");
 
             // PlayerInfo: broadcast new player to ALL clients (including the new one, so they see
             // themselves in the player list — matching MC's PlayerList.placeNewPlayer line 188)

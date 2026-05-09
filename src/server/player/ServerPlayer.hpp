@@ -6,8 +6,11 @@
 #include <memory>
 #include <chrono>
 #include <array>
+#include <vector>
+#include <cstdint>
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
+#include "common/entity/Inventory.hpp"
 
 namespace Game {
     class World;
@@ -97,14 +100,27 @@ namespace Server {
         // Get currently held block/item
         Game::BlockID getHeldBlock() const;
 
-        // Get block in specific hotbar slot
+        // Get block in specific hotbar slot (slot is 0..8). Returns Air for non-block items.
         Game::BlockID getHotbarBlock(int slot) const {
-            if (slot >= 0 && slot < 9) return m_hotbarBlocks[slot];
-            return Game::BlockID::Air;
+            return m_inventory.GetSlot(Game::Inventory::HotbarToIndex(slot)).AsBlockID();
         }
-        
+
         // Set block in hotbar slot
         void setHotbarBlock(int slot, Game::BlockID block);
+
+        // Direct access to backing inventory (server-authoritative)
+        Game::Inventory&       getInventory()       { return m_inventory; }
+        const Game::Inventory& getInventory() const { return m_inventory; }
+
+        // Cursor item (carried while inventory is open)
+        Game::InventorySlot&       getCarried()       { return m_carriedItem; }
+        const Game::InventorySlot& getCarried() const { return m_carriedItem; }
+        void setCarried(const Game::InventorySlot& s) { m_carriedItem = s; }
+
+        // QUICK_CRAFT (drag-distribute) state — see InventoryClickHandler
+        uint8_t  m_quickcraftStatus = 0;
+        uint8_t  m_quickcraftType   = 0;
+        std::vector<uint8_t> m_quickcraftSlots;
         
         // === DAMAGE & EFFECTS ===
         
@@ -206,20 +222,10 @@ namespace Server {
         float m_reachDistance = 5.0f;
         
         // === INVENTORY ===
-        // TODO: PlayerInventory m_inventory;
-        int m_selectedHotbarSlot = 0;
-        // Basic hotbar inventory (9 slots)
-        std::array<Game::BlockID, 9> m_hotbarBlocks = {
-            Game::BlockID::Air,
-            Game::BlockID::Dirt,
-            Game::BlockID::Grass,
-            Game::BlockID::Lava,
-            Game::BlockID::Glass,
-            Game::BlockID::Sand,
-            Game::BlockID::OakLeaves,
-            Game::BlockID::Water,
-            Game::BlockID::Bedrock
-        };
+        // 46-slot MC-compatible inventory (crafting + armor + main + hotbar + offhand).
+        Game::Inventory m_inventory;
+        // Cursor item carried while the inventory screen is open.
+        Game::InventorySlot m_carriedItem;
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;

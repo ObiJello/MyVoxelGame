@@ -44,7 +44,10 @@ namespace Render {
         static const char* s_vertSource;
         static const char* s_fragSource;
 
-        static constexpr size_t MAX_VERTICES = 8192;
+        // Up to ~30 line segments per player are converted to camera-facing thick
+        // triangle strips (6 verts per line). With ~50 segments per player including
+        // head circle and face features, that's ~300 verts/player → fits ~100 players.
+        static constexpr size_t MAX_VERTICES = 32768;
     };
 
 } // namespace Render

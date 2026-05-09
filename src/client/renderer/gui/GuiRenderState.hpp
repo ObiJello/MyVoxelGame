@@ -10,7 +10,9 @@
 #include <memory>
 #include <cstdint>
 
-namespace Game { struct InventorySlot; }
+// `InventorySlot` is now an alias for `ItemStack` (see common/entity/Item.hpp).
+// We forward-declare ItemStack so headers that include this don't pay for the full Item.hpp.
+namespace Game { struct ItemStack; }
 
 namespace Render {
 
@@ -61,6 +63,8 @@ namespace Render {
         float u[4] = {}, v[4] = {};
         uint32_t color = 0xFFFFFFFF;
         int zOrder = 0;
+        ScissorRect scissor;
+        bool hasScissor = false;
     };
 
     // MC-style hierarchical render state node

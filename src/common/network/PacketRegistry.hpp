@@ -52,6 +52,9 @@
             SetChunkCacheRadiusS2C = 0x26, // Server tells client the effective view distance
             PlayerInfoS2C          = 0x27, // Player list updates (join/leave with name)
             ClientboundPlayerPosition = 0x28, // Authoritative position snap (MC: ClientboundPlayerPositionPacket)
+            InventoryFullS2C       = 0x29, // Full 46-slot inventory + carried + selected hotbar slot
+            InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
+            InventorySetCarriedS2C = 0x2B, // Cursor item update
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -75,6 +78,8 @@
             SteerVehicle        = 0x8F,
             ChunkBatchAckC2S    = 0x90,  // Client acknowledges batch with desired send rate
             ServerboundAcceptTeleportation = 0x91, // Echo of teleport id (MC: ServerboundAcceptTeleportationPacket)
+            InventoryClickC2S   = 0x92,  // One inventory action (mirrors MC ContainerInput dispatch)
+            InventoryCloseC2S   = 0x93,  // Inventory screen closed (server drops carried item)
         };
 
         // Convert PacketId to string for logging
@@ -114,6 +119,9 @@
                 case PacketId::HotbarSyncS2C: return "HotbarSyncS2C";
                 case PacketId::PlayerInfoS2C: return "PlayerInfoS2C";
                 case PacketId::ClientboundPlayerPosition: return "ClientboundPlayerPosition";
+                case PacketId::InventoryFullS2C: return "InventoryFullS2C";
+                case PacketId::InventorySetSlotS2C: return "InventorySetSlotS2C";
+                case PacketId::InventorySetCarriedS2C: return "InventorySetCarriedS2C";
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";
@@ -135,6 +143,8 @@
                 case PacketId::SteerVehicle: return "SteerVehicle";
                 case PacketId::ChunkBatchAckC2S: return "ChunkBatchAckC2S";
                 case PacketId::ServerboundAcceptTeleportation: return "ServerboundAcceptTeleportation";
+                case PacketId::InventoryClickC2S: return "InventoryClickC2S";
+                case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
 
                 default: return "Unknown";
             }

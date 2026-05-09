@@ -165,6 +165,10 @@ add_library(imgui
         src/server/world/storage/AnvilRegionWriter.hpp
         src/server/world/storage/AnvilChunkSaver.cpp
         src/server/world/storage/AnvilChunkSaver.hpp
+        src/common/entity/Item.cpp
+        src/common/entity/Item.hpp
+        src/common/entity/ItemModelLoader.cpp
+        src/common/entity/ItemModelLoader.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
@@ -340,10 +344,13 @@ if(APPLE)
             src/common/physics/RayCast.cpp
             src/common/physics/Physics.cpp
             src/common/entity/Inventory.cpp
+            src/common/entity/Item.cpp
+            src/common/entity/ItemModelLoader.cpp
             src/client/input/PlayerController.cpp
             src/client/entity/Player.cpp
             src/client/entity/RemotePlayerManager.cpp
             src/client/renderer/entity/PlayerRenderer.cpp
+            src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/ChunkMegaBuffer.cpp
             src/client/renderer/mesh/ChunkRenderer.cpp
@@ -362,6 +369,9 @@ if(APPLE)
             src/client/renderer/gui/HudRenderer.cpp
             src/client/renderer/gui/ChatComponent.cpp
             src/client/renderer/gui/ChatScreen.cpp
+            src/client/renderer/gui/InventoryScreen.cpp
+            src/client/renderer/gui/items/ChestItemRenderer.cpp
+            src/client/renderer/gui/items/PlayerInventoryPreview.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/common/world/block/BlockRegistry.cpp
@@ -385,6 +395,7 @@ if(APPLE)
             src/server/IntegratedServer.cpp
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.cpp
+            src/server/inventory/InventoryClickHandler.cpp
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientBlockAccess.cpp
             src/client/world/PendingDiffsManager.cpp
@@ -470,6 +481,8 @@ else()
             # Client rendering - Entity
             src/client/renderer/entity/PlayerRenderer.cpp
             src/client/renderer/entity/PlayerRenderer.hpp
+            src/client/renderer/entity/StickFigureGeometry.cpp
+            src/client/renderer/entity/StickFigureGeometry.hpp
 
             # Client rendering - Shader
             src/client/renderer/shader/Shader.cpp
@@ -632,6 +645,10 @@ else()
 
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
+
+            # Server inventory
+            src/server/inventory/InventoryClickHandler.cpp
+            src/server/inventory/InventoryClickHandler.hpp
 
             # Server world - Cache
             src/server/world/cache/ChunkCache.cpp

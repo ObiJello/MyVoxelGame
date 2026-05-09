@@ -81,7 +81,7 @@ namespace Render {
         for (int i = 0; i < 9; i++) {
             int x = screenCenter - 90 + i * 20 + 2;
             int y = bottomY - 16 - 3;
-            RenderSlot(graphics, x, y, inventory.GetSlot(i));
+            RenderSlot(graphics, x, y, inventory.GetSlot(Game::Inventory::HotbarToIndex(i)));
         }
     }
 

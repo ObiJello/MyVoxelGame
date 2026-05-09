@@ -6,7 +6,6 @@
 namespace Game {
 
     Inventory::Inventory() : selectedSlot(0) {
-        // Initialize all slots as empty
         for (auto& slot : slots) {
             slot.Clear();
         }
@@ -14,109 +13,132 @@ namespace Game {
 
     void Inventory::InitializeDefaults() {
         Clear();
-        // Server sends authoritative hotbar contents via HotbarSyncS2C on join
-        Log::Info("Inventory cleared, awaiting server hotbar sync");
+        Log::Info("Inventory cleared, awaiting server inventory sync");
     }
 
     void Inventory::SetSelectedSlot(int slot) {
         selectedSlot = std::clamp(slot, 0, HOTBAR_SIZE - 1);
     }
 
-    BlockID Inventory::GetSelectedBlock() const {
-        const auto& slot = slots[selectedSlot];
-        return slot.IsEmpty() ? BlockID::Air : slot.blockId;
+    ItemID Inventory::GetSelectedItem() const {
+        const auto& slot = slots[HotbarToIndex(selectedSlot)];
+        return slot.IsEmpty() ? Items::Air : slot.itemId;
     }
 
-    const InventorySlot& Inventory::GetSlot(int index) const {
-        static const InventorySlot emptySlot{};
-        if (index < 0 || index >= HOTBAR_SIZE) {
+    BlockID Inventory::GetSelectedBlock() const {
+        return slots[HotbarToIndex(selectedSlot)].AsBlockID();
+    }
+
+    const ItemStack& Inventory::GetSlot(int index) const {
+        static const ItemStack emptySlot{};
+        if (index < 0 || index >= TOTAL_SIZE) {
             return emptySlot;
         }
         return slots[index];
     }
 
-    bool Inventory::ConsumeSelectedBlock() {
-        auto& slot = slots[selectedSlot];
-
-        if (slot.IsEmpty()) {
-            return false;
+    ItemStack& Inventory::MutableSlot(int index) {
+        static ItemStack dummy{};
+        if (index < 0 || index >= TOTAL_SIZE) {
+            dummy.Clear();
+            return dummy;
         }
+        return slots[index];
+    }
+
+    bool Inventory::ConsumeSelectedBlock() {
+        auto& slot = slots[HotbarToIndex(selectedSlot)];
+        if (slot.IsEmpty()) return false;
 
         slot.count--;
-
-        if (slot.count <= 0) {
-            slot.Clear();
-        }
-
+        if (slot.count <= 0) slot.Clear();
         return true;
     }
 
-    int Inventory::AddBlocks(BlockID blockId, int count) {
-        if (blockId == BlockID::Air || count <= 0) {
-            return count;
-        }
+    int Inventory::AddItems(ItemID id, int count) {
+        if (id == Items::Air || count <= 0) return count;
 
         int remaining = count;
+        const int maxStack = ItemRegistry::Get(id).maxStackSize;
 
-        // First, try to add to existing stacks of the same block
-        for (int i = 0; i < HOTBAR_SIZE && remaining > 0; ++i) {
-            auto& slot = slots[i];
+        // MC's Inventory.add() priority order (Inventory.java add() →
+        // getSlotWithRemainingSpace() → getFreeSlot()). MC's items list is laid out
+        // hotbar(0..8) + main(9..35) + armor(36..39) + offhand(40), so iterating from
+        // index 0 finds the hotbar first. Our unified index has main(9..35) before
+        // hotbar(36..44), so we walk these regions explicitly to preserve MC's
+        // selected-hotbar > offhand > hotbar > main priority.
+        const int sel = HOTBAR_BEGIN + selectedSlot;
 
-            if (slot.blockId == blockId && slot.count < MAX_STACK_SIZE) {
-                int toAdd = std::min(remaining, MAX_STACK_SIZE - slot.count);
+        auto tryMerge = [&](int slotIdx) {
+            if (remaining <= 0) return;
+            auto& slot = slots[slotIdx];
+            if (slot.itemId == id && slot.count > 0 && slot.count < maxStack) {
+                int toAdd = std::min(remaining, maxStack - slot.count);
                 slot.count += toAdd;
                 remaining -= toAdd;
             }
-        }
-
-        // Then, try to add to empty slots
-        for (int i = 0; i < HOTBAR_SIZE && remaining > 0; ++i) {
-            auto& slot = slots[i];
-
+        };
+        auto tryFill = [&](int slotIdx) {
+            if (remaining <= 0) return;
+            auto& slot = slots[slotIdx];
             if (slot.IsEmpty()) {
-                int toAdd = std::min(remaining, MAX_STACK_SIZE);
-                slot.blockId = blockId;
-                slot.count = toAdd;
+                int toAdd = std::min(remaining, maxStack);
+                slot.itemId = id;
+                slot.count  = toAdd;
                 remaining -= toAdd;
             }
-        }
+        };
 
-        return remaining; // Return any blocks that couldn't be added
+        // Pass 1 (merge into existing stacks): selected → offhand → hotbar → main
+        tryMerge(sel);
+        tryMerge(OFFHAND_BEGIN);
+        for (int i = HOTBAR_BEGIN; i < HOTBAR_BEGIN + HOTBAR_SIZE; ++i) tryMerge(i);
+        for (int i = MAIN_BEGIN;   i < MAIN_BEGIN   + MAIN_SIZE;   ++i) tryMerge(i);
+
+        // Pass 2 (place in empty slot): hotbar (left to right) → main (top-left to
+        // bottom-right). MC's getFreeSlot iterates items 0..size and returns the first
+        // empty index, which under MC's layout is hotbar-first.
+        for (int i = HOTBAR_BEGIN; i < HOTBAR_BEGIN + HOTBAR_SIZE; ++i) tryFill(i);
+        for (int i = MAIN_BEGIN;   i < MAIN_BEGIN   + MAIN_SIZE;   ++i) tryFill(i);
+
+        return remaining;
     }
 
-    std::optional<int> Inventory::FindBlock(BlockID blockId) const {
-        for (int i = 0; i < HOTBAR_SIZE; ++i) {
-            if (slots[i].blockId == blockId && !slots[i].IsEmpty()) {
+    std::optional<int> Inventory::FindItem(ItemID id) const {
+        const int playerBegin = MAIN_BEGIN;
+        const int playerEnd   = HOTBAR_BEGIN + HOTBAR_SIZE;
+        for (int i = playerBegin; i < playerEnd; ++i) {
+            if (slots[i].itemId == id && !slots[i].IsEmpty()) {
                 return i;
             }
         }
         return std::nullopt;
     }
 
-    bool Inventory::HasBlock(BlockID blockId) const {
-        return FindBlock(blockId).has_value();
-    }
-
-    int Inventory::GetBlockCount(BlockID blockId) const {
+    int Inventory::GetItemCount(ItemID id) const {
         int total = 0;
-        for (const auto& slot : slots) {
-            if (slot.blockId == blockId) {
-                total += slot.count;
-            }
+        const int playerBegin = MAIN_BEGIN;
+        const int playerEnd   = HOTBAR_BEGIN + HOTBAR_SIZE;
+        for (int i = playerBegin; i < playerEnd; ++i) {
+            if (slots[i].itemId == id) total += slots[i].count;
         }
         return total;
     }
 
-    void Inventory::SetSlot(int index, BlockID blockId, int count) {
-        if (index >= 0 && index < HOTBAR_SIZE) {
-            slots[index] = {blockId, count};
+    void Inventory::SetSlot(int index, ItemID id, int count) {
+        if (index >= 0 && index < TOTAL_SIZE) {
+            slots[index] = {id, count};
+        }
+    }
+
+    void Inventory::SetSlotFull(int index, const ItemStack& s) {
+        if (index >= 0 && index < TOTAL_SIZE) {
+            slots[index] = s;
         }
     }
 
     void Inventory::Clear() {
-        for (auto& slot : slots) {
-            slot.Clear();
-        }
+        for (auto& slot : slots) slot.Clear();
         selectedSlot = 0;
     }
 
@@ -128,26 +150,21 @@ namespace Game {
         selectedSlot = (selectedSlot + 1) % HOTBAR_SIZE;
     }
 
-    int Inventory::AddToSlot(int slotIndex, BlockID blockId, int count) {
-        if (slotIndex < 0 || slotIndex >= HOTBAR_SIZE || count <= 0) {
-            return 0;
-        }
-
+    int Inventory::AddToSlot(int slotIndex, ItemID id, int count) {
+        if (slotIndex < 0 || slotIndex >= TOTAL_SIZE || count <= 0) return 0;
+        const int maxStack = ItemRegistry::Get(id).maxStackSize;
         auto& slot = slots[slotIndex];
-
         if (slot.IsEmpty()) {
-            slot.blockId = blockId;
-            slot.count = std::min(count, MAX_STACK_SIZE);
+            slot.itemId = id;
+            slot.count = std::min(count, maxStack);
             return slot.count;
         }
-
-        if (slot.blockId == blockId) {
-            int available = MAX_STACK_SIZE - slot.count;
+        if (slot.itemId == id) {
+            int available = maxStack - slot.count;
             int toAdd = std::min(count, available);
             slot.count += toAdd;
             return toAdd;
         }
-
         return 0;
     }
 

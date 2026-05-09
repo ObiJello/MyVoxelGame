@@ -11,7 +11,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace Game { struct InventorySlot; }
+#include "common/entity/Item.hpp"
 
 namespace Render {
 
@@ -49,8 +49,30 @@ namespace Render {
         int GetStringWidth(const std::string& text) const;
 
         // --- Item rendering ---
-        void RenderItem(const Game::InventorySlot& slot, int x, int y);
-        void RenderItemDecorations(const Game::InventorySlot& slot, int x, int y);
+        // Single entry point matching MC's GuiGraphics.renderItem(ItemStack, x, y) — dispatches
+        // on the item's renderType OR a registered custom renderer:
+        //   1. If the item has a CustomItemRenderer registered, that runs (BEWLR-style —
+        //      e.g. chest, sign, banner, head, bed, all use this in MC).
+        //   2. ItemRenderType::Block  → 3D isometric mini-cube (uses BlockModel + atlas)
+        //   3. ItemRenderType::Sprite → flat 16×16 texture (lazy-loaded from assets/textures/item/)
+        void RenderItem(const Game::ItemStack& stack, int x, int y);
+        // Pre-load any sprite-type item textures so the first render frame after Open()
+        // can use them without a one-frame latency.
+        static void PreloadItem(Game::ItemID itemId);
+        void RenderItemDecorations(const Game::ItemStack& stack, int x, int y);
+
+        // Custom item renderers — MC's BlockEntityWithoutLevelRenderer equivalent. Items
+        // that are normally drawn by a block-entity renderer in the world (chest, sign,
+        // bell, banner, etc.) can register a function here to draw their inventory icon
+        // however they want (typically a 3D entity-textured model). Called from RenderItem
+        // BEFORE the standard block/sprite dispatch.
+        using CustomItemRenderer = void(*)(GuiGraphics& g, const Game::ItemStack& stack, int x, int y);
+        static void RegisterCustomItemRenderer(Game::ItemID id, CustomItemRenderer renderer);
+
+        // Direct access to the underlying render state — needed by custom item renderers
+        // that submit 3D quads (BEWLR-style chest, banner, etc.). Mirrors how MC's BEWLR
+        // gets a `MultiBufferSource` from the GuiGraphics during inventory rendering.
+        GuiRenderState* GetRenderState() { return m_renderState; }
 
         // --- Scissors/Clipping ---
         void EnableScissor(int x0, int y0, int x1, int y1);

@@ -129,6 +129,12 @@ namespace Game {
             packet.worldY = breakingBlockPos.y;
             packet.worldZ = breakingBlockPos.z;
             packet.action = Network::BlockActionType::BREAK;
+            // Carry the block ID we're breaking. In integrated-server mode the client
+            // applies SetBlock(Air) locally for immediate visual feedback BEFORE this
+            // packet reaches the server, and since both share the same World object the
+            // server's world->GetBlock(pos) returns Air by the time HandleBlockAction
+            // runs — making the server unable to add the broken block to inventory.
+            packet.blockId = breakingBlockId;
             packet.face = 0;
             packet.sequenceNumber = ++interactSeq;
 

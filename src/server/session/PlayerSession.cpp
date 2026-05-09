@@ -12,7 +12,9 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
 #include "../IntegratedServer.hpp"
+#include "../inventory/InventoryClickHandler.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace Server {
@@ -633,12 +635,46 @@ namespace Server {
                 if (!server || !server->GetWorld()) return;
                 Game::World* world = server->GetWorld();
 
-                Game::BlockID oldBlock = world->GetBlock(pos.x, pos.y, pos.z);
+                // Trust the packet's blockId for inventory purposes. In integrated-server
+                // mode the client and server share one World, so by the time we get here
+                // the client's local SetBlock(Air) prediction has already cleared the
+                // world block — world->GetBlock(pos) would return Air. The packet's
+                // blockId carries what the player actually broke. Fall back to the world
+                // value when the packet doesn't supply one (e.g. older clients).
+                Game::BlockID oldBlock = (packet.blockId != Game::BlockID::Air)
+                                       ? packet.blockId
+                                       : world->GetBlock(pos.x, pos.y, pos.z);
                 if (oldBlock == Game::BlockID::Air || oldBlock == Game::BlockID::Bedrock) return;
 
-                if (world->SetBlock(pos.x, pos.y, pos.z, Game::BlockID::Air)) {
-                    Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
-                              m_playerId, pos.x, pos.y, pos.z);
+                // SetBlock may already be a no-op (the world is already Air in integrated
+                // mode), but call it anyway so dedicated multiplayer still clears the
+                // server's world.
+                world->SetBlock(pos.x, pos.y, pos.z, Game::BlockID::Air);
+                Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
+                          m_playerId, pos.x, pos.y, pos.z);
+
+                // Add the broken block to the player's inventory and broadcast slot
+                // deltas. Without this the server-side inventory stays empty even
+                // though the client predicts the pickup, causing inventory clicks to
+                // be no-ops (server sees empty slots) and shift-click-clear to leave
+                // ghost items on screen (no SetSlot deltas for already-empty slots).
+                if (m_connection) {
+                    auto& inv = m_player->getInventory();
+                    std::array<Game::ItemStack, Game::Inventory::TOTAL_SIZE> before;
+                    for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+                        before[i] = inv.GetSlot(i);
+                    }
+                    inv.AddBlocks(oldBlock, 1);
+                    for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+                        const auto& after = inv.GetSlot(i);
+                        if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
+                        Network::InventorySetSlotS2CPacket out;
+                        out.slotIndex = static_cast<uint8_t>(i);
+                        out.itemId    = after.itemId;
+                        out.count     = static_cast<uint8_t>(std::max(0, after.count));
+                        auto data = Network::Serialization::Serialize(out);
+                        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+                    }
                 }
                 break;
             }
@@ -655,13 +691,99 @@ namespace Server {
         if (!m_player) return;
         int slot = packet.slot;
         if (slot >= 0 && slot < 9) {
+            // Only update the selected-slot index. The packet's `blockId` field is
+            // legacy from when the client was inventory-authoritative — applying it
+            // via setHotbarBlock(64) would clobber the real (server-authoritative)
+            // stack with a 64-count of whatever block the client thinks is here.
             m_player->selectHotbarSlot(slot);
-            // Also sync the block type for this slot (client-authoritative for now)
-            if (packet.blockId != 0) {
-                m_player->setHotbarBlock(slot, static_cast<Game::BlockID>(packet.blockId));
-            }
-            Log::Debug("[PlayerSession] Player %u: slot %d, block %d", m_playerId, slot, packet.blockId);
+            Log::Debug("[PlayerSession] Player %u: selected slot %d", m_playerId, slot);
         }
+    }
+
+    void PlayerSession::HandleInventoryClick(const Network::InventoryClickC2SPacket& packet) {
+        if (!m_player || !m_connection) return;
+
+        auto result = InventoryClickHandler::Handle(*m_player, packet);
+
+        // Broadcast slot deltas
+        for (uint8_t slotIdx : result.changedSlots) {
+            const auto& s = m_player->getInventory().GetSlot(slotIdx);
+            Network::InventorySetSlotS2CPacket out;
+            out.slotIndex = slotIdx;
+            out.itemId    = s.itemId;
+            out.count     = static_cast<uint8_t>(std::max(0, s.count));
+            auto data = Network::Serialization::Serialize(out);
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+        }
+        if (result.carriedChanged) {
+            const auto& c = m_player->getCarried();
+            Network::InventorySetCarriedS2CPacket out;
+            out.itemId = c.itemId;
+            out.count  = static_cast<uint8_t>(std::max(0, c.count));
+            auto data = Network::Serialization::Serialize(out);
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+        }
+        // TODO: spawn dropped item entity if !result.droppedItem.IsEmpty()
+    }
+
+    void PlayerSession::HandleInventoryClose(const Network::InventoryCloseC2SPacket&) {
+        if (!m_player || !m_connection) return;
+        // MC drops the cursor item as a world entity when the inventory closes,
+        // but since we have no item-entity system yet, dropping = the item just
+        // disappears. Better UX: try to put the carried stack back into the
+        // player's inventory (matching what the user expects when pressing E
+        // without intentionally dropping). Only items that don't fit get
+        // silently dropped (acceptable since the inventory is large).
+        auto& carried = m_player->getCarried();
+        if (carried.IsEmpty()) return;
+
+        auto& inv = m_player->getInventory();
+        std::array<Game::ItemStack, Game::Inventory::TOTAL_SIZE> before;
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) before[i] = inv.GetSlot(i);
+
+        int leftover = inv.AddItems(carried.itemId, carried.count);
+        // Whatever didn't fit is silently dropped (no item-entity system).
+        carried.Clear();
+
+        // Broadcast slot deltas + the cleared cursor.
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+            const auto& after = inv.GetSlot(i);
+            if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
+            Network::InventorySetSlotS2CPacket s;
+            s.slotIndex = static_cast<uint8_t>(i);
+            s.itemId    = after.itemId;
+            s.count     = static_cast<uint8_t>(std::max(0, after.count));
+            auto data = Network::Serialization::Serialize(s);
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+        }
+        Network::InventorySetCarriedS2CPacket out;
+        out.itemId = Game::Items::Air;
+        out.count  = 0;
+        auto data = Network::Serialization::Serialize(out);
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+
+        if (leftover > 0) {
+            Log::Debug("[HandleInventoryClose] Dropped %d items (no entity system to spawn them)",
+                       leftover);
+        }
+    }
+
+    void PlayerSession::SendInventoryFull() {
+        if (!m_player || !m_connection) return;
+        const auto& inv = m_player->getInventory();
+        Network::InventoryFullS2CPacket out;
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+            const auto& s = inv.GetSlot(i);
+            out.itemIds[i] = s.itemId;
+            out.counts[i]  = static_cast<uint8_t>(std::max(0, std::min(255, s.count)));
+        }
+        const auto& c = m_player->getCarried();
+        out.carriedItemId      = c.itemId;
+        out.carriedCount       = static_cast<uint8_t>(std::max(0, c.count));
+        out.selectedHotbarSlot = static_cast<uint8_t>(inv.GetSelectedSlot());
+
+        auto data = Network::Serialization::Serialize(out);
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryFullS2C), data);
     }
 
     void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
@@ -872,10 +994,27 @@ namespace Server {
         // - Gravity blocks (sand) if implemented
         
         // === 11. Inventory update ===
-        
-        if (m_player->getGameMode() != GameMode::CREATIVE) {
-            // TODO: Decrement held stack
-            // TODO: Send inventory slot echo back to player
+        // Decrement the selected hotbar slot and broadcast the new count.
+        // Without this the server's inventory keeps the original 64-stack while
+        // the client's local prediction decrements toward 0; clicking the slot
+        // in the inventory then "refills" it to whatever the server still has.
+        // (We always decrement — creative-mode infinite-stack support is a TODO.)
+        {
+            auto& inv = m_player->getInventory();
+            int selUnified = Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot();
+            auto& slot = inv.MutableSlot(selUnified);
+            if (!slot.IsEmpty()) {
+                slot.count--;
+                if (slot.count <= 0) slot.Clear();
+                if (m_connection) {
+                    Network::InventorySetSlotS2CPacket out;
+                    out.slotIndex = static_cast<uint8_t>(selUnified);
+                    out.itemId    = slot.itemId;
+                    out.count     = static_cast<uint8_t>(std::max(0, slot.count));
+                    auto data = Network::Serialization::Serialize(out);
+                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+                }
+            }
         }
         
         // === 12. Accumulate outbound notifications ===

@@ -315,6 +315,68 @@ namespace Network {
         int32_t id = 0;
     };
 
+    // ========================================================================
+    // INVENTORY PACKETS — mirror MC's ServerboundContainerClickPacket flow
+    // ========================================================================
+
+    // ContainerInput action types — match MC AbstractContainerMenu.ContainerInput verbatim.
+    enum class ContainerInput : uint8_t {
+        PICKUP      = 0, // Left/right click on a slot
+        QUICK_MOVE  = 1, // Shift+click; auto-move stack between regions
+        SWAP        = 2, // Number key — swap with hotbar slot `button` (0..8)
+        CLONE       = 3, // Middle click — clone full stack to cursor (creative)
+        THROW       = 4, // Q — drop 1; Ctrl+Q drops stack; outside-click drops cursor
+        QUICK_CRAFT = 5, // Drag-distribute (three phases: start/add/end)
+        PICKUP_ALL  = 6, // Double-click — collect matching items into cursor
+        // MC creative-only: shift-click on the destroy_item slot (creative survival tab).
+        // Mirrors CreativeModeInventoryScreen.slotClicked() line 189-193: clears every slot
+        // in the player's container (crafting + armor + main + hotbar + offhand).
+        CREATIVE_DESTROY_ALL = 7,
+    };
+
+    // Sentinel slot indices.
+    namespace InventorySlotSentinel {
+        constexpr int16_t OUTSIDE       = -999; // matches MC AbstractContainerMenu.SLOT_CLICKED_OUTSIDE
+        constexpr int16_t CREATIVE_GRID = -2;   // click on the search-tab creative source grid
+    }
+
+    // Server → client: full 46-slot snapshot. Sent on join and after large mutations.
+    // ItemID is uint32_t — block items use IDs 1..(BlockID::Count-1), pure items >= 0x10000.
+    struct InventoryFullS2CPacket {
+        std::array<uint32_t, 46> itemIds;
+        std::array<uint8_t,  46> counts;
+        uint32_t carriedItemId = 0;
+        uint8_t  carriedCount  = 0;
+        uint8_t  selectedHotbarSlot = 0;
+
+        InventoryFullS2CPacket() { itemIds.fill(0); counts.fill(0); }
+    };
+
+    // Server → client: single-slot delta.
+    struct InventorySetSlotS2CPacket {
+        uint8_t  slotIndex = 0; // 0..45
+        uint32_t itemId    = 0;
+        uint8_t  count     = 0;
+    };
+
+    // Server → client: cursor item update.
+    struct InventorySetCarriedS2CPacket {
+        uint32_t itemId = 0;
+        uint8_t  count  = 0;
+    };
+
+    // Client → server: one inventory action.
+    struct InventoryClickC2SPacket {
+        int16_t  slotIndex = 0;          // 0..45 OR InventorySlotSentinel::*
+        uint8_t  button    = 0;          // semantics depend on action
+        uint8_t  action    = 0;          // ContainerInput as uint8_t
+        uint8_t  flags     = 0;          // reserved (e.g. shift redundancy bits)
+        uint32_t creativeItemId = 0;     // only meaningful when slotIndex == CREATIVE_GRID
+    };
+
+    // Client → server: notify server the inventory screen was closed.
+    struct InventoryCloseC2SPacket {};
+
     // Chat messages and commands
     struct ChatMessageC2SPacket {
         std::string message;
@@ -995,6 +1057,84 @@ namespace Network {
             packet.id = static_cast<int32_t>(reader.ReadInt());
             return packet;
         }
+
+        // ---- InventoryFullS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const InventoryFullS2CPacket& packet) {
+            PacketBuffer buffer;
+            for (int i = 0; i < 46; ++i) buffer.WriteInt(packet.itemIds[i]);
+            for (int i = 0; i < 46; ++i) buffer.WriteByte(packet.counts[i]);
+            buffer.WriteInt(packet.carriedItemId);
+            buffer.WriteByte(packet.carriedCount);
+            buffer.WriteByte(packet.selectedHotbarSlot);
+            return buffer.GetData();
+        }
+        inline InventoryFullS2CPacket DeserializeInventoryFullS2C(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            InventoryFullS2CPacket packet;
+            for (int i = 0; i < 46; ++i) packet.itemIds[i] = reader.ReadInt();
+            for (int i = 0; i < 46; ++i) packet.counts[i]  = reader.ReadByte();
+            packet.carriedItemId       = reader.ReadInt();
+            packet.carriedCount        = reader.ReadByte();
+            packet.selectedHotbarSlot  = reader.ReadByte();
+            return packet;
+        }
+
+        // ---- InventorySetSlotS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const InventorySetSlotS2CPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteByte(packet.slotIndex);
+            buffer.WriteInt(packet.itemId);
+            buffer.WriteByte(packet.count);
+            return buffer.GetData();
+        }
+        inline InventorySetSlotS2CPacket DeserializeInventorySetSlotS2C(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            InventorySetSlotS2CPacket packet;
+            packet.slotIndex = reader.ReadByte();
+            packet.itemId    = reader.ReadInt();
+            packet.count     = reader.ReadByte();
+            return packet;
+        }
+
+        // ---- InventorySetCarriedS2CPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const InventorySetCarriedS2CPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteInt(packet.itemId);
+            buffer.WriteByte(packet.count);
+            return buffer.GetData();
+        }
+        inline InventorySetCarriedS2CPacket DeserializeInventorySetCarriedS2C(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            InventorySetCarriedS2CPacket packet;
+            packet.itemId = reader.ReadInt();
+            packet.count  = reader.ReadByte();
+            return packet;
+        }
+
+        // ---- InventoryClickC2SPacket Serialization ----
+        inline std::vector<uint8_t> Serialize(const InventoryClickC2SPacket& packet) {
+            PacketBuffer buffer;
+            buffer.WriteShort(static_cast<uint16_t>(packet.slotIndex));
+            buffer.WriteByte(packet.button);
+            buffer.WriteByte(packet.action);
+            buffer.WriteByte(packet.flags);
+            buffer.WriteInt(packet.creativeItemId);
+            return buffer.GetData();
+        }
+        inline InventoryClickC2SPacket DeserializeInventoryClickC2S(const std::vector<uint8_t>& data) {
+            PacketReader reader(data);
+            InventoryClickC2SPacket packet;
+            packet.slotIndex      = static_cast<int16_t>(reader.ReadShort());
+            packet.button         = reader.ReadByte();
+            packet.action         = reader.ReadByte();
+            packet.flags          = reader.ReadByte();
+            packet.creativeItemId = reader.ReadInt();
+            return packet;
+        }
+
+        // ---- InventoryCloseC2SPacket Serialization (empty payload) ----
+        inline std::vector<uint8_t> Serialize(const InventoryCloseC2SPacket&) { return {}; }
+        inline InventoryCloseC2SPacket DeserializeInventoryCloseC2S(const std::vector<uint8_t>&) { return {}; }
 
         // ---- Helper function to serialize any packet based on type ----
         template<typename PacketType>

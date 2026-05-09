@@ -268,10 +268,12 @@ void main() {
                 thisScissor = texts[sc.index].scissor;
                 AddTextQuads(texts[sc.index], fontRenderer);
             } else if (sc.type == 3) {
-                // Quad — arbitrary textured quad (isometric block faces)
+                // Quad — arbitrary textured quad (isometric block faces, stick-figure lines)
                 const auto& q = quads[sc.index];
                 thisTex = q.texture;
                 thisIsColor = (thisTex == INVALID_TEXTURE);
+                thisHasScissor = q.hasScissor;
+                thisScissor = q.scissor;
 
                 uint8_t a = (q.color >> 24) & 0xFF;
                 uint8_t r = (q.color >> 16) & 0xFF;

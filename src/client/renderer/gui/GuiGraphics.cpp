@@ -1,6 +1,7 @@
 // File: src/client/renderer/gui/GuiGraphics.cpp
 #include "GuiGraphics.hpp"
 #include "FontRenderer.hpp"
+#include "items/ItemLighting.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/entity/Inventory.hpp"
@@ -9,6 +10,12 @@
 #include "common/world/block/BlockModel.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <unordered_set>
+#include <unordered_map>
+#include <filesystem>
+#include "stb_image.h"
+
+// PlatformMain provides bundle-aware asset path resolution.
+namespace PlatformMain { std::string GetAssetPath(const std::string&); }
 
 namespace Render {
 
@@ -225,10 +232,13 @@ namespace Render {
         return glm::vec2(p.x, -p.y); // Negate Y: 3D Y-up → screen Y-down
     }
 
-    void GuiGraphics::RenderItem(const Game::InventorySlot& slot, int x, int y) {
-        if (slot.IsEmpty()) return;
-
-        const auto& block = Game::BlockRegistry::Get(slot.blockId);
+    // Internal: render a 3D isometric block face stack for a BlockID. Defined first so
+    // both the dispatcher AND the LoadItemTexture-using sprite path below can call it.
+    static void RenderBlockItemImpl(GuiGraphics& self,
+                                    GuiRenderState* renderState,
+                                    Game::BlockID blockId,
+                                    int x, int y) {
+        const auto& block = Game::BlockRegistry::Get(blockId);
         const std::string& modelName = block.modelName;
         if (modelName.empty()) return;
         if (!g_atlasBuilder) return;
@@ -252,7 +262,7 @@ namespace Render {
         if (Game::BlockModelRegistry::HasModel(modelName + "_inventory")) {
             modelPtr = &Game::BlockModelRegistry::GetModel(modelName + "_inventory");
         } else {
-            modelPtr = &Game::BlockRegistry::GetBlockModel(slot.blockId);
+            modelPtr = &Game::BlockRegistry::GetBlockModel(blockId);
         }
         const auto& model = *modelPtr;
 
@@ -280,9 +290,9 @@ namespace Render {
                 if (modelName.find("water") != std::string::npos) {
                     tint = 0xFF4C7FFF; // R=76, G=127, B=255 (matches FluidMeshBuilder waterTint)
                 }
-                Blit(g_atlasBuilder->GetBackendTextureHandle(),
-                     x, y, x + 16, y + 16,
-                     uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y, tint);
+                self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                          x, y, x + 16, y + 16,
+                          uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y, tint);
             }
             return;
         }
@@ -293,9 +303,35 @@ namespace Render {
         auto rightFace = LookupFaceTexture(model, Game::FaceDir::North, modelName);
 
         if (!topFace.found && !leftFace.found && !rightFace.found) {
+            // No cube faces resolved — try South too in case the model only defines that.
             auto fallback = LookupFaceTexture(model, Game::FaceDir::South, modelName);
-            if (!fallback.found) return;
-            topFace = leftFace = rightFace = fallback;
+            if (fallback.found) {
+                topFace = leftFace = rightFace = fallback;
+            } else {
+                // STILL no faces. This is normal for blocks rendered via MC's
+                // BlockEntityWithoutLevelRenderer (chests, signs, banners, beds, etc.) —
+                // their model JSON only declares a `particle` texture and no geometry,
+                // because the actual visual is drawn by a custom 3D renderer.
+                // We don't have BEWLR, so fall back to the particle texture as a flat
+                // 2D sprite. This matches MC's resource-pack-driven fallback when the
+                // custom renderer is missing.
+                AtlasUVRect uvRect;
+                std::string particleTex = model.ResolveTexture("#particle");
+                bool found = false;
+                if (particleTex != "missingno") {
+                    found = g_atlasBuilder->GetUVRect(particleTex, uvRect);
+                }
+                if (!found) {
+                    found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
+                }
+                if (found) {
+                    self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                              x, y, x + 16, y + 16,
+                              uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y,
+                              0xFFFFFFFF);
+                }
+                return;
+            }
         }
         if (!topFace.found) topFace = leftFace.found ? leftFace : rightFace;
         if (!leftFace.found) leftFace = topFace.found ? topFace : rightFace;
@@ -333,15 +369,27 @@ namespace Render {
             q.u[1] = uv.uvMax.x; q.v[1] = uv.uvMin.y;
             q.u[2] = uv.uvMax.x; q.v[2] = uv.uvMax.y;
             q.u[3] = uv.uvMin.x; q.v[3] = uv.uvMax.y;
-            m_renderState->SubmitQuad(q);
+            renderState->SubmitQuad(q);
         };
 
-        // Compute tinted shading colors per face
-        // MC shading: top=100%, right side=~80%, left side=~60%
-        // If tintIndex >= 0, multiply by biome grass color
+        // MC ITEMS_3D Lambertian shading per face. Standard block GUI rotation
+        // (block.json display.gui) is (30°, 225°, 0°) — same matrix used for the
+        // isometric projection above. Computed shades for the visible faces:
+        //   UP    (+Y, screen TOP)   ≈ 1.00
+        //   EAST  (+X, screen LEFT)  ≈ 0.65
+        //   NORTH (-Z, screen RIGHT) ≈ 0.40
+        // (See ItemLighting.hpp / minecraft_code/.../Lighting.java for the full math.)
+        constexpr float BLOCK_GUI_ROT_X = 30.0f;
+        constexpr float BLOCK_GUI_ROT_Y = 225.0f;
+        const uint32_t SHADE_UP    = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 1, 0}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
+        const uint32_t SHADE_EAST  = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 1, 0, 0}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
+        const uint32_t SHADE_NORTH = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 0,-1}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
+
+        // If the face has a biome tint (grass top, leaves), multiply the per-face
+        // shade by the tint color so the result is correctly shaded AND tinted.
         auto faceColor = [](const FaceLookupResult& face, uint32_t shading) -> uint32_t {
             if (face.tintIndex >= 0) {
-                return MultiplyColors(GUI_GRASS_TINT, shading);
+                return ItemLighting::MultiplyColor(GUI_GRASS_TINT, shading);
             }
             return shading;
         };
@@ -349,20 +397,148 @@ namespace Render {
         // Visible faces: Top(+Y), East(+X) left, North(-Z) right
         // Draw back-to-front. Vertex order: TL, TR, BR, BL (matching UV corners)
 
-        // 1. East face (+X, left side) — darkest
+        // 1. East face (+X, left side)
         submitFace({1,1,1}, {1,1,0}, {1,0,0}, {1,0,1},
-                   leftFace.uv, faceColor(leftFace, 0xFF999999));
+                   leftFace.uv, faceColor(leftFace, SHADE_EAST));
 
-        // 2. North face (-Z, right side) — medium
+        // 2. North face (-Z, right side)
         submitFace({0,1,0}, {1,1,0}, {1,0,0}, {0,0,0},
-                   rightFace.uv, faceColor(rightFace, 0xFFCCCCCC));
+                   rightFace.uv, faceColor(rightFace, SHADE_NORTH));
 
-        // 3. Top face (+Y, on top) — brightest
+        // 3. Top face (+Y, on top)
         submitFace({0,1,1}, {1,1,1}, {1,1,0}, {0,1,0},
-                   topFace.uv, faceColor(topFace, 0xFFFFFFFF));
+                   topFace.uv, faceColor(topFace, SHADE_UP));
     }
 
-    void GuiGraphics::RenderItemDecorations(const Game::InventorySlot& slot, int x, int y) {
+    // ─── Flat 2D item textures (compass, sword, etc.) ─────────────────────
+    // Process-global cache so the texture survives across GuiGraphics instances (which are
+    // recreated every frame) and across Open/Close cycles. Loaded once on first use.
+    namespace {
+        std::unordered_map<std::string, TextureHandle>& ItemTextureCache() {
+            static std::unordered_map<std::string, TextureHandle> cache;
+            return cache;
+        }
+
+        TextureHandle LoadItemTexture(const std::string& itemName) {
+            if (!g_renderBackend) return INVALID_TEXTURE;
+            auto& cache = ItemTextureCache();
+            auto it = cache.find(itemName);
+            if (it != cache.end()) return it->second;
+
+            std::string full = PlatformMain::GetAssetPath("assets/textures/item/" + itemName + ".png");
+            if (!std::filesystem::exists(full)) {
+                Log::Warning("[GuiGraphics] Item texture not found: %s", full.c_str());
+                cache[itemName] = INVALID_TEXTURE; // negative-cache so we don't re-stat every frame
+                return INVALID_TEXTURE;
+            }
+            int w = 0, h = 0, ch = 0;
+            stbi_set_flip_vertically_on_load(0); // GUI ortho is top-down — no flip
+            unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+            if (!pixels) {
+                Log::Warning("[GuiGraphics] stbi_load failed for %s: %s",
+                             full.c_str(), stbi_failure_reason());
+                cache[itemName] = INVALID_TEXTURE;
+                return INVALID_TEXTURE;
+            }
+            TextureHandle tex = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+            stbi_image_free(pixels);
+            if (tex != INVALID_TEXTURE) {
+                g_renderBackend->SetTextureFilter(tex, TextureFilter::Nearest, TextureFilter::Nearest);
+                g_renderBackend->SetTextureWrap(tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+            }
+            cache[itemName] = tex;
+            return tex;
+        }
+    } // namespace
+
+    void GuiGraphics::PreloadItem(Game::ItemID itemId) {
+        const auto& item = Game::ItemRegistry::Get(itemId);
+        if (item.renderType == Game::ItemRenderType::Sprite) {
+            // Static sprite (single texture).
+            if (!item.spriteName.empty()) LoadItemTexture(item.spriteName);
+            // Animated frames — preload all so any selected frame is ready immediately.
+            // (MC's compass has 32 frames; loading all on first inventory open avoids the
+            // first-frame texture-creation race that hides the icon until the next frame.)
+            for (const auto& frame : item.spriteFrames) {
+                if (!frame.empty()) LoadItemTexture(frame);
+            }
+        }
+        // Block items don't need preloading — they render from the block atlas which is
+        // already initialized at startup.
+    }
+
+    // ─── Custom item renderers (MC's BlockEntityWithoutLevelRenderer equivalent) ────────
+    // Process-global table mapping ItemID → custom-renderer function. Looked up first by
+    // the RenderItem dispatcher; if a match is found, the standard block/sprite path is
+    // bypassed entirely. Registered from client startup via RegisterCustomItemRenderer().
+    namespace {
+        std::unordered_map<Game::ItemID, GuiGraphics::CustomItemRenderer>& CustomRenderers() {
+            static std::unordered_map<Game::ItemID, GuiGraphics::CustomItemRenderer> m;
+            return m;
+        }
+    }
+
+    void GuiGraphics::RegisterCustomItemRenderer(Game::ItemID id, CustomItemRenderer renderer) {
+        CustomRenderers()[id] = renderer;
+    }
+
+    // MC-style RenderItem dispatcher: custom renderers first, then renderType.
+    //   1. Custom renderer (BEWLR — chest, sign, banner, etc.)
+    //   2. ItemRenderType::Block  → 3D isometric (RenderBlockItemImpl)
+    //   3. ItemRenderType::Sprite → flat 16×16 blit
+    void GuiGraphics::RenderItem(const Game::ItemStack& stack, int x, int y) {
+        if (stack.IsEmpty()) return;
+        // 1. Custom renderer takes precedence (matches MC's BEWLR dispatch).
+        auto& crs = CustomRenderers();
+        auto crIt = crs.find(stack.itemId);
+        if (crIt != crs.end() && crIt->second) {
+            crIt->second(*this, stack, x, y);
+            return;
+        }
+        const auto& item = Game::ItemRegistry::Get(stack.itemId);
+        switch (item.renderType) {
+            case Game::ItemRenderType::Block:
+                RenderBlockItemImpl(*this, m_renderState, item.blockId, x, y);
+                return;
+            case Game::ItemRenderType::Sprite: {
+                // MC-style frame resolution: if the item has a frame selector (e.g. compass),
+                // ask it which frame to draw based on the current per-frame render context
+                // (player position + yaw + target). Otherwise fall back to the static sprite.
+                std::string spriteName;
+                if (item.selectFrame && !item.spriteFrames.empty()) {
+                    int frame = item.selectFrame(Game::ItemRegistry::GetRenderContext());
+                    if (frame < 0) frame = 0;
+                    if (frame >= (int)item.spriteFrames.size()) frame = (int)item.spriteFrames.size() - 1;
+                    spriteName = item.spriteFrames[frame];
+                } else {
+                    spriteName = item.spriteName;
+                }
+                if (spriteName.empty()) {
+                    static bool warnedEmpty = false;
+                    if (!warnedEmpty) {
+                        Log::Warning("[GuiGraphics] RenderItem(item=%u): empty spriteName (frames=%zu, selector=%p)",
+                                     (unsigned)stack.itemId, item.spriteFrames.size(),
+                                     (void*)item.selectFrame);
+                        warnedEmpty = true;
+                    }
+                    return;
+                }
+                TextureHandle tex = LoadItemTexture(spriteName);
+                if (tex == INVALID_TEXTURE) {
+                    static std::unordered_set<std::string> warnedMissing;
+                    if (warnedMissing.insert(spriteName).second) {
+                        Log::Warning("[GuiGraphics] RenderItem(item=%u): missing texture for sprite '%s'",
+                                     (unsigned)stack.itemId, spriteName.c_str());
+                    }
+                    return;
+                }
+                Blit(tex, x, y, x + 16, y + 16, 0.0f, 0.0f, 1.0f, 1.0f);
+                return;
+            }
+        }
+    }
+
+    void GuiGraphics::RenderItemDecorations(const Game::ItemStack& slot, int x, int y) {
         if (slot.IsEmpty()) return;
         if (slot.count <= 1) return;
 

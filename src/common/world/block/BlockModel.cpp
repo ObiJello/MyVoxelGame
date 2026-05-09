@@ -167,8 +167,18 @@ namespace Game {
                 return result;
             }
         } else {
-            // No parent - start with default model
-            result = s_defaultModel;
+            // No parent. If this JSON declares its own `elements`, start fresh — the
+            // default cube geometry would only get overwritten anyway. Models that have
+            // NO parent AND NO elements (e.g. MC's `chest.json`, `sign.json`, etc., which
+            // are rendered by BlockEntityWithoutLevelRenderer instead of via the model
+            // system) MUST NOT inherit the stone-cube geometry from s_defaultModel — that
+            // would silently turn every BEWLR block into a stone cube in the inventory.
+            // Leave such models as empty so the renderer can fall back to the particle
+            // texture (matching MC's "missing custom renderer" behaviour).
+            if (j.contains("elements")) {
+                result = s_defaultModel;  // textures from default; elements overridden below
+            }
+            // else: result stays as a fresh empty BlockModel (no geometry, no textures)
         }
 
         // Merge this JSON's textures (child overrides parent)

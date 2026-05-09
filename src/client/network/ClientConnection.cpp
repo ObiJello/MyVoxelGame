@@ -403,6 +403,21 @@ namespace Client {
                 return std::make_unique<SetChunkCacheRadiusS2CPacketImpl>(data.viewDistance);
             }
 
+            case PacketId::InventoryFullS2C: {
+                auto data = Serialization::DeserializeInventoryFullS2C(payload);
+                return std::make_unique<InventoryFullS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::InventorySetSlotS2C: {
+                auto data = Serialization::DeserializeInventorySetSlotS2C(payload);
+                return std::make_unique<InventorySetSlotS2CPacketImpl>(data);
+            }
+
+            case PacketId::InventorySetCarriedS2C: {
+                auto data = Serialization::DeserializeInventorySetCarriedS2C(payload);
+                return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
+            }
+
             default:
                 // Return nullptr for unhandled packets - will fall back to legacy OnPacketReceived
                 return nullptr;

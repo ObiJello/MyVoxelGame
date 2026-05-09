@@ -11,6 +11,18 @@ namespace Server {
         : m_playerId(playerId)
         , m_name(name) {
         m_lastUpdateTime = std::chrono::steady_clock::now();
+
+        // Default starter inventory (replaces the old m_hotbarBlocks defaults).
+        // Slot 0 (selected) stays empty; the rest mirror the old hardcoded set.
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(1), Game::BlockID::Dirt,      64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(2), Game::BlockID::Grass,     64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(3), Game::BlockID::Lava,      64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(4), Game::BlockID::Glass,     64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(5), Game::BlockID::Sand,      64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(6), Game::BlockID::OakLeaves, 64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(7), Game::BlockID::Water,     64);
+        m_inventory.SetSlot(Game::Inventory::HotbarToIndex(8), Game::BlockID::Bedrock,   64);
+
         Log::Info("ServerPlayer: Created player %u '%s' at (%.1f, %.1f, %.1f)",
                  m_playerId, m_name.c_str(), m_position.x, m_position.y, m_position.z);
     }
@@ -238,25 +250,21 @@ namespace Server {
     // === INVENTORY ===
 
     void ServerPlayer::selectHotbarSlot(int slot) {
-        // TODO: Implement when inventory system exists
-        if (slot >= 0 && slot < 9) {
-            m_selectedHotbarSlot = slot;
+        if (slot >= 0 && slot < Game::Inventory::HOTBAR_SIZE) {
+            m_inventory.SetSelectedSlot(slot);
             Log::Debug("ServerPlayer: Player %u selected hotbar slot %d", m_playerId, slot);
         }
     }
 
     Game::BlockID ServerPlayer::getHeldBlock() const {
-        // Return block from hotbar at selected slot
-        if (m_selectedHotbarSlot >= 0 && m_selectedHotbarSlot < 9) {
-            return m_hotbarBlocks[m_selectedHotbarSlot];
-        }
-        // Default to air if invalid slot
-        return Game::BlockID::Air;
+        return m_inventory.GetSelectedBlock();
     }
-    
+
     void ServerPlayer::setHotbarBlock(int slot, Game::BlockID block) {
-        if (slot >= 0 && slot < 9) {
-            m_hotbarBlocks[slot] = block;
+        if (slot >= 0 && slot < Game::Inventory::HOTBAR_SIZE) {
+            // Default count of 64 keeps parity with the legacy setHotbarBlock(slot, block) callers.
+            int count = (block == Game::BlockID::Air) ? 0 : 64;
+            m_inventory.SetSlot(Game::Inventory::HotbarToIndex(slot), block, count);
             Log::Debug("ServerPlayer: Set hotbar slot %d to block %d", slot, static_cast<int>(block));
         }
     }

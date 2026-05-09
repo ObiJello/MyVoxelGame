@@ -142,6 +142,10 @@ namespace Server {
         // Handle held item change
         void HandleHeldItemChange(const std::vector<uint8_t>& payload);
 
+        // Handle inventory click and close
+        void HandleInventoryClick(const std::vector<uint8_t>& payload);
+        void HandleInventoryClose(const std::vector<uint8_t>& payload);
+
         // Handle ack for a previously sent ClientboundPlayerPosition (MC: handleAcceptTeleportPacket).
         // Validates the id matches m_awaitingTeleport — stale acks are ignored.
         void HandleAcceptTeleportation(const std::vector<uint8_t>& payload);

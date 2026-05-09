@@ -5,11 +5,11 @@
 
 #include "GuiGraphics.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/entity/Inventory.hpp"  // brings in InventorySlot alias + Inventory class
 #include <string>
 
 namespace Game {
     struct PlayerPhysics;
-    class Inventory;
 }
 
 namespace Render {

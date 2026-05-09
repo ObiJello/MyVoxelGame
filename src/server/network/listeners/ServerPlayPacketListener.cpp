@@ -64,6 +64,14 @@ namespace Server {
         m_session.HandleHeldItemChange(packet);
     }
 
+    void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {
+        m_session.HandleInventoryClick(packet);
+    }
+
+    void ServerPlayPacketListener::onInventoryCloseC2S(const Network::InventoryCloseC2SPacket& packet) {
+        m_session.HandleInventoryClose(packet);
+    }
+
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
         // Forward to session for per-player adaptive rate control (Minecraft's PlayerChunkSender)
         m_session.OnChunkBatchAck(desiredChunksPerTick);

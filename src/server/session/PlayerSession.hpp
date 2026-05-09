@@ -189,6 +189,11 @@ namespace Server {
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
         void HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet);
         void HandleKeepAlive(const Network::KeepAliveC2SPacket& packet);
+        void HandleInventoryClick(const Network::InventoryClickC2SPacket& packet);
+        void HandleInventoryClose(const Network::InventoryCloseC2SPacket& packet);
+
+        // Send full 46-slot inventory snapshot to this player's client.
+        void SendInventoryFull();
         
         // Helper for resyncing on placement failure
         void ResyncAndAck(const glm::ivec3& clicked, const glm::ivec3& target, uint32_t sequence);

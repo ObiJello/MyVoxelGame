@@ -12,6 +12,8 @@
 #include "common/world/block/BlockModel.hpp"
 #include "client/input/PlayerController.hpp"
 #include "client/entity/Player.hpp"
+#include "client/renderer/gui/InventoryScreen.hpp"
+#include "client/renderer/gui/items/ChestItemRenderer.hpp"
 #include "common/physics/RayCast.hpp"
 #include "common/physics/Physics.hpp"
 
@@ -102,6 +104,13 @@ static Render::ChatScreen g_chatScreen;
 
 namespace PlatformMain {
 
+// Shared "E held" state for cross-branch edge detection (game branch opens inventory,
+// inventory branch closes inventory — both must observe the same held-state to avoid
+// double-firing on the frame the inventory opens). The local `extern bool s_eKeyHeld;`
+// declarations inside Run() resolve to this via the enclosing namespace.
+bool s_eKeyHeld = false;
+
+
     std::string GetAssetPath(const std::string& relativePath) {
 #ifdef __APPLE__
         // On macOS, check if we're running from a bundle
@@ -176,6 +185,7 @@ namespace PlatformMain {
         g_chatComponent.Update(deltaTime);
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
+        Render::GetInventoryScreen().Render(graphics);
 
         // ── Nametags above remote players ─────────────────────────────────────
         // Matches MC's NameTagFeatureRenderer (line 45): poseStack.scale(0.025F, -0.025F, 0.025F)
@@ -389,7 +399,7 @@ namespace PlatformMain {
                 Game::BlockID pickedBlock = player.lastBlockHit->blockId;
                 if (pickedBlock != Game::BlockID::Air) {
                     int slot = player.inventory.GetSelectedSlot();
-                    player.inventory.SetSlot(slot, pickedBlock, 64);
+                    player.inventory.SetSlot(Game::Inventory::HotbarToIndex(slot), pickedBlock, 64);
                     // Sync with server (sends slot + block type)
                     controller.OnHotbarChanged(slot);
                 }
@@ -524,6 +534,9 @@ namespace PlatformMain {
 
         // Initialize block registries
         Game::BlockRegistry::Init();
+        // Initialize item registry AFTER blocks so block-items can copy their display names.
+        // (Sprite item textures are preloaded later, AFTER the render backend is up.)
+        Game::ItemRegistry::Initialize();
 
         // Use platform-specific asset path function
         std::string modelsPath = GetAssetPath("assets/models/block");
@@ -783,6 +796,18 @@ namespace PlatformMain {
             Log::Info("Render backend initialized: %s", Render::g_renderBackend->GetName());
         }
 
+        // Eagerly preload sprite-based item textures NOW (backend is up). Without this, the
+        // first render frame that uses a sprite item raced against texture creation — the
+        // unselected Search tab compass icon stayed empty until the user clicked Search,
+        // which forced a re-render after the texture had finished uploading.
+        // Block items don't need this — they live in the block atlas built later.
+        Render::GuiGraphics::PreloadItem(Game::Items::Compass);
+
+        // Register custom item renderers (MC's BlockEntityWithoutLevelRenderer equivalent).
+        // Chest is rendered by a 3D model from entity textures — not the standard block
+        // model JSON system. Add more entries here for sign, banner, head, bed, etc.
+        Render::RegisterChestItemRenderer();
+
         // Initialize game directory system (creates obeycraft folder and loads options.txt)
         if (!Platform::InitializeGameDirectorySystem()) {
             Log::Error("Failed to initialize game directory system");
@@ -865,6 +890,7 @@ namespace PlatformMain {
         Game::ClientPlayer player;
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
+        Render::GetInventoryScreen().SetPlayer(&player);
         if (!isRemoteClient) {
             playerController.SetWorld(world);
         } else {
@@ -1093,6 +1119,102 @@ namespace PlatformMain {
 
                 // Drain char queue to prevent stale input
                 // Skip player input — chat has focus
+            } else if (Render::GetInventoryScreen().IsOpen()) {
+                // ── Inventory screen overlay ───────────────────────────────────
+                auto& inv = Render::GetInventoryScreen();
+
+                // Char input → search box
+                while (Input::HasCharInput()) inv.OnCharInput(Input::PopCharInput());
+
+                // Edge-detect keys (E/ESC/Q close or drop, 1-9 swap, arrows/etc edit search).
+                // NOTE: eHeld is the SHARED static defined just below the chain so that pressing
+                // E to open the inventory in the game branch doesn't immediately retrigger
+                // OnKeyDown(E) here on the next frame (which would close it).
+                extern bool s_eKeyHeld;
+                static bool escHeld=false, qHeld=false;
+                static bool num1=false, num2=false, num3=false, num4=false,
+                            num5=false, num6=false, num7=false, num8=false, num9=false;
+                static bool ileftH=false, irightH=false, ihomeH=false, iendH=false,
+                            ibsH=false, idelH=false;
+                int mods = ((glfwGetKey(window, GLFW_KEY_LEFT_SHIFT)   == GLFW_PRESS) ||
+                            (glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT)  == GLFW_PRESS)) ? GLFW_MOD_SHIFT : 0;
+                mods |= ((glfwGetKey(window, GLFW_KEY_LEFT_CONTROL)    == GLFW_PRESS) ||
+                         (glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL)   == GLFW_PRESS)) ? GLFW_MOD_CONTROL : 0;
+
+                auto edge = [&](bool& held, int key, int glfwKey) {
+                    bool down = glfwGetKey(window, key) == GLFW_PRESS;
+                    if (down && !held) inv.OnKeyDown(glfwKey, mods);
+                    held = down;
+                };
+                edge(s_eKeyHeld, GLFW_KEY_E,    GLFW_KEY_E);
+                edge(escHeld,  GLFW_KEY_ESCAPE, GLFW_KEY_ESCAPE);
+                edge(qHeld,    GLFW_KEY_Q,      GLFW_KEY_Q);
+                edge(num1, GLFW_KEY_1, GLFW_KEY_1);
+                edge(num2, GLFW_KEY_2, GLFW_KEY_2);
+                edge(num3, GLFW_KEY_3, GLFW_KEY_3);
+                edge(num4, GLFW_KEY_4, GLFW_KEY_4);
+                edge(num5, GLFW_KEY_5, GLFW_KEY_5);
+                edge(num6, GLFW_KEY_6, GLFW_KEY_6);
+                edge(num7, GLFW_KEY_7, GLFW_KEY_7);
+                edge(num8, GLFW_KEY_8, GLFW_KEY_8);
+                edge(num9, GLFW_KEY_9, GLFW_KEY_9);
+                edge(ileftH,  GLFW_KEY_LEFT,      GLFW_KEY_LEFT);
+                edge(irightH, GLFW_KEY_RIGHT,     GLFW_KEY_RIGHT);
+                edge(ihomeH,  GLFW_KEY_HOME,      GLFW_KEY_HOME);
+                edge(iendH,   GLFW_KEY_END,       GLFW_KEY_END);
+                edge(ibsH,    GLFW_KEY_BACKSPACE, GLFW_KEY_BACKSPACE);
+                edge(idelH,   GLFW_KEY_DELETE,    GLFW_KEY_DELETE);
+
+                // Mouse position: feed in window-pixel coords + GUI virtual size.
+                // Use the same GUI-scale formula as the render path (line 167).
+                auto [mx, my] = Input::GetMousePosition();
+                int winW = 0, winH = 0, fbW = 0, fbH = 0;
+                glfwGetWindowSize(window, &winW, &winH);
+                glfwGetFramebufferSize(window, &fbW, &fbH);
+                if (fbW > 0 && fbH > 0 && winW > 0) {
+                    float invScaleX = static_cast<float>(fbW) / static_cast<float>(winW);
+                    float invGuiScale = std::max(1.0f, std::floor(invScaleX * 2.0f));
+                    int   guiWp = static_cast<int>(static_cast<float>(fbW) / invGuiScale);
+                    int   guiHp = static_cast<int>(static_cast<float>(fbH) / invGuiScale);
+                    // mx/my are in WINDOW (logical) pixels — convert via window→GUI scale.
+                    inv.OnMouseMove(mx, my, winW, winH, guiWp, guiHp);
+                }
+
+                // Edge-detect mouse buttons (Input.cpp doesn't register a glfwSetMouseButtonCallback)
+                static bool lmbH=false, rmbH=false, mmbH=false;
+                bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT)   == GLFW_PRESS;
+                bool rmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT)  == GLFW_PRESS;
+                bool mmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+                if (lmb != lmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_LEFT,   lmb ? GLFW_PRESS : GLFW_RELEASE, mods);
+                if (rmb != rmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_RIGHT,  rmb ? GLFW_PRESS : GLFW_RELEASE, mods);
+                if (mmb != mmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_MIDDLE, mmb ? GLFW_PRESS : GLFW_RELEASE, mods);
+                lmbH = lmb; rmbH = rmb; mmbH = mmb;
+
+                // Scroll wheel: route to inventory and consume so the hotbar doesn't move.
+                auto [sx, sy] = Input::GetScrollOffset();
+                if (sy != 0.0) inv.OnScroll(sy);
+                Input::ResetScrollOffset();
+
+                inv.Update(1.0f / 60.0f);
+
+                // Drain pending clicks → server.
+                Network::InventoryClickC2SPacket click;
+                while (inv.ConsumePendingClick(click)) {
+                    if (networkClient && networkClient->IsConnected()) {
+                        auto conn = networkClient->GetConnection();
+                        if (conn) {
+                            // 0xFF action = our local sentinel for "send InventoryCloseC2S".
+                            if (click.action == 0xFF) {
+                                Network::InventoryCloseC2SPacket close{};
+                                auto data = Network::Serialization::Serialize(close);
+                                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryCloseC2S), data);
+                            } else {
+                                auto data = Network::Serialization::Serialize(click);
+                                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryClickC2S), data);
+                            }
+                        }
+                    }
+                }
             } else {
                 // Drain char queue when chat is closed (prevent buildup)
                 while (Input::HasCharInput()) Input::PopCharInput();
@@ -1104,12 +1226,20 @@ namespace PlatformMain {
                     g_chatScreen.Open(true);
                 }
 
+                // E opens the inventory (MC default). Uses the SAME static as the inventory
+                // branch so the next-frame edge isn't retriggered there (which would close it).
+                extern bool s_eKeyHeld;
+                bool eDown = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
+                if (eDown && !s_eKeyHeld) Render::GetInventoryScreen().Open();
+                s_eKeyHeld = eDown;
+
                 HandlePlayerInput(player, playerController, camera);
             }
 
-            // Resolve cursor state AFTER chat handling so opening/closing chat this frame
-            // takes effect immediately (and Tab toggles can't be lost behind a closed chat).
-            cursorEnabled = HandleCursorToggle(window, camera, g_chatScreen.IsOpen());
+            // Resolve cursor state AFTER chat/inventory handling so opening/closing this
+            // frame takes effect immediately.
+            cursorEnabled = HandleCursorToggle(window, camera,
+                g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen());
 
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
             }
@@ -1290,10 +1420,31 @@ namespace PlatformMain {
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
             }
 
+            // Update per-frame item render context so animated items (compass, clock, etc.)
+            // can resolve their visual state from world data. MC: equivalent to passing the
+            // ClientLevel + LocalPlayer to ItemModelResolver each frame.
+            {
+                Game::ItemRenderContext ctx;
+                ctx.playerX = player.physics.position.x;
+                ctx.playerY = player.physics.position.y;
+                ctx.playerZ = player.physics.position.z;
+                ctx.playerYaw = player.yaw;
+                // Compass target: world spawn at (0, 0). LodestoneTracker support TODO.
+                ctx.compassTargetX = 0.0f;
+                ctx.compassTargetZ = 0.0f;
+                ctx.timeSeconds = static_cast<float>(glfwGetTime());
+                Game::ItemRegistry::SetRenderContext(ctx);
+                // Step the wobble simulation (MC: CompassAngleState ticks at 20 TPS).
+                Game::ItemRegistry::TickAnimated(dt);
+            }
+
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
             RenderHUD(window, player.inventory, dt, proj, view);
-            RenderCrosshair(window);
+            // Hide crosshair when inventory is open (MC: no crosshair while a Screen is shown).
+            if (!Render::GetInventoryScreen().IsOpen()) {
+                RenderCrosshair(window);
+            }
             PROFILE_TIMER_END(render, metrics.renderTime);
             }
 

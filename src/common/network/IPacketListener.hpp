@@ -16,13 +16,18 @@ namespace Network {
     struct PlayerUpdateS2CPacket;
     struct RemoveEntitiesS2CPacket;
     struct HotbarSyncS2CPacket;
-    
+    struct InventoryFullS2CPacket;
+    struct InventorySetSlotS2CPacket;
+    struct InventorySetCarriedS2CPacket;
+
     // C2S packet types
     struct UseItemOnC2SPacket;
     struct BlockActionC2SPacket;
     struct PlayerMoveC2SPacket;
     struct ChatMessageC2SPacket;
     struct HeldItemChangeC2SPacket;
+    struct InventoryClickC2SPacket;
+    struct InventoryCloseC2SPacket;
     class LoginStartC2SPacket;
     class HandshakeC2SPacket;
     class KeepAliveC2SPacket;
@@ -60,6 +65,9 @@ namespace Network {
 
         // Inventory sync
         virtual void onHotbarSyncS2C(const HotbarSyncS2CPacket& packet) {}
+        virtual void onInventoryFullS2C(const InventoryFullS2CPacket& packet) {}
+        virtual void onInventorySetSlotS2C(const InventorySetSlotS2CPacket& packet) {}
+        virtual void onInventorySetCarriedS2C(const InventorySetCarriedS2CPacket& packet) {}
 
         // View distance
         virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}
@@ -88,6 +96,10 @@ namespace Network {
 
         // Play phase - Held item change
         virtual void onHeldItemChangeC2S(const HeldItemChangeC2SPacket& packet) {}
+
+        // Play phase - Inventory clicks
+        virtual void onInventoryClickC2S(const InventoryClickC2SPacket& packet) {}
+        virtual void onInventoryCloseC2S(const InventoryCloseC2SPacket& packet) {}
         
         // Play phase - Keep alive
         virtual void onKeepAliveResponse(const KeepAliveC2SPacket& packet) {}

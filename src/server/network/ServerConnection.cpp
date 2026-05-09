@@ -60,6 +60,10 @@ namespace Server {
                                          [this](const std::vector<uint8_t>& p) { HandleHeldItemChange(p); });
         m_packetRegistry.RegisterHandler(PacketId::ServerboundAcceptTeleportation,
                                          [this](const std::vector<uint8_t>& p) { HandleAcceptTeleportation(p); });
+        m_packetRegistry.RegisterHandler(PacketId::InventoryClickC2S,
+                                         [this](const std::vector<uint8_t>& p) { HandleInventoryClick(p); });
+        m_packetRegistry.RegisterHandler(PacketId::InventoryCloseC2S,
+                                         [this](const std::vector<uint8_t>& p) { HandleInventoryClose(p); });
     }
 
     ServerConnection::~ServerConnection() {
@@ -580,6 +584,18 @@ namespace Server {
         if (m_listener) {
             m_listener->onHeldItemChangeC2S(packet);
         }
+    }
+
+    void ServerConnection::HandleInventoryClick(const std::vector<uint8_t>& payload) {
+        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+        auto packet = Network::Serialization::DeserializeInventoryClickC2S(payload);
+        if (m_listener) m_listener->onInventoryClickC2S(packet);
+    }
+
+    void ServerConnection::HandleInventoryClose(const std::vector<uint8_t>& payload) {
+        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+        auto packet = Network::Serialization::DeserializeInventoryCloseC2S(payload);
+        if (m_listener) m_listener->onInventoryCloseC2S(packet);
     }
 
     void ServerConnection::Teleport(double x, double y, double z, float yRot, float xRot) {

@@ -43,6 +43,9 @@ namespace Client {
         void onChunkBatchStart() override { handleChunkBatchStart(); }
         void onChunkBatchFinished(int batchSize) override { handleChunkBatchFinished(batchSize); }
         void onHotbarSyncS2C(const Network::HotbarSyncS2CPacket& packet) override { handleHotbarSync(packet); }
+        void onInventoryFullS2C(const Network::InventoryFullS2CPacket& packet) override { handleInventoryFull(packet); }
+        void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
+        void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
         void onSetChunkCacheRadiusS2C(int viewDistance) override { handleSetChunkCacheRadius(viewDistance); }
 
         // ========================================================================
@@ -86,6 +89,9 @@ namespace Client {
 
         // Inventory sync
         void handleHotbarSync(const Network::HotbarSyncS2CPacket& packet);
+        void handleInventoryFull(const Network::InventoryFullS2CPacket& packet);
+        void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
+        void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
 
         // View distance
         void handleSetChunkCacheRadius(int viewDistance);
