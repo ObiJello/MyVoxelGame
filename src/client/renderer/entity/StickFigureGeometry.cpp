@@ -169,18 +169,29 @@ namespace Render {
                     0.07f, kRingHalfWidth, kSmileSegments,
                     PI, 2.0f * PI, cr, cg, cb, ca);
 
-        // --- LINES: Eyes (short straight segments, no join issues) ---
-        const float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeLen = 0.03f;
+        // --- RING TRIANGLES: Eyes as tiny flat rings in the head's local plane ---
+        // Eyes were originally 3D line segments along faceRight, but in the world
+        // renderer that turns into a camera-facing thick strip whose perpendicular
+        // depends on cross(lineDir, toCamera). When the camera moves to the side
+        // of the player, that perpendicular rotates and the eye visibly "tilts"
+        // from horizontal toward vertical. Drawing each eye as a tiny solid ring
+        // in the same plane as the head outline keeps it locked to the face — it
+        // simply foreshortens to a thin strip from the side, never tilts.
+        const float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeRad = 0.025f;
         glm::vec3 eyeL = frontC + worldUp * eyeOffY + faceRight * (-eyeOffX);
         glm::vec3 eyeR = frontC + worldUp * eyeOffY + faceRight * ( eyeOffX);
-        PushLine(lineVerts, eyeL - faceRight * eyeLen, eyeL + faceRight * eyeLen, cr, cg, cb, ca);
-        PushLine(lineVerts, eyeR - faceRight * eyeLen, eyeR + faceRight * eyeLen, cr, cg, cb, ca);
+        PushArcRing(ringTris, eyeL, faceRight, worldUp,
+                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, cr, cg, cb, ca);
+        PushArcRing(ringTris, eyeR, faceRight, worldUp,
+                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, cr, cg, cb, ca);
 
         // --- TRIANGLES: Back-of-head filled disc (GPU face-culled) ---
         // Placed at headC (no offset) so it lines up with the neck/body connection.
         // Front features are offset forward, so they still render in front of this disc.
+        // Match the front ring's 64-segment smoothness — the old 16-segment disc
+        // showed visible polygonal sides next to the smooth front circle.
         PushDisc(discTris, headC, faceRight, worldUp, -lookDir,
-                 headRadius, 16, cr, cg, cb, ca);
+                 headRadius, 64, cr, cg, cb, ca);
     }
 
 } // namespace Render
