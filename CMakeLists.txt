@@ -346,6 +346,7 @@ if(APPLE)
             src/common/entity/Inventory.cpp
             src/common/entity/Item.cpp
             src/common/entity/ItemModelLoader.cpp
+            src/common/entity/PlayerColors.cpp
             src/client/input/PlayerController.cpp
             src/client/entity/Player.cpp
             src/client/entity/RemotePlayerManager.cpp
@@ -613,6 +614,8 @@ else()
             # Common entity
             src/common/entity/Inventory.cpp
             src/common/entity/Inventory.hpp
+            src/common/entity/PlayerColors.cpp
+            src/common/entity/PlayerColors.hpp
 
             # Common network
             src/common/network/MessageQueue.hpp
@@ -1214,6 +1217,7 @@ if(CURL_FOUND)
         src/launcher/platform/ProcessLauncher.cpp
         # Shared code compiled into launcher
         src/common/core/Log.cpp
+        src/common/entity/PlayerColors.cpp  # palette table shared with the game
         src/platform/GameDirectory.cpp
         ${MINIZIP_SOURCES}
     )

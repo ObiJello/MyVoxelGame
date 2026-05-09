@@ -106,7 +106,10 @@ namespace Client {
         }
     }
 
-    void ClientConnection::StartHandshake(const std::string& playerName, const std::string& serverHost, uint16_t serverPort) {
+    void ClientConnection::StartHandshake(const std::string& playerName,
+                                          uint8_t playerColor,
+                                          const std::string& serverHost,
+                                          uint16_t serverPort) {
         m_playerName = playerName;
         m_phase = ConnectionPhase::HANDSHAKING;
 
@@ -117,15 +120,20 @@ namespace Client {
         buffer.WriteShort(serverPort); // Server port
         buffer.WriteVarInt(2); // Next state: LOGIN
         SendPacket(static_cast<uint8_t>(Network::PacketId::Handshake), buffer.GetData());
-        
+
         m_phase = ConnectionPhase::LOGIN;
-        
-        // Send login start packet
+
+        // Send login start packet — name + colorId (1 byte). Tail-appending the
+        // colorId means an old server that doesn't read it just sees the name and
+        // ignores the extra byte; a new server reading from an old client gets
+        // remaining()==0 after the name and falls back to Default colour.
         Network::PacketBuffer loginBuffer;
         loginBuffer.WriteString(playerName);
+        loginBuffer.WriteByte(playerColor);
         SendPacket(static_cast<uint8_t>(Network::PacketId::LoginStart), loginBuffer.GetData());
-        
-        Log::Info("[ClientConnection] Sent handshake and login for player: %s", playerName.c_str());
+
+        Log::Info("[ClientConnection] Sent handshake and login for player: %s (color id=%u)",
+                  playerName.c_str(), static_cast<unsigned>(playerColor));
     }
 
     // ========================================================================
@@ -324,8 +332,12 @@ namespace Client {
 
         if (packet.action == Network::PlayerInfoS2CPacket::Action::ADD) {
             Client::g_remotePlayerManager->SetPlayerName(packet.playerId, packet.playerName);
-            Log::Info("[ClientConnection] PlayerInfo ADD: '%s' (ID: %u)",
-                      packet.playerName.c_str(), packet.playerId);
+            Client::g_remotePlayerManager->SetPlayerColor(
+                packet.playerId,
+                static_cast<Game::PlayerColorId>(packet.colorId));
+            Log::Info("[ClientConnection] PlayerInfo ADD: '%s' (ID: %u, color id=%u)",
+                      packet.playerName.c_str(), packet.playerId,
+                      static_cast<unsigned>(packet.colorId));
         } else if (packet.action == Network::PlayerInfoS2CPacket::Action::REMOVE) {
             Client::g_remotePlayerManager->RemovePlayer(packet.playerId);
             Log::Info("[ClientConnection] PlayerInfo REMOVE: ID %u", packet.playerId);

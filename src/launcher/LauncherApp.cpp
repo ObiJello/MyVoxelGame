@@ -38,6 +38,7 @@ namespace Launcher {
         bool autoUpdate = true;
         bool useVulkan = false;
         std::string playerName;             // Empty → server auto-assigns "PlayerN"
+        std::string playerColor;            // "" or "default" → neon green; otherwise palette slug ("pink", "blue"...)
         std::string lastJoinIP;             // Pre-fill the Join Server dialog
         std::string lastJoinPort = "25565"; // Pre-fill the Join Server dialog
 
@@ -51,6 +52,7 @@ namespace Launcher {
                 autoUpdate = json.value("auto_update", true);
                 useVulkan = json.value("use_vulkan", false);
                 playerName = json.value("player_name", "");
+                playerColor = json.value("player_color", "");
                 lastJoinIP = json.value("last_join_ip", "");
                 lastJoinPort = json.value("last_join_port", std::string("25565"));
             } catch (...) {
@@ -66,6 +68,7 @@ namespace Launcher {
                 json["auto_update"] = autoUpdate;
                 json["use_vulkan"] = useVulkan;
                 json["player_name"] = playerName;
+                json["player_color"] = playerColor;
                 json["last_join_ip"] = lastJoinIP;
                 json["last_join_port"] = lastJoinPort;
                 std::ofstream file(path);
@@ -223,6 +226,7 @@ namespace Launcher {
         uiState.gameInstalled = std::filesystem::exists(gameExePath);
         uiState.useVulkan = config.useVulkan;
         uiState.playerName = config.playerName;
+        uiState.playerColor = config.playerColor;
         uiState.lastJoinIP = config.lastJoinIP;
         uiState.lastJoinPort = config.lastJoinPort;
         if (!config.installedVersion.empty()) {
@@ -356,15 +360,22 @@ namespace Launcher {
             if (uiState.playerName.empty()) return "";
             return " --name " + uiState.playerName;
         };
+        // Build "--color <slug>" arg fragment if a non-default colour is set.
+        // Empty string means the user picked "Default" → game falls back to neon green.
+        auto buildColorArg = [&]() -> std::string {
+            if (uiState.playerColor.empty() || uiState.playerColor == "default") return "";
+            return " --color " + uiState.playerColor;
+        };
 
         ui.SetOnPlayClicked([&]() {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Launching game...";
-            // Persist any settings changes (username) before launching, so a crash
-            // before clean exit still keeps what the user typed.
+            // Persist any settings changes (username, colour) before launching, so a
+            // crash before clean exit still keeps what the user typed/picked.
             config.playerName = uiState.playerName;
+            config.playerColor = uiState.playerColor;
             config.Save(configPath);
-            std::string args = buildNameArg();
+            std::string args = buildNameArg() + buildColorArg();
             if (LaunchGame(gameExePath, uiState.useVulkan, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -378,12 +389,14 @@ namespace Launcher {
         ui.SetOnJoinClicked([&](const std::string& host, uint16_t port) {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Joining server...";
-            // Persist username + IP/port so re-opening the launcher pre-fills both
+            // Persist username, colour + IP/port so re-opening the launcher pre-fills all
             config.playerName = uiState.playerName;
+            config.playerColor = uiState.playerColor;
             config.lastJoinIP = uiState.lastJoinIP;
             config.lastJoinPort = uiState.lastJoinPort;
             config.Save(configPath);
-            std::string serverArg = "--server " + host + ":" + std::to_string(port) + buildNameArg();
+            std::string serverArg = "--server " + host + ":" + std::to_string(port)
+                                  + buildNameArg() + buildColorArg();
             if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -554,6 +567,7 @@ namespace Launcher {
         // ── Cleanup ──
         config.useVulkan = uiState.useVulkan;
         config.playerName = uiState.playerName;
+        config.playerColor = uiState.playerColor;
         config.lastJoinIP = uiState.lastJoinIP;
         config.lastJoinPort = uiState.lastJoinPort;
         config.Save(configPath);

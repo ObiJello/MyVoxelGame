@@ -42,6 +42,23 @@ namespace Launcher {
         // Perform a GET request and return the response body
         bool HttpGet(const std::string& url, std::string& outResponse);
 
+        // Same as HttpGet, but also captures the GitHub `Link: ...; rel="next"`
+        // header for pagination. Returns the next-page URL in `outNextUrl` (empty
+        // string if this is the last page). Used by FetchAllReleases.
+        bool HttpGetWithLink(const std::string& url,
+                             std::string& outBody,
+                             std::string& outNextUrl);
+
+        // Walk every page of /releases via Link-header pagination and append
+        // each release's JSON object to `outReleases`. Stops at MAX_PAGES as a
+        // safety cap. Returns true if any HTTP page succeeded; even partial
+        // results are usable since we semver-pick the best match downstream.
+        bool FetchAllReleases(std::vector<nlohmann::json>& outReleases);
+
+        // Parse the value of a Link response header to extract the URL marked
+        // rel="next". Returns "" if no next link is present.
+        static std::string ParseLinkNext(const std::string& headerBlock);
+
         // Parse a single release JSON object into ReleaseInfo
         bool ParseRelease(const nlohmann::json& json, ReleaseInfo& outInfo);
 

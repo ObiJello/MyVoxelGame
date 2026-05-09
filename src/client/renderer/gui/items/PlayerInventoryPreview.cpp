@@ -77,7 +77,8 @@ namespace Render {
                                       int x0, int y0, int x1, int y1,
                                       int size, float offsetY,
                                       float mouseX, float mouseY,
-                                      const StickFigurePose& pose) {
+                                      const StickFigurePose& pose,
+                                      Game::PlayerColorId colorId) {
         GuiRenderState* rs = g.GetRenderState();
         if (!rs) return;
 
@@ -101,12 +102,15 @@ namespace Render {
         effective.isCrouching  = false;
 
         // ─── Build the stick figure ──────────────────────────────────────────
+        const auto& colorEntry = Game::LookupPlayerColor(colorId);
+        PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
         std::vector<StickVertex> lineVerts;
         std::vector<StickVertex> triVerts;
         BuildStickFigure(lineVerts, triVerts,
                          /*feetPos*/ glm::vec3(0.0f),
                          effective.headYawDeg, effective.bodyYawDeg,
-                         effective.headPitchDeg, effective.isCrouching);
+                         effective.headPitchDeg, effective.isCrouching,
+                         color);
 
         // ─── Outer view rotation ─────────────────────────────────────────────
         // We negate Y inside ProjectToScreen (world-Y-up → screen-Y-down) so we

@@ -279,6 +279,10 @@ namespace Network {
         Action action = Action::ADD;
         uint32_t playerId = 0;
         std::string playerName;  // Only meaningful for ADD
+        // Player's stick-figure render colour (Game::PlayerColorId). Only meaningful
+        // for ADD; ignored on REMOVE. Old clients deserializing an ADD without this
+        // byte (because we tail-append it) get colorId=0 = Default green.
+        uint8_t colorId = 0;
     };
 
     // Relative-flag bitmask matching MC's net.minecraft.world.entity.Relative.
@@ -978,12 +982,19 @@ namespace Network {
         }
 
         // ---- PlayerInfoS2CPacket Serialization ----
+        // Wire format:
+        //   action(byte) playerId(int32) [if ADD: playerName(string), colorId(byte)]
+        // Old client compatibility: a client that doesn't know about the colorId byte
+        // reads through playerName and stops; the trailing byte is silently ignored.
+        // A new client reading from an old server gets remaining()==0 after the name
+        // and falls back to Default colour.
         inline std::vector<uint8_t> Serialize(const PlayerInfoS2CPacket& packet) {
             PacketBuffer buffer;
             buffer.WriteByte(static_cast<uint8_t>(packet.action));
             buffer.WriteInt(static_cast<int32_t>(packet.playerId));
             if (packet.action == PlayerInfoS2CPacket::Action::ADD) {
                 buffer.WriteString(packet.playerName);
+                buffer.WriteByte(packet.colorId);
             }
             return buffer.GetData();
         }
@@ -994,6 +1005,9 @@ namespace Network {
             packet.playerId = static_cast<uint32_t>(reader.ReadInt());
             if (packet.action == PlayerInfoS2CPacket::Action::ADD && reader.Remaining() > 0) {
                 packet.playerName = reader.ReadString();
+                if (reader.Remaining() >= 1) {
+                    packet.colorId = reader.ReadByte();
+                }
             }
             return packet;
         }

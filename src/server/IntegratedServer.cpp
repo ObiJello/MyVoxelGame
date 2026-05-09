@@ -787,6 +787,10 @@ namespace Server {
             Log::Info("[IntegratedServer] Created ServerPlayer for remote player '%s' (ID: %u)",
                       playerName.c_str(), playerId);
         }
+        // Capture the colour the client sent at LoginStart onto the ServerPlayer so
+        // both the new-player broadcast (below) and any future PlayerInfo refreshes
+        // pull from one canonical source.
+        playerPtr->setColorId(connection->GetPlayerColor());
 
         // PlayerInfo: send all existing players to the new client BEFORE adding it
         // (matching MC's PlayerList.placeNewPlayer line 185 — connection.send(createPlayerInitializing(this.players)))
@@ -796,6 +800,7 @@ namespace Server {
                 addExisting.action = Network::PlayerInfoS2CPacket::Action::ADD;
                 addExisting.playerId = existing->GetPlayerId();
                 addExisting.playerName = existing->GetPlayer()->getName();
+                addExisting.colorId = existing->GetPlayer()->getColorId();
                 auto data = Network::Serialization::Serialize(addExisting);
                 connection->SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerInfoS2C), data);
             }
@@ -825,6 +830,7 @@ namespace Server {
                 addNew.action = Network::PlayerInfoS2CPacket::Action::ADD;
                 addNew.playerId = playerId;
                 addNew.playerName = playerName;
+                addNew.colorId = playerPtr->getColorId();
                 auto data = Network::Serialization::Serialize(addNew);
 
                 for (const auto& conn : m_networkServer->GetConnections()) {

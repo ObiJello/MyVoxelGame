@@ -36,6 +36,7 @@ namespace Launcher {
 
         // Persisted across launcher runs (loaded from / saved to launcher.json by LauncherApp)
         std::string playerName;             // Empty → server auto-assigns "PlayerN"
+        std::string playerColor;            // Empty / "default" → game's neon green; otherwise palette slug
         std::string lastJoinIP;             // Pre-fills the Join Server dialog IP field
         std::string lastJoinPort = "25565"; // Pre-fills the Join Server dialog port field
     };

@@ -37,6 +37,7 @@ namespace Server {
         // Get/set player name
         void SetPlayerName(const std::string& name) { m_playerName = name; }
         const std::string& GetPlayerName() const { return m_playerName; }
+        uint8_t GetPlayerColor() const { return m_playerColor; }
         
         // Get/set player ID
         void SetPlayerId(uint32_t id) { m_playerId = id; }
@@ -174,6 +175,10 @@ namespace Server {
         std::string m_playerName;
         uint32_t m_playerId = 0;
         bool m_authenticated = false;
+        // Stick-figure colour from the client's LoginStart (Game::PlayerColorId
+        // value). Echoed in PlayerInfoS2C ADD broadcasts so other clients render
+        // this player in the right colour. 0 = Default neon green.
+        uint8_t m_playerColor = 0;
 
         // Teleport tracking — matches MC's awaitingTeleport. Incremented per Teleport() call;
         // client must echo this id back so we can ignore stale C2S position packets that

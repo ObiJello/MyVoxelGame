@@ -24,8 +24,13 @@ namespace Client {
         // CONNECTION STATE
         // ========================================================================
         
-        // Initiate handshake and login
-        void StartHandshake(const std::string& playerName, const std::string& serverHost = "127.0.0.1", uint16_t serverPort = 0);
+        // Initiate handshake and login. `playerColor` is a Game::PlayerColorId
+        // value cast to uint8_t — sent to the server so OTHER clients can render
+        // this player's stick figure in the chosen colour.
+        void StartHandshake(const std::string& playerName,
+                            uint8_t playerColor = 0,
+                            const std::string& serverHost = "127.0.0.1",
+                            uint16_t serverPort = 0);
         
         // Check if logged in
         bool IsLoggedIn() const { return m_loggedIn; }

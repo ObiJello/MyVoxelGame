@@ -158,8 +158,11 @@ void main() {
             float dz = rp.position.z - cameraPos.z;
             if (dx * dx + dz * dz > 256.0f * 256.0f) continue;
 
+            const auto& colorEntry = Game::LookupPlayerColor(rp.color);
+            PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
             BuildStickFigure(lineVerts, triVerts, rp.position,
-                             rp.rotation.x, rp.bodyYaw, rp.rotation.y, rp.isCrouching);
+                             rp.rotation.x, rp.bodyYaw, rp.rotation.y, rp.isCrouching,
+                             color);
         }
 
         glm::mat4 mvp = projection * view;

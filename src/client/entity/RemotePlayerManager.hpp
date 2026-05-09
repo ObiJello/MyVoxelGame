@@ -1,6 +1,7 @@
 // File: src/client/entity/RemotePlayerManager.hpp
 #pragma once
 
+#include "common/entity/PlayerColors.hpp"
 #include <glm/glm.hpp>
 #include <unordered_map>
 #include <memory>
@@ -14,6 +15,10 @@ namespace Client {
     struct RemotePlayer {
         uint32_t playerId = 0;
         std::string name;  // Player name (populated from PlayerInfoS2C ADD action)
+        // Stick-figure colour (server-broadcast in PlayerInfoS2C ADD). Default
+        // = the historical neon green so unknown / pre-update servers behave
+        // exactly as they did before colours existed.
+        Game::PlayerColorId color = Game::PlayerColorId::Default;
         bool positionInitialized = false;  // True after first UpdatePlayer call
 
         // Current rendered state (interpolated each tick)
@@ -139,6 +144,15 @@ namespace Client {
             auto& rp = m_players[id];
             rp.playerId = id;
             rp.name = name;
+        }
+
+        // Set the player's stick-figure colour. Same lazy-create semantics as
+        // SetPlayerName so the colour from PlayerInfoS2C ADD lands cleanly even
+        // before the first position packet arrives.
+        void SetPlayerColor(uint32_t id, Game::PlayerColorId color) {
+            auto& rp = m_players[id];
+            rp.playerId = id;
+            rp.color = color;
         }
 
         // Case-insensitive name lookup (matching MC's PlayerList.getPlayerByName)

@@ -83,6 +83,12 @@ namespace Client {
         // Set player name for handshake (default: "Player1")
         void SetPlayerName(const std::string& name) { m_playerName = name; }
         const std::string& GetPlayerName() const { return m_playerName; }
+
+        // Set player colour id for handshake (default: 0 = neon green). Sent to
+        // the server so other clients render this player's stick figure in the
+        // chosen colour.
+        void SetPlayerColor(uint8_t colorId) { m_playerColor = colorId; }
+        uint8_t GetPlayerColor() const { return m_playerColor; }
         
         // Server-sent view distance (effective render distance capped by server)
         void SetServerViewDistance(int distance) { m_serverViewDistance.store(distance); }
@@ -152,6 +158,7 @@ namespace Client {
 
         // Player name for handshake (empty → server auto-assigns "PlayerN")
         std::string m_playerName;
+        uint8_t     m_playerColor = 0; // Game::PlayerColorId::Default
         
         // Client state
         std::atomic<ClientState> m_state{ClientState::IDLE};

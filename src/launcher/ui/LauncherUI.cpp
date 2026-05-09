@@ -3,7 +3,9 @@
 #include "LauncherTheme.hpp"
 #include "launcher/LauncherConfig.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/entity/PlayerColors.hpp"
 #include <imgui.h>
+#include <algorithm>
 #include <sstream>
 
 namespace Launcher {
@@ -454,6 +456,52 @@ namespace Launcher {
                 state.playerName = m_playerName;
             }
             ImGui::TextDisabled("Leave blank to use the default (Player1, Player2, ...)");
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // ── Player Color (passed to the game as --color <slug>; sent to server
+            // at handshake so other players see your stick figure in this colour) ──
+            ImGui::Text("Player Color");
+            // Render a 5-column grid of colour swatches. The currently-selected
+            // entry gets a thick border. Default state (empty / "default") is
+            // equivalent to clicking the first swatch (neon green).
+            constexpr float kSwatchSize = 32.0f;
+            const auto& palette = Game::kPlayerColorTable;
+            const size_t paletteCount = sizeof(Game::kPlayerColorTable) / sizeof(Game::kPlayerColorTable[0]);
+            for (size_t i = 0; i < paletteCount; ++i) {
+                if (i % 5 != 0) ImGui::SameLine();
+                const auto& c = palette[i];
+                ImVec4 col(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, 1.0f);
+                ImVec4 hover(std::min(1.0f, col.x + 0.15f), std::min(1.0f, col.y + 0.15f),
+                             std::min(1.0f, col.z + 0.15f), 1.0f);
+                bool selected = (state.playerColor == c.slug)
+                              || (state.playerColor.empty() && c.id == Game::PlayerColorId::Default);
+                ImGui::PushStyleColor(ImGuiCol_Button, col);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hover);
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive, col);
+                if (selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(1, 1, 1, 1));
+                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.5f);
+                }
+                std::string id = std::string("##color_") + c.slug;
+                if (ImGui::Button(id.c_str(), ImVec2(kSwatchSize, kSwatchSize))) {
+                    // Default entry → store empty (lets a future renumber not break configs).
+                    state.playerColor = (c.id == Game::PlayerColorId::Default) ? std::string() : c.slug;
+                }
+                if (selected) {
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                }
+                ImGui::PopStyleColor(3);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", c.name);
+                }
+            }
+            // (Note for the dev: black/white/brown can't be "neon" by definition —
+            // their HSL S=0% / L<<50% means they look muted next to the saturated
+            // entries. Don't expose that as user-facing text.)
 
             ImGui::Spacing();
             ImGui::Separator();

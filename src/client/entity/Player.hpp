@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/entity/Inventory.hpp"
+#include "common/entity/PlayerColors.hpp"
 #include "common/physics/RayCast.hpp"
 #include "common/physics/Physics.hpp"
 #include "../renderer/core/Camera.hpp"
@@ -46,6 +47,11 @@ namespace Game {
         glm::dvec3 visualPos{0.0, 67.0, 0.0};     // Smoothed position for rendering
         float visualYaw = 0.0f;                   // Smoothed yaw
         float visualPitch = 0.0f;                 // Smoothed pitch
+
+        // Stick-figure render color — set from launcher's --color CLI arg at startup,
+        // sent to the server at handshake so other clients render this player in the
+        // chosen color too. Default = the historical neon green.
+        Game::PlayerColorId color = Game::PlayerColorId::Default;
         
         // === Player Attributes ===
         

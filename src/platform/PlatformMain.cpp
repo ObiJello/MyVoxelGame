@@ -605,6 +605,7 @@ bool s_eKeyHeld = false;
         std::string remoteServerAddress;
         uint16_t remoteServerPort = 25565;
         std::string playerName; // Empty → server auto-assigns "PlayerN" based on connection ID
+        Game::PlayerColorId playerColor = Game::PlayerColorId::Default;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--vulkan") {
@@ -631,6 +632,13 @@ bool s_eKeyHeld = false;
             if (arg == "--name" && i + 1 < argc) {
                 playerName = argv[++i];
                 Log::Info("Player name set to: %s", playerName.c_str());
+            }
+            if (arg == "--color" && i + 1 < argc) {
+                std::string colorSlug = argv[++i];
+                playerColor = Game::ParsePlayerColorName(colorSlug);
+                Log::Info("Player color set to: %s (id=%u)",
+                          Game::LookupPlayerColor(playerColor).name,
+                          static_cast<unsigned>(playerColor));
             }
         }
 
@@ -888,6 +896,7 @@ bool s_eKeyHeld = false;
 
         // 5. Initialize player and controller
         Game::ClientPlayer player;
+        player.color = playerColor; // from --color CLI arg parsed earlier
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
         Render::GetInventoryScreen().SetPlayer(&player);
@@ -950,8 +959,10 @@ bool s_eKeyHeld = false;
         auto networkClient = std::make_unique<Client::NetworkClient>(Client::g_networkIOService->GetIOContext());
         Client::g_networkClient = networkClient.get();  // Set global pointer for legacy systems
 
-        // Set player name for handshake
+        // Set player name + colour for handshake — both forwarded to the server
+        // so OTHER clients can render this player's stick figure correctly.
         networkClient->SetPlayerName(playerName);
+        networkClient->SetPlayerColor(static_cast<uint8_t>(playerColor));
 
         // Wire up player reference for server-authoritative hotbar sync
         if (auto handler = networkClient->GetPacketHandler()) {

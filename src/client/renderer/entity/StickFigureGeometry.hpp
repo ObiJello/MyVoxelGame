@@ -23,6 +23,17 @@ namespace Render {
     };
     static_assert(sizeof(StickVertex) == 24, "StickVertex must match block vertex stride");
 
+    // Per-player colour for the stick figure. Defaults to the historical neon
+    // green so single-player and any callers that don't pass a colour see the
+    // same look they always have.
+    struct PlayerColor {
+        uint8_t r = 0;
+        uint8_t g = 255;
+        uint8_t b = 60;
+        uint8_t a = 255;
+    };
+    inline constexpr PlayerColor kDefaultPlayerColor{0, 255, 60, 255};
+
     // Build line geometry (body, limbs, head outline, face features) into `lineVerts`,
     // and triangle geometry (filled back-of-head disc) into `triVerts`. Vertices come
     // out as line-pair lists and triangle-list, both in world space relative to
@@ -31,6 +42,7 @@ namespace Render {
                           std::vector<StickVertex>& triVerts,
                           const glm::vec3& feetPos,
                           float headYawDeg, float bodyYawDeg,
-                          float pitchDeg, bool isCrouching);
+                          float pitchDeg, bool isCrouching,
+                          PlayerColor color = kDefaultPlayerColor);
 
 } // namespace Render

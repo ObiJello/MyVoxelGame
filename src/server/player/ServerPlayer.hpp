@@ -152,6 +152,11 @@ namespace Server {
         uint32_t getPlayerId() const { return m_playerId; }
         const std::string& getName() const { return m_name; }
         void setName(const std::string& name) { m_name = name; }
+        // Stick-figure colour id (Game::PlayerColorId raw value). Set from the
+        // client's LoginStart packet at join time; broadcast in PlayerInfoS2C ADD
+        // so other clients render this player in the chosen colour. 0 = Default.
+        uint8_t getColorId() const { return m_colorId; }
+        void    setColorId(uint8_t id) { m_colorId = id; }
         
         const glm::dvec3& getPosition() const { return m_position; }
         float getYaw() const { return m_rotation.x; }
@@ -190,6 +195,7 @@ namespace Server {
         // === IDENTITY ===
         uint32_t m_playerId;
         std::string m_name;
+        uint8_t     m_colorId = 0; // Game::PlayerColorId::Default
         // TODO: UUID m_uuid;
         // TODO: ProfileProperties m_profile; // skin data
         // TODO: PermissionLevel m_permissions;

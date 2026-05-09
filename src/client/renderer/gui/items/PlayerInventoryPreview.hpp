@@ -12,6 +12,7 @@
 #pragma once
 
 #include "../GuiGraphics.hpp"
+#include "common/entity/PlayerColors.hpp"
 
 namespace Render {
 
@@ -25,10 +26,13 @@ namespace Render {
     // MC: InventoryScreen.renderEntityInInventoryFollowsMouse (lines 83-108).
     // `size` is pixels-per-meter for the projection; MC uses 20 for the creative
     // survival tab (CreativeModeInventoryScreen.java:702).
+    // `colorId` selects the stick-figure colour from the shared palette; defaults
+    // to the historical neon green so callers that don't care can omit it.
     void RenderStickFigureInInventory(GuiGraphics& g,
                                       int x0, int y0, int x1, int y1,
                                       int size, float offsetY,
                                       float mouseX, float mouseY,
-                                      const StickFigurePose& pose);
+                                      const StickFigurePose& pose,
+                                      Game::PlayerColorId colorId = Game::PlayerColorId::Default);
 
 } // namespace Render

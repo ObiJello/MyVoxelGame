@@ -657,7 +657,8 @@ namespace Render {
                 leftPos + 73, topPos + 6, leftPos + 105, topPos + 49,
                 20, 0.0625f,
                 m_mouseGui.x, m_mouseGui.y,
-                pose);
+                pose,
+                m_player->color);
             g.NextStratum();
         }
 

@@ -55,8 +55,9 @@ namespace Render {
                           std::vector<StickVertex>& triVerts,
                           const glm::vec3& feetPos,
                           float headYawDeg, float bodyYawDeg,
-                          float /*pitchDeg*/, bool isCrouching) {
-        const uint8_t cr = 0, cg = 255, cb = 60, ca = 255;
+                          float /*pitchDeg*/, bool isCrouching,
+                          PlayerColor color) {
+        const uint8_t cr = color.r, cg = color.g, cb = color.b, ca = color.a;
         constexpr float PI = 3.14159265f;
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
 

@@ -435,9 +435,14 @@ namespace Server {
         
         Network::PacketReader reader(payload);
         m_playerName = reader.ReadString();
-        
-        Log::Info("[ServerConnection %u] Player login: %s", 
-            GetConnectionId(), m_playerName.c_str());
+        // Optional trailing colour byte (Game::PlayerColorId). Old clients don't
+        // send it — those default to 0 (Default neon green).
+        if (reader.Remaining() >= 1) {
+            m_playerColor = reader.ReadByte();
+        }
+
+        Log::Info("[ServerConnection %u] Player login: %s (color id=%u)",
+            GetConnectionId(), m_playerName.c_str(), static_cast<unsigned>(m_playerColor));
         
         // Simple authentication (accept everyone for now)
         m_authenticated = true;
