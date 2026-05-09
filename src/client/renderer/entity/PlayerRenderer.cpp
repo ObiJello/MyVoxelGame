@@ -71,8 +71,16 @@ void main() {
             if (pLen2 < 1e-12f) continue; // line points directly at camera
             perp = glm::normalize(perp) * halfWidth;
 
-            glm::vec3 a0 = a + perp, a1 = a - perp;
-            glm::vec3 b0 = b + perp, b1 = b - perp;
+            // Extend each endpoint along the line direction by halfWidth so
+            // adjacent segments (head circle, smile arc) overlap at their
+            // shared endpoints and the outer-edge gap disappears. Standalone
+            // segments (limbs, eyes) just get free "square caps" — looks fine.
+            glm::vec3 along = glm::normalize(d) * halfWidth;
+            glm::vec3 ae = a - along; // pulled-back start
+            glm::vec3 be = b + along; // pushed-forward end
+
+            glm::vec3 a0 = ae + perp, a1 = ae - perp;
+            glm::vec3 b0 = be + perp, b1 = be - perp;
 
             auto push = [&](const glm::vec3& p) {
                 triOut.push_back({p.x, p.y, p.z, 0.0f, 0.0f, va.r, va.g, va.b, va.a});

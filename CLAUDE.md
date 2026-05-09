@@ -51,6 +51,22 @@ For distributing to users (uploads dSYMs to Sentry, builds universal binary):
 ./build/bin/MyVoxelGame
 ```
 
+### Command-line arguments
+
+All parsed in `src/platform/PlatformMain.cpp:Run()`. The launcher (`src/launcher/LauncherApp.cpp`) builds these from the user's settings + Play/Join buttons and passes them to the game at launch (via `system("open ... --args ...")` on macOS, `ShellExecuteA` on Windows). Anything you add here, you also need a `build*Arg` lambda + UI control in the launcher.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--vulkan` | (none) | Use the Vulkan render backend instead of OpenGL. Launcher: "Use Vulkan" checkbox in settings. |
+| `--crash-test` | (none) | Trigger a deliberate crash at startup — for testing the Sentry pipeline. Not exposed in the launcher. |
+| `--server` | `host[:port]` | Connect to a remote dedicated server instead of running the integrated one. Defaults to port 25565. Launcher: "Join Server" dialog (IP + port). |
+| `--name` | `<string>` | Player name. Empty/missing → server auto-assigns "PlayerN" based on connection ID. Launcher: "Username" field. |
+| `--color` | `<slug>` | Player stick-figure colour. Slug is one of `default`, `red`, `orange`, `yellow`, `blue`, `purple`, `pink`, `white`, `black`, `brown` (case-insensitive). Empty/missing/`default` → neon green (`#00FF3C`). Launcher: swatch grid in settings. |
+
+**Player color flow** (added 2026-05): launcher persists slug to `launcher.json` `"player_color"` → passes `--color <slug>` on launch → `PlatformMain` parses via `Game::ParsePlayerColorName` (`src/common/entity/PlayerColors.{hpp,cpp}`) → stored on `ClientPlayer.color` → forwarded to network as a uint8_t via `NetworkClient::SetPlayerColor` → tail-appended byte after username in the `LoginStart` packet → server's `LoginPacketListener::onLoginStart` calls `m_connection.SetPlayerColor(packet.colorId)` → IntegratedServer's `OnPlayerJoined` reads `connection->GetPlayerColor()` onto the new `ServerPlayer.colorId` → broadcast in both `PlayerInfoS2C ADD` paths (existing-players-to-new-client and new-player-to-all) → client writes onto `RemotePlayer.color` → `PlayerRenderer` looks up the RGB via `Game::LookupPlayerColor` and passes it to `BuildStickFigure`. Same for the local inventory preview via `PlayerInventoryPreview`. Default (id=0) is the historical neon green so old clients/servers stay compatible.
+
+To add a new color, append one row to `Game::kPlayerColorTable` in `src/common/entity/PlayerColors.hpp` and bump `PlayerColorId::Count`. The launcher swatch grid auto-includes it.
+
 ## Terrain Library Patches
 
 When updating `src/my_terrain_library/` from a newer snapshot, the following patches must be re-applied:

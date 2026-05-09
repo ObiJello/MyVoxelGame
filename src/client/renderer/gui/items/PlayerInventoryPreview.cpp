@@ -23,6 +23,11 @@ namespace Render {
 
         // Build a quad command for a "thick line" between two screen-space points.
         // The quad is the two endpoints offset perpendicular to the line by ±width/2.
+        // We also EXTEND each endpoint along the line direction by width/2 so that
+        // adjacent segments (e.g. on the head circle and smile arc) overlap at
+        // their shared endpoint and cover the otherwise-visible outer-edge gap.
+        // This effectively gives us "square caps" — fine for our short stick-figure
+        // segments and free of any extra geometry.
         void EmitThickLineQuad(GuiRenderState* rs,
                                const glm::vec2& p0, const glm::vec2& p1,
                                float width, uint32_t color,
@@ -30,16 +35,21 @@ namespace Render {
             glm::vec2 d = p1 - p0;
             float len = glm::length(d);
             if (len < 1e-4f) return; // degenerate
-            glm::vec2 perp = glm::vec2(-d.y, d.x) / len * (width * 0.5f);
+            glm::vec2 dir = d / len;
+            float half = width * 0.5f;
+            glm::vec2 ext = dir * half;            // extend along line
+            glm::vec2 perp(-dir.y * half, dir.x * half); // perpendicular offset
+            glm::vec2 a = p0 - ext;                // pulled-back start
+            glm::vec2 b = p1 + ext;                // pushed-forward end
             QuadCommand q;
             q.texture    = INVALID_TEXTURE;
             q.color      = color;
             q.hasScissor = true;
             q.scissor    = scissor;
-            q.px[0] = p0.x + perp.x; q.py[0] = p0.y + perp.y;
-            q.px[1] = p1.x + perp.x; q.py[1] = p1.y + perp.y;
-            q.px[2] = p1.x - perp.x; q.py[2] = p1.y - perp.y;
-            q.px[3] = p0.x - perp.x; q.py[3] = p0.y - perp.y;
+            q.px[0] = a.x + perp.x; q.py[0] = a.y + perp.y;
+            q.px[1] = b.x + perp.x; q.py[1] = b.y + perp.y;
+            q.px[2] = b.x - perp.x; q.py[2] = b.y - perp.y;
+            q.px[3] = a.x - perp.x; q.py[3] = a.y - perp.y;
             // UVs unused (no texture) but zero them out.
             q.u[0] = q.u[1] = q.u[2] = q.u[3] = 0.0f;
             q.v[0] = q.v[1] = q.v[2] = q.v[3] = 0.0f;
