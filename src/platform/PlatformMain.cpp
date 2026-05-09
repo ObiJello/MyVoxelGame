@@ -177,25 +177,31 @@ namespace PlatformMain {
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
 
-        // ── Nametags above remote players (matches MC's EntityRenderer.submitNameTag:
-        //    Font.drawInBatch with backgroundColor = 0x40000000 = 25% alpha black,
-        //    text centered horizontally on the entity origin) ─────────────────────
+        // ── Nametags above remote players ─────────────────────────────────────
+        // Matches MC's NameTagFeatureRenderer (line 45): poseStack.scale(0.025F, -0.025F, 0.025F)
+        // — the tag is a 3D billboard whose on-screen pixel size shrinks with distance.
+        // To replicate that without a 3D text pipeline, we project the head position to GUI
+        // space and apply a scale = (0.025 * guiHeight * proj[1][1]) / (2 * depth) to GuiGraphics
+        // so the rendered text occupies the same screen area as MC's billboard would.
         if (Client::g_remotePlayerManager) {
             glm::mat4 nameVp = proj * view;
-            // Camera position in world space — last column of inverse(view).
             glm::mat4 invView = glm::inverse(view);
             glm::vec3 cameraPos = glm::vec3(invView[3]);
+
+            // proj[1][1] = 1 / tan(vfov/2) — vertical focal length in NDC units per world unit
+            const float projY = proj[1][1];
 
             for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (rp.name.empty()) continue;
 
-                // MC default render distance for nametags is 64 blocks (squared = 4096).
+                // MC default render distance for nametags is 64 blocks
                 float dx = rp.position.x - cameraPos.x;
                 float dz = rp.position.z - cameraPos.z;
                 if (dx * dx + dz * dz > 64.0f * 64.0f) continue;
 
-                // MC: nameTagAttachment is at the top of the entity's bounding box
-                // (~entity height + 0.5). Player height ≈ 1.8, so y + ~2.0 sits just above head.
+                // MC: translate to nameTagAttachment.y + 0.5 (top of bounding box + half block).
+                // Our remote player position is at feet, model height ~1.8, so feet + 2.0 sits
+                // just above the head (matching the visible attachment point).
                 glm::vec4 worldPos(rp.position.x, rp.position.y + 2.0f, rp.position.z, 1.0f);
                 glm::vec4 clip = nameVp * worldPos;
                 if (clip.w <= 0.0f) continue;
@@ -205,15 +211,26 @@ namespace PlatformMain {
                 float sx = (ndcX * 0.5f + 0.5f) * guiWidth;
                 float sy = (1.0f - (ndcY * 0.5f + 0.5f)) * guiHeight;
 
-                int textW = g_fontRenderer.GetStringWidth(rp.name);
-                int tagX = static_cast<int>(sx) - textW / 2;
-                int tagY = static_cast<int>(sy);
+                // Perspective scale (MC's 0.025 world-units-per-font-pixel becomes this many GUI
+                // pixels at our viewport): factor of guiHeight maps NDC's 2.0-unit Y range to
+                // pixels, divide by 2 for the half-range, multiply by projY/depth for projection.
+                float scale = (0.025f * static_cast<float>(guiHeight) * projY) / (2.0f * clip.w);
 
-                // 25%-alpha black background extending 1px past the text (MC: -1, -1, +width, +height)
-                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1,
-                              tagY + Render::FontRenderer::LINE_HEIGHT, 0x40000000);
-                // White text with drop shadow (MC default for nametags)
+                int textW = g_fontRenderer.GetStringWidth(rp.name);
+                const int lineH = Render::FontRenderer::LINE_HEIGHT;
+
+                // PushMatrix lets us draw the text + bg with a uniform scale that DrawString /
+                // Fill don't otherwise support, while keeping the rest of the HUD at scale=1.
+                graphics.PushMatrix();
+                graphics.Translate(sx, sy);
+                graphics.Scale(scale, scale);
+                // Origin (0,0) is now the feet of the centered text. Center horizontally.
+                int tagX = -textW / 2;
+                int tagY = 0;
+                // 25% alpha black background, MC: 0x40000000
+                graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, 0x40000000);
                 graphics.DrawString(rp.name, tagX, tagY, 0xFFFFFFFF, true);
+                graphics.PopMatrix();
             }
         }
 

@@ -3,6 +3,16 @@
 #include "GuiGraphics.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <chrono>
+
+namespace {
+    // Wall-clock millis since some fixed epoch, mirroring Java's System.currentTimeMillis() /
+    // Util.getMillis() that MC uses in EditBox.renderWidget for cursor blinking.
+    long long NowMillis() {
+        using namespace std::chrono;
+        return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    }
+}
 
 namespace Render {
 
@@ -19,6 +29,21 @@ namespace Render {
         m_open = false;
         m_inputText.clear();
         m_cursorPos = 0;
+    }
+
+    void ChatScreen::ResetCursorBlink() {
+        // MC's behavior: focusedTime is updated when the cursor moves or the field gains focus,
+        // so the cursor immediately reappears in the "visible" half of its blink cycle.
+        m_focusedAtMillis = NowMillis();
+    }
+
+    bool ChatScreen::ShouldShowCursor() const {
+        // MC EditBox.java line 408 (verbatim formula):
+        //   showCursor = (Util.getMillis() - focusedTime) / 300L % 2L == 0L
+        // → 300ms visible / 300ms hidden, total 600ms cycle, driven by wall-clock millis.
+        long long elapsed = NowMillis() - m_focusedAtMillis;
+        if (elapsed < 0) elapsed = 0;
+        return ((elapsed / 300LL) % 2LL) == 0LL;
     }
 
     void ChatScreen::SetCursorPosition(int pos) {
@@ -121,13 +146,9 @@ namespace Render {
         return true; // Consume all keys when chat is open
     }
 
-    void ChatScreen::Update(float deltaTime) {
-        if (!m_open) return;
-        m_cursorTimer += deltaTime;
-        if (m_cursorTimer >= 0.5f) {
-            m_cursorTimer -= 0.5f;
-            m_cursorVisible = !m_cursorVisible;
-        }
+    void ChatScreen::Update(float /*deltaTime*/) {
+        // No-op: blink is driven by wall-clock millis in ShouldShowCursor() so the rate is
+        // independent of frame rate. MC does the same — see EditBox.renderWidget.
     }
 
     void ChatScreen::Render(GuiGraphics& graphics) {
@@ -141,15 +162,29 @@ namespace Render {
         graphics.Fill(0, inputY, guiWidth, guiHeight, 0x80000000);
 
         // Render the full input text (no trailing underscore — cursor is drawn separately)
-        graphics.DrawString(m_inputText, 4, inputY + 2, 0xFFFFFFFF, true);
+        const int textY = inputY + 2;
+        graphics.DrawString(m_inputText, 4, textY, 0xFFFFFFFF, true);
 
-        // Cursor: draw at the actual caret position. MC uses a vertical bar at end-of-text
-        // and a blinking underscore mid-text; we use a vertical bar in both cases for clarity.
-        if (m_cursorVisible) {
+        // Cursor — matches MC's EditBox.renderWidget (lines 411-458):
+        //   MC line 415:   drawX += font.width(text_before) + 1;       // +1 = inter-char gap
+        //   MC line 422-4: if insert (mid-text):  cursorX = drawX - 1; // bar drawn between glyphs
+        //                  else (at end of text): cursorX = drawX;     // underscore one gap past last char
+        //
+        // Effectively:
+        //   - At end of text: underscore at  text_start + width(before) + 1
+        //   - Mid-text:       vertical bar at text_start + width(before) + 1 - 1 = + 0 above
+        //                     (which is what GetStringWidth(before) already gives us)
+        if (ShouldShowCursor()) {
             std::string before = m_inputText.substr(0, m_cursorPos);
-            int cursorX = 4 + graphics.GetStringWidth(before);
-            // 1px wide, 9px tall white bar (MC font glyphs are 8px tall + 1px shadow)
-            graphics.Fill(cursorX, inputY + 1, cursorX + 1, inputY + 1 + 9, 0xFFFFFFFF);
+            int beforeWidth = graphics.GetStringWidth(before);
+            const bool atEnd = (m_cursorPos >= static_cast<int>(m_inputText.size()));
+            if (atEnd) {
+                int underscoreX = 4 + beforeWidth + 1;
+                graphics.DrawString("_", underscoreX, textY, 0xFFFFFFFF, true);
+            } else {
+                int barX = 4 + beforeWidth;
+                graphics.Fill(barX, textY - 1, barX + 1, textY + 1 + 9, 0xFFFFFFFF);
+            }
         }
     }
 
