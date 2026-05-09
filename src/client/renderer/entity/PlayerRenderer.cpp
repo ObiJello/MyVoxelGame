@@ -71,13 +71,16 @@ void main() {
             if (pLen2 < 1e-12f) continue; // line points directly at camera
             perp = glm::normalize(perp) * halfWidth;
 
-            // Extend each endpoint along the line direction by halfWidth so
-            // adjacent segments (head circle, smile arc) overlap at their
-            // shared endpoints and the outer-edge gap disappears. Standalone
-            // segments (limbs, eyes) just get free "square caps" — looks fine.
-            glm::vec3 along = glm::normalize(d) * halfWidth;
-            glm::vec3 ae = a - along; // pulled-back start
-            glm::vec3 be = b + along; // pushed-forward end
+            // Extend each endpoint along the line direction by the "miter
+            // factor" — exactly halfWidth * tan(angleChange/2) — so adjacent
+            // chained segments meet cleanly with no outer gap and no visible
+            // diamond spike past the curve. Our 16-segment head circle and
+            // 8-segment half-smile both have a 22.5° per-segment angle change,
+            // so tan(11.25°) ≈ 0.199 is the right factor.
+            constexpr float kMiterFactor = 0.199f;
+            glm::vec3 along = glm::normalize(d) * (halfWidth * kMiterFactor);
+            glm::vec3 ae = a - along; // slightly pulled-back start
+            glm::vec3 be = b + along; // slightly pushed-forward end
 
             glm::vec3 a0 = ae + perp, a1 = ae - perp;
             glm::vec3 b0 = be + perp, b1 = be - perp;

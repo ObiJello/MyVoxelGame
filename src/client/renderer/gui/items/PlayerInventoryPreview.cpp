@@ -23,11 +23,13 @@ namespace Render {
 
         // Build a quad command for a "thick line" between two screen-space points.
         // The quad is the two endpoints offset perpendicular to the line by ±width/2.
-        // We also EXTEND each endpoint along the line direction by width/2 so that
-        // adjacent segments (e.g. on the head circle and smile arc) overlap at
-        // their shared endpoint and cover the otherwise-visible outer-edge gap.
-        // This effectively gives us "square caps" — fine for our short stick-figure
-        // segments and free of any extra geometry.
+        // We also extend each endpoint slightly along the line direction so adjacent
+        // chained segments (head circle, smile arc) overlap at their shared point
+        // and the outer-edge gap disappears. The exact "perfect miter" extension is
+        // halfWidth * tan(angleChange/2). For our 16-segment circle and 8-segment
+        // half-smile both have a per-segment angle change of 22.5° → tan(11.25°) ≈
+        // 0.199. We use that factor; it's tiny for limbs (so they're not visibly
+        // longer) but exactly right for the chained shapes.
         void EmitThickLineQuad(GuiRenderState* rs,
                                const glm::vec2& p0, const glm::vec2& p1,
                                float width, uint32_t color,
@@ -37,10 +39,11 @@ namespace Render {
             if (len < 1e-4f) return; // degenerate
             glm::vec2 dir = d / len;
             float half = width * 0.5f;
-            glm::vec2 ext = dir * half;            // extend along line
+            constexpr float kMiterFactor = 0.199f; // tan(11.25°)
+            glm::vec2 ext = dir * (half * kMiterFactor);
             glm::vec2 perp(-dir.y * half, dir.x * half); // perpendicular offset
-            glm::vec2 a = p0 - ext;                // pulled-back start
-            glm::vec2 b = p1 + ext;                // pushed-forward end
+            glm::vec2 a = p0 - ext;                // slightly pulled-back start
+            glm::vec2 b = p1 + ext;                // slightly pushed-forward end
             QuadCommand q;
             q.texture    = INVALID_TEXTURE;
             q.color      = color;
