@@ -85,7 +85,11 @@ namespace Render {
         Tab                 m_currentTab = Tab::Survival;
         Game::InventorySlot m_carriedItem{};
         int                 m_hoveredSlot = HIT_NONE;
-        Game::ItemID        m_hoveredCreativeItem = Game::Items::Air;
+        // The creative search shows multiple stacks of the same item-id when an
+        // item supports per-stack variants (notably enchanted_book — one stack
+        // per enchantment+level). So we track the FULL stack for hover, not just
+        // the id, so the tooltip can read DataComponents like STORED_ENCHANTMENTS.
+        Game::ItemStack     m_hoveredCreativeStack{};
         glm::vec2           m_mouseGui{0.0f, 0.0f};
         Game::ClientPlayer* m_player = nullptr;
 
@@ -94,7 +98,11 @@ namespace Render {
         int                        m_searchCursorPos = 0;
         long long                  m_searchFocusedAtMillis = 0;
         bool                       m_searchFocused = false;
-        std::vector<Game::ItemID>  m_filteredItems;
+        // Stores fully-formed stacks (with DataComponents) so per-stack variants
+        // — e.g. enchanted_book at every (enchantment, level) — each get their own
+        // grid cell with their own tooltip and (for the glint pass) per-cell
+        // foil state.
+        std::vector<Game::ItemStack>  m_filteredItems;
         bool                       m_searchDirty = true;  // refilter on next render
         void                       RefreshSearchResults();
 
@@ -109,6 +117,12 @@ namespace Render {
         bool                 m_isDragging = false;
         uint8_t              m_dragType = 0;   // 0=split, 1=one-each, 2=clone
         std::vector<uint8_t> m_dragSlots;
+        // Cursor count when drag began. The drag preview shows what each
+        // touched slot WILL look like after the END phase commits server-side
+        // (since the server doesn't actually update slot counts until END).
+        // The cursor itself is rendered with `m_dragStartCarriedCount` minus
+        // what's been distributed so the user sees their stack shrinking live.
+        int                  m_dragStartCarriedCount = 0;
 
         // Double-click
         long long      m_lastClickTimeMs = 0;
@@ -144,7 +158,19 @@ namespace Render {
         void RenderSlot       (GuiGraphics&, int x, int y, const Game::InventorySlot& s);
         void RenderHoverHighlight(GuiGraphics&, int x, int y);
         void RenderCarriedItem(GuiGraphics&);
-        void RenderTooltip    (GuiGraphics&, Game::ItemID id, int mx, int my);
+
+        // Drag-distribute preview helpers — see InventoryScreen.cpp for the
+        // full doc. DisplayedSlot returns the slot's CONTENT as the user
+        // should currently SEE it (live drag preview overlaid on server state).
+        // DragRemainingCarriedCount mirrors that for the cursor stack.
+        int                  DragPerSlotCount() const;
+        Game::InventorySlot  DisplayedSlot(int slotIndex,
+                                           const Game::InventorySlot& base) const;
+        int                  DragRemainingCarriedCount() const;
+        // Reads STORED_ENCHANTMENTS (and future per-stack components) off the
+        // stack to render multi-line tooltips matching MC's format. See
+        // Enchantment::GetFullname for the per-line colour rules.
+        void RenderTooltip    (GuiGraphics&, const Game::ItemStack& stack, int mx, int my);
         void RenderSearchBox  (GuiGraphics&, int leftPos, int topPos);
         void RenderScrollbar  (GuiGraphics&, int leftPos, int topPos);
         void DrawBackground   (GuiGraphics&, int leftPos, int topPos, TextureHandle bg);

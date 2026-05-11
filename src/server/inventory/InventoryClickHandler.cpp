@@ -440,14 +440,27 @@ namespace Server {
         const int maxStack = Game::ItemRegistry::Get(itemId).maxStackSize;
         InventorySlot& carried = player.getCarried();
 
+        // If the cursor is already holding a DIFFERENT item, clicking the
+        // search grid just clears the cursor (the held item is discarded as
+        // requested) and does NOT pick up the new item. Two clicks are needed
+        // to swap: first click drops what you're holding, second click picks
+        // up the new item. This makes the search-grid the de-facto "delete"
+        // gesture for whatever you grabbed from your inventory.
+        if (!carried.IsEmpty() && carried.itemId != itemId) {
+            carried.Clear();
+            result.carriedChanged = true;
+            return result;
+        }
+
         if (button == 0) {
-            // Left click: full stack
+            // Full-stack pickup (only reached when cursor is empty or same item).
             carried = {itemId, maxStack};
         } else {
-            // Right click: +1 (if same item) or set to 1
+            // Single-item pickup (button==1).
             if (carried.IsEmpty()) {
                 carried = {itemId, 1};
-            } else if (carried.itemId == itemId && carried.count < maxStack) {
+            } else if (carried.count < maxStack) {
+                // Same item already held → increment by 1.
                 carried.count++;
             }
         }

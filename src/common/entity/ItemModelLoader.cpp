@@ -19,13 +19,14 @@ namespace Game {
         // to the local file slug (e.g. "compass_07").
         std::string SlugFromModelRef(const std::string& ref) {
             std::string s = ref;
-            // Strip namespace prefix if present
+            // Strip namespace prefix (minecraft:)
             auto colon = s.find(':');
             if (colon != std::string::npos) s = s.substr(colon + 1);
-            // Strip "item/" prefix
-            const std::string itemPrefix = "item/";
-            if (s.compare(0, itemPrefix.size(), itemPrefix) == 0) {
-                s = s.substr(itemPrefix.size());
+            // Strip category prefix — item/ OR block/. Item models reference textures
+            // from either dir (e.g. doors use item/oak_door, torches use block/torch).
+            // GuiGraphics::LoadItemTexture searches both, so we drop the prefix here.
+            for (const std::string& p : {std::string("item/"), std::string("block/")}) {
+                if (s.compare(0, p.size(), p) == 0) { s = s.substr(p.size()); break; }
             }
             return s;
         }
@@ -65,6 +66,24 @@ namespace Game {
             if (layerIt == texIt->end() || !layerIt->is_string()) return {};
             return TextureNameFromRef(layerIt->get<std::string>());
         }
+
+        // Extract ALL `textures.layerN` entries (layer0, layer1, …). MC's flat
+        // item models can stack up to 4 layers (vanilla uses 2 for leather
+        // armor + dye, spawn eggs, potions, fireworks, etc.). Order is
+        // preserved so caller can pair with index-aligned tint values.
+        std::vector<std::string> ExtractAllLayers(const nlohmann::json& model) {
+            std::vector<std::string> out;
+            if (!model.is_object()) return out;
+            auto texIt = model.find("textures");
+            if (texIt == model.end() || !texIt->is_object()) return out;
+            for (int i = 0; ; ++i) {
+                std::string key = "layer" + std::to_string(i);
+                auto it = texIt->find(key);
+                if (it == texIt->end() || !it->is_string()) break;
+                out.push_back(TextureNameFromRef(it->get<std::string>()));
+            }
+            return out;
+        }
     } // namespace
 
     bool ItemModelLoader::LoadInto(Item& item, const std::string& slug) {
@@ -78,6 +97,17 @@ namespace Game {
         // Base sprite — `textures.layer0`.
         std::string baseSprite = ExtractLayer0(root);
         if (!baseSprite.empty()) item.spriteName = baseSprite;
+
+        // All layers — for multi-layer items (leather armor + dye, spawn eggs,
+        // potions, fireworks). spriteName above stays as layer0 for back-compat
+        // with single-layer render paths; the renderer prefers spriteLayers
+        // when there's more than one entry.
+        // (NOTE: auto-detection of `_overlay` companion textures lives in
+        // applyClientItem in Item.cpp — it needs to see the items.json tints
+        // to decide whether MC would have generated a TWO_LAYERED_ITEM. Wolf
+        // armor without dye is a counter-example: overlay PNG exists but the
+        // un-dyed branch is single-layer, so we must NOT auto-attach it.)
+        item.spriteLayers = ExtractAllLayers(root);
 
         // Overrides → animated frames. Each override references another model file whose
         // `textures.layer0` is the actual texture for that frame.
@@ -99,6 +129,13 @@ namespace Game {
                 // directly — caller's frame-selector defines what semantic the value has.
                 auto pIt = ov.find("predicate");
                 if (pIt == ov.end() || !pIt->is_object() || pIt->empty()) continue;
+                // Capture the predicate NAME on the first override we see — every
+                // override in a vanilla MC item model uses the same predicate
+                // (compass.json is all "angle", clock.json is all "time", etc.).
+                // Item.predicateName feeds ItemRegistry's selector-wiring logic.
+                if (item.predicateName.empty()) {
+                    item.predicateName = pIt->begin().key();
+                }
                 float predicate = pIt->begin().value().get<float>();
 
                 // Resolve the referenced model and pull its layer0.

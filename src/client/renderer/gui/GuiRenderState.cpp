@@ -45,28 +45,28 @@ namespace Render {
 
     void GuiRenderState::GetAllBlits(std::vector<BlitCommand>& out) const {
         CollectBlits(m_root.get(), out);
-        std::sort(out.begin(), out.end(), [](const BlitCommand& a, const BlitCommand& b) {
+        std::stable_sort(out.begin(), out.end(), [](const BlitCommand& a, const BlitCommand& b) {
             return a.zOrder < b.zOrder;
         });
     }
 
     void GuiRenderState::GetAllFills(std::vector<FillCommand>& out) const {
         CollectFills(m_root.get(), out);
-        std::sort(out.begin(), out.end(), [](const FillCommand& a, const FillCommand& b) {
+        std::stable_sort(out.begin(), out.end(), [](const FillCommand& a, const FillCommand& b) {
             return a.zOrder < b.zOrder;
         });
     }
 
     void GuiRenderState::GetAllTexts(std::vector<TextCommand>& out) const {
         CollectTexts(m_root.get(), out);
-        std::sort(out.begin(), out.end(), [](const TextCommand& a, const TextCommand& b) {
+        std::stable_sort(out.begin(), out.end(), [](const TextCommand& a, const TextCommand& b) {
             return a.zOrder < b.zOrder;
         });
     }
 
     void GuiRenderState::GetAllQuads(std::vector<QuadCommand>& out) const {
         CollectQuads(m_root.get(), out);
-        std::sort(out.begin(), out.end(), [](const QuadCommand& a, const QuadCommand& b) {
+        std::stable_sort(out.begin(), out.end(), [](const QuadCommand& a, const QuadCommand& b) {
             return a.zOrder < b.zOrder;
         });
     }

@@ -30,8 +30,13 @@ in vec2 vTexCoord;
 in vec4 vColor;
 out vec4 FragColor;
 uniform sampler2D uTexture;
+uniform float uAlphaTest;  // discard threshold; 0.0 means "discard only fully transparent pixels"
 void main() {
     vec4 texColor = texture(uTexture, vTexCoord);
+    // Mirrors Vulkan gui_textured_vk.frag — see comment there for why this
+    // matters (lets the icon path write depth only on opaque pixels so the
+    // glint pass can mask itself via depth-test EQUAL).
+    if (texColor.a <= uAlphaTest) discard;
     FragColor = texColor * vColor;
 }
 )";
@@ -235,6 +240,10 @@ void main() {
         bool currentIsColor = true;
         bool currentHasScissor = false;
         ScissorRect currentScissor;
+        bool currentUseDepth = false;
+        QuadBlendMode currentBlendMode = QuadBlendMode::AlphaBlend;
+        CompareOp currentDepthFunc = CompareOp::LessEqual;
+        bool currentDepthWrite = true;
         int batchStartIndex = 0;
 
         for (const auto& sc : sorted) {
@@ -242,6 +251,10 @@ void main() {
             bool thisIsColor = false;
             bool thisHasScissor = false;
             ScissorRect thisScissor;
+            bool thisUseDepth = false;
+            QuadBlendMode thisBlendMode = QuadBlendMode::AlphaBlend;
+            CompareOp thisDepthFunc = CompareOp::LessEqual;
+            bool thisDepthWrite = true;
 
             int indexCountBefore = static_cast<int>(m_indices.size());
 
@@ -282,7 +295,7 @@ void main() {
 
                 uint32_t base = static_cast<uint32_t>(m_vertices.size());
                 for (int vi = 0; vi < 4; vi++) {
-                    m_vertices.push_back({ q.px[vi], q.py[vi], 0.0f, q.u[vi], q.v[vi], r, g, b, a });
+                    m_vertices.push_back({ q.px[vi], q.py[vi], q.pz[vi], q.u[vi], q.v[vi], r, g, b, a });
                 }
                 m_indices.push_back(base + 0);
                 m_indices.push_back(base + 1);
@@ -290,6 +303,10 @@ void main() {
                 m_indices.push_back(base + 0);
                 m_indices.push_back(base + 2);
                 m_indices.push_back(base + 3);
+                thisUseDepth = q.useDepth;
+                thisBlendMode = q.blendMode;
+                thisDepthFunc = q.depthFunc;
+                thisDepthWrite = q.depthWrite;
             }
 
             int newIndices = static_cast<int>(m_indices.size()) - indexCountBefore;
@@ -298,7 +315,11 @@ void main() {
             bool needNewBatch = m_batches.empty() ||
                                 thisTex != currentTex ||
                                 thisIsColor != currentIsColor ||
-                                thisHasScissor != currentHasScissor;
+                                thisHasScissor != currentHasScissor ||
+                                thisUseDepth != currentUseDepth ||
+                                thisBlendMode != currentBlendMode ||
+                                thisDepthFunc != currentDepthFunc ||
+                                thisDepthWrite != currentDepthWrite;
 
             if (!needNewBatch && thisHasScissor && currentHasScissor) {
                 if (thisScissor.x0 != currentScissor.x0 || thisScissor.y0 != currentScissor.y0 ||
@@ -315,12 +336,20 @@ void main() {
                 batch.indexCount = newIndices;
                 batch.hasScissor = thisHasScissor;
                 batch.scissor = thisScissor;
+                batch.useDepth = thisUseDepth;
+                batch.blendMode = thisBlendMode;
+                batch.depthFunc = thisDepthFunc;
+                batch.depthWrite = thisDepthWrite;
                 m_batches.push_back(batch);
 
                 currentTex = thisTex;
                 currentIsColor = thisIsColor;
                 currentHasScissor = thisHasScissor;
                 currentScissor = thisScissor;
+                currentUseDepth = thisUseDepth;
+                currentBlendMode = thisBlendMode;
+                currentDepthFunc = thisDepthFunc;
+                currentDepthWrite = thisDepthWrite;
             } else if (!m_batches.empty() && newIndices > 0) {
                 // Extend current batch
                 m_batches.back().indexCount += newIndices;
@@ -357,25 +386,90 @@ void main() {
 
         if (m_mesh == INVALID_MESH) return;
 
-        // Orthographic projection in GUI-scaled coordinates
+        // Orthographic projection in GUI-scaled coordinates.
+        //
+        // GLM's default `glm::ortho` produces a GL-style matrix where NDC Z
+        // spans [-1, 1]. Vulkan's clip space is [0, 1] for Z, so a GL-style
+        // matrix sends every vertex with world-Z > 0 to NDC-Z < 0 → CLIPPED.
+        // For the iso block icons (whose per-vertex Z straddles 0) this means
+        // any face with ~half its corners on the +Z side gets sliced by the
+        // near-plane, leaving only triangle slivers near the all-negative-Z
+        // corners — i.e. the "blocks render only corners" Vulkan symptom.
+        //
+        // Pick the matrix matching the active backend's NDC convention so the
+        // same per-vertex Z values land in the visible clip range either way.
         float guiWidth = static_cast<float>(fbWidth) / guiScale;
         float guiHeight = static_cast<float>(fbHeight) / guiScale;
-        glm::mat4 projection = glm::ortho(0.0f, guiWidth, guiHeight, 0.0f, -1000.0f, 1000.0f);
+        glm::mat4 projection = (g_renderBackend && g_renderBackend->GetType() == BackendType::Vulkan)
+            ? glm::orthoRH_ZO(0.0f, guiWidth, guiHeight, 0.0f, -1000.0f, 1000.0f)
+            : glm::ortho     (0.0f, guiWidth, guiHeight, 0.0f, -1000.0f, 1000.0f);
 
-        // GUI pipeline state: no depth, alpha blend
-        PipelineState guiState;
-        guiState.depthTestEnabled = false;
-        guiState.depthWriteEnabled = false;
-        guiState.blendEnabled = true;
-        guiState.srcBlendFactor = BlendFactor::SrcAlpha;
-        guiState.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
-        guiState.cullMode = CullMode::None;
-        g_renderBackend->SetPipelineState(guiState);
+        // GUI pipeline state — base config. Depth test/write are per-batch (only on
+        // for iso-block icon batches that set QuadCommand::useDepth=true) so flat 2D
+        // GUI elements never interact with depth values left over from previous icons
+        // and previous icons don't interact with each other (separate slots = separate
+        // screen pixels = no overlap to worry about).
+        PipelineState guiBase;
+        guiBase.blendEnabled = true;
+        guiBase.srcBlendFactor = BlendFactor::SrcAlpha;
+        guiBase.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+        guiBase.cullMode = CullMode::None;
+        guiBase.depthTestEnabled = false;
+        guiBase.depthWriteEnabled = false;
+        g_renderBackend->SetPipelineState(guiBase);
+        bool currentDepthState = false;
+        QuadBlendMode currentBlend = QuadBlendMode::AlphaBlend;
+        CompareOp currentDepthFunc = CompareOp::LessEqual;
+        bool currentDepthWrite = true;
+
+        auto applyState = [&](bool useDepth, QuadBlendMode blend, CompareOp dfunc, bool dwrite) {
+            PipelineState s = guiBase;
+            s.depthTestEnabled  = useDepth;
+            s.depthWriteEnabled = useDepth && dwrite;
+            s.depthCompareOp    = dfunc;
+            if (blend == QuadBlendMode::Additive) {
+                // Matches MC `BlendFunction.GLINT` (BlendFunction.java:22):
+                //   color final = src.rgb * src.rgb + dst.rgb
+                s.srcBlendFactor = BlendFactor::SrcColor;
+                s.dstBlendFactor = BlendFactor::One;
+            }
+            // AlphaBlend keeps guiBase's defaults (SrcAlpha / OneMinusSrcAlpha).
+            g_renderBackend->SetPipelineState(s);
+        };
 
         for (const auto& batch : m_batches) {
+            // Flip depth state when any aspect changes (depth on/off, blend mode,
+            // depth-compare function, or depth-write). Only clear the depth buffer
+            // when ENTERING the depth zone from a no-depth batch — the glint pass
+            // (depthFunc=Equal, depthWrite=false) MUST preserve the icon-pass
+            // depth values written immediately before it; clearing between icon
+            // and glint would erase the very mask we're trying to use.
+            if (batch.useDepth  != currentDepthState ||
+                batch.blendMode != currentBlend      ||
+                batch.depthFunc != currentDepthFunc  ||
+                batch.depthWrite != currentDepthWrite) {
+                applyState(batch.useDepth, batch.blendMode, batch.depthFunc, batch.depthWrite);
+                if (batch.useDepth && !currentDepthState) {
+                    g_renderBackend->Clear(/*color*/false, /*depth*/true);
+                }
+                currentDepthState = batch.useDepth;
+                currentBlend = batch.blendMode;
+                currentDepthFunc = batch.depthFunc;
+                currentDepthWrite = batch.depthWrite;
+            }
+
             ShaderHandle shader = batch.useColorShader ? m_colorShader : m_texturedShader;
             g_renderBackend->BindShader(shader);
             g_renderBackend->SetUniformMat4(shader, "uMVP", projection);
+            // Discard fully-transparent fragments. The textured shader gates on
+            // texColor.a <= uAlphaTest. This is a near-no-op for normal rendering
+            // (all visible pixels have alpha > 0), but it stops the icon pass
+            // from writing depth on transparent corners — which is what makes
+            // the glint pass (depth-test EQUAL) render only on the icon's
+            // opaque silhouette, mirroring MC.
+            if (!batch.useColorShader) {
+                g_renderBackend->SetUniformFloat(shader, "uAlphaTest", 0.0f);
+            }
 
             if (!batch.useColorShader && batch.texture != INVALID_TEXTURE) {
                 g_renderBackend->BindTexture(batch.texture, 0);

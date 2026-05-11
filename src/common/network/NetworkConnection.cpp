@@ -304,9 +304,17 @@ namespace Network {
                 OnPacketReceived(m_currentPacket.header.packetId, m_currentPacket.payload);
             }
         } catch (const std::exception& e) {
-            Log::Error("[%s] Exception decoding packet: %s", m_name.c_str(), e.what());
+            // Malformed packet — almost always an internet scanner or bot probing the
+            // open port (never happens for legitimate clients). Disconnect immediately
+            // instead of looping back into StartRead. If we keep reading, the strand
+            // callbacks hold shared_from_this(), so the half-dead connection stays
+            // alive in memory; over hours of scanner traffic those accumulate until
+            // file descriptors / heap exhaust and the process crashes.
+            Log::Error("[%s] Exception decoding packet: %s — disconnecting", m_name.c_str(), e.what());
+            Disconnect();
+            return;
         }
-        
+
         // Start reading next packet
         StartRead();
     }

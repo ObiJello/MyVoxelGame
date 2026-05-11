@@ -357,17 +357,25 @@ namespace Render {
         // Exact block boundary positions (matches Minecraft — no expansion)
         switch (face) {
             case BlockFace::PositiveY: // Top face (+Y)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                // MC FaceBakery convention (FaceInfo.UP + BlockElementFace.getU/getV):
+                //   minZ (north/back) → vMin (top of texture);
+                //   maxZ (south/front) → vMax (bottom of texture).
+                // i.e. "north is up" when looking down at the texture. Sides (NSEW) match
+                // MC already; only top/bottom were V-flipped before. Without this, blocks
+                // with directional top textures (beacon glass, stripped logs, sandstone)
+                // render with their top rotated 180° from MC.
+                vertices[0] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
 
             case BlockFace::NegativeY: // Bottom face (-Y)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                // MC FaceBakery (FaceInfo.DOWN): maxZ → vMin, minZ → vMax. Inverse of UP.
+                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
                 break;
 
             case BlockFace::PositiveZ: // Front face (+Z)

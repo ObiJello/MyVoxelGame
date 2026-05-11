@@ -59,11 +59,27 @@ namespace Game {
             : uv(uvCoords), textureRef(texture), tintIndex(tint), cullface(cull) {}
     };
 
+    // Per-element rotation (MC model JSON `rotation` field). Only one axis at a time.
+    // `axis == 0` means "no rotation" (the rotation is identity and can be skipped).
+    // `origin` is in MC pixel space (0..16). MC restricts angle to ±22.5 / ±45 / 0;
+    // we store and apply the raw value so non-vanilla models still work.
+    // `rescale=true` (rare) scales the rotated geometry up so the rotated bounding
+    // box fills the original axis-aligned bounds — used for diagonal stairs/rails;
+    // not needed for chain/wall/etc., but parsed so we don't drop the field.
+    struct ElementRotation {
+        glm::vec3 origin{8.0f, 8.0f, 8.0f};
+        char      axis    = 0;       // 'x' | 'y' | 'z' | 0
+        float     angle   = 0.0f;    // degrees
+        bool      rescale = false;
+    };
+
     // One cuboid "element" of the model (Minecraft models can have multiple cuboids)
     struct Element {
         glm::vec3 from{0.0f};                           // Bottom-left-back corner in 0-16 model space
         glm::vec3 to{16.0f};                            // Top-right-front corner in 0-16 model space
         std::map<FaceDir, FaceDef> faces;               // Only faces that are actually defined
+        ElementRotation rotation;                       // Optional per-element rotation
+        bool       shade = true;                        // MC's `shade` field; false = no directional shading
 
         Element() = default;
         Element(const glm::vec3& fromPos, const glm::vec3& toPos) : from(fromPos), to(toPos) {}
@@ -79,11 +95,23 @@ namespace Game {
         }
     };
 
+    // MC's `display.gui` block — controls how the model is oriented + sized in the
+    // inventory icon. Most blocks inherit `block/block`'s defaults (rotation [30, 225, 0],
+    // scale [0.625]) but fences override to [30, 135, 0] (`fence_inventory`), gates to
+    // [30, 45, 0] + scale 0.8 + translation [0, -1, 0] (`template_fence_gate`), etc.
+    // Translation is in MC's "model pixel" units (1/16 of a block).
+    struct GuiDisplay {
+        glm::vec3 rotation{30.0f, 225.0f, 0.0f};   // degrees, applied as Rx*Ry*Rz
+        glm::vec3 translation{0.0f, 0.0f, 0.0f};   // model-pixel units (1/16 of a block)
+        glm::vec3 scale{0.625f, 0.625f, 0.625f};
+    };
+
     // Full model for one block type
     struct BlockModel {
         std::string parent;                                    // Parent model (for inheritance)
         std::map<std::string, std::string> textures;          // Texture variable definitions
         std::vector<Element> elements;                         // List of cuboid elements
+        GuiDisplay guiDisplay;                                 // display.gui transform for inventory rendering
 
         BlockModel() = default;
 

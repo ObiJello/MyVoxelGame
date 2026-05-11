@@ -67,6 +67,53 @@ All parsed in `src/platform/PlatformMain.cpp:Run()`. The launcher (`src/launcher
 
 To add a new color, append one row to `Game::kPlayerColorTable` in `src/common/entity/PlayerColors.hpp` and bump `PlayerColorId::Count`. The launcher swatch grid auto-includes it.
 
+## Updating to a Newer Minecraft Version
+
+The game vendors several MC asset/code snapshots that need to be kept in sync when bumping MC versions. Sources should all come from the **same** MC release/snapshot — mismatches cause silent missing assets (e.g. an `Items.java` from 1.21.6 against textures from 1.21.4 leaves the new copper/spear/nautilus items unstyled).
+
+### Folders/files to overwrite from a fresh MC asset dump
+
+| What | Where in repo | Source in MC jar |
+|---|---|---|
+| Item model JSONs | `assets/models/item/*.json` | `assets/minecraft/models/item/*` |
+| Item textures | `assets/textures/item/*.png` | `assets/minecraft/textures/item/*` |
+| Block model JSONs | `assets/models/block/*.json` | `assets/minecraft/models/block/*` |
+| Block textures | `assets/textures/block/*.png` | `assets/minecraft/textures/block/*` |
+| GUI sprites | `assets/textures/gui/**/*.png` | `assets/minecraft/textures/gui/**` |
+| Font atlas | `assets/textures/font/ascii.png` | `assets/minecraft/textures/font/ascii.png` |
+| Lang file | `assets/lang/en_us.json` | `assets/minecraft/lang/en_us.json` |
+| Items.java decompile | `minecraft_code/decompiled_net/minecraft/world/item/Items.java` | decompiled `net/minecraft/world/item/Items.class` |
+| Terrain library snapshot | `src/my_terrain_library/` | (separate vendored project — see "Terrain Library Patches" below) |
+
+After overwriting `Items.java`, **regenerate** the item table (see next section). After overwriting `src/my_terrain_library/`, **re-apply patches** (see "Terrain Library Patches").
+
+### When MC ships new items
+
+The choice between re-running the generator vs. hand-editing depends on how many items changed:
+
+- **A handful of new items (≤5)** → append manually to `src/common/entity/GeneratedItemList.{hpp,cpp}` + drop the new JSON/PNG into `assets/models/item/` and `assets/textures/item/`. Faster than regenerating, and avoids touching the generator script. Append only — never reorder existing entries (numeric IDs are wire/save stable).
+- **A snapshot bump with many additions** → run `python3 tools/gen_items.py` to regenerate `GeneratedItemList.{hpp,cpp}` from the new `Items.java`. The generator is **append-aware**: it keeps existing entries in their existing positions and only appends new slugs at the end (so IDs stay stable). Always inspect the diff before committing to confirm nothing was reordered.
+
+Either way: once the item is in the table, registration is automatic — `ItemRegistry::Initialize` loops `kPureItemTable[]`, the loader picks up the JSON if present, and missing JSON/PNG just falls back to the slug-named texture (broken icon but no crash).
+
+### Items that exist in `Items.java` but lack assets
+
+It's normal for the asset dump to lag the decompile by a few items (snapshot vs. release timing). Missing-asset items still register and appear in the search tab — they just render with a missing-texture sprite. To list current gaps:
+
+```bash
+python3 -c '
+import os, re
+slugs = []
+with open("minecraft_code/decompiled_net/minecraft/world/item/Items.java") as f:
+    for line in f:
+        m = re.search(r"registerItem\(\s*\"([a-z0-9_]+)\"", line)
+        if m and "registerBlock" not in line: slugs.append(m.group(1))
+missing = [s for s in slugs if not os.path.exists(f"assets/models/item/{s}.json")]
+print(f"{len(missing)} items missing JSON model:")
+for s in missing: print(f"  {s}")
+'
+```
+
 ## Terrain Library Patches
 
 When updating `src/my_terrain_library/` from a newer snapshot, the following patches must be re-applied:

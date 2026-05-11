@@ -208,6 +208,23 @@ namespace Game {
             }
         }
 
+        // Merge display.gui from this JSON onto whatever the parent provided. MC's
+        // convention: any sub-key set on the child overrides ONLY that sub-key
+        // (rotation, translation, scale are independently inheritable). The parent
+        // chain bubbles up `block/block`'s defaults (rotation [30,225,0], scale 0.625)
+        // for blocks that don't override; fence/gate/etc. set their own here.
+        if (j.contains("display") && j["display"].is_object()
+            && j["display"].contains("gui") && j["display"]["gui"].is_object()) {
+            const auto& g = j["display"]["gui"];
+            auto readVec3 = [](const json& arr, glm::vec3 fallback) {
+                if (!arr.is_array() || arr.size() < 3) return fallback;
+                return glm::vec3(arr[0].get<float>(), arr[1].get<float>(), arr[2].get<float>());
+            };
+            if (g.contains("rotation"))    result.guiDisplay.rotation    = readVec3(g["rotation"],    result.guiDisplay.rotation);
+            if (g.contains("translation")) result.guiDisplay.translation = readVec3(g["translation"], result.guiDisplay.translation);
+            if (g.contains("scale"))       result.guiDisplay.scale       = readVec3(g["scale"],       result.guiDisplay.scale);
+        }
+
         // Clear parent reference to avoid confusion
         result.parent = "";
 
@@ -302,6 +319,36 @@ namespace Game {
                 elemJson["to"][1].get<float>(),
                 elemJson["to"][2].get<float>()
             );
+        }
+
+        // Parse per-element rotation (MC model JSON `rotation` block). Used by
+        // chains, rails, and any block whose geometry isn't axis-aligned.
+        if (elemJson.contains("rotation") && elemJson["rotation"].is_object()) {
+            const auto& rj = elemJson["rotation"];
+            if (rj.contains("origin") && rj["origin"].is_array() && rj["origin"].size() == 3) {
+                element.rotation.origin = glm::vec3(
+                    rj["origin"][0].get<float>(),
+                    rj["origin"][1].get<float>(),
+                    rj["origin"][2].get<float>()
+                );
+            }
+            if (rj.contains("axis") && rj["axis"].is_string()) {
+                std::string axis = rj["axis"].get<std::string>();
+                if (!axis.empty()) element.rotation.axis = axis[0];
+            }
+            if (rj.contains("angle")) {
+                element.rotation.angle = rj["angle"].get<float>();
+            }
+            if (rj.contains("rescale") && rj["rescale"].is_boolean()) {
+                element.rotation.rescale = rj["rescale"].get<bool>();
+            }
+        }
+
+        // Parse `shade` (defaults to true). When false, the renderer skips MC's
+        // per-direction face shading (used by chain/leaves/etc. where the model's
+        // texture already bakes in highlight/shadow).
+        if (elemJson.contains("shade") && elemJson["shade"].is_boolean()) {
+            element.shade = elemJson["shade"].get<bool>();
         }
 
         // Parse faces

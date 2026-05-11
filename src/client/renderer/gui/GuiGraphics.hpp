@@ -61,6 +61,15 @@ namespace Render {
         static void PreloadItem(Game::ItemID itemId);
         void RenderItemDecorations(const Game::ItemStack& stack, int x, int y);
 
+        // Animated purple "foil" overlay drawn over enchanted item icons.
+        // Mirrors MC `RenderType.glint()` (RenderTypes.java:392) +
+        // `TextureTransform.GLINT_TEXTURING` (TextureTransform.java:13, scale=8.0)
+        // — the texture from `textures/misc/enchanted_glint_item.png` is rendered
+        // additively over the icon with a time-scrolled UV transform that gives
+        // it the diagonal sparkle motion. Called automatically from RenderItem
+        // when `stack.HasFoil()` is true.
+        void RenderItemGlintOverlay(int x, int y, int size);
+
         // Custom item renderers — MC's BlockEntityWithoutLevelRenderer equivalent. Items
         // that are normally drawn by a block-entity renderer in the world (chest, sign,
         // bell, banner, etc.) can register a function here to draw their inventory icon

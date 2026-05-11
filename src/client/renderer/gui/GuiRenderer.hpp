@@ -55,6 +55,10 @@ namespace Render {
             int indexCount;
             bool hasScissor;
             ScissorRect scissor;
+            bool useDepth = false;    // enable depth STAGE for this batch
+            QuadBlendMode blendMode = QuadBlendMode::AlphaBlend;
+            CompareOp depthFunc = CompareOp::LessEqual;
+            bool depthWrite = true;
         };
 
         std::vector<GuiVertex> m_vertices;

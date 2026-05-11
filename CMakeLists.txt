@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.19)
 project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
 
+# Emit compile_commands.json so clangd knows the real per-file compile flags
+# (C++20 standard, include paths to ext/glm, ext/glfw, generated/, MoltenVK,
+# nlohmann_json fetch, PCH, etc.). Without it clangd falls back to defaults
+# and reports a flood of false positives (no `std::optional`, can't find
+# `glm/glm.hpp`, "C++17 extension" warnings, etc.).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
@@ -165,10 +172,6 @@ add_library(imgui
         src/server/world/storage/AnvilRegionWriter.hpp
         src/server/world/storage/AnvilChunkSaver.cpp
         src/server/world/storage/AnvilChunkSaver.hpp
-        src/common/entity/Item.cpp
-        src/common/entity/Item.hpp
-        src/common/entity/ItemModelLoader.cpp
-        src/common/entity/ItemModelLoader.hpp
 )
 target_include_directories(imgui PRIVATE
         ext/imgui
@@ -346,7 +349,14 @@ if(APPLE)
             src/common/entity/Inventory.cpp
             src/common/entity/Item.cpp
             src/common/entity/ItemModelLoader.cpp
+            src/common/entity/ClientItemLoader.cpp
+            src/common/entity/GeneratedItemList.cpp
             src/common/entity/PlayerColors.cpp
+            src/common/data/DataComponentMap.cpp
+            src/common/data/DataComponents.cpp
+            src/common/world/enchantment/Enchantment.cpp
+            src/common/world/enchantment/ItemEnchantments.cpp
+            src/common/world/enchantment/EnchantmentHelper.cpp
             src/client/input/PlayerController.cpp
             src/client/entity/Player.cpp
             src/client/entity/RemotePlayerManager.cpp
@@ -372,6 +382,11 @@ if(APPLE)
             src/client/renderer/gui/ChatScreen.cpp
             src/client/renderer/gui/InventoryScreen.cpp
             src/client/renderer/gui/items/ChestItemRenderer.cpp
+            src/client/renderer/gui/items/BedItemRenderer.cpp
+            src/client/renderer/gui/items/ShulkerBoxItemRenderer.cpp
+            src/client/renderer/gui/items/BannerItemRenderer.cpp
+            src/client/renderer/gui/items/HeadItemRenderer.cpp
+            src/client/renderer/gui/items/ShieldItemRenderer.cpp
             src/client/renderer/gui/items/PlayerInventoryPreview.cpp
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
@@ -549,6 +564,16 @@ else()
             src/client/renderer/gui/items/ItemLighting.hpp
             src/client/renderer/gui/items/ChestItemRenderer.hpp
             src/client/renderer/gui/items/ChestItemRenderer.cpp
+            src/client/renderer/gui/items/BedItemRenderer.hpp
+            src/client/renderer/gui/items/BedItemRenderer.cpp
+            src/client/renderer/gui/items/ShulkerBoxItemRenderer.hpp
+            src/client/renderer/gui/items/ShulkerBoxItemRenderer.cpp
+            src/client/renderer/gui/items/BannerItemRenderer.hpp
+            src/client/renderer/gui/items/BannerItemRenderer.cpp
+            src/client/renderer/gui/items/HeadItemRenderer.hpp
+            src/client/renderer/gui/items/HeadItemRenderer.cpp
+            src/client/renderer/gui/items/ShieldItemRenderer.hpp
+            src/client/renderer/gui/items/ShieldItemRenderer.cpp
             src/client/renderer/gui/items/PlayerInventoryPreview.hpp
             src/client/renderer/gui/items/PlayerInventoryPreview.cpp
 
@@ -623,6 +648,8 @@ else()
             # Common entity
             src/common/entity/Inventory.cpp
             src/common/entity/Inventory.hpp
+            src/common/entity/GeneratedItemList.cpp
+            src/common/entity/GeneratedItemList.hpp
             src/common/entity/PlayerColors.cpp
             src/common/entity/PlayerColors.hpp
 
@@ -975,11 +1002,34 @@ endif()
 
 # ── Copy shaders into .app/Contents/Resources on macOS ────────────────────────
 if(APPLE)
+    # Step 1: copy the source shaders dir (gets the .vert/.frag GLSL text and
+    # any pre-committed .spv fallbacks from when glslc isn't available).
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
     )
+    # Step 2: when glslc is available, the build's compile_shaders target
+    # produces fresh .spv files in ${CMAKE_BINARY_DIR}/shaders. Overwrite the
+    # bundle's stale .spv (and the source dir's stale .spv, so CLion debug
+    # runs that read shaders/ relative to the project root also see fresh
+    # .spv) with those. Without this step, edits to .frag/.vert never take
+    # effect at runtime — runtime loads the months-old .spv from the source
+    # dir verbatim.
+    if(GLSLC)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_BINARY_DIR}/shaders"
+                "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
+                COMMENT "Copying freshly-compiled SPIR-V into bundle Resources"
+        )
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_BINARY_DIR}/shaders"
+                "${PROJECT_SOURCE_DIR}/shaders"
+                COMMENT "Copying freshly-compiled SPIR-V back into source shaders/ for dev runs"
+        )
+    endif()
     # Copy assets directory for texture atlas and block models
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_directory

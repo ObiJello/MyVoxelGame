@@ -12,6 +12,10 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <filesystem>
+#include <vector>
+#include <algorithm>
+#include <cmath>
+#include <GLFW/glfw3.h>
 #include "stb_image.h"
 
 // PlatformMain provides bundle-aware asset path resolution.
@@ -190,42 +194,6 @@ namespace Render {
         return (a << 24) | (r << 16) | (g << 8) | b;
     }
 
-    struct FaceLookupResult {
-        AtlasUVRect uv;
-        int tintIndex = -1;
-        bool found = false;
-    };
-
-    // Helper: look up a face texture in the block atlas, including tint info
-    static FaceLookupResult LookupFaceTexture(const Game::BlockModel& model, Game::FaceDir dir,
-                                               const std::string& modelName) {
-        FaceLookupResult result;
-        if (!g_atlasBuilder) return result;
-
-        // Try all elements (grass_block has 2: base + overlay)
-        for (const auto& elem : model.elements) {
-            if (elem.HasFace(dir)) {
-                const auto& face = elem.GetFace(dir);
-                std::string texPath = model.ResolveTexture(face.textureRef);
-                if (texPath != "missingno" && g_atlasBuilder->GetUVRect(texPath, result.uv)) {
-                    result.tintIndex = face.tintIndex;
-                    result.found = true;
-                    return result;
-                }
-            }
-        }
-
-        // Fallback: try common key patterns
-        static const std::string suffixes[] = { "", "_top", "_side", "_front" };
-        for (const auto& suffix : suffixes) {
-            if (g_atlasBuilder->GetUVRect("block/" + modelName + suffix, result.uv)) {
-                result.found = true;
-                return result;
-            }
-        }
-        return result;
-    }
-
     // Transform a 3D point through the isometric matrix and project to 2D screen coords
     static glm::vec2 ProjectIsometric(const glm::mat4& isoMat, const glm::vec3& point) {
         glm::vec4 p = isoMat * glm::vec4(point, 1.0f);
@@ -237,34 +205,63 @@ namespace Render {
     static void RenderBlockItemImpl(GuiGraphics& self,
                                     GuiRenderState* renderState,
                                     Game::BlockID blockId,
+                                    const std::string& modelOverride,
                                     int x, int y) {
         const auto& block = Game::BlockRegistry::Get(blockId);
-        const std::string& modelName = block.modelName;
+        // MC's items/{slug}.json may override which block model the inventory
+        // renderer uses (trapdoors → `<wood>_trapdoor_bottom`, doors → `<wood>_door_bottom`,
+        // etc.). When set, prefer it over the block's own modelName.
+        const std::string& modelName = !modelOverride.empty() ? modelOverride : block.modelName;
         if (modelName.empty()) return;
         if (!g_atlasBuilder) return;
 
-        // MC isometric: rotationXYZ(30°, 225°, 0°) * scale(0.625) * translate(-0.5)
-        // Verified with numpy: R = Rx(30°) @ Ry(225°) gives visible Top, North, East faces.
-        // In GLM (right-multiply): Rx first, then Ry → builds Rx * Ry.
-        static glm::mat4 isoMat = [] {
-            glm::mat4 m(1.0f);
-            m = glm::rotate(m, glm::radians(30.0f),  glm::vec3(1, 0, 0)); // Rx
-            m = glm::rotate(m, glm::radians(225.0f), glm::vec3(0, 1, 0)); // Rx * Ry
-            m = glm::scale(m, glm::vec3(0.625f));
-            m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
-            return m;
-        }();
-
-        // Try inventory-specific model first (e.g., red_mushroom_block_inventory),
-        // fall back to the regular block model. MC uses separate inventory models
-        // for blocks whose world model doesn't show all faces (mushroom blocks, etc.)
+        // Try inventory-specific model first (e.g., red_mushroom_block_inventory,
+        // oak_fence_inventory), fall back to the regular block model. MC uses
+        // separate inventory models for blocks whose world model doesn't show
+        // all faces (mushroom blocks) AND whose inventory orientation differs
+        // from the world block (fences).
         const Game::BlockModel* modelPtr = nullptr;
         if (Game::BlockModelRegistry::HasModel(modelName + "_inventory")) {
             modelPtr = &Game::BlockModelRegistry::GetModel(modelName + "_inventory");
+        } else if (!modelOverride.empty() && Game::BlockModelRegistry::HasModel(modelName)) {
+            // The override targets a SPECIFIC variant model (e.g. oak_trapdoor_bottom),
+            // not whatever BlockRegistry::GetBlockModel returns for this BlockID
+            // (which is keyed off the stateful block name). Look up the override directly.
+            modelPtr = &Game::BlockModelRegistry::GetModel(modelName);
         } else {
             modelPtr = &Game::BlockRegistry::GetBlockModel(blockId);
         }
         const auto& model = *modelPtr;
+
+        // MC isometric: build the iso matrix from the model's `display.gui` transform,
+        // mirroring MC's `ItemTransform.apply` (translate → rotate → scale, applied to
+        // the model AFTER it's centered at the origin). Most blocks use the defaults
+        // from `block/block` (rotation [30,225,0], scale 0.625), but fences override
+        // to [30,135,0], gates to [30,45,0]+scale 0.8+translation [0,-1,0], etc.
+        // Translation values are in MC "pixel units" (1/16 of a block); divide by 16
+        // to get the [0..1] model space we use here.
+        const Game::GuiDisplay& gui = model.guiDisplay;
+        glm::mat4 isoMat(1.0f);
+        isoMat = glm::translate(isoMat, gui.translation / 16.0f);
+        isoMat = glm::rotate(isoMat, glm::radians(gui.rotation.x), glm::vec3(1, 0, 0));
+        isoMat = glm::rotate(isoMat, glm::radians(gui.rotation.y), glm::vec3(0, 1, 0));
+        isoMat = glm::rotate(isoMat, glm::radians(gui.rotation.z), glm::vec3(0, 0, 1));
+        isoMat = glm::scale(isoMat, gui.scale);
+        isoMat = glm::translate(isoMat, glm::vec3(-0.5f, -0.5f, -0.5f));
+
+        // Depth matrix used ONLY for back-to-front sort. We deliberately omit the
+        // X rotation so the iso tilt's Y-into-Z mixing doesn't dominate the sort
+        // key. Without this, a face with high Y-extent (e.g. a shelf's back panel,
+        // y=0..16) gets a higher transformed Z than a smaller face that is
+        // geometrically in front of it but at low Y (e.g. a bottom shelf board,
+        // y=0..4) — and the back panel paints over the board.
+        // MC doesn't hit this because it uses a real Z-buffer; we use painter's
+        // algorithm with face-center depth, which only orders by world-Z direction
+        // (post-Y-rotation) reliably. The full iso transform is still used for
+        // VERTEX projection so positions on screen remain identical.
+        glm::mat4 depthMat(1.0f);
+        depthMat = glm::rotate(depthMat, glm::radians(gui.rotation.y), glm::vec3(0, 1, 0));
+        depthMat = glm::translate(depthMat, glm::vec3(-0.5f, -0.5f, -0.5f));
 
         // Blocks without a real model file (water_still, lava_still) get the default
         // cube which has unresolvable textures. Render flat 2D texture instead.
@@ -297,51 +294,41 @@ namespace Render {
             return;
         }
 
-        // Look up textures for 3 visible faces (Top, East=left, North=right)
-        auto topFace = LookupFaceTexture(model, Game::FaceDir::Up, modelName);
-        auto leftFace = LookupFaceTexture(model, Game::FaceDir::East, modelName);
-        auto rightFace = LookupFaceTexture(model, Game::FaceDir::North, modelName);
-
-        if (!topFace.found && !leftFace.found && !rightFace.found) {
-            // No cube faces resolved — try South too in case the model only defines that.
-            auto fallback = LookupFaceTexture(model, Game::FaceDir::South, modelName);
-            if (fallback.found) {
-                topFace = leftFace = rightFace = fallback;
-            } else {
-                // STILL no faces. This is normal for blocks rendered via MC's
-                // BlockEntityWithoutLevelRenderer (chests, signs, banners, beds, etc.) —
-                // their model JSON only declares a `particle` texture and no geometry,
-                // because the actual visual is drawn by a custom 3D renderer.
-                // We don't have BEWLR, so fall back to the particle texture as a flat
-                // 2D sprite. This matches MC's resource-pack-driven fallback when the
-                // custom renderer is missing.
-                AtlasUVRect uvRect;
-                std::string particleTex = model.ResolveTexture("#particle");
-                bool found = false;
-                if (particleTex != "missingno") {
-                    found = g_atlasBuilder->GetUVRect(particleTex, uvRect);
-                }
-                if (!found) {
-                    found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
-                }
-                if (found) {
-                    self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
-                              x, y, x + 16, y + 16,
-                              uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y,
-                              0xFFFFFFFF);
-                }
-                return;
+        // Sanity: any visible face on any element? If not, this is a BEWLR block
+        // (chest/sign/banner/bed) — fall back to flat particle sprite as before.
+        bool anyVisible = false;
+        for (const auto& elem : model.elements) {
+            if (elem.HasFace(Game::FaceDir::Up) || elem.HasFace(Game::FaceDir::East)
+                || elem.HasFace(Game::FaceDir::North) || elem.HasFace(Game::FaceDir::South)
+                || elem.HasFace(Game::FaceDir::West) || elem.HasFace(Game::FaceDir::Down)) {
+                anyVisible = true;
+                break;
             }
         }
-        if (!topFace.found) topFace = leftFace.found ? leftFace : rightFace;
-        if (!leftFace.found) leftFace = topFace.found ? topFace : rightFace;
-        if (!rightFace.found) rightFace = topFace.found ? topFace : leftFace;
+        if (!anyVisible) {
+            AtlasUVRect uvRect;
+            std::string particleTex = model.ResolveTexture("#particle");
+            bool found = false;
+            if (particleTex != "missingno") {
+                found = g_atlasBuilder->GetUVRect(particleTex, uvRect);
+            }
+            if (!found) {
+                found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
+            }
+            if (found) {
+                self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                          x, y, x + 16, y + 16,
+                          uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y,
+                          0xFFFFFFFF);
+            }
+            return;
+        }
 
         // MC uses scale(16, -16, 16) in renderItemToAtlas — the model's 0.625 scale
         // already sizes the block to fit in 16 GUI pixels.
-        float scale = 16.0f;
-        float cx = static_cast<float>(x) + 8.0f;  // Center of 16x16 slot
-        float cy = static_cast<float>(y) + 8.0f;
+        const float scale = 16.0f;
+        const float cx = static_cast<float>(x) + 8.0f;  // Center of 16x16 slot
+        const float cy = static_cast<float>(y) + 8.0f;
 
         auto proj = [&](float mx, float my, float mz) -> glm::vec2 {
             glm::vec2 p = ProjectIsometric(isoMat, glm::vec3(mx, my, mz));
@@ -350,64 +337,230 @@ namespace Render {
 
         TextureHandle tex = g_atlasBuilder->GetBackendTextureHandle();
 
-        // Submit one face as a quad with 4 corners defined in 3D model space
-        auto submitFace = [&](glm::vec3 v0, glm::vec3 v1, glm::vec3 v2, glm::vec3 v3,
-                             const AtlasUVRect& uv, uint32_t color) {
-            glm::vec2 p0 = proj(v0.x, v0.y, v0.z);
-            glm::vec2 p1 = proj(v1.x, v1.y, v1.z);
-            glm::vec2 p2 = proj(v2.x, v2.y, v2.z);
-            glm::vec2 p3 = proj(v3.x, v3.y, v3.z);
+        // MC ITEMS_3D Lambertian shading per face — uses the model's actual GUI
+        // rotation so 135°/45° rotations (fences, walls, stairs, gates) get the
+        // right per-face shading too, not just the default 225°.
+        const float ROT_X = gui.rotation.x;
+        const float ROT_Y = gui.rotation.y;
+        const uint32_t SHADE_UP    = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 1, 0}, ROT_X, ROT_Y));
+        const uint32_t SHADE_DOWN  = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0,-1, 0}, ROT_X, ROT_Y));
+        const uint32_t SHADE_EAST  = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 1, 0, 0}, ROT_X, ROT_Y));
+        const uint32_t SHADE_WEST  = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({-1, 0, 0}, ROT_X, ROT_Y));
+        const uint32_t SHADE_NORTH = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 0,-1}, ROT_X, ROT_Y));
+        const uint32_t SHADE_SOUTH = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 0, 1}, ROT_X, ROT_Y));
 
-            QuadCommand q;
-            q.texture = tex;
-            q.color = color;
-            q.px[0] = p0.x; q.py[0] = p0.y;
-            q.px[1] = p1.x; q.py[1] = p1.y;
-            q.px[2] = p2.x; q.py[2] = p2.y;
-            q.px[3] = p3.x; q.py[3] = p3.y;
-            q.u[0] = uv.uvMin.x; q.v[0] = uv.uvMin.y;
-            q.u[1] = uv.uvMax.x; q.v[1] = uv.uvMin.y;
-            q.u[2] = uv.uvMax.x; q.v[2] = uv.uvMax.y;
-            q.u[3] = uv.uvMin.x; q.v[3] = uv.uvMax.y;
-            renderState->SubmitQuad(q);
+        // Map a (faceUV pixel space 0-16) coord to an atlas UV using the face's tile.
+        auto atlasU = [](const AtlasUVRect& tile, float px) {
+            return tile.uvMin.x + (px / 16.0f) * (tile.uvMax.x - tile.uvMin.x);
+        };
+        auto atlasV = [](const AtlasUVRect& tile, float px) {
+            return tile.uvMin.y + (px / 16.0f) * (tile.uvMax.y - tile.uvMin.y);
         };
 
-        // MC ITEMS_3D Lambertian shading per face. Standard block GUI rotation
-        // (block.json display.gui) is (30°, 225°, 0°) — same matrix used for the
-        // isometric projection above. Computed shades for the visible faces:
-        //   UP    (+Y, screen TOP)   ≈ 1.00
-        //   EAST  (+X, screen LEFT)  ≈ 0.65
-        //   NORTH (-Z, screen RIGHT) ≈ 0.40
-        // (See ItemLighting.hpp / minecraft_code/.../Lighting.java for the full math.)
-        constexpr float BLOCK_GUI_ROT_X = 30.0f;
-        constexpr float BLOCK_GUI_ROT_Y = 225.0f;
-        const uint32_t SHADE_UP    = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 1, 0}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
-        const uint32_t SHADE_EAST  = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 1, 0, 0}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
-        const uint32_t SHADE_NORTH = ItemLighting::ShadeAsColor(ItemLighting::ComputeShade({ 0, 0,-1}, BLOCK_GUI_ROT_X, BLOCK_GUI_ROT_Y));
-
-        // If the face has a biome tint (grass top, leaves), multiply the per-face
-        // shade by the tint color so the result is correctly shaded AND tinted.
-        auto faceColor = [](const FaceLookupResult& face, uint32_t shading) -> uint32_t {
-            if (face.tintIndex >= 0) {
-                return ItemLighting::MultiplyColor(GUI_GRASS_TINT, shading);
-            }
+        auto biomeTinted = [](int tintIndex, uint32_t shading) -> uint32_t {
+            if (tintIndex >= 0) return ItemLighting::MultiplyColor(GUI_GRASS_TINT, shading);
             return shading;
         };
 
-        // Visible faces: Top(+Y), East(+X) left, North(-Z) right
-        // Draw back-to-front. Vertex order: TL, TR, BR, BL (matching UV corners)
+        // One pre-computed face quad: 4 model-space corners + per-corner atlas UVs +
+        // shading colour. Built once per element-face, then sorted by post-iso depth.
+        struct FaceQuad {
+            glm::vec3 v[4];
+            float     u[4], v_[4];
+            uint32_t  color;
+            float     depth;  // average post-iso z; back-to-front = ascending z
+        };
 
-        // 1. East face (+X, left side)
-        submitFace({1,1,1}, {1,1,0}, {1,0,0}, {1,0,1},
-                   leftFace.uv, faceColor(leftFace, SHADE_EAST));
+        auto resolveFace = [&](const Game::Element& elem, Game::FaceDir dir,
+                               AtlasUVRect& outAtlas, glm::vec4& outFaceUV, int& outTint) -> bool {
+            if (!elem.HasFace(dir)) return false;
+            const auto& face = elem.GetFace(dir);
+            std::string texPath = model.ResolveTexture(face.textureRef);
+            if (texPath == "missingno") return false;
+            if (!g_atlasBuilder->GetUVRect(texPath, outAtlas)) {
+                if (!g_atlasBuilder->GetUVRect("block/" + modelName, outAtlas)) return false;
+            }
+            outFaceUV = face.uv;
+            outTint = face.tintIndex;
+            return true;
+        };
 
-        // 2. North face (-Z, right side)
-        submitFace({0,1,0}, {1,1,0}, {1,0,0}, {0,0,0},
-                   rightFace.uv, faceColor(rightFace, SHADE_NORTH));
+        // Back-face culling — skip faces whose world-space normal points AWAY
+        // from camera. Essential for translucent blocks (glass, stained glass,
+        // ice) so back faces don't show THROUGH the front ones' alpha-blended
+        // pixels and accumulate extra shading. For opaque/cutout blocks it's
+        // a no-op visually (back faces would have been hidden by front faces
+        // in painter's order anyway).
+        const glm::mat3 isoNormalMat(isoMat);
+        auto isFrontFacing = [&](glm::vec3 cubeLocalNormal) -> bool {
+            // Our ortho convention (per chest renderer comment): higher world z
+            // = closer to camera. So a face with world-normal.z > 0 faces the
+            // camera. Use a tiny epsilon to avoid edge cases at z ≈ 0.
+            glm::vec3 worldNormal = isoNormalMat * cubeLocalNormal;
+            return worldNormal.z > 1e-4f;
+        };
 
-        // 3. Top face (+Y, on top)
-        submitFace({0,1,1}, {1,1,1}, {1,1,0}, {0,1,0},
-                   topFace.uv, faceColor(topFace, SHADE_UP));
+        // Build a FaceQuad with the right vertex order + UV mapping for the given
+        // direction. Vertex order matches MC's per-face winding so the texture
+        // appears upright after iso projection. Each face's 4 vertices are
+        // arranged TL → TR → BR → BL of the face as the artist would see it
+        // looking AT that face from outside the cube.
+        auto buildFace = [&](FaceQuad& fq, glm::vec3 v0, glm::vec3 v1,
+                             glm::vec3 v2, glm::vec3 v3,
+                             const AtlasUVRect& tile, glm::vec4 fu,
+                             uint32_t color) {
+            fq.v[0] = v0; fq.v[1] = v1; fq.v[2] = v2; fq.v[3] = v3;
+            fq.u[0] = atlasU(tile, fu.x); fq.v_[0] = atlasV(tile, fu.y);
+            fq.u[1] = atlasU(tile, fu.z); fq.v_[1] = atlasV(tile, fu.y);
+            fq.u[2] = atlasU(tile, fu.z); fq.v_[2] = atlasV(tile, fu.w);
+            fq.u[3] = atlasU(tile, fu.x); fq.v_[3] = atlasV(tile, fu.w);
+            fq.color = color;
+            // Depth = average z of the 4 corners after the Ry-only depth matrix.
+            // See the comment above where depthMat is built for why we don't include
+            // the Rx tilt here.
+            float sum = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                glm::vec4 t = depthMat * glm::vec4(fq.v[i], 1.0f);
+                sum += t.z;
+            }
+            fq.depth = sum * 0.25f;
+        };
+
+        // Build ALL faces from ALL elements first, then sort once globally back-to-front.
+        // Per-element sorting is wrong for two reasons:
+        //   1. Multi-element models like grass_block (base cube + overlay cube at same
+        //      coords) need overlay-front to draw AFTER base-front, but per-element sort
+        //      ends up drawing overlay-back AFTER base-front because element 1 starts
+        //      from its own back face.
+        //   2. Fences/walls/gates have multiple posts and bars at different depths that
+        //      occlude each other in non-trivial ways — only a global depth sort gets
+        //      the visibility right.
+        // For TIES (overlapping coplanar faces from different elements), std::stable_sort
+        // preserves submission order — and we submit base elements before overlays, so
+        // overlay correctly draws over base on the front-visible faces.
+        std::vector<FaceQuad> quads;
+        quads.reserve(model.elements.size() * 6);
+        for (const auto& elem : model.elements) {
+            const float fx = elem.from.x / 16.0f, fy = elem.from.y / 16.0f, fz = elem.from.z / 16.0f;
+            const float tx = elem.to.x   / 16.0f, ty = elem.to.y   / 16.0f, tz = elem.to.z   / 16.0f;
+
+            // Per-element rotation (MC's `rotation` block — chains, rails, etc.).
+            // Identity if elem.rotation.axis == 0.
+            glm::mat4 rotMat(1.0f);
+            glm::mat3 rotNormalMat(1.0f);
+            if (elem.rotation.axis != 0) {
+                glm::vec3 origin = elem.rotation.origin / 16.0f;
+                glm::vec3 axisVec(0.0f);
+                switch (elem.rotation.axis) {
+                    case 'x': axisVec = glm::vec3(1, 0, 0); break;
+                    case 'y': axisVec = glm::vec3(0, 1, 0); break;
+                    case 'z': axisVec = glm::vec3(0, 0, 1); break;
+                }
+                rotMat = glm::translate(rotMat, origin);
+                rotMat = glm::rotate(rotMat, glm::radians(elem.rotation.angle), axisVec);
+                rotMat = glm::translate(rotMat, -origin);
+                rotNormalMat = glm::mat3(glm::rotate(glm::mat4(1.0f),
+                                                     glm::radians(elem.rotation.angle), axisVec));
+            }
+            auto rv = [&](glm::vec3 v) -> glm::vec3 {
+                return glm::vec3(rotMat * glm::vec4(v, 1.0f));
+            };
+            auto isFrontFacingRot = [&](glm::vec3 normal) -> bool {
+                return isFrontFacing(rotNormalMat * normal);
+            };
+            // shade=false elements (chains, leaves) skip directional shading — render
+            // at full brightness instead, matching MC's `BakedQuad.shade=false` behaviour.
+            const uint32_t SHADE_FLAT = 0xFFFFFFFFu;
+            auto pickShade = [&](uint32_t directional) -> uint32_t {
+                return elem.shade ? directional : SHADE_FLAT;
+            };
+
+            AtlasUVRect tile; glm::vec4 fu; int tint;
+            // Per-face vertex order (artist looking AT the face from outside the cube,
+            // TL → TR → BR → BL):
+            //   UP    (+Y at ty): TL=front-left, TR=front-right, BR=back-right, BL=back-left
+            //   DOWN  (-Y at fy): TL=back-left, TR=back-right, BR=front-right, BL=front-left
+            //   NORTH (-Z at fz): TL=top-left(-X), TR=top-right(+X), BR=bot-right, BL=bot-left
+            //   SOUTH (+Z at tz): TL=top-right(-X), TR=top-left(+X) — mirrored vs north
+            //   EAST  (+X at tx): TL=top-front, TR=top-back, BR=bot-back, BL=bot-front
+            //   WEST  (-X at fx): TL=top-back, TR=top-front, BR=bot-front, BL=bot-back
+            if (isFrontFacingRot({0, 1, 0}) && resolveFace(elem, Game::FaceDir::Up, tile, fu, tint)) {
+                // MC FaceBakery: UP face has minZ (north) → vMin (top of texture).
+                FaceQuad fq;
+                buildFace(fq, rv({fx,ty,fz}), rv({tx,ty,fz}), rv({tx,ty,tz}), rv({fx,ty,tz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_UP)));
+                quads.push_back(fq);
+            }
+            if (isFrontFacingRot({0, -1, 0}) && resolveFace(elem, Game::FaceDir::Down, tile, fu, tint)) {
+                // MC FaceBakery: DOWN face has maxZ → vMin (inverse of UP).
+                FaceQuad fq;
+                buildFace(fq, rv({fx,fy,tz}), rv({tx,fy,tz}), rv({tx,fy,fz}), rv({fx,fy,fz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_DOWN)));
+                quads.push_back(fq);
+            }
+            if (isFrontFacingRot({0, 0, -1}) && resolveFace(elem, Game::FaceDir::North, tile, fu, tint)) {
+                // MC FaceBakery NORTH: maxX → uMin (texture's left).
+                FaceQuad fq;
+                buildFace(fq, rv({tx,ty,fz}), rv({fx,ty,fz}), rv({fx,fy,fz}), rv({tx,fy,fz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_NORTH)));
+                quads.push_back(fq);
+            }
+            if (isFrontFacingRot({0, 0, 1}) && resolveFace(elem, Game::FaceDir::South, tile, fu, tint)) {
+                // MC FaceBakery SOUTH: minX → uMin.
+                FaceQuad fq;
+                buildFace(fq, rv({fx,ty,tz}), rv({tx,ty,tz}), rv({tx,fy,tz}), rv({fx,fy,tz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_SOUTH)));
+                quads.push_back(fq);
+            }
+            if (isFrontFacingRot({1, 0, 0}) && resolveFace(elem, Game::FaceDir::East, tile, fu, tint)) {
+                FaceQuad fq;
+                buildFace(fq, rv({tx,ty,tz}), rv({tx,ty,fz}), rv({tx,fy,fz}), rv({tx,fy,tz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_EAST)));
+                quads.push_back(fq);
+            }
+            if (isFrontFacingRot({-1, 0, 0}) && resolveFace(elem, Game::FaceDir::West, tile, fu, tint)) {
+                FaceQuad fq;
+                buildFace(fq, rv({fx,ty,fz}), rv({fx,ty,tz}), rv({fx,fy,tz}), rv({fx,fy,fz}),
+                          tile, fu, biomeTinted(tint, pickShade(SHADE_WEST)));
+                quads.push_back(fq);
+            }
+        }
+
+        // Global back-to-front sort across all elements' faces. Our ortho is
+        // glm::ortho(0,w,h,0,-1000,1000) so higher world z = closer to camera;
+        // painter's algorithm draws farthest first → sort ASCENDING by depth.
+        // stable_sort preserves submission order on ties so an overlay element
+        // declared AFTER its base draws ON TOP of the base for coplanar faces
+        // (matches MC's "later layers win" convention for grass_block etc.).
+        std::stable_sort(quads.begin(), quads.end(),
+                         [](const FaceQuad& a, const FaceQuad& b) { return a.depth < b.depth; });
+
+        // Per-vertex iso-projected Z for the depth buffer. Our convention (per the
+        // chest renderer comment) is "higher world Z = closer to camera". With our
+        // ortho `glm::ortho(0,w,h,0,-1000,1000)` (Z scale -0.001), higher world Z
+        // maps to smaller (more negative) NDC Z, which passes the GL_LESS depth
+        // test → closer wins. So we just pass the iso-transformed Z straight
+        // through; the ortho matrix in the shader does the rest.
+        auto isoZ = [&](glm::vec3 v) -> float {
+            glm::vec4 t = isoMat * glm::vec4(v, 1.0f);
+            return t.z;
+        };
+
+        for (const auto& fq : quads) {
+            glm::vec2 p0 = proj(fq.v[0].x, fq.v[0].y, fq.v[0].z);
+            glm::vec2 p1 = proj(fq.v[1].x, fq.v[1].y, fq.v[1].z);
+            glm::vec2 p2 = proj(fq.v[2].x, fq.v[2].y, fq.v[2].z);
+            glm::vec2 p3 = proj(fq.v[3].x, fq.v[3].y, fq.v[3].z);
+            QuadCommand q;
+            q.texture = tex;
+            q.color = fq.color;
+            q.useDepth = true;
+            q.px[0] = p0.x; q.py[0] = p0.y; q.pz[0] = isoZ(fq.v[0]); q.u[0] = fq.u[0]; q.v[0] = fq.v_[0];
+            q.px[1] = p1.x; q.py[1] = p1.y; q.pz[1] = isoZ(fq.v[1]); q.u[1] = fq.u[1]; q.v[1] = fq.v_[1];
+            q.px[2] = p2.x; q.py[2] = p2.y; q.pz[2] = isoZ(fq.v[2]); q.u[2] = fq.u[2]; q.v[2] = fq.v_[2];
+            q.px[3] = p3.x; q.py[3] = p3.y; q.pz[3] = isoZ(fq.v[3]); q.u[3] = fq.u[3]; q.v[3] = fq.v_[3];
+            renderState->SubmitQuad(q);
+        }
     }
 
     // ─── Flat 2D item textures (compass, sword, etc.) ─────────────────────
@@ -425,11 +578,19 @@ namespace Render {
             auto it = cache.find(itemName);
             if (it != cache.end()) return it->second;
 
+            // Item models reference textures by category (e.g. layer0 = "item/oak_door"
+            // vs. "block/torch"). The loader strips the prefix, so we don't know which
+            // dir the file lives in — try item/ first (most common), then block/.
             std::string full = PlatformMain::GetAssetPath("assets/textures/item/" + itemName + ".png");
             if (!std::filesystem::exists(full)) {
-                Log::Warning("[GuiGraphics] Item texture not found: %s", full.c_str());
-                cache[itemName] = INVALID_TEXTURE; // negative-cache so we don't re-stat every frame
-                return INVALID_TEXTURE;
+                std::string blockPath = PlatformMain::GetAssetPath("assets/textures/block/" + itemName + ".png");
+                if (std::filesystem::exists(blockPath)) {
+                    full = std::move(blockPath);
+                } else {
+                    Log::Warning("[GuiGraphics] Item texture not found: %s (and not in textures/block/)", full.c_str());
+                    cache[itemName] = INVALID_TEXTURE; // negative-cache so we don't re-stat every frame
+                    return INVALID_TEXTURE;
+                }
             }
             int w = 0, h = 0, ch = 0;
             stbi_set_flip_vertically_on_load(0); // GUI ortho is top-down — no flip
@@ -486,6 +647,161 @@ namespace Render {
     //   1. Custom renderer (BEWLR — chest, sign, banner, etc.)
     //   2. ItemRenderType::Block  → 3D isometric (RenderBlockItemImpl)
     //   3. ItemRenderType::Sprite → flat 16×16 blit
+    // Render a flat sprite icon at (x, y, size) with depth-write enabled. Used
+    // when the stack is foil — opaque pixels write Z=0 (transparent corners are
+    // discarded in the fragment shader via uAlphaTest, so they don't write
+    // depth), and then RenderItemGlintOverlay runs with depth-test EQUAL at
+    // Z=0 so the glint masks itself to the icon's silhouette. Mirrors MC's
+    // `RenderPipelines.GLINT.withDepthTestFunction(EQUAL_DEPTH_TEST)` trick
+    // (RenderPipelines.java:197).
+    static void BlitSpriteWithDepth(GuiRenderState* rs, TextureHandle tex,
+                                    int x, int y, int size) {
+        if (!rs) return;
+        QuadCommand q;
+        q.texture    = tex;
+        q.color      = 0xFFFFFFFFu;
+        q.useDepth   = true;
+        q.depthFunc  = CompareOp::LessEqual;
+        q.depthWrite = true;
+        q.blendMode  = QuadBlendMode::AlphaBlend;
+        q.px[0] = (float)x;        q.py[0] = (float)y;        q.pz[0] = 0.0f;
+        q.px[1] = (float)(x+size); q.py[1] = (float)y;        q.pz[1] = 0.0f;
+        q.px[2] = (float)(x+size); q.py[2] = (float)(y+size); q.pz[2] = 0.0f;
+        q.px[3] = (float)x;        q.py[3] = (float)(y+size); q.pz[3] = 0.0f;
+        q.u[0] = 0.0f; q.v[0] = 0.0f;
+        q.u[1] = 1.0f; q.v[1] = 0.0f;
+        q.u[2] = 1.0f; q.v[2] = 1.0f;
+        q.u[3] = 0.0f; q.v[3] = 1.0f;
+        rs->SubmitQuad(q);
+    }
+
+    namespace {
+        // Lazy-loaded glint texture, mirrors MC `ItemRenderer.ENCHANTED_GLINT_ITEM`
+        // ("textures/misc/enchanted_glint_item.png"). Wrap mode REPEAT so the
+        // scrolling UVs tile seamlessly when they exceed [0,1].
+        TextureHandle LoadGlintTexture() {
+            static TextureHandle s_tex = INVALID_TEXTURE;
+            static bool          s_tried = false;
+            if (s_tried) return s_tex;
+            s_tried = true;
+            if (!g_renderBackend) return INVALID_TEXTURE;
+            const std::string full = PlatformMain::GetAssetPath("assets/textures/misc/enchanted_glint_item.png");
+            if (!std::filesystem::exists(full)) {
+                Log::Warning("[GuiGraphics] glint texture missing at %s", full.c_str());
+                return INVALID_TEXTURE;
+            }
+            int w = 0, h = 0, ch = 0;
+            stbi_set_flip_vertically_on_load(0);
+            unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+            if (!pixels) {
+                Log::Warning("[GuiGraphics] stbi_load glint failed: %s", stbi_failure_reason());
+                return INVALID_TEXTURE;
+            }
+            s_tex = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+            stbi_image_free(pixels);
+            if (s_tex != INVALID_TEXTURE) {
+                g_renderBackend->SetTextureFilter(s_tex, TextureFilter::Linear, TextureFilter::Linear);
+                g_renderBackend->SetTextureWrap  (s_tex, TextureWrap::Repeat,  TextureWrap::Repeat);
+            }
+            return s_tex;
+        }
+    } // namespace
+
+    void GuiGraphics::RenderItemGlintOverlay(int x, int y, int size) {
+        // (Mirrors MC RenderType.glint; see header docs.)
+        TextureHandle tex = LoadGlintTexture();
+        if (tex == INVALID_TEXTURE) return;
+        if (!m_renderState) return;
+
+        // Time-driven UV transform — verbatim from MC's
+        // TextureTransform.setupGlintTexturing (TextureTransform.java:30-37):
+        //   millis    = current_ms * glintSpeed * MAX_ENCHANTMENT_GLINT_SPEED_MILLIS
+        //   layer0    = (millis % 110000) / 110000   ← X scroll cycle 110s
+        //   layer1    = (millis %  30000) /  30000   ← Y scroll cycle 30s
+        //   uvMatrix  = translate(-layer0, layer1) * rotateZ(0.17453292) * scale(8.0)
+        // 0.17453292 rad = π/18 = 10°. Scale 8.0 is the GLINT_TEXTURING constant
+        // (TextureTransform.java:13). glintSpeed is a user setting; we use the
+        // MC default (1.0) until we expose it as an option.
+        constexpr double MAX_GLINT_SPEED = 8.0;          // TextureTransform.java:9
+        constexpr double GLINT_SPEED     = 0.5;          // MC default (Options.java:1080)
+        constexpr float  GLINT_ROT_RAD   = 0.17453292f;  // π/18 = 10°
+        // GLINT_SCALE — careful derivation from MC's setup.
+        //
+        // MC `GLINT_TEXTURING` uses scale 8.0 (TextureTransform.java:13). But
+        // its scale=8 is applied to ITEM ATLAS UVs — at a typical 1024-px
+        // atlas, each 16-px sprite spans only 16/1024 = 0.015625 in UV. So
+        // the effective sampled-texture span per icon is
+        //   8 × 0.015625 = 0.125
+        // = 0.125 × 128-px glint texture = 16 texture pixels per 16-px icon
+        // = ONE-TO-ONE native pixel mapping (the icon shows the lattice at
+        //   its full crisp resolution, with each scrolling tick visibly
+        //   changing the pattern in front of you).
+        //
+        // Our items are STANDALONE textures with full UV (0..1). To hit the
+        // same 1:1 mapping we want `scale × 1.0 = 0.125`:
+        //   GLINT_SCALE = 16 / 128 = 0.125
+        //
+        // (Earlier we tried 0.5, which sampled 64 texture pixels into a 16-px
+        // icon — 4× minification + linear filter blurred all the bright/dark
+        // contrast into a uniform purple mush, so the natural intensity
+        // pulsing as bright streaks scrolled through went invisible.)
+        constexpr float  GLINT_SCALE     = 0.125f;
+
+        const long long now_ms   = static_cast<long long>(glfwGetTime() * 1000.0);
+        const long long millis   = static_cast<long long>(static_cast<double>(now_ms) * GLINT_SPEED * MAX_GLINT_SPEED);
+        const float layer0       = static_cast<float>(millis % 110000LL) / 110000.0f;
+        const float layer1       = static_cast<float>(millis %  30000LL) /  30000.0f;
+        const float c            = std::cos(GLINT_ROT_RAD);
+        const float s            = std::sin(GLINT_ROT_RAD);
+
+        // ── SINGLE-PASS GLINT (RenderTypes.java:392) ───────────────────────
+        // Modern MC renders item glint as ONE draw with the GLINT render
+        // type. The "intensity goes in and out" pulsing the user sees is a
+        // natural byproduct of the texture's bright streaks scrolling across
+        // the small sample window — there are moments when only the dimmer
+        // background lattice is in view (= relaxed glint) and moments when
+        // a bright streak is centered on the icon (= peak glint). The two
+        // layer offsets (cycling at 110000ms / 30000ms in different axes)
+        // ensure the crossings never settle into a static pattern.
+        //
+        // We previously tried a two-pass version — that filled in the dim
+        // moments because pass B always had a streak in view when pass A
+        // didn't, killing the relax phase the user wants.
+        auto transformUV = [&](float u, float v, float& outU, float& outV) {
+            const float su = u * GLINT_SCALE;
+            const float sv = v * GLINT_SCALE;
+            const float ru = su * c - sv * s;
+            const float rv = su * s + sv * c;
+            outU = ru - layer0;
+            outV = rv + layer1;
+        };
+
+        QuadCommand q;
+        q.texture    = tex;
+        // `core/glint.fsh` outputs `color.rgb * fade` where
+        // `fade = (1 - fog) * GlintAlpha` and `GlintAlpha` comes from the
+        // `glintStrength` option (Options.java:1082, default 0.75). Our
+        // additive (SrcColor, One) blend yields `(color * 0.75)² + dst`.
+        // Bake the 0.75 dampener into vColor so the textured shader's
+        // `texColor * vColor` produces MC's exact contribution.
+        // 0.75 * 255 = 191 = 0xBF.
+        q.color      = 0xBFBFBFBFu;
+        // Depth-equal mask trick (RenderPipelines.GLINT, RenderPipelines.java:197).
+        q.useDepth   = true;
+        q.depthFunc  = CompareOp::Equal;
+        q.depthWrite = false;
+        q.blendMode  = QuadBlendMode::Additive;
+        q.px[0] = static_cast<float>(x);          q.py[0] = static_cast<float>(y);          q.pz[0] = 0.0f;
+        q.px[1] = static_cast<float>(x + size);   q.py[1] = static_cast<float>(y);          q.pz[1] = 0.0f;
+        q.px[2] = static_cast<float>(x + size);   q.py[2] = static_cast<float>(y + size);   q.pz[2] = 0.0f;
+        q.px[3] = static_cast<float>(x);          q.py[3] = static_cast<float>(y + size);   q.pz[3] = 0.0f;
+        transformUV(0.0f, 0.0f, q.u[0], q.v[0]);
+        transformUV(1.0f, 0.0f, q.u[1], q.v[1]);
+        transformUV(1.0f, 1.0f, q.u[2], q.v[2]);
+        transformUV(0.0f, 1.0f, q.u[3], q.v[3]);
+        m_renderState->SubmitQuad(q);
+    }
+
     void GuiGraphics::RenderItem(const Game::ItemStack& stack, int x, int y) {
         if (stack.IsEmpty()) return;
         // 1. Custom renderer takes precedence (matches MC's BEWLR dispatch).
@@ -493,26 +809,88 @@ namespace Render {
         auto crIt = crs.find(stack.itemId);
         if (crIt != crs.end() && crIt->second) {
             crIt->second(*this, stack, x, y);
+            // TODO(glint): the BEWLR path (chest/banner/head/bed/shulker) doesn't
+            // write Z=0; it writes per-vertex iso depths. The glint pass uses
+            // depth-test EQUAL at Z=0, so masked-glint won't match here. No
+            // current vanilla item routed through BEWLR is enchantable, so this
+            // is dormant — when one appears (e.g. enchanted shulker box), the
+            // BEWLR renderers will need to also write depth at a known Z (or
+            // the glint pass will need to read the per-vertex Z those renderers
+            // emit and use that for the masked pass).
             return;
         }
         const auto& item = Game::ItemRegistry::Get(stack.itemId);
         switch (item.renderType) {
             case Game::ItemRenderType::Block:
-                RenderBlockItemImpl(*this, m_renderState, item.blockId, x, y);
+                RenderBlockItemImpl(*this, m_renderState, item.blockId, item.blockModelOverride, x, y);
+                // TODO(glint): block icons write per-vertex iso Z values, not Z=0,
+                // so the depth-test EQUAL mask the glint pass uses won't match.
+                // No vanilla block item is enchantable today; revisit when one is.
                 return;
             case Game::ItemRenderType::Sprite: {
                 // MC-style frame resolution: if the item has a frame selector (e.g. compass),
                 // ask it which frame to draw based on the current per-frame render context
                 // (player position + yaw + target). Otherwise fall back to the static sprite.
                 std::string spriteName;
+                bool useFrameSelector = false;
                 if (item.selectFrame && !item.spriteFrames.empty()) {
                     int frame = item.selectFrame(Game::ItemRegistry::GetRenderContext());
                     if (frame < 0) frame = 0;
                     if (frame >= (int)item.spriteFrames.size()) frame = (int)item.spriteFrames.size() - 1;
                     spriteName = item.spriteFrames[frame];
+                    useFrameSelector = true;
                 } else {
                     spriteName = item.spriteName;
                 }
+
+                // ── Multi-layer / tinted rendering (leather armor + dye,
+                //    leather horse armor, spawn eggs, potions, fireworks, …).
+                //    MC stacks layerN textures back to front; each layer
+                //    carries a tint color from the items JSON's `tints` array
+                //    (index N → layerN). 0 = untinted.
+                //
+                //    Take this path whenever there's >1 layer OR any layer
+                //    needs a tint — so single-layer dyed items (leather horse
+                //    armor — model only declares layer0 even though the items
+                //    JSON has a dye tint) still get tinted.
+                bool hasAnyTint = false;
+                for (uint32_t t : item.layerTints) { if (t != 0) { hasAnyTint = true; break; } }
+                if (!useFrameSelector && !item.spriteLayers.empty()
+                    && (item.spriteLayers.size() > 1 || hasAnyTint)) {
+                    bool foil = stack.HasFoil();
+                    for (size_t i = 0; i < item.spriteLayers.size(); ++i) {
+                        const std::string& layerName = item.spriteLayers[i];
+                        if (layerName.empty()) continue;
+                        TextureHandle ltex = LoadItemTexture(layerName);
+                        if (ltex == INVALID_TEXTURE) continue;
+                        // Tint resolution: explicit tint > untinted (white).
+                        // Stored value is ARGB; alpha bit must be set for the
+                        // textured shader's `texColor * vColor` to keep the
+                        // sprite opaque (raw 0xFF.... from MC's Java int
+                        // already has alpha=0xFF — see ClientItemLoader).
+                        uint32_t tint = 0xFFFFFFFFu;
+                        if (i < item.layerTints.size() && item.layerTints[i] != 0) {
+                            tint = item.layerTints[i];
+                            // Force alpha=0xFF in case the JSON value lacked
+                            // the high byte (MC's "minecraft:dye" tint type
+                            // operates on RGB only — alpha comes from the
+                            // texture, not the tint).
+                            tint |= 0xFF000000u;
+                        }
+                        if (foil && i == 0) {
+                            // Foil mask trick uses the FIRST layer's silhouette
+                            // as the depth mask. Subsequent layers stack on top
+                            // with normal alpha-blend — they don't need to
+                            // re-write depth.
+                            BlitSpriteWithDepth(m_renderState, ltex, x, y, 16);
+                        } else {
+                            Blit(ltex, x, y, x + 16, y + 16, 0.0f, 0.0f, 1.0f, 1.0f, tint);
+                        }
+                    }
+                    if (foil) RenderItemGlintOverlay(x, y, 16);
+                    return;
+                }
+
                 if (spriteName.empty()) {
                     static bool warnedEmpty = false;
                     if (!warnedEmpty) {
@@ -532,7 +910,16 @@ namespace Render {
                     }
                     return;
                 }
-                Blit(tex, x, y, x + 16, y + 16, 0.0f, 0.0f, 1.0f, 1.0f);
+                if (stack.HasFoil()) {
+                    // Foil path: write Z=0 on opaque pixels (alpha-discard
+                    // gates the depth write). The glint pass that follows
+                    // uses depth-test EQUAL to limit itself to the icon's
+                    // silhouette — see RenderItemGlintOverlay above.
+                    BlitSpriteWithDepth(m_renderState, tex, x, y, 16);
+                    RenderItemGlintOverlay(x, y, 16);
+                } else {
+                    Blit(tex, x, y, x + 16, y + 16, 0.0f, 0.0f, 1.0f, 1.0f);
+                }
                 return;
             }
         }

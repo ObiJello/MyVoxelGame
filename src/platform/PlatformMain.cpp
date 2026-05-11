@@ -12,8 +12,14 @@
 #include "common/world/block/BlockModel.hpp"
 #include "client/input/PlayerController.hpp"
 #include "client/entity/Player.hpp"
+#include "common/entity/GeneratedItemList.hpp"   // for Game::Items::Compass etc.
 #include "client/renderer/gui/InventoryScreen.hpp"
 #include "client/renderer/gui/items/ChestItemRenderer.hpp"
+#include "client/renderer/gui/items/BedItemRenderer.hpp"
+#include "client/renderer/gui/items/ShulkerBoxItemRenderer.hpp"
+#include "client/renderer/gui/items/BannerItemRenderer.hpp"
+#include "client/renderer/gui/items/HeadItemRenderer.hpp"
+#include "client/renderer/gui/items/ShieldItemRenderer.hpp"
 #include "common/physics/RayCast.hpp"
 #include "common/physics/Physics.hpp"
 
@@ -120,21 +126,15 @@ bool s_eKeyHeld = false;
             CFURLRef resourcesURL = CFBundleCopyResourcesDirectoryURL(mainBundle);
             if (resourcesURL) {
                 char path[PATH_MAX];
-                if (CFURLGetFileSystemRepresentation(resourcesURL, TRUE, (UInt8*)path, PATH_MAX)) {
-                    CFRelease(resourcesURL);
-
-                    std::string resourcesPath = std::string(path);
-                    std::string fullPath = resourcesPath + "/" + relativePath;
-
-                    // Check if the asset exists in the bundle Resources directory
+                bool gotPath = CFURLGetFileSystemRepresentation(resourcesURL, TRUE, (UInt8*)path, PATH_MAX);
+                CFRelease(resourcesURL);  // single release; CF double-release is fatal (SIGTRAP)
+                if (gotPath) {
+                    std::string fullPath = std::string(path) + "/" + relativePath;
                     if (std::filesystem::exists(fullPath)) {
-                        Log::Info("Using bundle asset path: %s", fullPath.c_str());
                         return fullPath;
-                    } else {
-                        Log::Debug("Asset not found in bundle Resources: %s", fullPath.c_str());
                     }
+                    Log::Debug("Asset not found in bundle Resources: %s", fullPath.c_str());
                 }
-                CFRelease(resourcesURL);
             }
         }
 
@@ -811,11 +811,6 @@ bool s_eKeyHeld = false;
         // Block items don't need this — they live in the block atlas built later.
         Render::GuiGraphics::PreloadItem(Game::Items::Compass);
 
-        // Register custom item renderers (MC's BlockEntityWithoutLevelRenderer equivalent).
-        // Chest is rendered by a 3D model from entity textures — not the standard block
-        // model JSON system. Add more entries here for sign, banner, head, bed, etc.
-        Render::RegisterChestItemRenderer();
-
         // Initialize game directory system (creates obeycraft folder and loads options.txt)
         if (!Platform::InitializeGameDirectorySystem()) {
             Log::Error("Failed to initialize game directory system");
@@ -836,6 +831,18 @@ bool s_eKeyHeld = false;
             Log::Error("Failure to init");
             return 1;
         }
+
+        // Register custom item renderers (MC's BlockEntityWithoutLevelRenderer equivalent).
+        // These render block entities via 3D entity-texture models, not the standard
+        // block-model JSON system. Add more entries here for sign, banner, head, etc.
+        // MUST run AFTER InitializeGameSystems → ItemRegistry::Initialize, since each
+        // walks the registry to find every item with the matching specialKind.
+        Render::RegisterChestItemRenderer();
+        Render::RegisterBedItemRenderer();
+        Render::RegisterShulkerBoxItemRenderer();
+        Render::RegisterBannerItemRenderer();
+        Render::RegisterHeadItemRenderer();
+        Render::RegisterShieldItemRenderer();
 
         // Initialize remote player tracking and renderer
         Client::g_remotePlayerManager = std::make_unique<Client::RemotePlayerManager>();
@@ -1439,7 +1446,11 @@ bool s_eKeyHeld = false;
                 ctx.playerX = player.physics.position.x;
                 ctx.playerY = player.physics.position.y;
                 ctx.playerZ = player.physics.position.z;
-                ctx.playerYaw = player.yaw;
+                // Mouse-look writes to `camera.yaw` every frame; `player.yaw`
+                // is only assigned on init/teleport and stays stale otherwise.
+                // The compass needs the live look-direction to counter-rotate
+                // the needle as the player turns.
+                ctx.playerYaw = camera.yaw;
                 // Compass target: world spawn at (0, 0). LodestoneTracker support TODO.
                 ctx.compassTargetX = 0.0f;
                 ctx.compassTargetZ = 0.0f;

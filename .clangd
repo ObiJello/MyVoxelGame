@@ -1,0 +1,23 @@
+# clangd configuration. Tells clangd to read per-file compile flags from
+# CMake's compile_commands.json (emitted by CMAKE_EXPORT_COMPILE_COMMANDS=ON
+# at the top of CMakeLists.txt). With this, clangd knows about our vendored
+# ext/* headers, the generated/ dir, the C++20 standard flag, and our defines.
+#
+# CLion uses its own analyzer that reads compile_commands.json natively — this
+# .clangd file is for editors that use external clangd (VS Code, Neovim, etc.)
+# and for any CI lint pipeline.
+
+CompileFlags:
+  CompilationDatabase: cmake-build-release/
+  # Strip flags clangd can't / shouldn't honor:
+  #   -Xclang -include-pch …  → CMake's PCH is binary-incompatible with clangd's own.
+  #   -Winvalid-pch           → tied to the same PCH path.
+  Remove:
+    - -Xclang
+    - -include-pch
+    - -Winvalid-pch
+    - -fcolor-diagnostics
+
+Diagnostics:
+  Suppress:
+    - unused-includes  # clangd over-reports transitive includes

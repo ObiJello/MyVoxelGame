@@ -675,12 +675,67 @@ namespace Render {
         m_pendingTextureUpdates.clear();
     }
 
+    // Recreate the sampler from the texture's cached state and rewrite the
+    // descriptor. Used by SetTextureFilter/SetTextureWrap so each only updates
+    // its own state without clobbering the other (calls are typically back-to-
+    // back at texture init — see GuiGraphics::LoadGlintTexture).
+    void VKBackend::RecreateSamplerFromCache(VkDevice device, VKTextureInfo& tex) {
+        VkSamplerCreateInfo info{};
+        info.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        info.magFilter               = tex.magFilter;
+        info.minFilter               = tex.minFilter;
+        info.addressModeU            = tex.addressModeU;
+        info.addressModeV            = tex.addressModeV;
+        info.addressModeW            = tex.addressModeV; // mirror V for 2D textures
+        info.anisotropyEnable        = VK_FALSE;
+        info.maxAnisotropy           = 1.0f;
+        info.borderColor             = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+        info.unnormalizedCoordinates = VK_FALSE;
+        info.compareEnable           = VK_FALSE;
+        info.mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+        VkSampler newSampler = VK_NULL_HANDLE;
+        if (vkCreateSampler(device, &info, nullptr, &newSampler) != VK_SUCCESS) return;
+
+        VkSampler oldSampler = tex.sampler;
+        tex.sampler          = newSampler;
+
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView   = tex.imageView;
+        imageInfo.sampler     = newSampler;
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = tex.descriptorSet;
+        write.dstBinding      = 0;
+        write.dstArrayElement = 0;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo      = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
+        if (oldSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device, oldSampler, nullptr);
+        }
+    }
+
     void VKBackend::SetTextureFilter(TextureHandle handle, TextureFilter min, TextureFilter mag) {
-        // Would need to recreate sampler - skip for now, use default
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+        vkDeviceWaitIdle(m_device);
+        it->second.minFilter = (min == TextureFilter::Linear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        it->second.magFilter = (mag == TextureFilter::Linear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        RecreateSamplerFromCache(m_device, it->second);
     }
 
     void VKBackend::SetTextureWrap(TextureHandle handle, TextureWrap s, TextureWrap t) {
-        // Would need to recreate sampler - skip for now
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+        vkDeviceWaitIdle(m_device);
+        it->second.addressModeU = ToVkWrap(s);
+        it->second.addressModeV = ToVkWrap(t);
+        RecreateSamplerFromCache(m_device, it->second);
     }
 
     void VKBackend::GenerateMipmaps(TextureHandle handle) {

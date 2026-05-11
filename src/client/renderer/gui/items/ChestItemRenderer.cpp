@@ -50,36 +50,48 @@
 #include <filesystem>
 #include <array>
 #include <algorithm>
+#include <unordered_map>
 
 namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
 
 namespace Render {
 
     namespace {
-        TextureHandle g_chestTexture = INVALID_TEXTURE;
+        // One cached GL texture per chest variant ("normal", "trapped", "ender",
+        // "christmas", …). Each maps to assets/textures/entity/chest/{variant}.png.
+        std::unordered_map<std::string, TextureHandle>& ChestTextureCache() {
+            static std::unordered_map<std::string, TextureHandle> m;
+            return m;
+        }
 
-        TextureHandle LoadChestTexture() {
-            if (g_chestTexture != INVALID_TEXTURE) return g_chestTexture;
+        TextureHandle LoadChestTexture(const std::string& variant) {
+            auto& cache = ChestTextureCache();
+            auto it = cache.find(variant);
+            if (it != cache.end()) return it->second;
             if (!g_renderBackend) return INVALID_TEXTURE;
-            const std::string full = PlatformMain::GetAssetPath("assets/textures/entity/chest/normal.png");
+            const std::string rel  = "assets/textures/entity/chest/" + variant + ".png";
+            const std::string full = PlatformMain::GetAssetPath(rel);
             if (!std::filesystem::exists(full)) {
-                Log::Warning("[ChestItemRenderer] entity/chest/normal.png not found at %s", full.c_str());
+                Log::Warning("[ChestItemRenderer] %s not found at %s", rel.c_str(), full.c_str());
+                cache[variant] = INVALID_TEXTURE; // negative-cache
                 return INVALID_TEXTURE;
             }
             int w = 0, h = 0, ch = 0;
             stbi_set_flip_vertically_on_load(0);
             unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
             if (!pixels) {
-                Log::Warning("[ChestItemRenderer] stbi_load failed: %s", stbi_failure_reason());
+                Log::Warning("[ChestItemRenderer] stbi_load failed for %s: %s", full.c_str(), stbi_failure_reason());
+                cache[variant] = INVALID_TEXTURE;
                 return INVALID_TEXTURE;
             }
-            g_chestTexture = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+            TextureHandle tex = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
             stbi_image_free(pixels);
-            if (g_chestTexture != INVALID_TEXTURE) {
-                g_renderBackend->SetTextureFilter(g_chestTexture, TextureFilter::Nearest, TextureFilter::Nearest);
-                g_renderBackend->SetTextureWrap (g_chestTexture, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+            if (tex != INVALID_TEXTURE) {
+                g_renderBackend->SetTextureFilter(tex, TextureFilter::Nearest, TextureFilter::Nearest);
+                g_renderBackend->SetTextureWrap (tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
             }
-            return g_chestTexture;
+            cache[variant] = tex;
+            return tex;
         }
 
         // MC's `template_chest.json` display.gui: rotation [30, 45, 0], scale 0.625.
@@ -233,9 +245,13 @@ namespace Render {
             for (int i : order) SubmitFace(rs, tex, iso, cx, cy, scale, faces[i]);
         }
 
-        void RenderChestInventory(GuiGraphics& g, const Game::ItemStack& /*stack*/,
+        void RenderChestInventory(GuiGraphics& g, const Game::ItemStack& stack,
                                   int x, int y) {
-            TextureHandle tex = LoadChestTexture();
+            // Per-item variant: normal / trapped / ender / christmas. ItemRegistry
+            // captures this from items/{slug}.json's nested special.model.texture.
+            const auto& item = Game::ItemRegistry::Get(stack.itemId);
+            const std::string variant = item.specialTexture.empty() ? "normal" : item.specialTexture;
+            TextureHandle tex = LoadChestTexture(variant);
             if (tex == INVALID_TEXTURE) return;
             GuiRenderState* rs = g.GetRenderState();
             if (!rs) return;
@@ -266,8 +282,17 @@ namespace Render {
     } // namespace
 
     void RegisterChestItemRenderer() {
-        Game::ItemID chestId = Game::ItemRegistry::FromBlock(Game::BlockID::Chest);
-        GuiGraphics::RegisterCustomItemRenderer(chestId, &RenderChestInventory);
+        // Walk every block item and hook the chest BEWLR for any whose
+        // assets/items/{slug}.json declared specialKind == "chest". Covers vanilla
+        // chest, trapped_chest, ender_chest, and any modded chest variant. MUST be
+        // called AFTER ItemRegistry::Initialize() so the registry is populated.
+        const int total = static_cast<int>(Game::BlockID::Count);
+        for (int i = 1; i < total; ++i) {
+            const auto& it = Game::ItemRegistry::Get(static_cast<Game::ItemID>(i));
+            if (it.specialKind == "chest") {
+                GuiGraphics::RegisterCustomItemRenderer(static_cast<Game::ItemID>(i), &RenderChestInventory);
+            }
+        }
     }
 
 } // namespace Render

@@ -218,6 +218,13 @@ namespace Render {
         uint32_t m_nextHandle = 1;
         uint32_t AllocHandle() { return m_nextHandle++; }
 
+        // Forward decl so we can declare the helper before VKTextureInfo's full def.
+        struct VKTextureInfo;
+        // Recreate the sampler from the texture's cached filter+wrap state and
+        // rewrite its descriptor. Used by SetTextureFilter / SetTextureWrap so
+        // each only updates its own piece without clobbering the other.
+        static void RecreateSamplerFromCache(VkDevice device, VKTextureInfo& tex);
+
         struct VKBufferInfo {
             VkBuffer buffer = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -235,6 +242,14 @@ namespace Render {
             int width = 0, height = 0;
             uint32_t mipLevels = 1;
             size_t memorySize = 0;
+            // Cached sampler state so SetTextureFilter / SetTextureWrap can
+            // recreate the sampler while preserving each other's settings.
+            // CreateTexture2D initializes these to the defaults it builds the
+            // sampler with (NEAREST filter, CLAMP_TO_EDGE wrap).
+            VkFilter             magFilter = VK_FILTER_NEAREST;
+            VkFilter             minFilter = VK_FILTER_NEAREST;
+            VkSamplerAddressMode addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            VkSamplerAddressMode addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         };
         std::unordered_map<uint32_t, VKTextureInfo> m_textures;
 

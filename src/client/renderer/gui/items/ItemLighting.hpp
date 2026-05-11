@@ -28,6 +28,24 @@ namespace Render::ItemLighting {
 
     struct Lights { glm::vec3 L0; glm::vec3 L1; };
 
+    // ITEMS_FLAT pre-baked lights. Mirrors Lighting.java line 30-31:
+    //   flatPose = rotationY(-PI/8) * rotateX(2.3561945)
+    //   Light0_view = flatPose.transformDirection(normalize(0.2, 1, -0.7))
+    //   Light1_view = flatPose.transformDirection(normalize(-0.2, 1, 0.7))
+    // Used for items with `gui_light: "front"` (banners, signs) — gives brighter
+    // front-facing illumination than ITEMS_3D.
+    inline const Lights& MCItemsFlatLights() {
+        static Lights lights = []{
+            glm::mat4 m(1.0f);
+            m = glm::rotate(m, -3.14159265f / 8.0f, glm::vec3(0, 1, 0));
+            m = glm::rotate(m, 2.3561945f,           glm::vec3(1, 0, 0));
+            glm::vec3 L0v = glm::vec3(m * glm::vec4(glm::normalize(glm::vec3( 0.2f, 1.0f, -0.7f)), 0.0f));
+            glm::vec3 L1v = glm::vec3(m * glm::vec4(glm::normalize(glm::vec3(-0.2f, 1.0f,  0.7f)), 0.0f));
+            return Lights{ glm::normalize(L0v), glm::normalize(L1v) };
+        }();
+        return lights;
+    }
+
     // ITEMS_3D pre-baked lights. Mirrors Lighting.java line 32-33:
     //   item3DPose = scaling(1,-1,1) * rotateYXZ(1.0821, 3.2375, 0) * rotateYXZ(-PI/8, 2.3561, 0)
     //   Light0_view = item3DPose.transformDirection(normalize(0.2, 1, -0.7))
@@ -70,6 +88,20 @@ namespace Render::ItemLighting {
         glm::mat3 nm = BuildNormalMatrix(displayRotXDeg, displayRotYDeg);
         glm::vec3 N  = glm::normalize(nm * modelNormal);
         const Lights& L = MCItems3DLights();
+        float d0 = std::max(0.0f, glm::dot(L.L0, N));
+        float d1 = std::max(0.0f, glm::dot(L.L1, N));
+        return std::min(1.0f, (d0 + d1) * 0.6f + 0.4f);
+    }
+
+    // Same as ComputeShade but uses the ITEMS_FLAT lights — for items whose
+    // model JSON declares `gui_light: "front"` (banners, signs, etc.). The
+    // FLAT pose lacks the scaling(1,-1,1) and the YXZ rotation that ITEMS_3D
+    // adds, so the lights hit front-facing surfaces more directly → brighter.
+    inline float ComputeShadeFlat(glm::vec3 modelNormal,
+                                  float displayRotXDeg, float displayRotYDeg) {
+        glm::mat3 nm = BuildNormalMatrix(displayRotXDeg, displayRotYDeg);
+        glm::vec3 N  = glm::normalize(nm * modelNormal);
+        const Lights& L = MCItemsFlatLights();
         float d0 = std::max(0.0f, glm::dot(L.L0, N));
         float d1 = std::max(0.0f, glm::dot(L.L1, N));
         return std::min(1.0f, (d0 + d1) * 0.6f + 0.4f);

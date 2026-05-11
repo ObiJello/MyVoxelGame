@@ -3,7 +3,7 @@
 // Matches MC's GuiRenderState: hierarchical node tree with strata for z-ordering.
 #pragma once
 
-#include "../backend/RenderTypes.hpp"
+#include "../backend/RenderTypes.hpp" // CompareOp etc.
 #include <glm/glm.hpp>
 #include <vector>
 #include <string>
@@ -55,12 +55,42 @@ namespace Render {
         int zOrder = 0;
     };
 
+    // Blend mode for a QuadCommand. Most GUI quads use AlphaBlend (standard
+    // src*alpha + dst*(1-alpha)). The enchantment glint overlay uses Additive
+    // (src + dst) so the moving sparkle accumulates over the underlying icon
+    // — matches MC's `RenderType.glint()` setup (RenderTypes.java:392, which
+    // selects `RenderPipelines.GLINT` with additive blending).
+    enum class QuadBlendMode : uint8_t { AlphaBlend, Additive };
+
     // An arbitrary textured quad with 4 explicit corner positions (for isometric faces)
     struct QuadCommand {
         TextureHandle texture = INVALID_TEXTURE;
         // 4 corners: top-left, top-right, bottom-right, bottom-left
         float px[4] = {}, py[4] = {};
         float u[4] = {}, v[4] = {};
+        // Per-vertex Z (depth) — only consulted when `useDepth` is true. Used by 3D-in-GUI
+        // renderers (chest/bed/banner/shulker/head/iso block icons) to enable proper
+        // per-pixel depth ordering instead of painter's-algorithm face-center sort.
+        float pz[4] = {};
+        // When true, this quad is part of an iso-block icon and the renderer enables
+        // depth test+write so multi-element blocks (shelves, walls, dragon, etc.) get
+        // the correct per-pixel Z-buffer occlusion instead of relying on a face-center
+        // depth sort that fails when face Y/Z extents don't line up.
+        bool useDepth = false;
+        // Per-quad blend mode — flipped at batch boundaries by GuiRenderer.
+        QuadBlendMode blendMode = QuadBlendMode::AlphaBlend;
+        // Depth state pieces independent of `useDepth`. When useDepth=true:
+        //   - depthFunc selects how this quad's depth is COMPARED to the depth
+        //     buffer (LessEqual for normal painter-style; Equal for the glint
+        //     mask pass that should only show on pixels where the icon already
+        //     wrote depth).
+        //   - depthWrite controls whether passing fragments WRITE their depth
+        //     (true for the icon pass; false for the glint pass — we don't want
+        //     glint to overwrite the icon's depth values).
+        // Mirrors MC `BlendFunction.GLINT` + `RenderPipelines.GLINT.withDepthWrite
+        // (false).withDepthTestFunction(EQUAL_DEPTH_TEST)` (RenderPipelines.java:197).
+        CompareOp depthFunc = CompareOp::LessEqual;
+        bool      depthWrite = true;
         uint32_t color = 0xFFFFFFFF;
         int zOrder = 0;
         ScissorRect scissor;

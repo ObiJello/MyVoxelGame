@@ -5,6 +5,11 @@
 #include "items/PlayerInventoryPreview.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/entity/GeneratedItemList.hpp"   // for Game::Items::Compass etc.
+#include "common/world/enchantment/Enchantment.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/world/enchantment/ItemEnchantments.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/core/Log.hpp"
 #include "client/entity/Player.hpp"
 
@@ -37,6 +42,47 @@ namespace {
     // QuickCraft mask helpers — match MC AbstractContainerMenu lines 749/753/757.
     inline uint8_t QuickcraftMask(int header, int type) {
         return (uint8_t)(((header & 3) << 2) | (type & 3));
+    }
+
+    // Whether a block has an item form (= can appear in inventory). MC's Items.java
+    // explicitly registers BlockItems for ~1000 blocks; the rest are
+    // placement-only or technical blocks (wall_torch is auto-placed when you
+    // right-click a torch on a wall, redstone_wire is the placed form of redstone
+    // dust, etc.). Without this filter, the search tab shows duplicates like
+    // "Wall Torch" alongside "Torch".
+    //
+    // TODO: replace this hardcoded denylist by extending tools/gen_items.py to
+    // emit a `kBlockItemSlugs` allowlist parsed from Items.java's
+    // `registerBlock(Blocks.X, ...)` calls. That's the MC-faithful approach.
+    bool BlockHasItemForm(const std::string& slug) {
+        // Substring patterns: anything matching is a wall/auto-placed variant.
+        for (const char* needle : {
+            "wall_torch", "wall_sign", "wall_hanging_sign",
+            "wall_banner", "wall_skull", "wall_head", "wall_fan",
+        }) {
+            if (slug.find(needle) != std::string::npos) return false;
+        }
+        // Exact-match technical/placeholder blocks.
+        switch (slug.size()) {
+            default: break;
+            case 3: if (slug == "air") return false; break;
+            case 4: if (slug == "fire" || slug == "lava" || slug == "kelp" || slug == "wheat") return false; break;
+            case 5: if (slug == "water" || slug == "cocoa") return false; break;
+            case 7: if (slug == "carrots" || slug == "tripwire" || slug == "void_air"
+                        || slug == "cave_air" || slug == "frosted_ice") return false; break;
+            case 8: if (slug == "potatoes" || slug == "soul_fire") return false; break;
+            case 9: if (slug == "beetroots" || slug == "kelp_plant") return false; break;
+            case 11: if (slug == "piston_head" || slug == "pumpkin_stem"
+                         || slug == "redstone_wire" || slug == "end_portal"
+                         || slug == "melon_stem") return false; break;
+            case 13: if (slug == "moving_piston" || slug == "nether_portal"
+                         || slug == "end_gateway" || slug == "tall_seagrass"
+                         || slug == "bubble_column") return false; break;
+            case 16: if (slug == "sweet_berry_bush" || slug == "bamboo_sapling") return false; break;
+            case 21: if (slug == "attached_melon_stem") return false; break;
+            case 23: if (slug == "attached_pumpkin_stem") return false; break;
+        }
+        return true;
     }
 }
 
@@ -131,16 +177,54 @@ namespace Render {
         // Block items have IDs 1..(BlockID::Count-1); pure items live at PURE_ITEM_BASE+.
         const int blockItemCount = (int)Game::BlockID::Count;
         for (int i = 1; i < blockItemCount; ++i) {
+            const auto& block = Game::BlockRegistry::Get((Game::BlockID)i);
+            if (!BlockHasItemForm(block.modelName)) continue;
             const auto& it = Game::ItemRegistry::Get((Game::ItemID)i);
             if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
-                m_filteredItems.push_back((Game::ItemID)i);
+                m_filteredItems.emplace_back((Game::ItemID)i, 1);
             }
         }
-        // Pure items — list every registered pure item ID.
-        for (Game::ItemID id : { Game::Items::Compass }) {
+        // Pure items — walk the generated table; IDs are PURE_ITEM_BASE + table index.
+        for (size_t k = 0; k < Game::kPureItemTableSize; ++k) {
+            const Game::ItemID id = Game::PURE_ITEM_BASE + (Game::ItemID)k;
+            // Special case: enchanted_book expands into one stack per (enchantment,
+            // level) pair — mirrors MC's CreativeModeTabs.generateEnchantmentBook
+            // TypesAllLevels at CreativeModeTabs.java:1843–1844, which streams
+            // IntStream.rangeClosed(minLevel, maxLevel) and calls EnchantmentHelper
+            // .createBook(...) for each. The match needle filters against the
+            // enchantment's display name so "sharpness" finds Sharpness I–V.
+            if (id == Game::Items::EnchantedBook) {
+                // The item itself is "Enchanted Book" — also let users find
+                // every variant by typing the item's own name (or a substring
+                // like "enchant"). MC's search tab matches BOTH the item name
+                // and per-variant tooltip lines this way.
+                const auto& bookItem = Game::ItemRegistry::Get(id);
+                const bool itemNameMatches =
+                    !needle.empty()
+                    && ToLower(bookItem.name).find(needle) != std::string::npos;
+                const auto& all = Game::EnchantmentRegistry::All();
+                for (size_t ei = 0; ei < all.size(); ++ei) {
+                    const auto& ench = all[ei];
+                    const Game::EnchantmentId enchId = static_cast<Game::EnchantmentId>(ei);
+                    for (int level = ench.minLevel; level <= ench.maxLevel; ++level) {
+                        // Match search needle against bare display name so
+                        // "sharpness" finds Sharpness I–V, "protect" finds all
+                        // protection variants, etc. Also match against the
+                        // item's own name ("enchanted book") so a search of
+                        // "enchant" returns the full set.
+                        if (needle.empty()
+                            || itemNameMatches
+                            || ToLower(ench.displayName).find(needle) != std::string::npos) {
+                            m_filteredItems.push_back(
+                                Game::EnchantmentHelper::CreateBook({enchId, level}));
+                        }
+                    }
+                }
+                continue; // skip the default single-stack push for enchanted_book
+            }
             const auto& it = Game::ItemRegistry::Get(id);
             if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
-                m_filteredItems.push_back(id);
+                m_filteredItems.emplace_back(id, 1);
             }
         }
         m_scrollOffs = 0.0f;
@@ -238,7 +322,7 @@ namespace Render {
                     int rowIndex = GetRowIndex();
                     int idx = (rowIndex + row) * 9 + col;
                     if (idx >= 0 && idx < (int)m_filteredItems.size()) {
-                        m_hoveredCreativeItem = m_filteredItems[idx];
+                        m_hoveredCreativeStack = m_filteredItems[idx];
                         return HIT_CREATIVE_GRID;
                     }
                 }
@@ -296,8 +380,17 @@ namespace Render {
     bool InventoryScreen::OnKeyDown(int glfwKey, int glfwMods) {
         if (!m_open) return false;
 
-        // E or ESC always closes (search box doesn't capture E in MC either).
-        if (glfwKey == GLFW_KEY_ESCAPE || glfwKey == GLFW_KEY_E) {
+        // ESC always closes. E closes too — UNLESS the user is typing in the
+        // search box, in which case E must produce the letter (handled later by
+        // OnCharInput). We let GLFW_KEY_E fall through to the search-edit block
+        // below, which returns true to mark the key consumed; OnCharInput then
+        // appends the actual character.
+        if (glfwKey == GLFW_KEY_ESCAPE) {
+            Close();
+            return true;
+        }
+        const bool searchTyping = (m_currentTab == Tab::Search && m_searchFocused);
+        if (glfwKey == GLFW_KEY_E && !searchTyping) {
             Close();
             return true;
         }
@@ -354,10 +447,42 @@ namespace Render {
             // Release: end scroll-drag and quick-craft.
             if (m_isScrolling) m_isScrolling = false;
             if (m_isDragging) {
-                // End phase
+                // Commit the drag preview to the client's local inventory and
+                // cursor state IMMEDIATELY, before sending the END packet. The
+                // server's SetSlot/SetCarried response will arrive a few frames
+                // later with the same values; without this local commit the UI
+                // would briefly snap back to the pre-drag state during those
+                // frames, producing a visible flicker.
+                if (m_player && !m_carriedItem.IsEmpty()) {
+                    const int per = DragPerSlotCount();
+                    const int maxStack = Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
+                    int distributed = 0;
+                    for (uint8_t s : m_dragSlots) {
+                        const auto& base = m_player->inventory.GetSlot(s);
+                        if (base.IsEmpty()) {
+                            int give = std::min(per, maxStack);
+                            m_player->inventory.SetSlot(s, m_carriedItem.itemId, give);
+                            distributed += give;
+                        } else if (base.itemId == m_carriedItem.itemId) {
+                            int give = std::min(per, maxStack - base.count);
+                            if (give > 0) {
+                                m_player->inventory.SetSlot(s, base.itemId, base.count + give);
+                                distributed += give;
+                            }
+                        }
+                        // Different-item slots are skipped (preview also skips).
+                    }
+                    int remaining = std::max(0, m_dragStartCarriedCount - distributed);
+                    m_carriedItem.count = remaining;
+                    if (remaining <= 0) m_carriedItem.Clear();
+                }
+                // End phase — server commits its own copy and replies with
+                // matching SetSlot/SetCarried packets that just confirm what we
+                // already showed locally.
                 QueueClick(Network::ContainerInput::QUICK_CRAFT, -1, QuickcraftMask(2, m_dragType));
                 m_isDragging = false;
                 m_dragSlots.clear();
+                m_dragStartCarriedCount = 0;
             }
             return;
         }
@@ -382,16 +507,19 @@ namespace Render {
 
         // Search-grid clicks (creative source)
         if (hit == HIT_CREATIVE_GRID) {
-            if (shift) {
-                QueueClick(Network::ContainerInput::QUICK_MOVE,
-                           Network::InventorySlotSentinel::CREATIVE_GRID, 0,
-                           m_hoveredCreativeItem);
-            } else {
-                uint8_t btn = (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
-                QueueClick(Network::ContainerInput::PICKUP,
-                           Network::InventorySlotSentinel::CREATIVE_GRID, btn,
-                           m_hoveredCreativeItem);
-            }
+            // Server-side button semantics in HandleCreativePickup:
+            //   button=0 → cursor = full stack of this item
+            //   button=1 → cursor = 1 of this item (or +1 if same; clear if different)
+            //
+            // Mapping (shift = stack, no-shift = single, regardless of L/R):
+            //   plain left   → 1 on cursor
+            //   plain right  → 1 on cursor (or +1 if same item already held)
+            //   shift+left   → full stack on cursor
+            //   shift+right  → full stack on cursor
+            uint8_t btn = shift ? 0 : 1;
+            QueueClick(Network::ContainerInput::PICKUP,
+                       Network::InventorySlotSentinel::CREATIVE_GRID, btn,
+                       m_hoveredCreativeStack.itemId);
             return;
         }
 
@@ -453,8 +581,21 @@ namespace Render {
             m_lastClickedSlot  = hit;
             m_lastClickedItem  = slot.itemId;
 
-            // Cursor non-empty → start drag
+            // Cursor non-empty → either drag (same item) or swap (different item).
+            // Drag-distribute only makes sense when the slot is empty or holds
+            // the SAME item as the cursor — otherwise the user expects the
+            // cursor and the slot to swap contents (MC's standard behaviour).
             if (!m_carriedItem.IsEmpty()) {
+                const bool slotCompatible = slot.IsEmpty()
+                                         || slot.itemId == m_carriedItem.itemId;
+                if (!slotCompatible) {
+                    // Different item in slot → swap via PICKUP. HandlePickup's
+                    // "both non-empty + different items" branch does std::swap
+                    // on slot ↔ carried, which is exactly what we want here.
+                    uint8_t btn = (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
+                    QueueClick(Network::ContainerInput::PICKUP, (int16_t)hit, btn);
+                    return;
+                }
                 int type = 0;
                 if (glfwButton == GLFW_MOUSE_BUTTON_RIGHT)  type = 1;
                 if (glfwButton == GLFW_MOUSE_BUTTON_MIDDLE) type = 2;
@@ -462,6 +603,10 @@ namespace Render {
                 m_dragSlots.clear();
                 m_dragSlots.push_back((uint8_t)hit);
                 m_isDragging = true;
+                // Snapshot the cursor count at drag start. The drag preview
+                // (in RenderSlot / RenderCarriedItem) uses this to compute
+                // what each touched slot WILL look like after END commits.
+                m_dragStartCarriedCount = m_carriedItem.count;
                 // Start phase
                 QueueClick(Network::ContainerInput::QUICK_CRAFT, -1, QuickcraftMask(0, type));
                 // Add this first slot
@@ -566,6 +711,65 @@ namespace Render {
         const float u1 = (float)IMAGE_W / 256.0f;
         const float v1 = (float)IMAGE_H / 256.0f;
         g.Blit(bg, leftPos, topPos, leftPos + IMAGE_W, topPos + IMAGE_H, u0, v0, u1, v1);
+    }
+
+    // ─── Drag-preview helpers ────────────────────────────────
+    // The server only commits drag distribution at QUICK_CRAFT END (mouse up).
+    // While the user is still holding the button, the inventory would otherwise
+    // show no feedback. Mirror MC's behaviour by computing locally what each
+    // touched slot AND the cursor will look like after the drag commits, and
+    // rendering THAT instead of the raw server state.
+    int InventoryScreen::DragPerSlotCount() const {
+        if (!m_isDragging || m_carriedItem.IsEmpty() || m_dragSlots.empty()) return 0;
+        if (m_dragType == 0) {
+            // Left-drag: split as evenly as possible across touched slots.
+            return m_dragStartCarriedCount / static_cast<int>(m_dragSlots.size());
+        }
+        if (m_dragType == 1) {
+            // Right-drag: 1 per slot.
+            return 1;
+        }
+        // Middle (creative-clone): full stack per slot.
+        return Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
+    }
+
+    Game::InventorySlot InventoryScreen::DisplayedSlot(int slotIndex,
+                                                       const Game::InventorySlot& base) const {
+        if (!m_isDragging || m_carriedItem.IsEmpty()) return base;
+        if (std::find(m_dragSlots.begin(), m_dragSlots.end(),
+                      static_cast<uint8_t>(slotIndex)) == m_dragSlots.end()) {
+            return base;
+        }
+        const int per = DragPerSlotCount();
+        if (per <= 0) return base;
+        const int maxStack = Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
+        if (base.IsEmpty()) {
+            return Game::InventorySlot{m_carriedItem.itemId, std::min(per, maxStack)};
+        }
+        if (base.itemId == m_carriedItem.itemId) {
+            // Top up an existing same-item stack (cap at max).
+            int newCount = std::min(maxStack, base.count + per);
+            return Game::InventorySlot{base.itemId, newCount};
+        }
+        // Different item in the slot — drag never overwrites these (server's
+        // QUICK_CRAFT_addPlayerSlot also rejects them); show as-is.
+        return base;
+    }
+
+    int InventoryScreen::DragRemainingCarriedCount() const {
+        if (!m_isDragging || m_carriedItem.IsEmpty()) return m_carriedItem.count;
+        const int per = DragPerSlotCount();
+        // Only count slots that will actually accept items in the preview
+        // (empty or same-item not-yet-full). Different-item slots receive 0.
+        int distributed = 0;
+        for (uint8_t s : m_dragSlots) {
+            if (!m_player) break;
+            const auto& base = m_player->inventory.GetSlot(s);
+            if (base.IsEmpty() || base.itemId == m_carriedItem.itemId) {
+                distributed += per;
+            }
+        }
+        return std::max(0, m_dragStartCarriedCount - distributed);
     }
 
     // ─── Rendering ───────────────────────────────────────────
@@ -700,15 +904,16 @@ namespace Render {
         // Crafting grid + result are HIDDEN in MC's creative survival tab
         // (CreativeModeInventoryScreen.java line 534-536: x=-2000, y=-2000). Don't render.
 
-        // Main inventory
+        // Main inventory + hotbar — DisplayedSlot overlays the live drag preview
+        // (so the user sees their stack distribute as they drag) on top of the
+        // raw server state.
         for (int i = Game::Inventory::MAIN_BEGIN; i < Game::Inventory::MAIN_BEGIN + Game::Inventory::MAIN_SIZE; ++i) {
             int sx, sy; if (!GetSlotImagePos(i, sx, sy)) continue;
-            RenderSlot(g, leftPos + sx, topPos + sy, inv.GetSlot(i));
+            RenderSlot(g, leftPos + sx, topPos + sy, DisplayedSlot(i, inv.GetSlot(i)));
         }
-        // Hotbar
         for (int i = Game::Inventory::HOTBAR_BEGIN; i < Game::Inventory::HOTBAR_BEGIN + Game::Inventory::HOTBAR_SIZE; ++i) {
             int sx, sy; if (!GetSlotImagePos(i, sx, sy)) continue;
-            RenderSlot(g, leftPos + sx, topPos + sy, inv.GetSlot(i));
+            RenderSlot(g, leftPos + sx, topPos + sy, DisplayedSlot(i, inv.GetSlot(i)));
         }
 
         // Hover highlight — bump stratum first so it lands above the panel background
@@ -731,11 +936,12 @@ namespace Render {
         DrawBackground(g, leftPos, topPos, EnsureBackground(false));
         if (!m_player) return;
 
-        // Hotbar always visible at bottom of search tab
+        // Hotbar always visible at bottom of search tab — DisplayedSlot adds
+        // the live drag-distribute preview if a drag is in progress.
         const auto& inv = m_player->inventory;
         for (int i = Game::Inventory::HOTBAR_BEGIN; i < Game::Inventory::HOTBAR_BEGIN + Game::Inventory::HOTBAR_SIZE; ++i) {
             int sx, sy; if (!GetSlotImagePos(i, sx, sy)) continue;
-            RenderSlot(g, leftPos + sx, topPos + sy, inv.GetSlot(i));
+            RenderSlot(g, leftPos + sx, topPos + sy, DisplayedSlot(i, inv.GetSlot(i)));
         }
 
         // Creative search grid (5×9) — paint each visible block as a 1-count slot.
@@ -745,8 +951,12 @@ namespace Render {
             for (int col = 0; col < 9; ++col) {
                 int idx = (rowIndex + row) * 9 + col;
                 if (idx >= (int)m_filteredItems.size()) continue;
-                Game::InventorySlot s{m_filteredItems[idx], 1};
-                RenderSlot(g, leftPos + 9 + col * SLOT_STEP, topPos + 18 + row * SLOT_STEP, s);
+                // Render the pre-built ItemStack directly — it carries the
+                // correct DataComponents (e.g. STORED_ENCHANTMENTS for an
+                // enchanted_book variant), which RenderItem / its glint pass
+                // need to read for foil detection.
+                RenderSlot(g, leftPos + 9 + col * SLOT_STEP, topPos + 18 + row * SLOT_STEP,
+                           m_filteredItems[idx]);
             }
         }
 
@@ -764,7 +974,7 @@ namespace Render {
             if (GetSlotImagePos(m_hoveredSlot, sx, sy)) {
                 RenderHoverHighlight(g, leftPos + sx, topPos + sy);
             }
-        } else if (m_hoveredSlot == HIT_CREATIVE_GRID && m_hoveredCreativeItem != Game::Items::Air) {
+        } else if (m_hoveredSlot == HIT_CREATIVE_GRID && !m_hoveredCreativeStack.IsEmpty()) {
             // Find the cell again (cheap re-derive)
             const int mx = (int)std::floor(m_mouseGui.x) - leftPos;
             const int my = (int)std::floor(m_mouseGui.y) - topPos;
@@ -814,30 +1024,61 @@ namespace Render {
         if (m_carriedItem.IsEmpty()) return;
         int x = (int)m_mouseGui.x - 8;
         int y = (int)m_mouseGui.y - 8;
-        g.RenderItem(m_carriedItem, x, y);
+        // While dragging, render the cursor with the PROJECTED remaining count
+        // (start count minus what's been distributed so far) so the user sees
+        // their stack shrink live as they drag across slots. After drag ends,
+        // the server's SetCarried packet syncs the real value.
+        Game::InventorySlot displayed = m_carriedItem;
+        if (m_isDragging) displayed.count = DragRemainingCarriedCount();
+        if (displayed.IsEmpty()) return;
+        g.RenderItem(displayed, x, y);
         g.NextStratum();
-        g.RenderItemDecorations(m_carriedItem, x, y);
+        g.RenderItemDecorations(displayed, x, y);
     }
 
-    void InventoryScreen::RenderTooltip(GuiGraphics& g, Game::ItemID id, int mx, int my) {
-        if (id == Game::Items::Air) return;
-        const std::string name = Game::ItemRegistry::Get(id).name;
+    void InventoryScreen::RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack, int mx, int my) {
+        if (stack.IsEmpty()) return;
+        const std::string name = Game::ItemRegistry::Get(stack.itemId).name;
         if (name.empty()) return;
-        int textW = g.GetStringWidth(name);
+
+        // Build the line list: name first (white), then any per-stack annotations.
+        // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips chain —
+        // each component's TooltipProvider implementation appends its lines to
+        // the consumer. Today only STORED_ENCHANTMENTS contributes; future
+        // components (CUSTOM_NAME, LORE, durability bar, etc.) plug in here.
+        struct Line { std::string text; uint32_t color; };
+        std::vector<Line> lines;
+        lines.push_back({name, 0xFFFFFFFFu});
+
+        if (auto stored = stack.get(Game::DataComponents::STORED_ENCHANTMENTS)) {
+            std::vector<Game::Enchantment::FormattedLine> ench;
+            stored->AddToTooltip(ench);
+            for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
+        }
+
+        // Layout: 10-px line spacing matches MC's GuiGraphics tooltip spacing.
+        const int LINE_H = 10;
+        int textW = 0;
+        for (const auto& l : lines) textW = std::max(textW, g.GetStringWidth(l.text));
+        const int totalH = static_cast<int>(lines.size()) * LINE_H - 2; // last line has no trailing gap
+
         int x = mx + 12;
         int y = my - 12;
-        // MC tooltip background colors
+        // MC tooltip background colours (Screen.renderTooltip)
         const uint32_t bg     = 0xF0100010;
         const uint32_t border = 0x505000FF;
-        g.Fill(x - 3, y - 4, x + textW + 3, y - 3, bg);
-        g.Fill(x - 3, y + 9 + 3, x + textW + 3, y + 9 + 4, bg);
-        g.Fill(x - 3, y - 3, x + textW + 3, y + 9 + 3, bg);
-        g.Fill(x - 4, y - 3, x - 3, y + 9 + 3, bg);
-        g.Fill(x + textW + 3, y - 3, x + textW + 4, y + 9 + 3, bg);
-        // Border
-        g.Fill(x - 3, y - 3 + 1, x - 3 + 1, y + 9 + 3 - 1, border);
-        g.Fill(x + textW + 2, y - 3 + 1, x + textW + 3, y + 9 + 3 - 1, border);
-        g.DrawString(name, x, y, 0xFFFFFFFF, true);
+        g.Fill(x - 3, y - 4,           x + textW + 3, y - 3,           bg);
+        g.Fill(x - 3, y + totalH + 3,  x + textW + 3, y + totalH + 4,  bg);
+        g.Fill(x - 3, y - 3,           x + textW + 3, y + totalH + 3,  bg);
+        g.Fill(x - 4, y - 3,           x - 3,         y + totalH + 3,  bg);
+        g.Fill(x + textW + 3, y - 3,   x + textW + 4, y + totalH + 3,  bg);
+        // Border (left + right)
+        g.Fill(x - 3,         y - 3 + 1, x - 3 + 1,     y + totalH + 3 - 1, border);
+        g.Fill(x + textW + 2, y - 3 + 1, x + textW + 3, y + totalH + 3 - 1, border);
+
+        for (size_t i = 0; i < lines.size(); ++i) {
+            g.DrawString(lines[i].text, x, y + static_cast<int>(i) * LINE_H, lines[i].color, true);
+        }
     }
 
     void InventoryScreen::Render(GuiGraphics& g) {
@@ -878,10 +1119,10 @@ namespace Render {
             if (m_hoveredSlot >= 0 && m_player) {
                 const auto& s = m_player->inventory.GetSlot(m_hoveredSlot);
                 if (!s.IsEmpty()) {
-                    RenderTooltip(g, s.itemId, (int)m_mouseGui.x, (int)m_mouseGui.y);
+                    RenderTooltip(g, s, (int)m_mouseGui.x, (int)m_mouseGui.y);
                 }
-            } else if (m_hoveredSlot == HIT_CREATIVE_GRID && m_hoveredCreativeItem != Game::Items::Air) {
-                RenderTooltip(g, m_hoveredCreativeItem, (int)m_mouseGui.x, (int)m_mouseGui.y);
+            } else if (m_hoveredSlot == HIT_CREATIVE_GRID && !m_hoveredCreativeStack.IsEmpty()) {
+                RenderTooltip(g, m_hoveredCreativeStack, (int)m_mouseGui.x, (int)m_mouseGui.y);
             }
         }
     }

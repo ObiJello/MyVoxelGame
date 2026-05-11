@@ -16,7 +16,9 @@
 #pragma once
 
 #include "../world/block/Blocks.hpp"
+#include "../data/DataComponentMap.hpp"
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -27,11 +29,12 @@ namespace Game {
     // Pure items live at and above this base so they never collide with block items.
     static constexpr ItemID PURE_ITEM_BASE = 0x10000;
 
-    // Built-in pure item IDs (mirrors MC's net.minecraft.world.item.Items class).
+    // Built-in pure item IDs. The full vanilla MC item list lives in the
+    // auto-generated GeneratedItemList.hpp (mirrors MC's Items.java declaration
+    // order). The Air sentinel is defined here because it's special — ID 0 is
+    // reserved for "empty slot" and isn't a registered item.
     namespace Items {
-        static constexpr ItemID Air      = 0;
-        static constexpr ItemID Compass  = PURE_ITEM_BASE + 0;
-        // Future pure items go here. Block items are accessed via FromBlock(BlockID).
+        static constexpr ItemID Air = 0;
     }
 
     enum class ItemRenderType : uint8_t {
@@ -65,11 +68,49 @@ namespace Game {
         std::string                   name;            // human-readable display name
         ItemRenderType                renderType = ItemRenderType::Sprite;
         BlockID                       blockId    = BlockID::Air;  // iff renderType == Block
-        std::string                   spriteName;                  // single static sprite
+        std::string                   spriteName;                  // single static sprite (layer0 or non-layered)
+        std::vector<std::string>      spriteLayers;                // all layerN textures (multi-layer items: leather armor, spawn egg, potion, …)
+        std::vector<uint32_t>         layerTints;                  // ARGB tint per layer index (0 = untinted/white). From the items/{slug}.json `tints` array.
         std::vector<std::string>      spriteFrames;                // animated sprite frames
         ItemFrameSelector             selectFrame = nullptr;        // picks index into spriteFrames
         int                           maxStackSize = 64;
+        // Predicate name from the JSON model's overrides[] (if any) — surfaced
+        // by ItemModelLoader. Used by ItemRegistry::Initialize to wire up the
+        // right ItemFrameSelector. "" means no animation.
+        std::string                   predicateName;
+        // Block-model override (set from `assets/items/{slug}.json`). When
+        // non-empty AND renderType == Block, RenderBlockItemImpl uses this
+        // model name instead of the block's own modelName. MC's data
+        // generators register block items this way — e.g. trapdoors point at
+        // `oak_trapdoor_bottom`, not the block's stateful root. Items.java
+        // line 467 (`registerSimpleItemModel(trapdoor, bottom)`).
+        std::string                   blockModelOverride;
+        // BEWLR (BlockEntityWithoutLevelRenderer) hooks — set when the
+        // items/{slug}.json uses {"type":"minecraft:special", "model":{"type":"chest","texture":"trapped"}}.
+        // specialKind picks the C++ renderer (chest, shulker_box, …);
+        // specialTexture is the variant (normal, trapped, ender, christmas, …).
+        // Each renderer reads these from the Item to pick its assets.
+        std::string                   specialKind;
+        std::string                   specialTexture;
+        // Default DataComponents for this item — mirrors MC's
+        // `Item.Properties.component(...)` accumulation. ItemStack lookups
+        // (ItemStack::get<T>) fall back to these when the stack itself doesn't
+        // override the component. e.g. `enchanted_book` sets defaults
+        // STORED_ENCHANTMENTS=EMPTY and ENCHANTMENT_GLINT_OVERRIDE=true here
+        // (Items.java:2854), so every enchanted_book stack glints by default
+        // even before a specific enchantment is stored on it.
+        DataComponentMap              defaultComponents;
     };
+
+    // Generated registration table — one entry per pure item, in MC's
+    // Items.java declaration order. Lives in GeneratedItemList.cpp; consumed
+    // by ItemRegistry::Initialize.
+    struct PureItemTableEntry {
+        const char* slug;           // matches assets/models/item/{slug}.json + textures/item/{slug}.png
+        const char* predicateHint;  // "angle" | "time" | "pull" | ... | "none"
+    };
+    extern const PureItemTableEntry kPureItemTable[];
+    extern const size_t             kPureItemTableSize;
 
     // Process-global item registry. Build-once, read-many.
     class ItemRegistry {
@@ -119,8 +160,13 @@ namespace Game {
     // Inventory slot contents. Replaces the old InventorySlot { BlockID, count } struct.
     // (Renamed type alias `InventorySlot` is provided in Inventory.hpp for migration.)
     struct ItemStack {
-        ItemID itemId = Items::Air;
-        int    count  = 0;
+        ItemID            itemId = Items::Air;
+        int               count  = 0;
+        // Per-stack DataComponent overrides. Default-empty (vanilla stacks pay
+        // zero allocations because the entry vector starts empty). Mirrors MC's
+        // ItemStack `components` field; reads via `get<T>()` fall back to the
+        // owning item's `defaultComponents`, matching MC's PatchedDataComponentMap.
+        DataComponentMap  components;
 
         ItemStack() = default;
         ItemStack(ItemID id, int c) : itemId(id), count(c) {}
@@ -131,7 +177,7 @@ namespace Game {
             : itemId(ItemRegistry::FromBlock(b)), count(c) {}
 
         bool IsEmpty() const { return count <= 0 || itemId == Items::Air; }
-        void Clear() { itemId = Items::Air; count = 0; }
+        void Clear() { itemId = Items::Air; count = 0; components = {}; }
 
         // BlockID accessor for legacy callers that only deal with blocks. Returns Air for
         // pure items so existing block-only flows (place-block, etc.) treat them as nothing.
@@ -140,6 +186,21 @@ namespace Game {
                 ? ItemRegistry::ToBlock(itemId)
                 : BlockID::Air;
         }
+
+        // Read a DataComponent value, falling back to the owning item's defaults
+        // when the stack itself doesn't override it. Mirrors MC's
+        // `ItemStack.get(DataComponentType)` semantics — see PatchedDataComponentMap.
+        template<typename T>
+        std::optional<T> get(const DataComponentType<T>& key) const {
+            if (auto v = components.get(key)) return v;
+            return ItemRegistry::Get(itemId).defaultComponents.get(key);
+        }
+
+        // Mirrors MC `ItemStack.hasFoil()` (ItemStack.java:909–911): explicit
+        // ENCHANTMENT_GLINT_OVERRIDE wins; otherwise the stack glints iff it
+        // has any stored enchantments. Out-of-line so we don't pull
+        // DataComponents.hpp (and the enchantment headers) into Item.hpp.
+        bool HasFoil() const;
     };
 
 } // namespace Game
