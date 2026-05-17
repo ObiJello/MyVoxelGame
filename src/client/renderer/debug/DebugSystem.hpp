@@ -327,10 +327,15 @@ namespace Debug {
         static ChunkPipelineSnapshot s_pipelineSnap;
         static bool s_debugEnabled;
         static bool s_renderDistanceChanged;
+        static bool s_bloomEnabled;
 
     public:
         // Returns true once if render distance was changed via debug UI, then resets
         static bool ConsumeRenderDistanceChanged();
+        // Portal-bloom toggle (Render Controls panel). Off by default.
+        // Read by PlatformMain each frame to decide whether to invoke
+        // BloomPipeline.Apply on the HDR colour buffer.
+        static bool IsBloomEnabled() { return s_bloomEnabled; }
     };
 
 } // namespace Debug

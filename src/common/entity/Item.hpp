@@ -16,11 +16,21 @@
 #pragma once
 
 #include "../world/block/Blocks.hpp"
+#include "../world/block/BlockInteraction.hpp"
 #include "../data/DataComponentMap.hpp"
+#include "../core/Features.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
+
+namespace Game {
+    class World;
+}
+namespace Server {
+    class ServerPlayer;
+}
 
 namespace Game {
 
@@ -35,6 +45,15 @@ namespace Game {
     // reserved for "empty slot" and isn't a registered item.
     namespace Items {
         static constexpr ItemID Air = 0;
+
+#if ENABLE_PORTAL_GUN
+        // Custom (non-MC) item — registered post-loop in
+        // ItemRegistry::Initialize at PURE_ITEM_BASE + kPureItemTableSize.
+        // Mutable (not constexpr) because the actual ID depends on
+        // kPureItemTableSize which isn't a constant expression. Safe to
+        // read after ItemRegistry::Initialize() runs.
+        extern ItemID PortalGun;
+#endif
     }
 
     enum class ItemRenderType : uint8_t {
@@ -63,6 +82,48 @@ namespace Game {
     // MC: ItemModelResolver / RangeSelectItemModel resolve this from item state at render
     // time — exactly the same dispatch shape, just data-driven instead of subclass-driven.
     using ItemFrameSelector = int (*)(const ItemRenderContext& ctx);
+
+    struct ItemStack;  // forward — defined below
+
+    // Right-click ON a block. Mirrors MC's `Item.useOn(UseOnContext)`
+    // (Item.java:187). Default behaviour (nullptr → Pass) lets the dispatch
+    // fall through to BlockItem placement. Override per-item for things like
+    // FlintAndSteel (spawn fire), BoneMeal (grow), Hoe (till), Bucket (fill),
+    // Shovel (path), Shears (shear leaves).
+    using ItemUseOnFn = UseResult (*)(const UseOnContext& ctx, ItemStack& stack);
+
+    // Right-click in AIR. Mirrors MC's `Item.use(Level, Player, Hand)`
+    // (Item.java:196-219). Default → Pass. Override for ranged items (Bow,
+    // Snowball, EnderPearl, Egg) and self-targeting items.
+    //
+    // MC's BASE `Item.use` is itself non-trivial — it reads several
+    // DataComponents and dispatches on them BEFORE returning Pass:
+    //   1. CONSUMABLE      → consumable.startConsuming(player, stack, hand)
+    //                        (food, potions; starts the eating/drinking timer)
+    //   2. EQUIPPABLE     → if swappable, equippable.swapWithEquipmentSlot
+    //                        (clicking a chestplate auto-equips it)
+    //   3. BLOCKS_ATTACKS  → player.startUsingItem(hand) → CONSUME
+    //                        (shield: start blocking)
+    //   4. KINETIC_WEAPON  → player.startUsingItem(hand) + makeSound → CONSUME
+    //                        (mace: start the wind-up swing)
+    //   5. else            → PASS
+    //
+    // We don't yet have:
+    //   • The UseItemC2SPacket that triggers this server-side (only
+    //     UseItemOnC2SPacket exists today, which targets a block).
+    //   • The CONSUMABLE/EQUIPPABLE/BLOCKS_ATTACKS/KINETIC_WEAPON DataComponent
+    //     types registered (we only have STORED_ENCHANTMENTS and
+    //     ENCHANTMENT_GLINT_OVERRIDE so far).
+    //   • Player.startUsingItem (use-duration tick + finishUsingItem callback
+    //     after N ticks, e.g. 32 for normal food).
+    //
+    // When those land, the default `Item.use` should be implemented in
+    // Item.cpp (NOT as a per-item callback) and dispatch on the components
+    // above. Per-item `use` callbacks override the default for items with
+    // unique behaviour (BowItem.releaseUsing, EnderpearlItem.use to throw a
+    // pearl entity, etc.).
+    using ItemUseFn = UseResult (*)(World* world, Server::ServerPlayer* player,
+                                    uint32_t hand, ItemStack& stack);
 
     struct Item {
         std::string                   name;            // human-readable display name
@@ -100,6 +161,14 @@ namespace Game {
         // (Items.java:2854), so every enchanted_book stack glints by default
         // even before a specific enchantment is stored on it.
         DataComponentMap              defaultComponents;
+        // Per-item interaction callbacks. nullptr → defaults to UseResult::Pass
+        // and the server's dispatch falls through to the next step (block
+        // placement / empty-hand block use). Mirrors MC's per-Item-subclass
+        // `useOn` and `use` overrides — see Item.java:187 (useOn) and
+        // Item.java:196 (use). Wiring happens in ItemRegistry::Initialize for
+        // items that need behaviour (FlintAndSteel, BoneMeal, Hoe, Bucket, etc).
+        ItemUseOnFn                   useOn = nullptr;
+        ItemUseFn                     use   = nullptr;
     };
 
     // Generated registration table — one entry per pure item, in MC's
@@ -135,6 +204,26 @@ namespace Game {
 
         // For diagnostics / iteration.
         static size_t Size();
+
+        // Iterate every registered PURE item (id, item) — both vanilla MC
+        // entries from kPureItemTable AND any custom items registered past
+        // the table (e.g. Portal Gun). Use this from anywhere that needs
+        // to enumerate the full item set rather than just the MC slice
+        // (the inventory search tab is the canonical caller). Callback
+        // signature: `void(ItemID, const Item&)`.
+        //
+        // Implemented as: get a const-ref to the backing map, iterate it.
+        // Splitting accessor + inline template lets the header expose a
+        // generic callback shape without leaking the anonymous-namespace
+        // map into other TUs.
+        static const std::unordered_map<ItemID, Item>& AllPureItems();
+
+        template<typename F>
+        static void ForEachPureItem(F&& callback) {
+            for (const auto& [id, item] : AllPureItems()) {
+                callback(id, item);
+            }
+        }
 
         // Process-global render context. Renderers call ItemRegistry::SetRenderContext()
         // once per frame; per-item frame selectors read from it. Mirrors MC's pattern of

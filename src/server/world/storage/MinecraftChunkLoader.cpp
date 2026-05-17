@@ -17,7 +17,7 @@ namespace Game {
         s_worldPath = path;
         // Clear region file cache when world path changes
         // This ensures we don't have stale cache entries from previous attempts
-        World::RegionFileCache::Instance().Clear();
+       ::World::RegionFileCache::Instance().Clear();
         Log::Info("World path set to: %s (region cache cleared)", path.c_str());
     }
 
@@ -128,7 +128,7 @@ namespace Game {
         ChunkToRegion(pos, regionX, regionZ, localX, localZ);
 
         // Try to get region file
-        auto regionFile = World::RegionFileCache::Instance().GetRegionFile(regionX, regionZ, worldPath);
+        auto regionFile = ::World::RegionFileCache::Instance().GetRegionFile(regionX, regionZ, worldPath);
         if (!regionFile || !regionFile->IsValid()) {
             return false;
         }
@@ -153,7 +153,7 @@ namespace Game {
         localZ = chunkPos.z - (regionZ << 5);  // chunkZ - regionZ * 32
     }
 
-    World::NBTTagPtr MinecraftChunkLoader::LoadChunkNBT(Math::ChunkPos pos, const std::string& worldPath) {
+   ::World::NBTTagPtr MinecraftChunkLoader::LoadChunkNBT(Math::ChunkPos pos, const std::string& worldPath) {
         try {
             // Convert to region coordinates
             int regionX, regionZ, localX, localZ;
@@ -167,7 +167,7 @@ namespace Game {
             Log::Debug("Looking for region file: %s", regionPath.c_str());
 
             // Get region file from cache
-            auto regionFile = World::RegionFileCache::Instance().GetRegionFile(regionX, regionZ, worldPath);
+            auto regionFile = ::World::RegionFileCache::Instance().GetRegionFile(regionX, regionZ, worldPath);
             if (!regionFile || !regionFile->IsValid()) {
                 Log::Debug("No valid region file found for region (%d, %d) at path: %s", regionX, regionZ, regionPath.c_str());
                 return nullptr;
@@ -181,7 +181,7 @@ namespace Game {
             }
 
             // Read chunk data using RegionDumper
-            auto chunkData = World::RegionDumper::ReadChunkData(*regionFile, localX, localZ);
+            auto chunkData = ::World::RegionDumper::ReadChunkData(*regionFile, localX, localZ);
             if (!chunkData.isValid || !chunkData.rootTag) {
                 Log::Warning("Failed to read or parse chunk data for (%d, %d)", localX, localZ);
                 return nullptr;

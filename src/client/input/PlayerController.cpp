@@ -7,8 +7,15 @@
 #include "../network/ClientConnection.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../world/ClientChunkManager.hpp"
+#include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
+#include "common/entity/Item.hpp"
+#if ENABLE_PORTAL_GUN
+#include "../renderer/portal/PortalParticleSystem.hpp"
+#include "../renderer/viewmodel/PortalGunViewmodel.hpp"
+#endif
 #include <glm/glm.hpp>
+#include <cmath>
 #include <thread>
 
 namespace Game {
@@ -65,6 +72,12 @@ namespace Game {
 
         // NOTE: Block placement now only happens via network packets
         // The server will send back block changes that update the world
+
+#if ENABLE_PORTAL_GUN
+        // Tick any in-flight portal-gun projectiles; on impact each one
+        // turns into a UseItemOnC2S at the hit block face.
+        UpdatePendingPortalProjectiles(deltaTime);
+#endif
 
         // Send movement packets if due (TODO: Implement for networking)
         SendMovementIfDue();
@@ -149,10 +162,10 @@ namespace Game {
         FinishBreaking();
     }
 
-    void ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand) {
+    void ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract) {
         // Build and send BlockPlaceC2S packet (Minecraft-compatible)
-        Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d", 
-                  hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand);
+        Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d alt=%d",
+                  hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand, altInteract ? 1 : 0);
         
         if (!networkClient) {
             Log::Debug("SendUseItemOn: networkClient is null - not set on controller");
@@ -190,7 +203,8 @@ namespace Game {
             hit.cursorPos.y,        // Cursor Y [0,1)
             hit.cursorPos.z,        // Cursor Z [0,1)
             hit.insideBlock,        // Inside block flag
-            ++interactSeq           // Sequence number
+            ++interactSeq,          // Sequence number
+            altInteract             // true = left-click "use" semantics
         );
         
         // Serialize and send
@@ -271,17 +285,30 @@ namespace Game {
 
     void ClientPlayerController::OnLMB(bool pressed) {
         if (!player) return;
-        
+
         if (pressed) {
             breakButtonHeld = true;
-            
+
+#if ENABLE_PORTAL_GUN
+            // PortalGun hijacks left-click for blue-portal placement.
+            // Fire a true projectile — it sweeps through the world each
+            // tick and, on first solid hit, sends UseItemOnC2S so the
+            // server places the portal at the impact face. No look-raycast
+            // dependency: the player can fire across long sight-lines.
+            const Game::ItemID held = player->inventory.GetSelectedItem();
+            if (held != Game::ItemID(0) && held == Game::Items::PortalGun) {
+                SpawnPortalProjectile(/*isOrange=*/false);
+                return;  // skip the normal block-break path
+            }
+#endif
+
             const auto& currentHit = player->lastBlockHit;
             if (currentHit.has_value() && !isBreaking) {
                 StartDig(currentHit->blockPos, currentHit->hitFace);
             }
         } else {
             breakButtonHeld = false;
-            
+
             if (isBreaking) {
                 AbortDig();
             }
@@ -297,22 +324,92 @@ namespace Game {
             // Check if we should process this click (rate limiting)
             if (rightClickDelayTimer <= 0.0f) {
                 const auto& currentHit = player->lastBlockHit;
-                
+
+#if ENABLE_PORTAL_GUN
+                // PortalGun branches BEFORE the normal block-hit path so
+                // it can fire even when nothing is in melee range.
+                //   • Shift + RMB → clear-portals gesture: still needs a
+                //     block hit (server detects sneak+!altInteract). No
+                //     projectile.
+                //   • Plain RMB → fire orange projectile. Server placement
+                //     happens on impact, not at fire time.
+                {
+                    const Game::ItemID heldRMB = player->inventory.GetSelectedItem();
+                    if (heldRMB != Game::ItemID(0) && heldRMB == Game::Items::PortalGun) {
+                        if (player->physics.isSneaking) {
+                            OnHotbarChanged(player->inventory.GetSelectedSlot());
+                            if (currentHit.has_value()) {
+                                SendUseItemOn(*currentHit, /*hand=*/0, /*altInteract=*/false);
+                            } else {
+                                // No block in sight (player is staring at sky
+                                // or out past raycast range). The clear gesture
+                                // shouldn't require a target — fabricate a
+                                // zero-distance "hit" at the player's eye so
+                                // the server's UseItemOn path still dispatches
+                                // OnGunUseOn. suppressBlockUse = sneaking &&
+                                // somethingInHands skips the block-use branch,
+                                // so the synthetic-hit air block is never
+                                // actually queried — OnGunUseOn runs and the
+                                // sneak+!alt branch calls ClearPair.
+                                const glm::vec3 eye  = player->physics.GetEyePosition();
+                                const glm::ivec3 ipos(
+                                    static_cast<int>(std::floor(eye.x)),
+                                    static_cast<int>(std::floor(eye.y)),
+                                    static_cast<int>(std::floor(eye.z)));
+                                RaycastHit sky{};
+                                sky.blockPos    = ipos;
+                                sky.adjacentPos = ipos;
+                                sky.hitPoint    = eye;
+                                sky.normal      = glm::vec3(0.0f, 1.0f, 0.0f);
+                                sky.cursorPos   = glm::vec3(0.5f);
+                                sky.blockId     = BlockID::Air;
+                                sky.distance    = 0.0f;
+                                sky.hitFace     = 2;   // +Y, arbitrary
+                                sky.insideBlock = true;
+                                SendUseItemOn(sky, /*hand=*/0, /*altInteract=*/false);
+                            }
+                        } else {
+                            SpawnPortalProjectile(/*isOrange=*/true);
+                        }
+                        rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                        placeButtonHeld = true;
+                        return;
+                    }
+                }
+#endif
+
                 // TODO: Check for entity hit first when entity system exists
                 // if (player->lastEntityHit.has_value()) {
                 //     SendUseEntity(*player->lastEntityHit, 0);  // Interact with entity
                 //     rightClickDelayTimer = RIGHT_CLICK_DELAY;
                 // } else
-                if (currentHit.has_value() && player->GetSelectedBlock() != BlockID::Air) {
-                    // Ensure server knows what block we're holding BEFORE the place request
+                if (currentHit.has_value()) {
+                    // Targeting a block — send UseItemOn regardless of what we
+                    // hold. The server's dispatch order (mirroring MC's
+                    // ServerPlayerGameMode.useItemOn) decides what happens:
+                    //   block.useItemOn → block.useWithoutItem → item.useOn
+                    //   → BlockItem placement
+                    // Previously this branch was gated on "holding a block",
+                    // which meant flint_and_steel / hoe / shovel / bone_meal /
+                    // shears / etc. fell into the air-use path and the server
+                    // never ran their useOn callback even though the player
+                    // clicked on a block.
                     OnHotbarChanged(player->inventory.GetSelectedSlot());
-                    // Send place request to server
                     SendUseItemOn(*currentHit, 0);  // 0 = main hand
-                    // Consume block from client inventory
-                    player->inventory.ConsumeSelectedBlock();
-                    rightClickDelayTimer = RIGHT_CLICK_DELAY;  // Set delay to prevent spam
+
+                    // Predictive consumption — ONLY for block placement.
+                    // The server's placement-fallback path consumes one block
+                    // from the stack; for non-block items (tools, food, etc.)
+                    // it doesn't, so we mustn't predict consumption either.
+                    // Server is authoritative — it'll re-sync our inventory
+                    // either way.
+                    if (player->GetSelectedBlock() != BlockID::Air) {
+                        player->inventory.ConsumeSelectedBlock();
+                    }
+                    rightClickDelayTimer = RIGHT_CLICK_DELAY;  // rate limiting
                 } else {
-                    // No hit - use item in air
+                    // No block target — use item in air (Bow draw, EnderPearl
+                    // throw, food eat, etc.). Server-side `Item.use` handles it.
                     SendUseItem(0);  // 0 = main hand
                     rightClickDelayTimer = RIGHT_CLICK_DELAY;
                 }
@@ -492,6 +589,129 @@ namespace Game {
             return BlockID::Air;
         }
     }
+
+#if ENABLE_PORTAL_GUN
+    // Portal's BLAST_SPEED from weapon_portalgun.cpp:71 — 3000 HU/s
+    // = 57.15 m/s. For long-range shots (server reach = 256 m) we
+    // need ~4.5 s of flight at that speed, so we lift the lifetime
+    // cap well above sv_portal_projectile_delay's 0.5 s.
+    static constexpr float kPortalProjSpeed_m_per_s = 57.15f;
+    static constexpr float kPortalProjMaxLifetime  = 4.5f;  // ≈ 257 m
+
+    void ClientPlayerController::SpawnPortalProjectile(bool isOrange) {
+        if (!player) return;
+
+        // Use the cached camera-space forward written by UpdateRaycast
+        // each frame. player->yaw/pitch are stale (mouse-look writes
+        // camera.yaw/pitch and only syncs back on teleports), so reading
+        // them here makes every shot fly the same direction.
+        const glm::vec3 front = player->lookDir;
+
+        const glm::vec3 origin = player->physics.GetEyePosition();
+
+        // Logical projectile — the collision raycast stays anchored to
+        // the eye so the shot lands EXACTLY where the crosshair points
+        // (independent of the visual muzzle offset). Without this, the
+        // shot would consistently impact a few centimetres right/down
+        // of where you aimed.
+        PendingPortalProjectile p;
+        p.origin     = origin;
+        p.direction  = front;
+        p.currentPos = origin;
+        p.age        = 0.0f;
+        p.isOrange   = isOrange;
+        p.hand       = 0;
+        m_pendingPortalProjectiles.push_back(p);
+
+        // Visual bolt — spawn at the gun's muzzle, not the eye. The
+        // offsets here are the muzzle position in camera-space *as
+        // rendered by the viewmodel*, then FOV-corrected to the world
+        // projection so the bolt actually appears at the gun's tip on
+        // screen instead of drifting toward the centre.
+        //
+        // The viewmodel renders with a 54° narrow FOV (PortalGun-
+        // Viewmodel::Render — matches Portal's v_viewmodel_fov ConVar).
+        // The world projection uses 70° (Render::Camera::fov default).
+        // For a point at world-space (x, y, -z) to project to the same
+        // NDC under 70° as under 54°, x and y must scale by
+        // tan(35°)/tan(27°) ≈ 1.374. Without that the muzzle's
+        // on-screen position under the world projection sits much
+        // closer to the centre than where the gun is actually drawn,
+        // and the bolt visibly "spawns from the air" beside the gun.
+        //
+        // Raw viewmodel-space muzzle (right, down, forward):
+        //     hold offset (+0.18, -0.16, -0.32)
+        //   + gun extent past grip after 180° Y rotation ≈ -0.53 z
+        //   = (+0.27, -0.12, +0.85)
+        // Scaled by 1.374 in x & y:
+        constexpr glm::vec3 kMuzzleOffsetCameraSpace{0.371f, -0.165f, 0.85f};
+        const glm::vec3 worldUp(0.0f, 1.0f, 0.0f);
+        // Look almost-straight-up/down breaks the cross-with-worldUp
+        // basis (right collapses to zero). Fall back to world-X in
+        // that degenerate case so the muzzle still has a defined
+        // position. Threshold of 0.999 ≈ within ~2.5° of vertical.
+        glm::vec3 right;
+        if (std::abs(glm::dot(front, worldUp)) > 0.999f) {
+            right = glm::vec3(1.0f, 0.0f, 0.0f);
+        } else {
+            right = glm::normalize(glm::cross(front, worldUp));
+        }
+        const glm::vec3 up = glm::normalize(glm::cross(right, front));
+        const glm::vec3 muzzle =
+            origin
+            + right * kMuzzleOffsetCameraSpace.x
+            + up    * kMuzzleOffsetCameraSpace.y
+            + front * kMuzzleOffsetCameraSpace.z;
+
+        // Aim the visual bolt at the crosshair point — find the
+        // logical projectile's first impact within max range, and
+        // use that as the visual endpoint. If no hit (sky shot),
+        // the bolt streaks to the max-lifetime point in the air.
+        // This makes the bolt appear to converge from the muzzle to
+        // where you aimed, hiding the small parallax between the
+        // muzzle and the crosshair.
+        const float reachM = kPortalProjSpeed_m_per_s * kPortalProjMaxLifetime;
+        auto aimHit = Raycast::CastRay(origin, front, reachM);
+        const glm::vec3 aimPoint = aimHit.has_value()
+            ? aimHit->hitPoint
+            : (origin + front * reachM);
+        Render::g_portalParticleSystem.EmitProjectile(muzzle, aimPoint, isOrange);
+
+        // Play the real Source @fire1 animation — 15-frame, 0.625s
+        // skeletal clip from v_portalgun.mdl (the prongs spin out and
+        // back). Returns to @idle automatically when done.
+        Render::g_portalGunViewmodel.OnFire();
+    }
+
+    void ClientPlayerController::UpdatePendingPortalProjectiles(float deltaTime) {
+        if (m_pendingPortalProjectiles.empty()) return;
+
+        const float segmentDist = kPortalProjSpeed_m_per_s * deltaTime;
+        auto it = m_pendingPortalProjectiles.begin();
+        while (it != m_pendingPortalProjectiles.end()) {
+            PendingPortalProjectile& p = *it;
+            p.age += deltaTime;
+            if (p.age > kPortalProjMaxLifetime) {
+                it = m_pendingPortalProjectiles.erase(it);
+                continue;
+            }
+
+            // Sweep one short segment per frame using the shared block
+            // raycast (same one the look-aim uses, just stepped forward
+            // from the projectile's current position).
+            auto hit = Raycast::CastRay(p.currentPos, p.direction, segmentDist);
+            if (hit.has_value()) {
+                // altInteract=true → blue portal (matches LMB semantics).
+                SendUseItemOn(*hit, p.hand, /*altInteract=*/!p.isOrange);
+                it = m_pendingPortalProjectiles.erase(it);
+                continue;
+            }
+
+            p.currentPos += p.direction * segmentDist;
+            ++it;
+        }
+    }
+#endif
 
     void ClientPlayerController::MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos) {
         if (!Client::g_clientChunkManager) {

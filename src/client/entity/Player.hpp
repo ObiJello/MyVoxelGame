@@ -66,6 +66,12 @@ namespace Game {
         
         // === Raycast Cache ===
         std::optional<RaycastHit> lastBlockHit;  // Cached result from per-frame raycast
+        // Last camera-space forward vector — refreshed every frame by
+        // UpdateRaycast(camera). Use this instead of yaw/pitch fields
+        // when you need the live look direction; the yaw/pitch members
+        // are stale because mouse-look writes camera.yaw/pitch directly
+        // and only syncs back at teleport-style events.
+        glm::vec3 lookDir{0.0f, 0.0f, 1.0f};
         // TODO: Add entity hit cache when entity system is implemented
         // std::optional<EntityHit> lastEntityHit;
         

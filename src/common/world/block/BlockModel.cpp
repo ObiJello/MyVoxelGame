@@ -3,6 +3,8 @@
 #include "../../core/Log.hpp"
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <unordered_set>
 #ifdef __APPLE__
 #include <unistd.h>
 #endif
@@ -181,10 +183,47 @@ namespace Game {
             // else: result stays as a fresh empty BlockModel (no geometry, no textures)
         }
 
-        // Merge this JSON's textures (child overrides parent)
+        // Merge this JSON's textures (child overrides parent).
+        //
+        // Two valid forms in MC's modern model schema:
+        //   1. Bare string:   "all": "minecraft:block/stone"
+        //   2. Object form:   "all": { "force_translucent": true,
+        //                              "sprite": "minecraft:block/glass" }
+        // The object form (used by glass.json, ice.json, etc.) lets MC mark a
+        // texture as needing the translucent render path independent of the
+        // block's `gui_light` field. The actual texture reference lives in
+        // the inner `sprite` key. We extract that here; `force_translucent`
+        // itself is captured into BlockModel.translucentTextureRefs so the
+        // mesher can route those faces through the translucent pass.
         if (j.contains("textures")) {
             for (const auto& [key, value] : j["textures"].items()) {
-                std::string texPath = value.get<std::string>();
+                std::string texPath;
+                if (value.is_string()) {
+                    texPath = value.get<std::string>();
+                } else if (value.is_object()) {
+                    // Modern MC object form. Required field: "sprite".
+                    auto spriteIt = value.find("sprite");
+                    if (spriteIt == value.end() || !spriteIt->is_string()) {
+                        // Malformed entry — skip silently rather than throw
+                        // (one bad texture shouldn't kill the whole model).
+                        continue;
+                    }
+                    texPath = spriteIt->get<std::string>();
+                    // Optional: force_translucent flag. MC uses this on glass
+                    // and similar to bypass the normal opacity classification
+                    // and route the face through the translucent render layer
+                    // even when the texture's alpha would otherwise look
+                    // opaque to the atlas builder. We surface it by tagging
+                    // the texture KEY so the mesher / model classifier can
+                    // consult it later.
+                    auto ftIt = value.find("force_translucent");
+                    if (ftIt != value.end() && ftIt->is_boolean() && ftIt->get<bool>()) {
+                        result.translucentTextureRefs.insert(key);
+                    }
+                } else {
+                    // Number / array / null → skip (no valid form).
+                    continue;
+                }
 
                 // **CANONICALIZATION**: Strip "minecraft:" namespace prefix to match atlas keys
                 // "minecraft:block/stone" -> "block/stone"
@@ -452,11 +491,59 @@ namespace Game {
             return it->second;
         }
 
-        // Model not found, return default
-        static bool loggedMissing = false;
-        if (!loggedMissing) {
-            Log::Debug("Model '%s' not found, using default cube model", name.c_str());
-            loggedMissing = true;
+        // ── Model not found — falling back to s_defaultModel (a stone cube). ──
+        // Track every UNIQUE missing model name and append it to a text file
+        // the user can audit. Without this, blocks with no model silently
+        // render as stone cubes in-world and we have no idea which blocks
+        // need attention.
+        //
+        // File: ./missing_block_models.txt (relative to the cwd the game was
+        // launched from). One name per line; the file is APPENDED to as new
+        // names are discovered, so it grows naturally as the user explores
+        // chunks containing blocks we haven't modelled yet. Existing lines
+        // are preserved across runs so you can collect a master list over
+        // multiple sessions.
+        //
+        // Thread-safety: this gets hit from chunk-mesher worker threads, so
+        // both the seen-set and the file write are mutex-guarded. The set
+        // dedupes BEFORE touching the file, so the per-call cost after the
+        // first occurrence is just a hash lookup + mutex.
+        {
+            static std::unordered_set<std::string> s_missingSeen;
+            static std::mutex                      s_missingMutex;
+
+            std::lock_guard<std::mutex> lock(s_missingMutex);
+            if (s_missingSeen.insert(name).second) {
+                // First time we've seen this name — write it out.
+                const std::filesystem::path outPath = "missing_block_models.txt";
+                std::error_code              ec;
+                const std::filesystem::path  absPath = std::filesystem::absolute(outPath, ec);
+
+                std::ofstream out(outPath, std::ios::app);
+                if (out) {
+                    out << name << '\n';
+                    // Tell the user where the file lives the very first time
+                    // we write to it, so they can find the audit list.
+                    static bool s_announced = false;
+                    if (!s_announced) {
+                        s_announced = true;
+                        Log::Info("[BlockModel] Tracking missing models in %s "
+                                  "(first miss: '%s'). Each unique block model "
+                                  "name that falls back to the stone cube is "
+                                  "appended to that file.",
+                                  absPath.string().c_str(), name.c_str());
+                    }
+                } else {
+                    // File-open failure shouldn't be fatal — log once and move on.
+                    static bool s_warnedOpenFail = false;
+                    if (!s_warnedOpenFail) {
+                        s_warnedOpenFail = true;
+                        Log::Warning("[BlockModel] Could not open %s for append; "
+                                     "missing-model audit list will be lost.",
+                                     absPath.string().c_str());
+                    }
+                }
+            }
         }
 
         return s_defaultModel;

@@ -39,7 +39,7 @@ namespace Game {
                                  int& localX, int& localZ);
 
         // Load chunk NBT from region file
-        static World::NBTTagPtr LoadChunkNBT(Math::ChunkPos pos, const std::string& worldPath);
+        static ::World::NBTTagPtr LoadChunkNBT(Math::ChunkPos pos, const std::string& worldPath);
     };
 
 } // namespace Game

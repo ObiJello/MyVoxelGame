@@ -112,6 +112,14 @@ namespace Game {
         std::map<std::string, std::string> textures;          // Texture variable definitions
         std::vector<Element> elements;                         // List of cuboid elements
         GuiDisplay guiDisplay;                                 // display.gui transform for inventory rendering
+        // Texture KEYS that MC marked `force_translucent: true` in the modern
+        // object-form texture entry: `"all": {"force_translucent": true,
+        // "sprite": "minecraft:block/glass"}`. Surfaces that resolve to one of
+        // these keys must be routed through the translucent render layer
+        // regardless of the texture's actual alpha distribution. The mesher
+        // can consult this set when deciding which pass a face belongs in.
+        // Empty for the vast majority of blocks (no perf cost).
+        std::set<std::string> translucentTextureRefs;
 
         BlockModel() = default;
 

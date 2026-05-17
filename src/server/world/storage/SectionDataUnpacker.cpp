@@ -117,8 +117,53 @@ namespace Game {
             s_nameToBlockId["minecraft:void_air"] = BlockID::Air;
             s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
 
-            // Specific block state overrides
+            // ── Specific block-state overrides ──────────────────────────────
+            // MC's `BlockState.toString()` shape is `minecraft:<name>{p1:v1,p2:v2}`,
+            // alpha-sorted by property name. Our `BlockState::GetStateKey`
+            // (SectionDataUnpacker.hpp) emits the same canonical form, so
+            // these keys match what ResolveBlockState will hash on chunk load.
+            //
+            // For each state-driven block we route the bare lookup at its
+            // DEFAULT state (handled by s_nameToBlockId fall-through) and
+            // explicit non-default states to their variant BlockIDs declared
+            // in Blocks.hpp's manual section.
+
             s_stateToBlockId["minecraft:grass_block{snowy:true}"] = BlockID::SnowGrass;
+
+            // Double-tall plants. Property: `half=upper|lower`
+            // (BlockStateProperties.DOUBLE_BLOCK_HALF). Lower is MC's default.
+            // The bare BlockID handles `half=lower`; the explicit
+            // `{half:upper}` key dispatches to the *_top variant.
+            s_stateToBlockId["minecraft:lilac{half:upper}"]         = BlockID::LilacTop;
+            s_stateToBlockId["minecraft:peony{half:upper}"]         = BlockID::PeonyTop;
+            s_stateToBlockId["minecraft:rose_bush{half:upper}"]     = BlockID::RoseBushTop;
+            s_stateToBlockId["minecraft:large_fern{half:upper}"]    = BlockID::LargeFernTop;
+            s_stateToBlockId["minecraft:tall_seagrass{half:upper}"] = BlockID::TallSeagrassTop;
+            s_stateToBlockId["minecraft:tall_grass{half:upper}"]    = BlockID::TallGrassTop;
+
+            // Bee nest — only honey_level=5 visually differs from empty
+            // (BlockModelGenerators.java:797 dispatches honey_level=5 to
+            // _honey, all other levels to _empty). Bare BlockID covers 0..4.
+            s_stateToBlockId["minecraft:bee_nest{honey_level:5}"]   = BlockID::BeeNestHoney;
+
+            // Leaf litter — segment_amount=1..4 (BlockStateProperties.java:165).
+            // Bare BlockID = segment 1. Add explicit keys for segments 2..4.
+            s_stateToBlockId["minecraft:leaf_litter{segment_amount:2}"] = BlockID::LeafLitter2;
+            s_stateToBlockId["minecraft:leaf_litter{segment_amount:3}"] = BlockID::LeafLitter3;
+            s_stateToBlockId["minecraft:leaf_litter{segment_amount:4}"] = BlockID::LeafLitter4;
+
+            // Wildflowers — same segment_amount property as leaf litter.
+            s_stateToBlockId["minecraft:wildflowers{segment_amount:2}"] = BlockID::Wildflowers2;
+            s_stateToBlockId["minecraft:wildflowers{segment_amount:3}"] = BlockID::Wildflowers3;
+            s_stateToBlockId["minecraft:wildflowers{segment_amount:4}"] = BlockID::Wildflowers4;
+
+            // Pink petals — DIFFERENT property name (`flower_amount`,
+            // BlockStateProperties.java:164 FLOWER_AMOUNT). Same 1..4 shape
+            // as leaf_litter/wildflowers but the NBT key is different, so
+            // these need their own state-key entries.
+            s_stateToBlockId["minecraft:pink_petals{flower_amount:2}"] = BlockID::PinkPetals2;
+            s_stateToBlockId["minecraft:pink_petals{flower_amount:3}"] = BlockID::PinkPetals3;
+            s_stateToBlockId["minecraft:pink_petals{flower_amount:4}"] = BlockID::PinkPetals4;
 
             // Log statistics
             Log::Info("BlockStateRegistry initialized with %zu base blocks and %zu specific states",
@@ -187,13 +232,13 @@ namespace Game {
     }
 
     // SectionDataUnpacker implementation
-    bool SectionDataUnpacker::UnpackChunkSections(const World::NBTTagPtr& chunkNBT, Chunk& chunk) {
+    bool SectionDataUnpacker::UnpackChunkSections(const ::World::NBTTagPtr& chunkNBT, Chunk& chunk) {
         if (!chunkNBT) {
             Log::Error("Null chunk NBT passed to UnpackChunkSections");
             return false;
         }
 
-        auto rootCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(chunkNBT);
+        auto rootCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(chunkNBT);
         if (!rootCompound) {
             Log::Error("Chunk NBT root is not a compound tag");
             return false;
@@ -203,12 +248,12 @@ namespace Game {
         BlockStateRegistry::Initialize();
 
         // Get the Level compound (pre-1.18) or look for sections at root level (1.18+)
-        World::NBTTagPtr sectionsTag = nullptr;
+        ::World::NBTTagPtr sectionsTag = nullptr;
         auto levelTag = rootCompound->GetTag("Level");
 
         if (levelTag) {
             // Pre-1.18 format: sections are in Level compound
-            auto levelCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(levelTag);
+            auto levelCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(levelTag);
             if (levelCompound) {
                 sectionsTag = levelCompound->GetTag("sections");
             }
@@ -222,7 +267,7 @@ namespace Game {
             return false;
         }
 
-        auto sectionsList = std::dynamic_pointer_cast<World::NBTTagList>(sectionsTag);
+        auto sectionsList = std::dynamic_pointer_cast<::World::NBTTagList>(sectionsTag);
         if (!sectionsList) {
             Log::Error("Sections tag is not a list");
             return false;
@@ -235,7 +280,7 @@ namespace Game {
 
         // Process each section
         for (const auto& sectionTagPtr : sectionsList->value) {
-            auto sectionCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(sectionTagPtr);
+            auto sectionCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(sectionTagPtr);
             if (!sectionCompound) {
                 Log::Warning("Section is not a compound tag, skipping");
                 continue;
@@ -260,9 +305,9 @@ namespace Game {
         return successfulSections > 0;
     }
 
-    bool SectionDataUnpacker::UnpackSection(const World::NBTTagPtr& sectionNBT,
+    bool SectionDataUnpacker::UnpackSection(const ::World::NBTTagPtr& sectionNBT,
                                            Chunk& chunk, int sectionY) {
-        auto sectionCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(sectionNBT);
+        auto sectionCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(sectionNBT);
         if (!sectionCompound) {
             return false;
         }
@@ -274,7 +319,7 @@ namespace Game {
             return true; // Empty section is valid, just fill with air
         }
 
-        auto blockStatesCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(blockStatesTag);
+        auto blockStatesCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(blockStatesTag);
         if (!blockStatesCompound) {
             Log::Error("block_states is not a compound in section Y=%d", sectionY);
             return false;
@@ -331,7 +376,7 @@ namespace Game {
             return false;
         }
 
-        auto dataArray = std::dynamic_pointer_cast<World::NBTTagLongArray>(dataTag);
+        auto dataArray = std::dynamic_pointer_cast<::World::NBTTagLongArray>(dataTag);
         if (!dataArray) {
             Log::Error("Data is not a long array in block_states for section Y=%d", sectionY);
             return false;
@@ -350,10 +395,10 @@ namespace Game {
         return UnpackBlockData(packedData, palette, chunk, sectionY);
     }
 
-    std::vector<BlockState> SectionDataUnpacker::ParsePalette(const World::NBTTagPtr& paletteList) {
+    std::vector<BlockState> SectionDataUnpacker::ParsePalette(const ::World::NBTTagPtr& paletteList) {
         std::vector<BlockState> palette;
 
-        auto paletteListTag = std::dynamic_pointer_cast<World::NBTTagList>(paletteList);
+        auto paletteListTag = std::dynamic_pointer_cast<::World::NBTTagList>(paletteList);
         if (!paletteListTag) {
             Log::Error("Palette is not a list tag");
             return palette;
@@ -362,7 +407,7 @@ namespace Game {
         palette.reserve(paletteListTag->value.size());
 
         for (const auto& entryPtr : paletteListTag->value) {
-            auto entryCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(entryPtr);
+            auto entryCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(entryPtr);
             if (!entryCompound) {
                 Log::Warning("Palette entry is not a compound, skipping");
                 continue;
@@ -375,10 +420,10 @@ namespace Game {
             std::unordered_map<std::string, std::string> properties;
             auto propertiesTag = entryCompound->GetTag("Properties");
             if (propertiesTag) {
-                auto propertiesCompound = std::dynamic_pointer_cast<World::NBTTagCompound>(propertiesTag);
+                auto propertiesCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(propertiesTag);
                 if (propertiesCompound) {
                     for (const auto& [propName, propTag] : propertiesCompound->value) {
-                        auto stringTag = std::dynamic_pointer_cast<World::NBTTagString>(propTag);
+                        auto stringTag = std::dynamic_pointer_cast<::World::NBTTagString>(propTag);
                         if (stringTag) {
                             properties[propName] = stringTag->value;
                         }

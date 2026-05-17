@@ -1,6 +1,7 @@
 // File: src/client/network/ClientPacketHandler.hpp
 #pragma once
 
+#include "common/core/Features.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "common/network/IPacketListener.hpp"
 #include <memory>
@@ -46,6 +47,12 @@ namespace Client {
         void onInventoryFullS2C(const Network::InventoryFullS2CPacket& packet) override { handleInventoryFull(packet); }
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
         void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
+#if ENABLE_PORTAL_GUN
+        void onPortalSetS2C(const Network::PortalSetS2CPacket& packet) override    { handlePortalSet(packet); }
+        void onPortalRemoveS2C(const Network::PortalRemoveS2CPacket& packet) override { handlePortalRemove(packet); }
+        void onPortalTeleportFlashS2C(const Network::PortalTeleportFlashS2CPacket& packet) override { handlePortalTeleportFlash(packet); }
+        void onPortalFizzleS2C(const Network::PortalFizzleS2CPacket& packet) override { handlePortalFizzle(packet); }
+#endif
         void onSetChunkCacheRadiusS2C(int viewDistance) override { handleSetChunkCacheRadius(viewDistance); }
 
         // ========================================================================
@@ -92,6 +99,15 @@ namespace Client {
         void handleInventoryFull(const Network::InventoryFullS2CPacket& packet);
         void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
         void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
+
+#if ENABLE_PORTAL_GUN
+        // Portal gun (server-broadcast pair state). Forwards into
+        // ClientPortalManager — see client/portal/ClientPortalManager.hpp.
+        void handlePortalSet(const Network::PortalSetS2CPacket& packet);
+        void handlePortalRemove(const Network::PortalRemoveS2CPacket& packet);
+        void handlePortalTeleportFlash(const Network::PortalTeleportFlashS2CPacket& packet);
+        void handlePortalFizzle(const Network::PortalFizzleS2CPacket& packet);
+#endif
 
         // View distance
         void handleSetChunkCacheRadius(int viewDistance);

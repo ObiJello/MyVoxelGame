@@ -13,7 +13,26 @@ namespace Render {
         glm::vec3 position{ 0.0f, 64.0f, 0.0f }; // This will be set by PlayerController
         float yaw   = -90.0f;  // Facing down –Z by default
         float pitch =   0.0f;
+        float roll  =   0.0f;  // Camera roll around forward axis (degrees).
+                               // Always 0 for the player's real camera.
+                               // Set non-zero by the portal renderer when the
+                               // virtual camera goes through a portal pair
+                               // whose source/destination orientations differ
+                               // (e.g. floor↔wall) — the camera basis must
+                               // tilt to match the rotated "up" through the
+                               // portal pair. Without it, lookAt's world-Y
+                               // up would silently drop the roll component.
         float fov   =  70.0f;  // Degrees
+
+        // Optional explicit view-matrix override. When set, GetViewMatrix()
+        // returns this matrix verbatim instead of building one from
+        // yaw/pitch/roll. Used by the portal renderer's virtual camera —
+        // yaw/pitch decomposition is unstable for near-vertical forward
+        // directions (atan2 of tiny near-zero components swings wildly),
+        // so the portal renderer composes the view directly from the
+        // src→dst transform and stores it here.
+        bool      hasViewOverride = false;
+        glm::mat4 viewOverride    {1.0f};
 
         // Movement settings (not used when physics is enabled)
         float moveSpeed      =  10.0f;  // units per second
@@ -27,6 +46,7 @@ namespace Render {
 
         // Returns a view matrix using glm::lookAt
         glm::mat4 GetViewMatrix() const {
+            if (hasViewOverride) return viewOverride;
             glm::vec3 front;
             front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
             front.y = sin(glm::radians(pitch));
@@ -34,6 +54,15 @@ namespace Render {
             glm::vec3 dir = glm::normalize(front);
             glm::vec3 right = glm::normalize(glm::cross(dir, {0.0f, 1.0f, 0.0f}));
             glm::vec3 up    = glm::normalize(glm::cross(right, dir));
+            if (roll != 0.0f) {
+                const float r  = glm::radians(roll);
+                const float cs = std::cos(r);
+                const float sn = std::sin(r);
+                const glm::vec3 newUp    =  cs * up    + sn * right;
+                const glm::vec3 newRight = -sn * up    + cs * right;
+                up    = newUp;
+                right = newRight;
+            }
             return glm::lookAt(position, position + dir, up);
         }
 

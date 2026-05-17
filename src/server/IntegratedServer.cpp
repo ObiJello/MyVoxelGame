@@ -24,6 +24,10 @@
 #include "world/MyTerrainGenerator.hpp"
 #include "world/storage/SectionDataUnpacker.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/core/Features.hpp"
+#if ENABLE_PORTAL_GUN
+#include "portal/PortalRegistry.hpp"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -428,6 +432,13 @@ namespace Server {
         // NOTE: PlayerSession is now ticked via m_sessionManager->Tick() at line 384
         // No need to tick it directly here anymore
 
+#if ENABLE_PORTAL_GUN
+        // Portal gun: per-tick crossing detection. Runs AFTER player tick so
+        // the registry sees post-physics positions. Cheap when no portals
+        // are placed (early-outs in PortalRegistry::Tick).
+        Game::Portal::ServerRegistry().Tick(this);
+#endif
+
         // === 2. SESSION-DRIVEN CHUNK LOADING (Minecraft-style) ===
         // Process watch set changes: request loading for new chunks entering view
         ProcessWatchSetChanges();
@@ -695,8 +706,16 @@ namespace Server {
             packet.worldZ = worldZ;
             packet.newBlockId = blockId;
             SendPacketToClient(std::move(packet));
-            
-            Log::Debug("Applied block change at (%d, %d, %d): %d", 
+
+#if ENABLE_PORTAL_GUN
+            // Remove any portal whose wall blocks were just modified —
+            // breaking either of the two wall blocks behind a portal
+            // destroys it.
+            Game::Portal::ServerRegistry().OnBlockChanged(
+                glm::ivec3(worldX, worldY, worldZ));
+#endif
+
+            Log::Debug("Applied block change at (%d, %d, %d): %d",
                       worldX, worldY, worldZ, static_cast<int>(blockId));
         } else {
             Log::Warning("Failed to apply block change at (%d, %d, %d)", worldX, worldY, worldZ);
@@ -841,6 +860,13 @@ namespace Server {
                 Log::Info("[IntegratedServer] Broadcast PlayerInfo ADD for '%s' (ID: %u)",
                           playerName.c_str(), playerId);
             }
+
+#if ENABLE_PORTAL_GUN
+            // Catch the new client up to every currently active portal so
+            // they render immediately rather than waiting for someone to
+            // re-fire. No-op when no portals exist.
+            Game::Portal::ServerRegistry().SyncToClient(connection.get());
+#endif
         } else {
             Log::Error("[IntegratedServer] Failed to retrieve session after OnPlayerJoin for player %u", playerId);
         }

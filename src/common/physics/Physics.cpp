@@ -19,6 +19,11 @@ namespace Game {
         return blockAccess->GetBlock(x, y, z);
     }
 
+    namespace { PortalPassthroughFn g_portalPassthrough = nullptr; }
+    void SetPortalPassthroughFn(PortalPassthroughFn fn) {
+        g_portalPassthrough = fn;
+    }
+
     bool PhysicsContext::IsBlockSolid(int x, int y, int z) const {
         if (!blockAccess) {
             return false;
@@ -203,7 +208,13 @@ namespace Game {
             // 4. Move with collision
             glm::vec3 movement = physics.waterVelocity * deltaTime;
 
-            // Vertical collision
+            // Vertical collision — snap to collision boundary (mirrors
+            // MC's Entity.collide()/Shapes.collide which return the
+            // exact maximum-allowed movement). Without snapping, the
+            // player would stop at the pre-frame Y, leaving them
+            // floating slightly above the floor; the next ~5 frames of
+            // gravity would drift them down — visible as a "land,
+            // stall, drift" stutter.
             glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.y = newPosition.y;
@@ -211,6 +222,19 @@ namespace Game {
                     physics.isOnGround = false;
                 }
             } else {
+                float lo = newPosition.y;        // colliding endpoint
+                float hi = physics.position.y;   // last frame's resting Y (assumed safe)
+                glm::vec3 testPos = physics.position;
+                for (int i = 0; i < 10; ++i) {   // 10 iter ≈ 1024× precision
+                    const float mid = (lo + hi) * 0.5f;
+                    testPos.y = mid;
+                    if (CheckCollision(testPos, physics, context)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                physics.position.y = hi;
                 if (movement.y < 0.0f) {
                     physics.isOnGround = true;
                     physics.waterVelocity.y = 0.0f;
@@ -274,10 +298,21 @@ namespace Game {
                 horizontalMovement = glm::normalize(horizontalMovement) * speed;
             }
 
+            // Add residual horizontal velocity (set by portal teleports
+            // when src=floor/ceiling and dst=wall — the player's vertical
+            // fall velocity gets rotated into horizontal exit velocity).
+            // Without this the velocity field is ignored and the player
+            // just stands at the wall portal exit.
+            horizontalMovement.x += physics.velocity.x;
+            horizontalMovement.z += physics.velocity.z;
+
             glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
             glm::vec3 movement = totalMovement * deltaTime;
 
-            // Vertical collision
+            // Vertical collision — snap to collision boundary (mirrors
+            // MC's Entity.collide()/Shapes.collide). See the matching
+            // comment in the water-physics branch above for the bug
+            // this prevents.
             glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.y = newPosition.y;
@@ -285,6 +320,19 @@ namespace Game {
                     physics.isOnGround = false;
                 }
             } else {
+                float lo = newPosition.y;
+                float hi = physics.position.y;
+                glm::vec3 testPos = physics.position;
+                for (int i = 0; i < 10; ++i) {
+                    const float mid = (lo + hi) * 0.5f;
+                    testPos.y = mid;
+                    if (CheckCollision(testPos, physics, context)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                physics.position.y = hi;
                 if (movement.y < 0.0f) {
                     physics.isOnGround = true;
                     physics.velocity.y = 0.0f;
@@ -320,11 +368,30 @@ namespace Game {
             newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.x = newPosition.x;
+            } else {
+                // Wall collision — kill residual horizontal velocity in
+                // the blocked axis so the player doesn't keep "pushing"
+                // into the wall after hitting one.
+                physics.velocity.x = 0.0f;
             }
 
             newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.z = newPosition.z;
+            } else {
+                physics.velocity.z = 0.0f;
+            }
+
+            // Decay residual horizontal velocity ONLY when on ground.
+            // In-air motion keeps full momentum (Portal-style flight
+            // through the air after a wall-portal exit). On ground,
+            // friction ≈ 0.83 per 20-TPS tick (doubled from MC's 0.91:
+            // 0.91² ≈ 0.83). Scaled to per-frame via the dt exponent.
+            if (physics.isOnGround) {
+                const float frictionFactor =
+                    std::pow(0.83f, deltaTime * 20.0f);
+                physics.velocity.x *= frictionFactor;
+                physics.velocity.z *= frictionFactor;
             }
         }
     }
@@ -358,6 +425,18 @@ namespace Game {
                         );
 
                         if (playerAABB.Intersects(blockAABB)) {
+                            // Portal-passthrough exception. The block is
+                            // solid AND the player AABB overlaps it, but
+                            // the portal hook may say "this player at
+                            // this position fits inside the portal opening
+                            // — let them through." If the player AABB
+                            // exceeds the opening laterally (e.g. they're
+                            // approaching from the side), the hook returns
+                            // false and the wall stays solid.
+                            if (g_portalPassthrough &&
+                                g_portalPassthrough(x, y, z, playerAABB)) {
+                                continue;
+                            }
                             return true; // Collision detected
                         }
                     }
@@ -388,6 +467,20 @@ namespace Game {
                 int blockZ = static_cast<int>(std::floor(cornerPosition.z));
 
                 if (context.IsBlockSolid(blockX, blockY, blockZ)) {
+                    // Portal-passthrough at this corner — degenerate AABB
+                    // collapsed to the corner point. If the corner falls
+                    // inside the portal opening (no surrounding wall
+                    // material at that position), the corner doesn't
+                    // count as support — needed so floor/ceiling portals
+                    // let the player fall through.
+                    if (g_portalPassthrough) {
+                        AABB pointAABB;
+                        pointAABB.min = cornerPosition;
+                        pointAABB.max = cornerPosition;
+                        if (g_portalPassthrough(blockX, blockY, blockZ, pointAABB)) {
+                            continue;
+                        }
+                    }
                     return true;
                 }
             }

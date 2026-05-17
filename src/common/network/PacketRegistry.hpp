@@ -1,6 +1,8 @@
 // File: src/common/network/PacketRegistry.hpp
 #pragma once
 
+#include "common/core/Features.hpp"
+
 #include <cstdint>
 #include <unordered_map>
 #include <functional>
@@ -55,6 +57,12 @@
             InventoryFullS2C       = 0x29, // Full 46-slot inventory + carried + selected hotbar slot
             InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
             InventorySetCarriedS2C = 0x2B, // Cursor item update
+#if ENABLE_PORTAL_GUN
+            PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
+            PortalRemoveS2C         = 0x2D, // Portal pair cleared
+            PortalTeleportFlashS2C  = 0x2E, // Visual flash both portals on teleport
+            PortalFizzleS2C         = 0x2F, // One-shot particle burst (placement fail / close)
+#endif
 
             // ========================================================================
             // CLIENT → SERVER PACKETS (0x3E, 0x80-0xFF)
@@ -122,6 +130,12 @@
                 case PacketId::InventoryFullS2C: return "InventoryFullS2C";
                 case PacketId::InventorySetSlotS2C: return "InventorySetSlotS2C";
                 case PacketId::InventorySetCarriedS2C: return "InventorySetCarriedS2C";
+#if ENABLE_PORTAL_GUN
+                case PacketId::PortalSetS2C:           return "PortalSetS2C";
+                case PacketId::PortalRemoveS2C:        return "PortalRemoveS2C";
+                case PacketId::PortalTeleportFlashS2C: return "PortalTeleportFlashS2C";
+                case PacketId::PortalFizzleS2C:        return "PortalFizzleS2C";
+#endif
 
                 // Client → Server
                 case PacketId::UseItemOnC2S: return "UseItemOnC2S";

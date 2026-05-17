@@ -6,6 +6,9 @@
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
+#if ENABLE_PORTAL_GUN
+#include "../portal/ClientPortalManager.hpp"
+#endif
 
 // Forward declaration: defined in src/client/renderer/gui/InventoryScreen.cpp.
 // Lets the inventory carried-item update flow without pulling the GUI header here.
@@ -198,11 +201,16 @@ namespace Client {
     void ClientPacketHandler::handleDisconnect(const std::string& reason) {
         m_stats.packetsProcessed++;
         Log::Info("[ClientPacketHandler] Disconnected: %s", reason.c_str());
-        
+
         // Clean up chunk manager
         if (m_chunkManager) {
             m_chunkManager->ClearAllChunks();
         }
+#if ENABLE_PORTAL_GUN
+        // Drop any portals carried over from this server. The next server's
+        // SyncToClient will repopulate from authoritative state.
+        GetClientPortalManager().Clear();
+#endif
     }
 
     void ClientPacketHandler::handleKeepAlive(uint64_t id) {
@@ -346,5 +354,27 @@ namespace Client {
 
         m_stats.packetsProcessed++;
     }
+
+#if ENABLE_PORTAL_GUN
+    void ClientPacketHandler::handlePortalSet(const Network::PortalSetS2CPacket& packet) {
+        GetClientPortalManager().OnPortalSet(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handlePortalRemove(const Network::PortalRemoveS2CPacket& packet) {
+        GetClientPortalManager().OnPortalRemove(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handlePortalTeleportFlash(const Network::PortalTeleportFlashS2CPacket& packet) {
+        GetClientPortalManager().OnTeleportFlash(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handlePortalFizzle(const Network::PortalFizzleS2CPacket& packet) {
+        GetClientPortalManager().OnPortalFizzle(packet);
+        m_stats.packetsProcessed++;
+    }
+#endif
 
 } // namespace Client

@@ -219,6 +219,15 @@ namespace Server {
         // TODO: std::vector<StatusEffect> m_effects;
         float m_stepHeight = 0.6f;
         float m_fallDistance = 0.0f;
+        // Set by teleport(); setPosition() bypasses the anti-cheat
+        // distance check while this is in the future. Without it, a
+        // portal teleport that fires server-side races against the
+        // client's predicted-position move packets — the client sends
+        // a move at the post-teleport location BEFORE the server's
+        // teleport() runs (or before its broadcast acks back), and
+        // setPosition() sees a 200+ block jump and rejects every one
+        // of those moves with "moved too fast".
+        std::chrono::steady_clock::time_point m_teleportGraceUntil{};
         
         // === ABILITIES & MODE ===
         GameMode m_gameMode = GameMode::SURVIVAL;

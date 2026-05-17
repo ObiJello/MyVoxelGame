@@ -6,7 +6,23 @@
 #include <array>
 #include <string>
 
+#include <glm/glm.hpp>
+
+namespace Server { class ServerPlayer; }
+
 namespace Game {
+
+    // Forward declarations only — including BlockInteraction.hpp here would
+    // also expose its `class World;` forward decl (Game::World) to every TU
+    // that pulls BlockRegistry.hpp transitively. That breaks files like
+    // SectionDataUnpacker.cpp which write unqualified `World::NBTTagPtr`
+    // expecting it to resolve to the global `::World` NBT namespace —
+    // making Game::World suddenly visible shadows the lookup. Function
+    // pointer typedefs only need declarations, so fwd-decl is enough.
+    enum class UseResult : int;
+    struct BlockHitResult;
+    struct ItemStack;
+    class World;
 
     // Render layer classification — determines which rendering pass a block uses
     enum class RenderLayer : uint8_t {
@@ -14,6 +30,27 @@ namespace Game {
         Cutout = 1,      // Alpha-test blocks (leaves, grass, flowers)
         Translucent = 2  // Blended blocks (glass, water, ice)
     };
+
+    // Empty-hand right-click on this block. Mirrors MC's
+    // `BlockBehaviour.useWithoutItem(level, player, hit)` (called from
+    // `ServerPlayerGameMode.useItemOn` line 354 when the held item returned
+    // TryEmptyHandInteraction). Examples: open door, flip lever, press button,
+    // open chest, sit in boat. Default nullptr → Pass.
+    using BlockUseWithoutItemFn = UseResult (*)(World* world, const glm::ivec3& pos,
+                                                Server::ServerPlayer* player,
+                                                const BlockHitResult& hit);
+
+    // Right-click WITH an item on this block. Mirrors MC's
+    // `BlockBehaviour.useItemOn(stack, level, player, hand, hit)` — called
+    // BEFORE Item.useOn (so blocks can claim certain item interactions, like
+    // fitting a banner into a pot). Default nullptr → Pass. Returning
+    // TryEmptyHandInteraction from here makes the dispatch fall through to
+    // useWithoutItem (i.e., "I'd react to an empty-hand click here, ignore
+    // the item").
+    using BlockUseItemOnFn = UseResult (*)(struct ItemStack& stack,
+                                           World* world, const glm::ivec3& pos,
+                                           Server::ServerPlayer* player, uint32_t hand,
+                                           const BlockHitResult& hit);
 
     struct Block {
         std::string name;
@@ -28,6 +65,10 @@ namespace Game {
         bool enableBiomeTinting = false;  // Whether this block uses biome coloring
         bool isTransparent = false;       // Whether this block has transparent parts
         RenderLayer renderLayer = RenderLayer::Opaque;
+
+        // Per-block interaction callbacks. Default nullptr → Pass.
+        BlockUseWithoutItemFn useWithoutItem = nullptr;
+        BlockUseItemOnFn      useItemOn      = nullptr;
     };
 
     class BlockRegistry {

@@ -1,0 +1,2760 @@
+[DmeElement] untitled
+  name = untitled
+  particlesystemdefinitions -> [12 elements]:
+    [DmeParticleSystemDefinition] portal_2_test
+      name = portal_2_test
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          min length = 0
+          max length = 2000
+          length fade in time = 0
+          operator fade oscillate = 0
+          animation rate = 0.1
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      operators -> [3 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator fade oscillate = 0
+          max constraint passes = 3
+          drag = 0
+          gravity = 0 0 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Alpha Fade and Decay
+          name = Alpha Fade and Decay
+          functionname = Alpha Fade and Decay
+          operator fade oscillate = 0
+          end_fade_out_time = 1
+          start_fade_out_time = 0.5
+          end_fade_in_time = 0.5
+          start_fade_in_time = 0
+          end_alpha = 0
+          start_alpha = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator fade oscillate = 0
+          scale_bias = 0.5
+          ease_in_and_out = 0
+          radius_end_scale = 0
+          radius_start_scale = 0.25
+          end_time = 1
+          start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      initializers -> [4 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          distance_bias_absolute_value = 0 0 1
+          operator fade oscillate = 0
+          bias in local system = 1
+          distance_bias = 1 1 0.1
+          speed_random_exponent = 1
+          speed_in_local_coordinate_system_max = 0 0 -10
+          speed_in_local_coordinate_system_min = 0 0 -10
+          speed_max = 0
+          speed_min = 0
+          control_point_number = 0
+          distance_max = 50
+          distance_min = 48
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator fade oscillate = 0
+          rotation_random_exponent = 1
+          rotation_offset_max = 360
+          rotation_offset_min = 0
+          rotation_initial = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator fade oscillate = 0
+          warp max = 0.6 1 1
+          warp min = 0.6 1 1
+          local coordinate space = 1
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Trail Length Random
+          name = Trail Length Random
+          functionname = Trail Length Random
+          operator fade oscillate = 0
+          length_random_exponent = 1
+          length_max = 1
+          length_min = 0.5
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator fade oscillate = 0
+          emission_duration = 0
+          emission_rate = 200
+          emission_start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      children -> [0 elements]:
+      forces -> [1 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator fade oscillate = 0
+          falloff power = 1
+          amount of force = 300
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = effects\portal_2_particle.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -10
+      bounding_box_max = 60 40 70
+      radius = 5
+      color = 255 198 0 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_2_close
+      name = portal_2_close
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          animation rate = 0.1
+          length fade in time = 0.025
+          max length = 8
+          min length = 0
+      operators -> [10 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0.25
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Lifespan Decay
+          name = Lifespan Decay
+          functionname = Lifespan Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 1
+          radius_start_scale = 0.35
+          radius_end_scale = 0
+          ease_in_and_out = 0
+          scale_bias = 0.5
+          operator fade oscillate = 0
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          operator start fadein = 999
+          operator end fadein = 999
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          oscillation field = 0
+          oscillation rate min = -0.5 -0.5 -0.5
+          oscillation rate max = 0.5 0.5 0.5
+          oscillation rate exponent = 1
+          oscillation frequency min = 0.125 0.125 0.125
+          oscillation frequency max = 2 2 2
+          oscillation frequency exponent = 1
+          proportional 0/1 = 1
+          start time min = 0
+          start time max = 0
+          start time exponent = 1
+          end time min = 1
+          end time max = 1
+          end time exponent = 1
+          start/end proportional = 1
+          absolute oscillation = 1
+        [DmeParticleOperator] Alpha Fade Out Random
+          name = Alpha Fade Out Random
+          functionname = Alpha Fade Out Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          fade out time min = 1
+          fade out time max = 2
+          fade out time exponent = 1
+          proportional 0/1 = 0
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          operator start fadein = 999
+          operator end fadein = 999
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          oscillation field = 0
+          oscillation rate min = -0.5 -0.5 -0.5
+          oscillation rate max = 0.5 0.5 0.5
+          oscillation rate exponent = 1
+          oscillation frequency min = 0.1 0.1 0.1
+          oscillation frequency max = 3 3 3
+          oscillation frequency exponent = 1
+          proportional 0/1 = 1
+          start time min = 0
+          start time max = 0
+          start time exponent = 1
+          end time min = 1
+          end time max = 1
+          end time exponent = 1
+          start/end proportional = 1
+          absolute oscillation = 1
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          operator start fadein = 999
+          operator end fadein = 999
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          oscillation field = 0
+          oscillation rate min = -50 -50 -50
+          oscillation rate max = 50 50 50
+          oscillation rate exponent = 1
+          oscillation frequency min = 0.1 0.1 0.1
+          oscillation frequency max = 1 1 1
+          oscillation frequency exponent = 1
+          proportional 0/1 = 1
+          start time min = 0.4
+          start time max = 0.5
+          start time exponent = 1
+          end time min = 1
+          end time max = 1
+          end time exponent = 1
+          start/end proportional = 1
+          absolute oscillation = 1
+        [DmeParticleOperator] Movement Dampen Relative to Control Point
+          name = Movement Dampen Relative to Control Point
+          functionname = Movement Dampen Relative to Control Point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          control_point_number = 0
+          falloff range = 24
+          dampen scale = 0.125
+        [DmeParticleOperator] Cull Random
+          name = Cull Random
+          functionname = Cull Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          cull start time = 0.5
+          cull end time = 1
+          cull time exponent = 1
+          cull percentage = 1
+        [DmeParticleOperator] Color Fade
+          name = Color Fade
+          functionname = Color Fade
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          color_fade = 0 0 0 255
+          fade_start_time = 0
+          fade_end_time = 1
+          ease_in_and_out = 1
+      initializers -> [6 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 0
+          distance_max = 50
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 10
+          speed_in_local_coordinate_system_max = 0 0 12
+          speed_random_exponent = 1
+          distance_bias = 1 1 0
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 0
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          rotation_initial = 0
+          rotation_offset_min = 0
+          rotation_offset_max = 360
+          rotation_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.6 1 1
+          warp max = 0.6 1 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Lifetime Random
+          name = Lifetime Random
+          functionname = Lifetime Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          lifetime_min = 1
+          lifetime_max = 1
+          lifetime_random_exponent = 1
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          color1 = 255 93 4 255
+          color2 = 255 93 4 255
+          tint_perc = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          alpha_min = 220
+          alpha_max = 255
+          alpha_random_exponent = 1
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_instantaneously
+          name = emit_instantaneously
+          functionname = emit_instantaneously
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          num_to_emit = 200
+          operator fade oscillate = 0
+      children -> [1 elements]:
+        [DmeParticleChild] portal_1_close_flash
+          name = portal_1_close_flash
+          child -> element:
+            [DmeParticleSystemDefinition] portal_1_close_flash
+              name = portal_1_close_flash
+              renderers -> [1 elements]:
+                [DmeParticleOperator] render_animated_sprites
+                  name = render_animated_sprites
+                  functionname = render_animated_sprites
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  animation rate = 0.1
+                  animation_fit_lifetime = 0
+                  orientation_type = 0
+                  second sequence animation rate = 0
+                  use animation rate as fps = 0
+              operators -> [5 elements]:
+                [DmeParticleOperator] Movement Basic
+                  name = Movement Basic
+                  functionname = Movement Basic
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  gravity = 0 0 0
+                  drag = 0.05
+                  max constraint passes = 3
+                [DmeParticleOperator] Lifespan Decay
+                  name = Lifespan Decay
+                  functionname = Lifespan Decay
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Radius Scale
+                  name = Radius Scale
+                  functionname = Radius Scale
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  start_time = 0
+                  end_time = 1
+                  radius_start_scale = 8
+                  radius_end_scale = 0
+                  ease_in_and_out = 0
+                  scale_bias = 0.5
+                [DmeParticleOperator] Alpha Fade Out Random
+                  name = Alpha Fade Out Random
+                  functionname = Alpha Fade Out Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  fade out time min = 0.15
+                  fade out time max = 0.15
+                  fade out time exponent = 1
+                  proportional 0/1 = 0
+                [DmeParticleOperator] Movement Dampen Relative to Control Point
+                  name = Movement Dampen Relative to Control Point
+                  functionname = Movement Dampen Relative to Control Point
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  control_point_number = 0
+                  falloff range = 4
+                  dampen scale = 0.25
+              initializers -> [5 elements]:
+                [DmeParticleOperator] Position Within Sphere Random
+                  name = Position Within Sphere Random
+                  functionname = Position Within Sphere Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  distance_min = 0
+                  distance_max = 0
+                  distance_bias = 1 1 1
+                  distance_bias_absolute_value = 0 0 0
+                  bias in local system = 0
+                  control_point_number = 0
+                  speed_min = 0
+                  speed_max = 0
+                  speed_random_exponent = 1
+                  speed_in_local_coordinate_system_min = -50 0 0
+                  speed_in_local_coordinate_system_max = -50 0 0
+                  create in model = 0
+                  randomly distribute to highest supplied control point = 0
+                [DmeParticleOperator] remap initial scalar
+                  name = remap initial scalar
+                  functionname = remap initial scalar
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  emitter lifetime start time (seconds) = -1
+                  emitter lifetime end time (seconds) = -1
+                  input field = 8
+                  input minimum = 0
+                  input maximum = 0.1
+                  output field = 3
+                  output minimum = 15
+                  output maximum = 1
+                  output is scalar of initial random range = 0
+                [DmeParticleOperator] remap initial scalar
+                  name = remap initial scalar
+                  functionname = remap initial scalar
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  emitter lifetime start time (seconds) = -1
+                  emitter lifetime end time (seconds) = -1
+                  input field = 8
+                  input minimum = 0
+                  input maximum = 0.1
+                  output field = 1
+                  output minimum = 0.25
+                  output maximum = 0.35
+                  output is scalar of initial random range = 0
+                [DmeParticleOperator] remap initial scalar
+                  name = remap initial scalar
+                  functionname = remap initial scalar
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  emitter lifetime start time (seconds) = -1
+                  emitter lifetime end time (seconds) = -1
+                  input field = 8
+                  input minimum = 0
+                  input maximum = 0.1
+                  output field = 7
+                  output minimum = 0.0125
+                  output maximum = 0.4
+                  output is scalar of initial random range = 0
+                [DmeParticleOperator] Velocity Repulse from World
+                  name = Velocity Repulse from World
+                  functionname = Velocity Repulse from World
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  minimum velocity = 0 0 0
+                  maximum velocity = 2 2 2
+                  collision group = DEBRIS
+                  control_point_number = 0
+                  per particle world collision tests = 1
+                  use radius for per particle trace length = 1
+                  offset instead of accelerate = 0
+                  offset proportional to radius 0/1 = 0
+                  trace length = 16
+              emitters -> [1 elements]:
+                [DmeParticleOperator] emit_continuously
+                  name = emit_continuously
+                  functionname = emit_continuously
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  emission_start_time = 0
+                  emission_rate = 100
+                  emission_duration = 0.1
+                  scale emission to used control points = 0
+              children -> [0 elements]:
+              forces -> [1 elements]:
+                [DmeParticleOperator] Pull towards control point
+                  name = Pull towards control point
+                  functionname = Pull towards control point
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  amount of force = 1000
+                  falloff power = 0
+                  control point number = 0
+              constraints -> [0 elements]:
+              preventnamebasedlookup = 0
+              max_particles = 1000
+              initial_particles = 0
+              material = particle\warp2_warp.vmt
+              bounding_box_control_point = 0
+              bounding_box_min = -10 -10 -10
+              bounding_box_max = 10 10 10
+              radius = 5
+              color = 255 255 255 255
+              rotation = 0
+              rotation_speed = 0
+              sequence_number = 0
+              sequence_number 1 = 0
+              group id = 0
+              maximum time step = 0.1
+              maximum sim tick rate = 0
+              minimum sim tick rate = 0
+              minimum rendered frames = 0
+              control point to disable rendering if it is the camera = -1
+          delay = 0
+      forces -> [3 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = 18000
+          falloff power = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] twist around axis
+          name = twist around axis
+          functionname = twist around axis
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0.5
+          operator end fadeout = 0.5
+          operator fade oscillate = 0
+          amount of force = -150
+          twist axis = 0 0 1
+          object local space axis 0/1 = 1
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0.6
+          operator end fadein = 0.6
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          amount of force = 500
+          falloff power = 0
+          control point number = 0
+      constraints -> [1 elements]:
+        [DmeParticleOperator] Constrain distance to control point
+          name = Constrain distance to control point
+          functionname = Constrain distance to control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          minimum distance = 2
+          maximum distance = 500
+          control point number = 0
+          offset of center = 0 0 0
+          global center point = 0
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = particle\particle_glow_03_additive.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -15
+      bounding_box_max = 60 40 15
+      radius = 5
+      color = 255 198 0 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_1_particles
+      name = portal_1_particles
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_animated_sprites
+          name = render_animated_sprites
+          functionname = render_animated_sprites
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          animation rate = 0.25
+          animation_fit_lifetime = 0
+          orientation_type = 0
+          second sequence animation rate = 0
+          use animation rate as fps = 0
+      operators -> [3 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Fade and Decay
+          name = Alpha Fade and Decay
+          functionname = Alpha Fade and Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_alpha = 0
+          end_alpha = 0
+          start_fade_in_time = 0
+          end_fade_in_time = 0.5
+          start_fade_out_time = 0.5
+          end_fade_out_time = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 1
+          radius_start_scale = 0
+          radius_end_scale = 1
+          ease_in_and_out = 0
+          scale_bias = 0.25
+          operator fade oscillate = 0
+      initializers -> [6 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 48
+          distance_max = 48
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 0
+          speed_in_local_coordinate_system_max = 0 0 0
+          speed_random_exponent = 1
+          distance_bias = 1 1 0
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.6 1 0
+          warp max = 0.6 1 0
+          operator fade oscillate = 0
+        [DmeParticleOperator] Trail Length Random
+          name = Trail Length Random
+          functionname = Trail Length Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          length_min = 0.5
+          length_max = 1
+          length_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          alpha_min = 32
+          alpha_max = 32
+          alpha_random_exponent = 1
+        [DmeParticleOperator] Radius Random
+          name = Radius Random
+          functionname = Radius Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          radius_min = 16
+          radius_max = 16
+          radius_random_exponent = 1
+        [DmeParticleOperator] Sequence Random
+          name = Sequence Random
+          functionname = Sequence Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          sequence_min = 0
+          sequence_max = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          emission_rate = 0
+          emission_duration = 0
+          operator fade oscillate = 0
+      children -> [1 elements]:
+        [DmeParticleChild] Portal_1_vacuum
+          name = Portal_1_vacuum
+          child -> element:
+            [DmeParticleSystemDefinition] Portal_1_vacuum
+              name = Portal_1_vacuum
+              renderers -> [1 elements]:
+                [DmeParticleOperator] render_animated_sprites
+                  name = render_animated_sprites
+                  functionname = render_animated_sprites
+                  operator fade oscillate = 0
+                  animation_fit_lifetime = 0
+                  orientation_type = 0
+                  animation rate = 0.1
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                  second sequence animation rate = 0
+                  use animation rate as fps = 0
+              operators -> [6 elements]:
+                [DmeParticleOperator] Movement Basic
+                  name = Movement Basic
+                  functionname = Movement Basic
+                  operator fade oscillate = 0
+                  max constraint passes = 3
+                  drag = 0
+                  gravity = 0 0 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Radius Scale
+                  name = Radius Scale
+                  functionname = Radius Scale
+                  operator fade oscillate = 0
+                  scale_bias = 0.5
+                  ease_in_and_out = 0
+                  radius_end_scale = 0.1
+                  radius_start_scale = 0.5
+                  end_time = 2
+                  start_time = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Alpha Fade In Random
+                  name = Alpha Fade In Random
+                  functionname = Alpha Fade In Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  fade in time min = 0.25
+                  fade in time max = 0.25
+                  fade in time exponent = 1
+                  proportional 0/1 = 1
+                [DmeParticleOperator] Lifespan Decay
+                  name = Lifespan Decay
+                  functionname = Lifespan Decay
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Alpha Fade Out Random
+                  name = Alpha Fade Out Random
+                  functionname = Alpha Fade Out Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  fade out time min = 0.125
+                  fade out time max = 0.125
+                  fade out time exponent = 1
+                  proportional 0/1 = 1
+                [DmeParticleOperator] Movement Dampen Relative to Control Point
+                  name = Movement Dampen Relative to Control Point
+                  functionname = Movement Dampen Relative to Control Point
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  control_point_number = 0
+                  falloff range = 128
+                  dampen scale = 0.035
+              initializers -> [7 elements]:
+                [DmeParticleOperator] Position Within Sphere Random
+                  name = Position Within Sphere Random
+                  functionname = Position Within Sphere Random
+                  distance_bias_absolute_value = 0 0 0
+                  operator fade oscillate = 0
+                  bias in local system = 1
+                  distance_bias = 1 1 0
+                  speed_random_exponent = 1
+                  speed_in_local_coordinate_system_max = 0 0 100
+                  speed_in_local_coordinate_system_min = 0 0 70
+                  speed_max = 0
+                  speed_min = 0
+                  control_point_number = 0
+                  distance_max = 100
+                  distance_min = 100
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                  create in model = 0
+                  randomly distribute to highest supplied control point = 0
+                [DmeParticleOperator] Rotation Random
+                  name = Rotation Random
+                  functionname = Rotation Random
+                  operator fade oscillate = 0
+                  rotation_random_exponent = 1
+                  rotation_offset_max = 360
+                  rotation_offset_min = 0
+                  rotation_initial = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Position Modify Warp Random
+                  name = Position Modify Warp Random
+                  functionname = Position Modify Warp Random
+                  operator fade oscillate = 0
+                  warp max = 0.6 1 1
+                  warp min = 0.6 1 1
+                  local coordinate space = 1
+                  control point number = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                  warp transition time (treats min/max as start/end sizes) = 0
+                  warp transition start time = 0
+                  reverse warp (0/1) = 0
+                [DmeParticleOperator] Position Modify Offset Random
+                  name = Position Modify Offset Random
+                  functionname = Position Modify Offset Random
+                  operator fade oscillate = 0
+                  offset in local space 0/1 = 1
+                  offset max = 0 0 32
+                  offset min = 0 0 32
+                  control_point_number = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                  offset proportional to radius 0/1 = 0
+                [DmeParticleOperator] Lifetime Random
+                  name = Lifetime Random
+                  functionname = Lifetime Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  lifetime_min = 1.5
+                  lifetime_max = 1.5
+                  lifetime_random_exponent = 1
+                [DmeParticleOperator] Color Random
+                  name = Color Random
+                  functionname = Color Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  color1 = 4 86 252 255
+                  color2 = 4 86 252 255
+                  tint_perc = 0
+                [DmeParticleOperator] Sequence Random
+                  name = Sequence Random
+                  functionname = Sequence Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  sequence_min = 0
+                  sequence_max = 15
+              emitters -> [2 elements]:
+                [DmeParticleOperator] emit_continuously
+                  name = emit_continuously
+                  functionname = emit_continuously
+                  operator fade oscillate = 5
+                  emission_duration = 0
+                  emission_rate = 25
+                  emission_start_time = 0
+                  operator end fadeout = 1
+                  operator start fadeout = 0.1
+                  operator end fadein = 0.8
+                  operator start fadein = 0
+                  scale emission to used control points = 0
+                [DmeParticleOperator] emit_continuously
+                  name = emit_continuously
+                  functionname = emit_continuously
+                  scale emission to used control points = 0
+                  emission_duration = 0
+                  emission_rate = 20
+                  emission_start_time = 0
+                  operator fade oscillate = 8.3
+                  operator end fadeout = 1
+                  operator start fadeout = 0.2
+                  operator end fadein = 0.8
+                  operator start fadein = 0
+              children -> [0 elements]:
+              forces -> [3 elements]:
+                [DmeParticleOperator] Pull towards control point
+                  name = Pull towards control point
+                  functionname = Pull towards control point
+                  operator fade oscillate = 0
+                  falloff power = 0
+                  amount of force = 400
+                  control point number = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Pull towards control point
+                  name = Pull towards control point
+                  functionname = Pull towards control point
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  amount of force = 1000
+                  falloff power = 1
+                  control point number = 0
+                [DmeParticleOperator] twist around axis
+                  name = twist around axis
+                  functionname = twist around axis
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  amount of force = -300
+                  twist axis = 0 0 1
+                  object local space axis 0/1 = 1
+              constraints -> [1 elements]:
+                [DmeParticleOperator] Collision via traces
+                  name = Collision via traces
+                  functionname = Collision via traces
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  amount of bounce = 0.2
+                  amount of slide = 0.2
+                  radius scale = 1
+                  collision group = DEBRIS
+                  brush only = 0
+              preventnamebasedlookup = 0
+              max_particles = 100
+              initial_particles = 0
+              material = particle\smoke1\dust_motes.vmt
+              bounding_box_control_point = 0
+              bounding_box_min = -60 -50 0
+              bounding_box_max = 60 50 70
+              radius = 5
+              color = 255 198 0 255
+              rotation = 0
+              rotation_speed = 0
+              sequence_number = 0
+              sequence_number 1 = 0
+              group id = 0
+              maximum time step = 0.1
+              maximum sim tick rate = 0
+              minimum sim tick rate = 0
+              minimum rendered frames = 0
+              control point to disable rendering if it is the camera = -1
+          delay = 0
+      forces -> [1 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = -200
+          falloff power = 1
+          operator fade oscillate = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = particle\fire_particle_4\fire_particle_4.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -10
+      bounding_box_max = 60 40 70
+      radius = 5
+      color = 255 255 255 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_2_particles
+      name = portal_2_particles
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          min length = 0
+          max length = 2000
+          length fade in time = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          animation rate = 0.1
+          operator fade oscillate = 0
+      operators -> [3 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Fade and Decay
+          name = Alpha Fade and Decay
+          functionname = Alpha Fade and Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_alpha = 0
+          end_alpha = 0
+          start_fade_in_time = 0
+          end_fade_in_time = 0.5
+          start_fade_out_time = 0.5
+          end_fade_out_time = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 1
+          radius_start_scale = 0.25
+          radius_end_scale = 0
+          ease_in_and_out = 0
+          scale_bias = 0.5
+          operator fade oscillate = 0
+      initializers -> [4 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 48
+          distance_max = 50
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 -10
+          speed_in_local_coordinate_system_max = 0 0 -20
+          speed_random_exponent = 1
+          distance_bias = 1 1 0
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 1
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          rotation_initial = 0
+          rotation_offset_min = 0
+          rotation_offset_max = 360
+          rotation_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.6 1 1
+          warp max = 0.6 1 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Trail Length Random
+          name = Trail Length Random
+          functionname = Trail Length Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          length_min = 0.5
+          length_max = 1
+          length_random_exponent = 1
+          operator fade oscillate = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          emission_rate = 0
+          emission_duration = 0
+          operator fade oscillate = 0
+      children -> [1 elements]:
+        [DmeParticleChild] portal_2_vacuum
+          name = portal_2_vacuum
+          child -> element:
+            [DmeParticleSystemDefinition] portal_2_vacuum
+              name = portal_2_vacuum
+              renderers -> [1 elements]:
+                [DmeParticleOperator] render_animated_sprites
+                  name = render_animated_sprites
+                  functionname = render_animated_sprites
+                  use animation rate as fps = 0
+                  second sequence animation rate = 0
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  animation rate = 0.1
+                  orientation_type = 0
+                  animation_fit_lifetime = 0
+                  operator fade oscillate = 0
+              operators -> [6 elements]:
+                [DmeParticleOperator] Movement Basic
+                  name = Movement Basic
+                  functionname = Movement Basic
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  gravity = 0 0 0
+                  drag = 0
+                  max constraint passes = 3
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Radius Scale
+                  name = Radius Scale
+                  functionname = Radius Scale
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  start_time = 0
+                  end_time = 2
+                  radius_start_scale = 0.5
+                  radius_end_scale = 0.1
+                  ease_in_and_out = 0
+                  scale_bias = 0.5
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Alpha Fade In Random
+                  name = Alpha Fade In Random
+                  functionname = Alpha Fade In Random
+                  proportional 0/1 = 1
+                  fade in time exponent = 1
+                  fade in time max = 0.25
+                  fade in time min = 0.25
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Lifespan Decay
+                  name = Lifespan Decay
+                  functionname = Lifespan Decay
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Alpha Fade Out Random
+                  name = Alpha Fade Out Random
+                  functionname = Alpha Fade Out Random
+                  proportional 0/1 = 1
+                  fade out time exponent = 1
+                  fade out time max = 0.125
+                  fade out time min = 0.125
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Movement Dampen Relative to Control Point
+                  name = Movement Dampen Relative to Control Point
+                  functionname = Movement Dampen Relative to Control Point
+                  dampen scale = 0.035
+                  falloff range = 128
+                  control_point_number = 0
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+              initializers -> [7 elements]:
+                [DmeParticleOperator] Position Within Sphere Random
+                  name = Position Within Sphere Random
+                  functionname = Position Within Sphere Random
+                  randomly distribute to highest supplied control point = 0
+                  create in model = 0
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  distance_min = 100
+                  distance_max = 100
+                  control_point_number = 0
+                  speed_min = 0
+                  speed_max = 0
+                  speed_in_local_coordinate_system_min = 0 0 70
+                  speed_in_local_coordinate_system_max = 0 0 100
+                  speed_random_exponent = 1
+                  distance_bias = 1 1 0
+                  bias in local system = 1
+                  operator fade oscillate = 0
+                  distance_bias_absolute_value = 0 0 0
+                [DmeParticleOperator] Rotation Random
+                  name = Rotation Random
+                  functionname = Rotation Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  rotation_initial = 0
+                  rotation_offset_min = 0
+                  rotation_offset_max = 360
+                  rotation_random_exponent = 1
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Position Modify Warp Random
+                  name = Position Modify Warp Random
+                  functionname = Position Modify Warp Random
+                  reverse warp (0/1) = 0
+                  warp transition start time = 0
+                  warp transition time (treats min/max as start/end sizes) = 0
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  control point number = 0
+                  local coordinate space = 1
+                  warp min = 0.6 1 1
+                  warp max = 0.6 1 1
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Position Modify Offset Random
+                  name = Position Modify Offset Random
+                  functionname = Position Modify Offset Random
+                  offset proportional to radius 0/1 = 0
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  control_point_number = 0
+                  offset min = 0 0 32
+                  offset max = 0 0 32
+                  offset in local space 0/1 = 1
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Lifetime Random
+                  name = Lifetime Random
+                  functionname = Lifetime Random
+                  lifetime_random_exponent = 1
+                  lifetime_max = 1.5
+                  lifetime_min = 1.5
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Color Random
+                  name = Color Random
+                  functionname = Color Random
+                  tint_perc = 0
+                  color2 = 255 93 4 255
+                  color1 = 255 93 4 255
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] Sequence Random
+                  name = Sequence Random
+                  functionname = Sequence Random
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  operator fade oscillate = 0
+                  sequence_min = 0
+                  sequence_max = 15
+              emitters -> [2 elements]:
+                [DmeParticleOperator] emit_continuously
+                  name = emit_continuously
+                  functionname = emit_continuously
+                  scale emission to used control points = 0
+                  operator start fadein = 0
+                  operator end fadein = 0.8
+                  operator start fadeout = 0.1
+                  operator end fadeout = 1
+                  emission_start_time = 0
+                  emission_rate = 25
+                  emission_duration = 0
+                  operator fade oscillate = 5
+                [DmeParticleOperator] emit_continuously
+                  name = emit_continuously
+                  functionname = emit_continuously
+                  operator start fadein = 0
+                  operator end fadein = 0.8
+                  operator start fadeout = 0.2
+                  operator end fadeout = 1
+                  operator fade oscillate = 8.3
+                  emission_start_time = 0
+                  emission_rate = 20
+                  emission_duration = 0
+                  scale emission to used control points = 0
+              children -> [0 elements]:
+              forces -> [3 elements]:
+                [DmeParticleOperator] Pull towards control point
+                  name = Pull towards control point
+                  functionname = Pull towards control point
+                  operator start fadein = 0
+                  operator end fadein = 0
+                  operator start fadeout = 0
+                  operator end fadeout = 0
+                  control point number = 0
+                  amount of force = 400
+                  falloff power = 0
+                  operator fade oscillate = 0
+                [DmeParticleOperator] Pull towards control point
+                  name = Pull towards control point
+                  functionname = Pull towards control point
+                  control point number = 0
+                  falloff power = 1
+                  amount of force = 1000
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                [DmeParticleOperator] twist around axis
+                  name = twist around axis
+                  functionname = twist around axis
+                  object local space axis 0/1 = 1
+                  twist axis = 0 0 1
+                  amount of force = 300
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+              constraints -> [1 elements]:
+                [DmeParticleOperator] Collision via traces
+                  name = Collision via traces
+                  functionname = Collision via traces
+                  collision group = DEBRIS
+                  radius scale = 1
+                  amount of slide = 0.2
+                  amount of bounce = 0.2
+                  operator fade oscillate = 0
+                  operator end fadeout = 0
+                  operator start fadeout = 0
+                  operator end fadein = 0
+                  operator start fadein = 0
+                  brush only = 0
+              preventnamebasedlookup = 0
+              max_particles = 100
+              initial_particles = 0
+              material = particle\smoke1\dust_motes.vmt
+              bounding_box_control_point = 0
+              bounding_box_min = -60 -50 0
+              bounding_box_max = 60 50 70
+              radius = 5
+              color = 255 198 0 255
+              rotation = 0
+              rotation_speed = 0
+              sequence_number = 0
+              sequence_number 1 = 0
+              group id = 0
+              maximum time step = 0.1
+              maximum sim tick rate = 0
+              minimum sim tick rate = 0
+              minimum rendered frames = 0
+              control point to disable rendering if it is the camera = -1
+          delay = 0
+      forces -> [1 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = 300
+          falloff power = 1
+          operator fade oscillate = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = effects\portal_2_particle.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -10
+      bounding_box_max = 60 40 70
+      radius = 5
+      color = 255 198 0 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] Portal_1_vacuum_
+      name = Portal_1_vacuum_
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_animated_sprites
+          name = render_animated_sprites
+          functionname = render_animated_sprites
+          use animation rate as fps = 0
+          second sequence animation rate = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          animation rate = 0.1
+          orientation_type = 0
+          animation_fit_lifetime = 0
+          operator fade oscillate = 0
+      operators -> [5 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 2
+          radius_start_scale = 0.5
+          radius_end_scale = 0.1
+          ease_in_and_out = 0
+          scale_bias = 0.5
+          operator fade oscillate = 0
+        [DmeParticleOperator] Lifespan Decay
+          name = Lifespan Decay
+          functionname = Lifespan Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Fade In Random
+          name = Alpha Fade In Random
+          functionname = Alpha Fade In Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          fade in time min = 0.25
+          fade in time max = 0.25
+          fade in time exponent = 1
+          proportional 0/1 = 1
+        [DmeParticleOperator] Alpha Fade Out Random
+          name = Alpha Fade Out Random
+          functionname = Alpha Fade Out Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          fade out time min = 0.25
+          fade out time max = 0.25
+          fade out time exponent = 1
+          proportional 0/1 = 1
+      initializers -> [7 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 1
+          distance_max = 1
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 50
+          speed_in_local_coordinate_system_max = 0 0 60
+          speed_random_exponent = 1
+          distance_bias = 1 1 0
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 0
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          rotation_initial = 0
+          rotation_offset_min = 0
+          rotation_offset_max = 360
+          rotation_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.6 1 1
+          warp max = 0.6 1 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Offset Random
+          name = Position Modify Offset Random
+          functionname = Position Modify Offset Random
+          offset proportional to radius 0/1 = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control_point_number = 0
+          offset min = 50 50 50
+          offset max = -50 -50 48
+          offset in local space 0/1 = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Random
+          name = Radius Random
+          functionname = Radius Random
+          radius_random_exponent = 1
+          radius_max = 4
+          radius_min = 1
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          color1 = 4 86 252 255
+          color2 = 4 86 252 255
+          tint_perc = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          alpha_min = 32
+          alpha_max = 64
+          alpha_random_exponent = 1
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          emission_rate = 9
+          emission_duration = 0
+          operator fade oscillate = 0
+      children -> [0 elements]:
+      forces -> [2 elements]:
+        [DmeParticleOperator] random force
+          name = random force
+          functionname = random force
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          min force = -40 -40 -40
+          max force = 40 40 40
+          operator fade oscillate = 0
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = 10000
+          falloff power = 1
+          operator fade oscillate = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = particle\particle_glow_03.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -50 0
+      bounding_box_max = 60 50 70
+      radius = 5
+      color = 255 255 255 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_1_edge
+      name = portal_1_edge
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          min length = 0
+          max length = 2000
+          length fade in time = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          animation rate = 0.1
+          operator fade oscillate = 0
+      operators -> [3 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0.3
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Fade and Decay
+          name = Alpha Fade and Decay
+          functionname = Alpha Fade and Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_alpha = 0
+          end_alpha = 0
+          start_fade_in_time = 0
+          end_fade_in_time = 0.5
+          start_fade_out_time = 0.75
+          end_fade_out_time = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 1
+          radius_start_scale = 2
+          radius_end_scale = 0
+          ease_in_and_out = 0
+          scale_bias = 0.5
+          operator fade oscillate = 0
+      initializers -> [6 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 50
+          distance_max = 50
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 10
+          speed_in_local_coordinate_system_max = 0 0 -10
+          speed_random_exponent = 1
+          distance_bias = 1 1 0.07
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 1
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          rotation_initial = 0
+          rotation_offset_min = 0
+          rotation_offset_max = 360
+          rotation_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.65 1 1
+          warp max = 0.65 1 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Trail Length Random
+          name = Trail Length Random
+          functionname = Trail Length Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          length_min = 0.1
+          length_max = 0.9
+          length_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          alpha_min = 5
+          alpha_max = 50
+          alpha_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          tint_perc = 0
+          color2 = 14 116 231 255
+          color1 = 6 99 204 255
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          emission_rate = 300
+          emission_duration = 0
+          operator fade oscillate = 0
+      children -> [0 elements]:
+      forces -> [2 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = 1000
+          falloff power = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] twist around axis
+          name = twist around axis
+          functionname = twist around axis
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          amount of force = -300
+          twist axis = 0 0 1
+          object local space axis 0/1 = 1
+          operator fade oscillate = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = effects\portal_1_particle.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -50
+      bounding_box_max = 60 40 50
+      radius = 5
+      color = 255 255 255 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_2_edge
+      name = portal_2_edge
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          min length = 0
+          max length = 2000
+          length fade in time = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          animation rate = 0.1
+          operator fade oscillate = 0
+      operators -> [3 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          gravity = 0 0 0
+          drag = 0.2
+          max constraint passes = 3
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Fade and Decay
+          name = Alpha Fade and Decay
+          functionname = Alpha Fade and Decay
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_alpha = 0
+          end_alpha = 0
+          start_fade_in_time = 0
+          end_fade_in_time = 0.5
+          start_fade_out_time = 0.75
+          end_fade_out_time = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          start_time = 0
+          end_time = 1
+          radius_start_scale = 2
+          radius_end_scale = 0
+          ease_in_and_out = 0
+          scale_bias = 0.75
+          operator fade oscillate = 0
+      initializers -> [6 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          randomly distribute to highest supplied control point = 0
+          create in model = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          distance_min = 51
+          distance_max = 51
+          control_point_number = 0
+          speed_min = 0
+          speed_max = 0
+          speed_in_local_coordinate_system_min = 0 0 -10
+          speed_in_local_coordinate_system_max = 0 0 10
+          speed_random_exponent = 1
+          distance_bias = 1 1 0.07
+          bias in local system = 1
+          operator fade oscillate = 0
+          distance_bias_absolute_value = 0 0 1
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          rotation_initial = 0
+          rotation_offset_min = 0
+          rotation_offset_max = 360
+          rotation_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          reverse warp (0/1) = 0
+          warp transition start time = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          local coordinate space = 1
+          warp min = 0.6 1 1
+          warp max = 0.6 1 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Trail Length Random
+          name = Trail Length Random
+          functionname = Trail Length Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          length_min = 0.1
+          length_max = 0.75
+          length_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          alpha_min = 5
+          alpha_max = 50
+          alpha_random_exponent = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          tint_perc = 0
+          color2 = 239 129 0 255
+          color1 = 95 38 1 255
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          scale emission to used control points = 0
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          emission_start_time = 0
+          emission_rate = 400
+          emission_duration = 0
+          operator fade oscillate = 0
+      children -> [0 elements]:
+      forces -> [2 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          control point number = 0
+          amount of force = 1000
+          falloff power = 1
+          operator fade oscillate = 0
+        [DmeParticleOperator] twist around axis
+          name = twist around axis
+          functionname = twist around axis
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          amount of force = 300
+          twist axis = 0 0 1
+          object local space axis 0/1 = 1
+          operator fade oscillate = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = effects\portal_2_particle.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -50
+      bounding_box_max = 60 40 50
+      radius = 5
+      color = 255 198 0 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_1_close
+      name = portal_1_close
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_sprite_trail
+          name = render_sprite_trail
+          functionname = render_sprite_trail
+          min length = 0
+          max length = 8
+          length fade in time = 0.025
+          animation rate = 0.1
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      operators -> [9 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator fade oscillate = 0
+          max constraint passes = 3
+          drag = 0.25
+          gravity = 0 0 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Lifespan Decay
+          name = Lifespan Decay
+          functionname = Lifespan Decay
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator fade oscillate = 0
+          scale_bias = 0.5
+          ease_in_and_out = 0
+          radius_end_scale = 0
+          radius_start_scale = 0.35
+          end_time = 1
+          start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          absolute oscillation = 1
+          start/end proportional = 1
+          end time exponent = 1
+          end time max = 1
+          end time min = 1
+          start time exponent = 1
+          start time max = 0
+          start time min = 0
+          proportional 0/1 = 1
+          oscillation frequency exponent = 1
+          oscillation frequency max = 2 2 2
+          oscillation frequency min = 0.125 0.125 0.125
+          oscillation rate exponent = 1
+          oscillation rate max = 0.5 0.5 0.5
+          oscillation rate min = -0.5 -0.5 -0.5
+          oscillation field = 0
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 999
+          operator start fadein = 999
+        [DmeParticleOperator] Alpha Fade Out Random
+          name = Alpha Fade Out Random
+          functionname = Alpha Fade Out Random
+          proportional 0/1 = 0
+          fade out time exponent = 1
+          fade out time max = 2
+          fade out time min = 1
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          absolute oscillation = 1
+          start/end proportional = 1
+          end time exponent = 1
+          end time max = 1
+          end time min = 1
+          start time exponent = 1
+          start time max = 0
+          start time min = 0
+          proportional 0/1 = 1
+          oscillation frequency exponent = 1
+          oscillation frequency max = 3 3 3
+          oscillation frequency min = 0.1 0.1 0.1
+          oscillation rate exponent = 1
+          oscillation rate max = 0.5 0.5 0.5
+          oscillation rate min = -0.5 -0.5 -0.5
+          oscillation field = 0
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 999
+          operator start fadein = 999
+        [DmeParticleOperator] Oscillate Vector
+          name = Oscillate Vector
+          functionname = Oscillate Vector
+          absolute oscillation = 1
+          start/end proportional = 1
+          end time exponent = 1
+          end time max = 1
+          end time min = 1
+          start time exponent = 1
+          start time max = 0.5
+          start time min = 0.4
+          proportional 0/1 = 1
+          oscillation frequency exponent = 1
+          oscillation frequency max = 1 1 1
+          oscillation frequency min = 0.1 0.1 0.1
+          oscillation rate exponent = 1
+          oscillation rate max = 50 50 50
+          oscillation rate min = -50 -50 -50
+          oscillation field = 0
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 999
+          operator start fadein = 999
+        [DmeParticleOperator] Movement Dampen Relative to Control Point
+          name = Movement Dampen Relative to Control Point
+          functionname = Movement Dampen Relative to Control Point
+          dampen scale = 0.125
+          falloff range = 24
+          control_point_number = 0
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Cull Random
+          name = Cull Random
+          functionname = Cull Random
+          cull percentage = 1
+          cull time exponent = 1
+          cull end time = 1
+          cull start time = 0.5
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      initializers -> [6 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          distance_bias_absolute_value = 0 0 0
+          operator fade oscillate = 0
+          bias in local system = 1
+          distance_bias = 1 1 0
+          speed_random_exponent = 1
+          speed_in_local_coordinate_system_max = 0 0 12
+          speed_in_local_coordinate_system_min = 0 0 10
+          speed_max = 0
+          speed_min = 0
+          control_point_number = 0
+          distance_max = 50
+          distance_min = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          create in model = 0
+          randomly distribute to highest supplied control point = 0
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator fade oscillate = 0
+          rotation_random_exponent = 1
+          rotation_offset_max = 360
+          rotation_offset_min = 0
+          rotation_initial = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          operator fade oscillate = 0
+          warp max = 0.6 1 1
+          warp min = 0.6 1 1
+          local coordinate space = 1
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          warp transition start time = 0
+          reverse warp (0/1) = 0
+        [DmeParticleOperator] Lifetime Random
+          name = Lifetime Random
+          functionname = Lifetime Random
+          lifetime_random_exponent = 1
+          lifetime_max = 1
+          lifetime_min = 1
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          tint_perc = 0
+          color2 = 4 86 252 255
+          color1 = 4 86 252 255
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          alpha_random_exponent = 1
+          alpha_max = 255
+          alpha_min = 220
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_instantaneously
+          name = emit_instantaneously
+          functionname = emit_instantaneously
+          operator fade oscillate = 0
+          num_to_emit = 200
+          emission_start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      children -> [1 elements]:
+        [DmeParticleChild] portal_1_close_flash
+          name = portal_1_close_flash
+          child -> element:
+          delay = 0
+      forces -> [3 elements]:
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator fade oscillate = 0
+          falloff power = 1
+          amount of force = 18000
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] twist around axis
+          name = twist around axis
+          functionname = twist around axis
+          object local space axis 0/1 = 1
+          twist axis = 0 0 1
+          amount of force = -150
+          operator fade oscillate = 0
+          operator end fadeout = 0.5
+          operator start fadeout = 0.5
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          control point number = 0
+          falloff power = 0
+          amount of force = 500
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0.6
+          operator start fadein = 0.6
+      constraints -> [1 elements]:
+        [DmeParticleOperator] Constrain distance to control point
+          name = Constrain distance to control point
+          functionname = Constrain distance to control point
+          global center point = 0
+          offset of center = 0 0 0
+          control point number = 0
+          maximum distance = 500
+          minimum distance = 2
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = particle\particle_glow_03.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -40 -15
+      bounding_box_max = 60 40 15
+      radius = 5
+      color = 255 198 0 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1
+    [DmeParticleSystemDefinition] portal_1_vacuum2
+      name = portal_1_vacuum2
+      renderers -> [1 elements]:
+        [DmeParticleOperator] render_animated_sprites
+          name = render_animated_sprites
+          functionname = render_animated_sprites
+          operator fade oscillate = 0
+          animation_fit_lifetime = 0
+          orientation_type = 0
+          animation rate = 0.1
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          second sequence animation rate = 0
+          use animation rate as fps = 0
+      operators -> [5 elements]:
+        [DmeParticleOperator] Movement Basic
+          name = Movement Basic
+          functionname = Movement Basic
+          operator fade oscillate = 0
+          max constraint passes = 3
+          drag = 0
+          gravity = 0 0 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Radius Scale
+          name = Radius Scale
+          functionname = Radius Scale
+          operator fade oscillate = 0
+          scale_bias = 0.5
+          ease_in_and_out = 0
+          radius_end_scale = 0.1
+          radius_start_scale = 0.5
+          end_time = 2
+          start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Lifespan Decay
+          name = Lifespan Decay
+          functionname = Lifespan Decay
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Alpha Fade In Random
+          name = Alpha Fade In Random
+          functionname = Alpha Fade In Random
+          proportional 0/1 = 1
+          fade in time exponent = 1
+          fade in time max = 0.25
+          fade in time min = 0.25
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Alpha Fade Out Random
+          name = Alpha Fade Out Random
+          functionname = Alpha Fade Out Random
+          proportional 0/1 = 1
+          fade out time exponent = 1
+          fade out time max = 0.25
+          fade out time min = 0.25
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      initializers -> [7 elements]:
+        [DmeParticleOperator] Position Within Sphere Random
+          name = Position Within Sphere Random
+          functionname = Position Within Sphere Random
+          distance_bias_absolute_value = 0 0 0
+          operator fade oscillate = 0
+          bias in local system = 1
+          distance_bias = 1 1 0
+          speed_random_exponent = 1
+          speed_in_local_coordinate_system_max = 0 0 60
+          speed_in_local_coordinate_system_min = 0 0 50
+          speed_max = 0
+          speed_min = 0
+          control_point_number = 0
+          distance_max = 1
+          distance_min = 1
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          create in model = 0
+          randomly distribute to highest supplied control point = 0
+        [DmeParticleOperator] Rotation Random
+          name = Rotation Random
+          functionname = Rotation Random
+          operator fade oscillate = 0
+          rotation_random_exponent = 1
+          rotation_offset_max = 360
+          rotation_offset_min = 0
+          rotation_initial = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Position Modify Warp Random
+          name = Position Modify Warp Random
+          functionname = Position Modify Warp Random
+          operator fade oscillate = 0
+          warp max = 0.6 1 1
+          warp min = 0.6 1 1
+          local coordinate space = 1
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          warp transition time (treats min/max as start/end sizes) = 0
+          warp transition start time = 0
+          reverse warp (0/1) = 0
+        [DmeParticleOperator] Position Modify Offset Random
+          name = Position Modify Offset Random
+          functionname = Position Modify Offset Random
+          operator fade oscillate = 0
+          offset in local space 0/1 = 1
+          offset max = -50 -50 48
+          offset min = 50 50 50
+          control_point_number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          offset proportional to radius 0/1 = 0
+        [DmeParticleOperator] Radius Random
+          name = Radius Random
+          functionname = Radius Random
+          operator start fadein = 0
+          operator end fadein = 0
+          operator start fadeout = 0
+          operator end fadeout = 0
+          operator fade oscillate = 0
+          radius_min = 0.2
+          radius_max = 0.5
+          radius_random_exponent = 1
+        [DmeParticleOperator] Color Random
+          name = Color Random
+          functionname = Color Random
+          tint_perc = 0
+          color2 = 4 86 252 255
+          color1 = 4 86 252 255
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Alpha Random
+          name = Alpha Random
+          functionname = Alpha Random
+          alpha_random_exponent = 1
+          alpha_max = 64
+          alpha_min = 128
+          operator fade oscillate = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      emitters -> [1 elements]:
+        [DmeParticleOperator] emit_continuously
+          name = emit_continuously
+          functionname = emit_continuously
+          operator fade oscillate = 0
+          emission_duration = 0
+          emission_rate = 90
+          emission_start_time = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+          scale emission to used control points = 0
+      children -> [0 elements]:
+      forces -> [2 elements]:
+        [DmeParticleOperator] random force
+          name = random force
+          functionname = random force
+          operator fade oscillate = 0
+          max force = 40 40 40
+          min force = -40 -40 -40
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+        [DmeParticleOperator] Pull towards control point
+          name = Pull towards control point
+          functionname = Pull towards control point
+          operator fade oscillate = 0
+          falloff power = 1
+          amount of force = 10000
+          control point number = 0
+          operator end fadeout = 0
+          operator start fadeout = 0
+          operator end fadein = 0
+          operator start fadein = 0
+      constraints -> [0 elements]:
+      preventnamebasedlookup = 0
+      max_particles = 1000
+      initial_particles = 0
+      material = particle\particle_glow_03.vmt
+      bounding_box_control_point = 0
+      bounding_box_min = -60 -50 0
+      bounding_box_max = 60 50 70
+      radius = 5
+      color = 255 255 255 255
+      rotation = 0
+      rotation_speed = 0
+      sequence_number = 0
+      sequence_number 1 = 0
+      group id = 0
+      maximum time step = 0.1
+      maximum sim tick rate = 0
+      minimum sim tick rate = 0
+      minimum rendered frames = 0
+      control point to disable rendering if it is the camera = -1

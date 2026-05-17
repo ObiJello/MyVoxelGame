@@ -339,8 +339,12 @@ namespace Render {
         m_clearColor = {{r, g, b, a}};
     }
 
-    void VKBackend::Clear(bool color, bool depth) {
-        // Handled by render pass clear values in BeginFrame
+    void VKBackend::Clear(bool /*color*/, bool /*depth*/, bool /*stencil*/) {
+        // Handled by the render pass's per-attachment clear values in
+        // BeginFrame — Vulkan can't issue a free-standing clear inside an
+        // active render pass without a separate vkCmdClearAttachments call.
+        // Stencil is cleared to 0 along with depth via the depth/stencil
+        // attachment clear value (BeginFrame sets {1.0, 0}).
     }
 
     void VKBackend::SetViewport(int x, int y, int width, int height) {
@@ -841,18 +845,40 @@ namespace Render {
         }
     }
 
-    void VKBackend::SetUniformVec3(ShaderHandle, const std::string&, const glm::vec3&) { /* Push constants or UBO */ }
+    void VKBackend::SetUniformVec4(ShaderHandle, const std::string& name, const glm::vec4& value) {
+        // Generic colour-style slot (used by crosshair tint, etc.)
+        if (name == "uTint" || name == "uColor") {
+            m_pushConstants.uColor = value;
+        }
+    }
+    void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
+        // Pack vec3 into the .rgb of the colour slot. Alpha retained
+        // from whatever was set last (e.g. uPulse via SetUniformFloat).
+        if (name == "uPortalColor" || name == "uTint" || name == "uColor") {
+            m_pushConstants.uColor = glm::vec4(value, m_pushConstants.uColor.a);
+        }
+    }
     void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
         if (name == "uScreenSize") {
             m_pushConstants.uScreenSize = value;
+        } else if (name == "uUVMin") {
+            m_pushConstants.uUVRange.x = value.x;
+            m_pushConstants.uUVRange.y = value.y;
+        } else if (name == "uUVMax") {
+            m_pushConstants.uUVRange.z = value.x;
+            m_pushConstants.uUVRange.w = value.y;
         }
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
-        if (name == "uLineWidth") {
-            m_pushConstants.uLineWidth = value;
-        } else if (name == "uAlphaTest") {
-            m_pushConstants.uAlphaTest = value;
-        }
+        if (name == "uLineWidth")        m_pushConstants.uLineWidth = value;
+        else if (name == "uAlphaTest")   m_pushConstants.uAlphaTest = value;
+        // Pack small per-shader scalars into the uScalars vec4 by
+        // recognised name → component. Keeps shader-side GLSL clean
+        // (just `uScalars.x` / `uScalars.y` etc.).
+        else if (name == "uPulse")       m_pushConstants.uScalars.x = value;
+        else if (name == "uTime")        m_pushConstants.uScalars.y = value;
+        else if (name == "uOpenAmount")  m_pushConstants.uScalars.z = value;
+        else if (name == "uFlashIntensity") m_pushConstants.uScalars.w = value;
     }
     void VKBackend::SetUniformInt(ShaderHandle, const std::string&, int) { /* Push constants or UBO */ }
 
@@ -879,6 +905,16 @@ namespace Render {
 
     void VKBackend::SetPipelineState(const PipelineState& state) {
         m_currentPipelineState = state;
+    }
+
+    void VKBackend::ApplyDynamicStencilState(VkCommandBuffer cmd) const {
+        if (!m_currentPipelineState.stencilTestEnabled) return;
+        // Both faces use the same values — matches the symmetric front/back
+        // setup in CreateGraphicsPipeline.
+        constexpr VkStencilFaceFlags faces = VK_STENCIL_FACE_FRONT_AND_BACK;
+        vkCmdSetStencilReference (cmd, faces, m_currentPipelineState.stencilReference);
+        vkCmdSetStencilCompareMask(cmd, faces, m_currentPipelineState.stencilReadMask);
+        vkCmdSetStencilWriteMask  (cmd, faces, m_currentPipelineState.stencilWriteMask);
     }
 
     void VKBackend::InvalidateStateCache() {
@@ -909,6 +945,11 @@ namespace Render {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             m_currentPipeline = pipeline;
         }
+        // Push per-draw stencil dynamic state. Sticky across pipeline binds
+        // within a command buffer, so re-pushing every draw is mildly
+        // wasteful but never wrong; the early-out on stencilTestEnabled
+        // keeps the overhead at zero when stencil isn't in use.
+        ApplyDynamicStencilState(cmd);
 
         // Push MVP matrix
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -953,6 +994,11 @@ namespace Render {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             m_currentPipeline = pipeline;
         }
+        // Push per-draw stencil dynamic state. Sticky across pipeline binds
+        // within a command buffer, so re-pushing every draw is mildly
+        // wasteful but never wrong; the early-out on stencilTestEnabled
+        // keeps the overhead at zero when stencil isn't in use.
+        ApplyDynamicStencilState(cmd);
 
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
@@ -994,6 +1040,11 @@ namespace Render {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             m_currentPipeline = pipeline;
         }
+        // Push per-draw stencil dynamic state. Sticky across pipeline binds
+        // within a command buffer, so re-pushing every draw is mildly
+        // wasteful but never wrong; the early-out on stencilTestEnabled
+        // keeps the overhead at zero when stencil isn't in use.
+        ApplyDynamicStencilState(cmd);
 
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
@@ -1036,6 +1087,11 @@ namespace Render {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
             m_currentPipeline = pipeline;
         }
+        // Push per-draw stencil dynamic state. Sticky across pipeline binds
+        // within a command buffer, so re-pushing every draw is mildly
+        // wasteful but never wrong; the early-out on stencilTestEnabled
+        // keeps the overhead at zero when stencil isn't in use.
+        ApplyDynamicStencilState(cmd);
 
         vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
@@ -1389,6 +1445,10 @@ namespace Render {
         return true;
     }
 
+    // Forward decl — defined further down next to FindDepthFormat. True iff
+    // the format has a packed stencil component (D24S8, D32S8, D16S8).
+    static bool DepthFormatHasStencil(VkFormat fmt);
+
     bool VKBackend::CreateDepthResources() {
         m_depthFormat = FindDepthFormat();
         if (!CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
@@ -1398,7 +1458,12 @@ namespace Render {
             Log::Error("VKBackend: Failed to create depth image");
             return false;
         }
-        m_depthImageView = CreateImageView(m_depthImage, m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+        // Aspect mask must include STENCIL_BIT when the format actually has a
+        // stencil component, otherwise the validation layer warns and (on
+        // some drivers) reading the stencil aspect via this view fails.
+        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        m_depthImageView = CreateImageView(m_depthImage, m_depthFormat, aspect, 1);
         return m_depthImageView != VK_NULL_HANDLE;
     }
 
@@ -1418,7 +1483,13 @@ namespace Render {
         depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
         depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        // Stencil load: clear at render-pass start so each frame begins with
+        // stencil = 0. (Without this, the portal renderer's "stencil ==
+        // recursion level" check would see leftover values from prior frames
+        // and either fail to mark or mask the wrong region.) Don't bother
+        // storing — Phase 7's recursive passes ALL run within one render
+        // pass, so stencil never needs to survive the swap.
+        depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
         depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1704,8 +1775,33 @@ namespace Render {
     }
 
     VkFormat VKBackend::FindDepthFormat() const {
-        return FindSupportedFormat({VK_FORMAT_D32_SFLOAT, VK_FORMAT_D32_SFLOAT_S8_UINT, VK_FORMAT_D24_UNORM_S8_UINT},
-                                  VK_IMAGE_TILING_OPTIMAL, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+        // Order matters: candidates are tried in sequence and the first one
+        // the GPU supports wins. We require stencil bits because the portal
+        // renderer (Phase 6+) uses stencil for the see-through pass — the
+        // depth-only D32_SFLOAT format silently dropped stencil ops on the
+        // floor here, which is hard to debug ("portals don't render"). The
+        // packed S8 formats are universally supported on every desktop GPU,
+        // so the no-stencil fallback at the end of the list realistically
+        // never fires; it's there only so a dev who builds the engine on
+        // an exotic device without packed depth-stencil still gets a depth
+        // buffer.
+        return FindSupportedFormat(
+            {VK_FORMAT_D24_UNORM_S8_UINT,
+             VK_FORMAT_D32_SFLOAT_S8_UINT,
+             VK_FORMAT_D32_SFLOAT},
+            VK_IMAGE_TILING_OPTIMAL,
+            VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    }
+
+    // True iff the chosen depth format has a stencil component. Used to
+    // pick the right aspect mask when creating the depth image view (image
+    // views with VK_IMAGE_ASPECT_DEPTH_BIT only on a stencil-bearing format
+    // would let the view bind, but you can't sample stencil from it; here
+    // we don't sample either way, but the validation layer warns).
+    static bool DepthFormatHasStencil(VkFormat fmt) {
+        return fmt == VK_FORMAT_D24_UNORM_S8_UINT
+            || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT
+            || fmt == VK_FORMAT_D16_UNORM_S8_UINT;
     }
 
     VkFormat VKBackend::FindSupportedFormat(const std::vector<VkFormat>& candidates,
@@ -1902,7 +1998,37 @@ namespace Render {
         hash ^= std::hash<int>{}(static_cast<int>(state.primitiveType)) << 7;
         hash ^= std::hash<int>{}(static_cast<int>(state.frontFace)) << 8;
         hash ^= std::hash<bool>{}(state.depthBiasEnabled) << 9;
+        // Stencil — must be in the cache key, otherwise two pipelines with
+        // identical depth/blend/cull but different stencil state would
+        // collide and we'd reuse the wrong one. Reference + masks are
+        // dynamic in Vulkan (set per-draw via vkCmdSetStencil*) so they
+        // don't need to be in the hash; only the bits that are baked into
+        // VkPipeline at creation do.
+        hash ^= std::hash<bool>{}(state.stencilTestEnabled)               << 10;
+        hash ^= std::hash<int>{}(static_cast<int>(state.stencilCompareOp)) << 11;
+        hash ^= std::hash<int>{}(static_cast<int>(state.stencilFailOp))    << 12;
+        hash ^= std::hash<int>{}(static_cast<int>(state.stencilDepthFailOp)) << 13;
+        hash ^= std::hash<int>{}(static_cast<int>(state.stencilPassOp))   << 14;
+        // Color write mask is baked into the pipeline (no Vulkan dynamic
+        // state for it before VK_EXT_extended_dynamic_state3) → fold into
+        // the cache key so depth/stencil-only pipelines don't collide with
+        // their color-writing counterparts.
+        hash ^= std::hash<bool>{}(state.colorWriteEnabled)                << 15;
         return hash;
+    }
+
+    static VkStencilOp ToVkStencilOp(StencilOp op) {
+        switch (op) {
+            case StencilOp::Keep:      return VK_STENCIL_OP_KEEP;
+            case StencilOp::Zero:      return VK_STENCIL_OP_ZERO;
+            case StencilOp::Replace:   return VK_STENCIL_OP_REPLACE;
+            case StencilOp::IncrClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+            case StencilOp::DecrClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+            case StencilOp::Invert:    return VK_STENCIL_OP_INVERT;
+            case StencilOp::IncrWrap:  return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+            case StencilOp::DecrWrap:  return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+        }
+        return VK_STENCIL_OP_KEEP;
     }
 
     VkPipeline VKBackend::GetOrCreatePipeline(const PipelineState& state, ShaderHandle shader) {
@@ -1965,11 +2091,22 @@ namespace Render {
         }
         inputAssembly.primitiveRestartEnable = VK_FALSE;
 
-        // Dynamic state (viewport + scissor)
-        VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        // Dynamic state (viewport + scissor + per-draw stencil ref/masks).
+        // Treating stencil reference + read/write masks as dynamic means we
+        // don't need a separate VkPipeline per (gunId × recursion-level)
+        // combination — just call vkCmdSetStencilReference between draws.
+        // Compare/fail/pass ops still go in the pipeline because changing
+        // those is rare (each Phase 6 sub-pass uses a fixed op set).
+        VkDynamicState dynamicStates[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+            VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+            VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+        };
         VkPipelineDynamicStateCreateInfo dynamicState{};
         dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamicState.dynamicStateCount = 2;
+        dynamicState.dynamicStateCount = sizeof(dynamicStates) / sizeof(dynamicStates[0]);
         dynamicState.pDynamicStates = dynamicStates;
 
         VkPipelineViewportStateCreateInfo viewportState{};
@@ -2005,12 +2142,30 @@ namespace Render {
         depthStencil.depthWriteEnable = state.depthWriteEnabled ? VK_TRUE : VK_FALSE;
         depthStencil.depthCompareOp = ToVkCompareOp(state.depthCompareOp);
         depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.stencilTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = state.stencilTestEnabled ? VK_TRUE : VK_FALSE;
+        // Front + back use the same op set — keep the API minimal until a
+        // feature actually wants asymmetric ops. compareMask, writeMask, and
+        // reference are listed as dynamic state above, so the values set
+        // here at pipeline-creation time are placeholders only — the real
+        // values come from vkCmdSetStencil{Reference,CompareMask,WriteMask}
+        // before each draw.
+        VkStencilOpState stencilOp{};
+        stencilOp.failOp      = ToVkStencilOp(state.stencilFailOp);
+        stencilOp.passOp      = ToVkStencilOp(state.stencilPassOp);
+        stencilOp.depthFailOp = ToVkStencilOp(state.stencilDepthFailOp);
+        stencilOp.compareOp   = ToVkCompareOp(state.stencilCompareOp);
+        stencilOp.compareMask = state.stencilReadMask;
+        stencilOp.writeMask   = state.stencilWriteMask;
+        stencilOp.reference   = state.stencilReference;
+        depthStencil.front = stencilOp;
+        depthStencil.back  = stencilOp;
 
         // Color blending
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                              VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        colorBlendAttachment.colorWriteMask = state.colorWriteEnabled
+            ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+            : 0;
         colorBlendAttachment.blendEnable = state.blendEnabled ? VK_TRUE : VK_FALSE;
         colorBlendAttachment.srcColorBlendFactor = ToVkBlendFactor(state.srcBlendFactor);
         colorBlendAttachment.dstColorBlendFactor = ToVkBlendFactor(state.dstBlendFactor);

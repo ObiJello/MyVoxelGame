@@ -4,6 +4,8 @@
 #include "../backend/RenderTypes.hpp"
 #include "client/entity/RemotePlayerManager.hpp"
 #include <glm/glm.hpp>
+#include <unordered_set>
+#include <cstdint>
 
 namespace Render {
 
@@ -20,9 +22,42 @@ namespace Render {
         bool Initialize();
         void Shutdown();
 
+        // `partialTick` (range [0, 1]) is the sub-tick fraction = how far
+        // through the current 50ms client tick the renderer is. Used to
+        // interpolate each remote player's position/rotation between the
+        // previous-tick snapshot and the current value, mirroring MC's
+        // Entity.getPosition(partialTick) (Entity.java:1955-1960). Without
+        // this we'd render the same position N times per tick, producing
+        // visible 50ms-period stutter.
+        // `skipIds` (optional) — player IDs to EXCLUDE from the bulk pass.
+        // Portal-straddling players are excluded here and re-rendered
+        // individually via RenderSingle with an entry-clip plane so the
+        // half of the body that's "already through" the portal isn't
+        // drawn twice. Pass nullptr to render everyone.
         void Render(const glm::mat4& projection, const glm::mat4& view,
                     const glm::vec3& cameraPos,
-                    const Client::RemotePlayerManager& remotePlayers);
+                    const Client::RemotePlayerManager& remotePlayers,
+                    float partialTick,
+                    const std::unordered_set<uint32_t>* skipIds = nullptr);
+
+        // Render a single arbitrary player (NOT in RemotePlayerManager).
+        // Used by the portal see-through pass to draw the LOCAL player as a
+        // stick figure when the player can see themselves through a portal —
+        // the local player is normally invisible (it IS the camera). No
+        // distance cull, no nametag, no chat bubble.
+        //
+        // `model` and `clipPlane` carry portal-ghost half-body rendering
+        // state (see PortalGhostRenderer-style usage in PlatformMain): pass
+        // identity matrix + zero plane for normal rendering. For ghost
+        // rendering, pass the source→destination portal matrix M and the
+        // destination portal's plane equation so only the "emerged" half
+        // of the body is drawn (clipped against the destination wall).
+        void RenderSingle(const glm::mat4& projection, const glm::mat4& view,
+                          const glm::vec3& position,
+                          float headYaw, float bodyYaw, float pitch,
+                          bool isCrouching, uint8_t colorId,
+                          const glm::mat4& model     = glm::mat4(1.0f),
+                          const glm::vec4& clipPlane = glm::vec4(0.0f));
 
         // Render chat bubbles above remote players (screen-space billboarded)
         void RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,

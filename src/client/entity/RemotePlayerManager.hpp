@@ -12,6 +12,24 @@
 
 namespace Client {
 
+    // Wrap angle to [-180, 180] range. Mirrors MC `Mth.wrapDegrees`
+    // (Mth.java:221-232). Free function (not a class member) so the renderer
+    // can use it for sub-tick rotation interpolation without dragging in
+    // RemotePlayerManager's public surface.
+    inline float Wrap180(float deg) {
+        deg = fmodf(deg + 180.0f, 360.0f);
+        if (deg < 0.0f) deg += 360.0f;
+        return deg - 180.0f;
+    }
+
+    // MC `Mth.rotLerp(a, from, to)` (Mth.java:588-594) — linear lerp that
+    // takes the SHORT way around the 360° circle. 350° → 10° lerps via
+    // wrapDegrees(10°-350°) = wrapDegrees(-340°) = +20°, so the rotation
+    // moves +20° not -340°.
+    inline float RotLerp(float a, float from, float to) {
+        return from + a * Wrap180(to - from);
+    }
+
     struct RemotePlayer {
         uint32_t playerId = 0;
         std::string name;  // Player name (populated from PlayerInfoS2C ADD action)
@@ -36,6 +54,18 @@ namespace Client {
         glm::vec2 targetRotation{0.0f};
         int lerpSteps = 0;
 
+        // ── Previous-tick snapshot for SUB-TICK render interpolation ────────
+        // Mirrors MC Entity.xo/yo/zo + yRotO/xRotO + yBodyRotO. Updated at the
+        // START of RemotePlayerManager::Tick() — BEFORE the per-tick lerp step
+        // writes the new "current" values to position/rotation/bodyYaw. The
+        // renderer then lerps prev → current using a per-frame partialTick
+        // fraction so frames within a tick show a continuously-advancing
+        // position instead of a stair-step (Entity.java:1955-1960 for pos,
+        // :1918 for yaw, :1914 for pitch).
+        glm::vec3 renderPrevPosition{0.0f};
+        glm::vec2 renderPrevRotation{0.0f};
+        float     renderPrevBodyYaw = 0.0f;
+
         // Chat bubble
         std::string chatBubbleText;
         float chatBubbleTimer = 0.0f;
@@ -56,6 +86,12 @@ namespace Client {
                 rp.targetRotation = rot;
                 rp.bodyYaw = rot.x; // start body facing same as head
                 rp.prevPosition = pos;
+                // Seed the render-prev snapshot to the same spawn point — without
+                // this, the first frame after spawn would lerp from origin (0,0,0)
+                // up to the spawn position, briefly visualising the player at 0,0,0.
+                rp.renderPrevPosition = pos;
+                rp.renderPrevRotation = rot;
+                rp.renderPrevBodyYaw  = rot.x;
                 rp.lerpSteps = 0;
                 rp.positionInitialized = true;
             } else {
@@ -69,6 +105,16 @@ namespace Client {
         // Apply one interpolation step + body rotation. Call at 20Hz.
         void Tick() {
             for (auto& [id, rp] : m_players) {
+                // Snapshot what THIS tick is starting from — the renderer uses
+                // these as the "previous" point for sub-tick interpolation.
+                // Mirrors MC: LivingEntity.baseTick() updates yRotO/xRotO/
+                // yHeadRotO/yBodyRotO at tick boundary; Entity.setOldPos() does
+                // the same for xo/yo/zo. MUST happen BEFORE the per-tick lerp
+                // below writes the new "current" values.
+                rp.renderPrevPosition = rp.position;
+                rp.renderPrevRotation = rp.rotation;
+                rp.renderPrevBodyYaw  = rp.bodyYaw;
+
                 // --- Position/rotation interpolation (Minecraft's InterpolationHandler) ---
                 if (rp.lerpSteps > 0) {
                     float alpha = 1.0f / static_cast<float>(rp.lerpSteps);
@@ -178,13 +224,6 @@ namespace Client {
 
     private:
         std::unordered_map<uint32_t, RemotePlayer> m_players;
-
-        // Wrap angle to [-180, 180] range
-        static float Wrap180(float deg) {
-            deg = fmodf(deg + 180.0f, 360.0f);
-            if (deg < 0.0f) deg += 360.0f;
-            return deg - 180.0f;
-        }
     };
 
     extern std::unique_ptr<RemotePlayerManager> g_remotePlayerManager;

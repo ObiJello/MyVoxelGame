@@ -603,7 +603,8 @@ namespace Server {
         if (m_listener) m_listener->onInventoryCloseC2S(packet);
     }
 
-    void ServerConnection::Teleport(double x, double y, double z, float yRot, float xRot) {
+    void ServerConnection::Teleport(double x, double y, double z, float yRot, float xRot,
+                                    double dx, double dy, double dz) {
         // Match MC's ServerGamePacketListenerImpl.teleport(PositionMoveRotation, Set<Relative>):
         //   1. Bump the awaiting-teleport id (wrap on int max)
         //   2. Snap the server-side player position
@@ -612,13 +613,17 @@ namespace Server {
             m_awaitingTeleport = 0;
         }
 
-        // Locate this connection's ServerPlayer via session manager and snap its position
+        // Locate this connection's ServerPlayer via session manager and snap its position.
+        // Use teleport() not setPosition() — setPosition() runs the anti-cheat
+        // distance check (>100 blocks → reject + warn), which trips on every
+        // legitimate server-issued teleport (portal jumps, /tp, world spawn
+        // far from origin). teleport() bypasses the check.
         if (Server::g_integratedServer) {
             auto* sessionManager = Server::g_integratedServer->GetSessionManager();
             if (sessionManager) {
                 auto session = sessionManager->GetSession(m_playerId);
                 if (session && session->GetPlayer()) {
-                    session->GetPlayer()->setPosition(glm::dvec3(x, y, z));
+                    session->GetPlayer()->teleport(glm::dvec3(x, y, z));
                 }
             }
         }
@@ -626,15 +631,15 @@ namespace Server {
         Network::ClientboundPlayerPositionPacket packet;
         packet.id = m_awaitingTeleport;
         packet.x = x;  packet.y = y;  packet.z = z;
-        packet.dx = 0.0; packet.dy = 0.0; packet.dz = 0.0; // MC's helper passes Vec3.ZERO — kills velocity
+        packet.dx = dx; packet.dy = dy; packet.dz = dz;
         packet.yRot = yRot;
         packet.xRot = xRot;
         packet.relatives = 0; // empty Set<Relative> — fully absolute teleport
         auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::ClientboundPlayerPosition), data);
 
-        Log::Info("[ServerConnection %u] Teleport id=%d → (%.2f, %.2f, %.2f)",
-                  GetConnectionId(), m_awaitingTeleport, x, y, z);
+        Log::Info("[ServerConnection %u] Teleport id=%d → (%.2f, %.2f, %.2f) vel(%.2f, %.2f, %.2f)",
+                  GetConnectionId(), m_awaitingTeleport, x, y, z, dx, dy, dz);
     }
 
     void ServerConnection::HandleAcceptTeleportation(const std::vector<uint8_t>& payload) {

@@ -128,6 +128,26 @@ namespace Game {
     // Function to check if a block is solid for collision
     using BlockCollisionFunction = std::function<bool(int x, int y, int z)>;
 
+    // Optional collision filter consulted by player-block collision
+    // (CheckCollision + HasSupportBelow). When set and it returns true
+    // for a given (block coords, player AABB), the block is treated as
+    // non-solid for that specific player at that position. Used by
+    // client physics so the player can walk THROUGH the 1×2 opening of
+    // an active portal pair — but only when their AABB fits inside the
+    // opening laterally. If they're standing off-center so part of their
+    // body would intersect the wall material AROUND the opening, the
+    // block stays solid.
+    //
+    // The AABB context is what makes the check directional: a player
+    // approaching the front face along the portal normal slides through;
+    // a player approaching from the side has AABB extent that exceeds
+    // the opening rectangle in the tangent axes → blocked.
+    //
+    // Plain function pointer (not std::function) — collision is in a
+    // hot loop, the null-check + call cost has to stay near zero.
+    using PortalPassthroughFn = bool(*)(int x, int y, int z, const AABB& playerAABB);
+    void SetPortalPassthroughFn(PortalPassthroughFn fn);
+
     // **UPDATED**: Main physics update function now takes PhysicsContext
     void UpdatePlayerPhysics(PlayerPhysics& physics,
                             const glm::vec3& movementInput,

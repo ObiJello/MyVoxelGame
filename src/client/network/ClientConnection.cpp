@@ -12,8 +12,14 @@
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
 static std::function<void(const std::string&)> s_chatCallback;
 static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
-// Teleport callback — set by PlatformMain to snap the local Player on /tp
-static std::function<void(double, double, double, float, float)> s_teleportCallback;
+// Teleport callback — set by PlatformMain to snap the local Player on /tp.
+// Signature: (x, y, z, yaw, pitch, dx, dy, dz). dx/dy/dz are the
+// authoritative post-teleport velocity in blocks/sec, matching the
+// packet's deltaMovement field (MC convention). For /tp the server
+// passes zero (kills momentum); for portal teleports it passes the
+// rotated source velocity (carries momentum through the portal pair).
+static std::function<void(double, double, double, float, float,
+                          double, double, double)> s_teleportCallback;
 
 void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
     s_chatCallback = std::move(callback);
@@ -23,7 +29,8 @@ void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> cal
     s_chatBubbleCallback = std::move(callback);
 }
 
-void SetTeleportCallback(std::function<void(double, double, double, float, float)> callback) {
+void SetTeleportCallback(std::function<void(double, double, double, float, float,
+                                             double, double, double)> callback) {
     s_teleportCallback = std::move(callback);
 }
 
@@ -301,7 +308,9 @@ namespace Client {
         // set. Our /tp only ever sends absolute (relatives == 0), so the snap is straightforward.
         // If we ever support relative teleport, this is where to apply Relative bit logic.
         if (s_teleportCallback) {
-            s_teleportCallback(packet.x, packet.y, packet.z, packet.yRot, packet.xRot);
+            s_teleportCallback(packet.x, packet.y, packet.z,
+                               packet.yRot, packet.xRot,
+                               packet.dx, packet.dy, packet.dz);
         } else {
             Log::Warning("[ClientConnection] Got teleport packet but no callback registered");
         }
@@ -429,6 +438,28 @@ namespace Client {
                 auto data = Serialization::DeserializeInventorySetCarriedS2C(payload);
                 return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
             }
+
+#if ENABLE_PORTAL_GUN
+            case PacketId::PortalSetS2C: {
+                auto data = Serialization::DeserializePortalSetS2C(payload);
+                return std::make_unique<PortalSetS2CPacketImpl>(data);
+            }
+
+            case PacketId::PortalRemoveS2C: {
+                auto data = Serialization::DeserializePortalRemoveS2C(payload);
+                return std::make_unique<PortalRemoveS2CPacketImpl>(data);
+            }
+
+            case PacketId::PortalTeleportFlashS2C: {
+                auto data = Serialization::DeserializePortalTeleportFlashS2C(payload);
+                return std::make_unique<PortalTeleportFlashS2CPacketImpl>(data);
+            }
+
+            case PacketId::PortalFizzleS2C: {
+                auto data = Serialization::DeserializePortalFizzleS2C(payload);
+                return std::make_unique<PortalFizzleS2CPacketImpl>(data);
+            }
+#endif
 
             default:
                 // Return nullptr for unhandled packets - will fall back to legacy OnPacketReceived

@@ -136,6 +136,11 @@ endif()
 
 # 3b) Tracy profiler (client library only — viewer is a separate download)
 option(ENABLE_TRACY "Enable Tracy profiler integration" OFF)
+
+# Note: "extra features" toggles (portal gun, future stuff) live in
+# src/common/core/Features.hpp — one header, one place, edit and rebuild.
+# CMake intentionally has no opinion on them; this file just compiles every
+# .cpp and lets the preprocessor strip disabled features out of each TU.
 if(ENABLE_TRACY)
     FetchContent_Declare(
         tracy
@@ -308,6 +313,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/gui_color_vk.frag
             ${VK_SHADER_DIR}/player_billboard_vk.vert
             ${VK_SHADER_DIR}/player_billboard_vk.frag
+            ${VK_SHADER_DIR}/portal_crosshair_vk.vert
+            ${VK_SHADER_DIR}/portal_crosshair_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -348,6 +355,18 @@ if(APPLE)
             src/common/physics/Physics.cpp
             src/common/entity/Inventory.cpp
             src/common/entity/Item.cpp
+            src/common/entity/ItemBehaviors.cpp
+            src/common/entity/PortalGunBehavior.cpp  # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/server/portal/PortalRegistry.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/portal/ClientPortalManager.cpp        # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/PortalRenderer.cpp           # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/PortalCameraTransform.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/PortalParticleSystem.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/HDRPipeline.cpp              # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/BloomPipeline.cpp            # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/portal/PortalCrosshair.cpp          # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/viewmodel/GltfLoader.cpp            # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/viewmodel/PortalGunViewmodel.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/common/entity/ItemModelLoader.cpp
             src/common/entity/ClientItemLoader.cpp
             src/common/entity/GeneratedItemList.cpp
@@ -835,6 +854,18 @@ if(ENABLE_TRACY)
     target_compile_definitions(MyVoxelGame PRIVATE TRACY_ENABLE)
 
 endif()
+
+# ─── Push Features.hpp toggles down as compile-definitions ──────────────────
+# These match the `#ifndef ENABLE_X` defaults in src/common/core/Features.hpp.
+# When CMake sets `-DENABLE_PORTAL_GUN=OFF`, ENABLE_PORTAL_GUN=0 reaches every
+# TU's preprocessor and every `#if ENABLE_PORTAL_GUN` block strips out.
+
+# All "extra features" .cpp files are listed unconditionally in the source
+# block above — the preprocessor `#if ENABLE_X` blocks inside each file
+# strip the body to nothing when the flag is off, leaving an empty .o.
+# Build-time cost of compiling an empty TU is negligible, and this keeps
+# Features.hpp as the single source of truth (no CMake editing needed when
+# you flip a flag).
 
 # Link Vulkan if available
 if(HAS_VULKAN)

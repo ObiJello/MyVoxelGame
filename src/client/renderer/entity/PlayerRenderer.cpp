@@ -23,22 +23,44 @@ layout(location = 1) in vec2 aUV;
 layout(location = 2) in vec4 aColor;
 
 uniform mat4 uMVP;
+// Optional pre-transform applied to the world-space stick-figure verts.
+// Identity for normal player rendering; for portal ghost passes this is
+// the source-to-destination portal pair matrix M, so the player appears
+// emerging from the destination portal in its mirrored pose.
+uniform mat4 uModel;
 
+out vec3 vWorldPos;
 out vec4 vColor;
 
 void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vColor = aColor;
+    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vWorldPos    = worldPos.xyz;
+    gl_Position  = uMVP * worldPos;
+    vColor       = aColor;
 }
 )";
 
     const char* PlayerRenderer::s_fragSource = R"(
 #version 330 core
 
+in vec3 vWorldPos;
 in vec4 vColor;
 out vec4 FragColor;
 
+// Optional clip plane for portal half-body ghost rendering.
+//   xyz = plane normal (world space)
+//   w   = -dot(normal, point on plane)
+// Pixel is discarded if dot(worldPos, xyz) + w < 0 — i.e. on the "wrong
+// side" of the plane. Default vec4(0) = no clipping (xyz==0 short-
+// circuits the test since the dot product is then zero and 0 + w < 0
+// only when w < 0; callers pass (0,0,0,0) for "off").
+uniform vec4 uClipPlane;
+
 void main() {
+    if (any(notEqual(uClipPlane.xyz, vec3(0.0))) &&
+        dot(vWorldPos, uClipPlane.xyz) + uClipPlane.w < 0.0) {
+        discard;
+    }
     FragColor = vColor;
 }
 )";
@@ -153,7 +175,9 @@ void main() {
 
     void PlayerRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                 const glm::vec3& cameraPos,
-                                const Client::RemotePlayerManager& remotePlayers) {
+                                const Client::RemotePlayerManager& remotePlayers,
+                                float partialTick,
+                                const std::unordered_set<uint32_t>* skipIds) {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         const auto& players = remotePlayers.GetPlayers();
@@ -166,16 +190,35 @@ void main() {
         triVerts.reserve(players.size() * 640);
 
         for (const auto& [id, rp] : players) {
-            float dx = rp.position.x - cameraPos.x;
-            float dz = rp.position.z - cameraPos.z;
+            if (skipIds && skipIds->count(id)) continue;
+            // ── Sub-tick interpolation. Mirrors MC Entity.getPosition(partialTick)
+            // (Entity.java:1955-1960), Entity.getYRot(partialTick) (:1918, uses
+            // rotLerp for 360° wrap), Entity.getXRot(partialTick) (:1914, plain
+            // lerp — pitch never wraps). Without this the renderer holds the
+            // same value for ~3 frames per tick at 60fps then snaps, producing
+            // visible 50ms-period stair-stepping.
+            const glm::vec3 renderPos {
+                glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
+                glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
+                glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
+            };
+            const float renderHeadYaw = Client::RotLerp(partialTick, rp.renderPrevRotation.x, rp.rotation.x);
+            const float renderPitch   = glm::mix(           rp.renderPrevRotation.y, rp.rotation.y, partialTick);
+            const float renderBodyYaw = Client::RotLerp(partialTick, rp.renderPrevBodyYaw,    rp.bodyYaw);
+
+            // Distance-cull on the INTERPOLATED position so the cull boundary
+            // matches what the user sees on screen (avoids edge-case cull pop
+            // when prev/current straddle the 256m line).
+            float dx = renderPos.x - cameraPos.x;
+            float dz = renderPos.z - cameraPos.z;
             if (dx * dx + dz * dz > 256.0f * 256.0f) continue;
 
             const auto& colorEntry = Game::LookupPlayerColor(rp.color);
             PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
             // Append ring + disc into one shared list — both render with the
             // same triangles + CullMode::Back pipeline, so batching is fine.
-            BuildStickFigure(lineVerts, triVerts, triVerts, rp.position,
-                             rp.rotation.x, rp.bodyYaw, rp.rotation.y, rp.isCrouching,
+            BuildStickFigure(lineVerts, triVerts, triVerts, renderPos,
+                             renderHeadYaw, renderBodyYaw, renderPitch, rp.isCrouching,
                              color);
         }
 
@@ -199,7 +242,9 @@ void main() {
 
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
-            g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+            g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
+            g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
+            g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", glm::vec4(0.0f));
             g_renderBackend->DrawArrays(m_triMesh, static_cast<uint32_t>(triVerts.size()));
             g_renderBackend->UnbindMesh();
         }
@@ -232,7 +277,9 @@ void main() {
 
                 g_renderBackend->BindShader(m_shader);
                 g_renderBackend->BindTexture(m_dummyTexture, 0);
-                g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+                g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
+                g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
+                g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", glm::vec4(0.0f));
                 g_renderBackend->DrawArrays(m_lineMesh, static_cast<uint32_t>(stripVerts.size()));
                 g_renderBackend->UnbindMesh();
             }
@@ -246,6 +293,84 @@ void main() {
         defaultState.cullMode          = CullMode::Back;
         defaultState.polygonMode       = PolygonMode::Fill;
         g_renderBackend->SetPipelineState(defaultState);
+    }
+
+    void PlayerRenderer::RenderSingle(const glm::mat4& projection, const glm::mat4& view,
+                                      const glm::vec3& position,
+                                      float headYaw, float bodyYaw, float pitch,
+                                      bool isCrouching, uint8_t colorId,
+                                      const glm::mat4& model,
+                                      const glm::vec4& clipPlane) {
+        if (m_shader == INVALID_SHADER || !g_renderBackend) return;
+
+        std::vector<StickVertex> lineVerts;
+        std::vector<StickVertex> triVerts;
+        lineVerts.reserve(36);
+        triVerts.reserve(640);
+
+        const auto& colorEntry = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(colorId));
+        PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
+        BuildStickFigure(lineVerts, triVerts, triVerts, position,
+                         headYaw, bodyYaw, pitch, isCrouching, color);
+
+        const glm::mat4 mvp = projection * view;
+
+        // Mirrors the existing Render() impl — same two-pass triangle then
+        // strip draw with same pipeline states.
+        if (!triVerts.empty() && m_triMesh != INVALID_MESH) {
+            g_renderBackend->UpdateBuffer(m_triVB, 0,
+                triVerts.size() * sizeof(StickVertex), triVerts.data());
+
+            PipelineState triState;
+            triState.depthTestEnabled  = true;
+            triState.depthWriteEnabled = true;
+            triState.blendEnabled      = false;
+            triState.cullMode          = CullMode::Back;
+            triState.frontFace         = FrontFace::CounterClockwise;
+            triState.primitiveType     = PrimitiveType::Triangles;
+            g_renderBackend->SetPipelineState(triState);
+
+            g_renderBackend->BindShader(m_shader);
+            g_renderBackend->BindTexture(m_dummyTexture, 0);
+            g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
+            g_renderBackend->SetUniformMat4(m_shader, "uModel", model);
+            g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", clipPlane);
+            g_renderBackend->DrawArrays(m_triMesh, static_cast<uint32_t>(triVerts.size()));
+            g_renderBackend->UnbindMesh();
+        }
+
+        if (!lineVerts.empty() && m_lineMesh != INVALID_MESH) {
+            constexpr float kStripHalfWidth = 0.018f;
+
+            // For RenderSingle the camera position is recoverable from the
+            // inverse view matrix's translation column — same convention as
+            // the rest of the see-through pass uses.
+            const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
+
+            std::vector<StickVertex> stripVerts;
+            EmitThickWorldStripFromLines(lineVerts, cameraPos, kStripHalfWidth, stripVerts);
+
+            if (!stripVerts.empty() && stripVerts.size() <= MAX_VERTICES) {
+                g_renderBackend->UpdateBuffer(m_lineVB, 0,
+                    stripVerts.size() * sizeof(StickVertex), stripVerts.data());
+
+                PipelineState stripState;
+                stripState.depthTestEnabled  = true;
+                stripState.depthWriteEnabled = true;
+                stripState.blendEnabled      = false;
+                stripState.cullMode          = CullMode::None;
+                stripState.primitiveType     = PrimitiveType::Triangles;
+                g_renderBackend->SetPipelineState(stripState);
+
+                g_renderBackend->BindShader(m_shader);
+                g_renderBackend->BindTexture(m_dummyTexture, 0);
+                g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
+                g_renderBackend->SetUniformMat4(m_shader, "uModel", model);
+                g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", clipPlane);
+                g_renderBackend->DrawArrays(m_lineMesh, static_cast<uint32_t>(stripVerts.size()));
+                g_renderBackend->UnbindMesh();
+            }
+        }
     }
 
     void PlayerRenderer::RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,

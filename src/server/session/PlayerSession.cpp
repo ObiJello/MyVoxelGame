@@ -13,6 +13,12 @@
 #include "common/world/level/World.hpp"
 #include "../IntegratedServer.hpp"
 #include "../inventory/InventoryClickHandler.hpp"
+#include "common/core/Features.hpp"
+#if ENABLE_PORTAL_GUN
+#include "../portal/PortalRegistry.hpp"
+#endif
+#include "common/entity/Item.hpp"
+#include "common/entity/Inventory.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -650,6 +656,12 @@ namespace Server {
                 // mode), but call it anyway so dedicated multiplayer still clears the
                 // server's world.
                 world->SetBlock(pos.x, pos.y, pos.z, Game::BlockID::Air);
+#if ENABLE_PORTAL_GUN
+                // Remove any portal mounted on this block. Block-break
+                // bypasses IntegratedServer::ApplyBlockChange so the
+                // notification has to happen here too.
+                Game::Portal::ServerRegistry().OnBlockChanged(pos);
+#endif
                 Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
                           m_playerId, pos.x, pos.y, pos.z);
 
@@ -855,45 +867,165 @@ namespace Server {
         Game::UseOnContext context(world, m_player, packet.hand, hit);
         context.playerYaw = m_player->getYaw();
         context.playerPitch = m_player->getPitch();
+        context.altInteract = packet.altInteract;
         
         // === 4. Reach validation ===
-        
+
         // Reconstruct ray from player eye to hit point
         glm::dvec3 playerPos = m_player->getPosition();
         glm::vec3 eyePos = glm::vec3(playerPos.x, playerPos.y + 1.62, playerPos.z); // Eye height
         float distance = glm::length(hitPoint - eyePos);
         float maxReach = m_player->getGameMode() == GameMode::CREATIVE ? 5.0f : 4.5f;
-        
+
+#if ENABLE_PORTAL_GUN
+        // The portal gun fires a projectile that travels up to
+        // sv_portal_projectile_delay × BLAST_SPEED ≈ 28.5 m before
+        // expiring. Client-side collision sweeps it forward each tick
+        // and only sends UseItemOnC2S on the impact face, so the impact
+        // point is genuinely much farther than melee reach. Exempt the
+        // portal gun from the reach cap so long-range shots place.
+        {
+            const int slot = m_player->getInventory().GetSelectedSlot();
+            const Game::ItemStack& s = m_player->getInventory().GetSlot(
+                Game::Inventory::HotbarToIndex(slot));
+            if (s.itemId == Game::Items::PortalGun) {
+                maxReach = 256.0f;  // long-range portal shots
+            }
+        }
+#endif
+
         if (distance > maxReach) {
             Log::Warning("HandleUseItemOn: Out of reach %.2f > %.2f", distance, maxReach);
             ResyncAndAck(clicked, clicked, packet.sequence);
             return;
         }
         
-        // === 5. "Use then place" semantics (Minecraft rule) ===
-        
-        // TODO: Implement block use logic when BlockRegistry is fully implemented
-        // If player is not sneaking, try to use the block first
-        // if (!m_player->IsSneaking()) {
-        //     Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
-        //     Game::Block* clickedBlock = Game::BlockRegistry::getInstance().getBlock(clickedBlockId);
-        //     
-        //     if (clickedBlock) {
-        //         Game::UseResult useResult = clickedBlock->use(world, clicked, m_player, packet.hand, hit);
-        //         
-        //         if (useResult == Game::UseResult::Success || useResult == Game::UseResult::Consume) {
-        //             // Block was used (chest opened, lever flipped, etc.)
-        //             // TODO: Play use effects
-        //             // TODO: Open container if needed
-        //             AckInteraction(packet.sequence, true);
-        //             m_lastInteractionSequence = packet.sequence;
-        //             return;
-        //         }
-        //     }
+        // === 5. MC-style dispatch — mirrors ServerPlayerGameMode.useItemOn
+        //    (ServerPlayerGameMode.java lines 329-381) ===
+        //
+        //   feature-gating: if !state.block.isEnabled(level.enabledFeatures())
+        //       → return FAIL                                    [TODO, see below]
+        //   if gameMode == SPECTATOR:
+        //       open menu provider if any (chests etc.)          [TODO, no menus]
+        //       → CONSUME / PASS
+        //   suppressUsingBlock = isSecondaryUseActive() && haveSomethingInOurHands
+        //   if !suppressUsingBlock:
+        //       result = block.useItemOn(stack, ...)            // block reacts to held item
+        //       if consumesAction:
+        //           CriteriaTriggers.ITEM_USED_ON_BLOCK         [TODO, no advancements]
+        //           → done
+        //       if result == TryEmptyHandInteraction && mainHand:
+        //           result = block.useWithoutItem(...)          // block reacts as if empty hand
+        //           if consumesAction:
+        //               CriteriaTriggers.DEFAULT_BLOCK_USE      [TODO, no advancements]
+        //               → done
+        //   if !stack.isEmpty() && !player.cooldowns.isOnCooldown(stack):  [TODO, no cooldowns]
+        //       if hasInfiniteMaterials (creative):
+        //           int count = stack.count
+        //           result = stack.useOn(ctx)
+        //           stack.count = count                         // creative count preservation
+        //       else:
+        //           result = stack.useOn(ctx)
+        //       if consumesAction:
+        //           CriteriaTriggers.ITEM_USED_ON_BLOCK         [TODO, no advancements]
+        //           → done
+        //   else PASS → fall through to BlockItem placement.
+        const Game::BlockID clickedBlkId  = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        const Game::Block&  clickedBlock  = Game::BlockRegistry::Get(clickedBlkId);
+        const int           selectedSlot  = m_player->getInventory().GetSelectedSlot();
+        Game::ItemStack&    heldStack     = m_player->getInventory().MutableSlot(
+                                                Game::Inventory::HotbarToIndex(selectedSlot));
+        const Game::Item&   heldItem      = Game::ItemRegistry::Get(heldStack.itemId);
+        const bool isMainHand             = (packet.hand == 0);
+        const bool isCreative             = (m_player->getGameMode() == Server::GameMode::CREATIVE);
+        // const bool isSpectator         = (m_player->getGameMode() == Server::GameMode::SPECTATOR);
+
+        // (void)clickedBlkId; — kept for future feature-flag check:
+        //   if (!IsBlockFeatureEnabled(clickedBlkId)) { ResyncAndAck(...); return; }
+
+        // TODO(spectator): if (isSpectator) {
+        //     auto provider = clickedBlock.menuProvider;
+        //     if (provider) { m_player->openMenu(provider); AckInteraction(true); return; }
+        //     AckInteraction(false); return;
         // }
-        
-        // === 6. Build the candidate block state (from the held item) ===
-        
+        // (Spectators today fall through to the regular dispatch — same as if SURVIVAL —
+        // which is harmless because they can't actually mutate the world via SetBlock
+        // gating elsewhere. Revisit once we have menu providers.)
+
+        // MC: `suppressUsingBlock = isSecondaryUseActive() && haveSomethingInOurHands`
+        //  — sneaking + something in hand → skip block-use, run item.useOn directly.
+        const bool sneaking               = m_player->IsSneaking();
+        const bool somethingInHands       = !heldStack.IsEmpty();
+        const bool suppressBlockUse       = sneaking && somethingInHands;
+
+        if (!suppressBlockUse) {
+            if (clickedBlock.useItemOn) {
+                Game::UseResult r = clickedBlock.useItemOn(
+                    heldStack, world, clicked, m_player, packet.hand, hit);
+                if (Game::ConsumesAction(r)) {
+                    // TODO(advancements): CriteriaTriggers.ITEM_USED_ON_BLOCK.trigger(player, pos, stackCopy);
+                    AckInteraction(packet.sequence, true);
+                    m_lastInteractionSequence = packet.sequence;
+                    return;
+                }
+                if (r == Game::UseResult::TryEmptyHandInteraction && isMainHand
+                    && clickedBlock.useWithoutItem) {
+                    Game::UseResult r2 = clickedBlock.useWithoutItem(
+                        world, clicked, m_player, hit);
+                    if (Game::ConsumesAction(r2)) {
+                        // TODO(advancements): CriteriaTriggers.DEFAULT_BLOCK_USE.trigger(player, pos);
+                        AckInteraction(packet.sequence, true);
+                        m_lastInteractionSequence = packet.sequence;
+                        return;
+                    }
+                }
+            } else if (clickedBlock.useWithoutItem) {
+                // Block declares no item-on-block reaction but does have an
+                // empty-hand reaction (the common case: doors, levers, buttons).
+                if (heldStack.IsEmpty() || isMainHand) {
+                    Game::UseResult r = clickedBlock.useWithoutItem(
+                        world, clicked, m_player, hit);
+                    if (Game::ConsumesAction(r)) {
+                        // TODO(advancements): CriteriaTriggers.DEFAULT_BLOCK_USE.trigger(player, pos);
+                        AckInteraction(packet.sequence, true);
+                        m_lastInteractionSequence = packet.sequence;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Item.useOn — the item acts on the targeted block (FlintAndSteel,
+        // Hoe, Bucket, Shovel, BoneMeal, Shears, …).
+        // TODO(cooldowns): if (m_player->cooldowns().isOnCooldown(heldStack)) skip this block.
+        // (MC.useItemOn line 362: `if (!itemStack.isEmpty() && !player.getCooldowns().isOnCooldown(itemStack))`)
+        if (heldItem.useOn && !heldStack.IsEmpty()) {
+            // MC's "creative count preservation" trick (ServerPlayerGameMode.java
+            // line 365-371): in creative, snapshot count BEFORE useOn, restore it
+            // AFTER, so a single block placed/transformed doesn't decrement the
+            // infinite stack. We mutate the stack via the &-reference, so the
+            // snapshot/restore must wrap the call.
+            const int countBefore = heldStack.count;
+            Game::UseResult r = heldItem.useOn(context, heldStack);
+            if (isCreative) {
+                heldStack.count = countBefore;
+            }
+            if (Game::ConsumesAction(r)) {
+                // TODO(advancements): CriteriaTriggers.ITEM_USED_ON_BLOCK.trigger(player, pos, stackCopy);
+                AckInteraction(packet.sequence, true);
+                m_lastInteractionSequence = packet.sequence;
+                return;
+            }
+            if (r == Game::UseResult::Fail) {
+                // Item explicitly rejected — DO NOT fall through to placement.
+                AckInteraction(packet.sequence, false);
+                m_lastInteractionSequence = packet.sequence;
+                return;
+            }
+        }
+
+        // === 6. BlockItem placement fallback (existing behaviour) ===
+
         // Get block to place from player's hand
         Game::BlockID blockToPlace = m_player->getHeldBlock();
         

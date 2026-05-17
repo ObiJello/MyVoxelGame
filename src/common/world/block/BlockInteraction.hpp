@@ -26,13 +26,48 @@ namespace Game {
             : blockPos(pos), face(f), hitPoint(hit), insideBlock(inside) {}
     };
     
-    // Result of a block use action
+    // Result of a block / item use action — mirrors MC's InteractionResult
+    // (net.minecraft.world.InteractionResult, which is a sealed interface).
+    //
+    //   Pass                       — no opinion; caller falls through to next step
+    //   Success                    — handled, swing arm client-side
+    //   SuccessServer              — handled, swing arm server-side (rare; e.g. some particle items)
+    //   Consume                    — handled, no arm swing
+    //   Fail                       — explicitly rejected; STOP, do NOT fall through
+    //   TryEmptyHandInteraction    — item declined; main hand should retry as if
+    //                                empty (so block.useWithoutItem gets a turn even
+    //                                though there's an item in hand)
+    //
+    // We keep a plain enum (not MC's sealed-interface-with-records) for the kind
+    // because:
+    //   • the "swing source" distinction (NONE vs CLIENT vs SERVER) folds into
+    //     the three Success-flavour values above;
+    //   • MC's `heldItemTransformedTo` Optional<ItemStack> is achieved by us via
+    //     the mutable `ItemStack&` passed into useOn/use callbacks — they just
+    //     mutate the stack directly to "transform" it (bucket → water_bucket,
+    //     stew → bowl). If/when we need a non-mutating API path (e.g. dual-wield
+    //     with a clean copy), upgrade this to a struct carrying an optional
+    //     replacement stack — see InteractionResult.Success.heldItemTransformedTo
+    //     in MC's InteractionResult.java.
+    //   • `wasItemInteraction` (used by MC for ITEM_USED_ON_BLOCK criteria)
+    //     defaults to true; the rare `withoutItem()` variant isn't needed until
+    //     we have advancements.
     enum class UseResult {
-        Pass,       // Continue to next action (e.g., try placing)
-        Success,    // Action succeeded, stop processing
-        Consume,    // Consume the action but don't indicate success
-        Fail        // Action failed
+        Pass,
+        Success,
+        SuccessServer,
+        Consume,
+        Fail,
+        TryEmptyHandInteraction
     };
+
+    // Mirrors MC InteractionResult.consumesAction(): true when the result means
+    // "I handled it, stop dispatching" — Success / SuccessServer / Consume.
+    inline bool ConsumesAction(UseResult r) {
+        return r == UseResult::Success
+            || r == UseResult::SuccessServer
+            || r == UseResult::Consume;
+    }
     
     // Context for block placement/interaction
     struct UseOnContext {
@@ -42,7 +77,10 @@ namespace Game {
         BlockHitResult hitResult;
         float playerYaw;            // Player's yaw for orientation
         float playerPitch;          // Player's pitch for orientation
-        
+        bool  altInteract = false;  // true = left-click "use" (currently
+                                    // only meaningful for PortalGun: left
+                                    // = blue, right = orange).
+
         UseOnContext() = default;
         UseOnContext(World* w, Server::ServerPlayer* p, uint32_t h, const BlockHitResult& hit)
             : world(w), player(p), hand(h), hitResult(hit), playerYaw(0), playerPitch(0) {}

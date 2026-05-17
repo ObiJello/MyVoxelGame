@@ -74,6 +74,23 @@ namespace Render {
         glCullFace(GL_BACK);
         glFrontFace(GL_CCW);
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        // Stencil starts disabled — matches PipelineState defaults. Set the
+        // op + func to known no-ops so even if a buggy caller somehow flips
+        // GL_STENCIL_TEST without a fresh SetPipelineState, behaviour is sane.
+        glDisable(GL_STENCIL_TEST);
+        glStencilFunc(GL_ALWAYS, 0, 0xFFu);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glStencilMask(0xFFu);
+        // Color writes default-on (matches PipelineState::colorWriteEnabled = true).
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+        // User clip plane 0 — used by the chunk vertex shader's
+        // gl_ClipDistance[0] output for the portal see-through
+        // rendering. Mirrors Portal's PushCustomClipPlane (Source SDK).
+        // Always enabled; the shader writes gl_ClipDistance[0]=1 (always
+        // pass) when the uniform plane is vec4(0), so this has no effect
+        // outside the portal pass.
+        glEnable(GL_CLIP_DISTANCE0);
 
         m_stateInitialized = true;
         Log::Info("GLBackend: Initialized successfully");
@@ -131,11 +148,23 @@ namespace Render {
         glClearColor(r, g, b, a);
     }
 
-    void GLBackend::Clear(bool color, bool depth) {
+    void GLBackend::Clear(bool color, bool depth, bool stencil) {
         GLbitfield mask = 0;
-        if (color) mask |= GL_COLOR_BUFFER_BIT;
-        if (depth) mask |= GL_DEPTH_BUFFER_BIT;
+        if (color)   mask |= GL_COLOR_BUFFER_BIT;
+        if (depth)   mask |= GL_DEPTH_BUFFER_BIT;
+        if (stencil) {
+            // glClear honours glStencilMask — must be 0xFF or partial bits
+            // won't actually be cleared. Force full mask before clearing,
+            // then restore to current PipelineState mask. (m_stateInitialized
+            // means there IS a current state; otherwise restore to 0xFF
+            // which matches the default PipelineState.)
+            glStencilMask(0xFFu);
+            mask |= GL_STENCIL_BUFFER_BIT;
+        }
         if (mask) glClear(mask);
+        if (stencil && m_stateInitialized) {
+            glStencilMask(m_currentState.stencilWriteMask);
+        }
     }
 
     void GLBackend::SetViewport(int x, int y, int width, int height) {
@@ -203,15 +232,43 @@ namespace Render {
         glGenTextures(1, &glId);
         if (glId == 0) return INVALID_TEXTURE;
 
+        // Default to RGBA8 (LDR). Override for HDR + depth formats below.
         GLenum internalFormat = GL_RGBA8;
-        GLenum dataFormat = GL_RGBA;
-        if (format == TextureFormat::SRGB8_A8) {
-            internalFormat = GL_SRGB8_ALPHA8;
+        GLenum dataFormat     = GL_RGBA;
+        GLenum dataType       = GL_UNSIGNED_BYTE;
+        int    bytesPerPixel  = 4;
+        switch (format) {
+            case TextureFormat::RGBA8:
+                /* defaults */ break;
+            case TextureFormat::SRGB8_A8:
+                internalFormat = GL_SRGB8_ALPHA8; break;
+            case TextureFormat::RGBA16F:
+                internalFormat = GL_RGBA16F;
+                dataType       = GL_HALF_FLOAT;
+                bytesPerPixel  = 8;
+                break;
+            case TextureFormat::RGBA32F:
+                internalFormat = GL_RGBA32F;
+                dataType       = GL_FLOAT;
+                bytesPerPixel  = 16;
+                break;
+            case TextureFormat::R11G11B10F:
+                internalFormat = GL_R11F_G11F_B10F;
+                dataFormat     = GL_RGB;
+                dataType       = GL_UNSIGNED_INT_10F_11F_11F_REV;
+                bytesPerPixel  = 4;
+                break;
+            case TextureFormat::Depth24Stencil8:
+                internalFormat = GL_DEPTH24_STENCIL8;
+                dataFormat     = GL_DEPTH_STENCIL;
+                dataType       = GL_UNSIGNED_INT_24_8;
+                bytesPerPixel  = 4;
+                break;
         }
 
         glBindTexture(GL_TEXTURE_2D, glId);
         glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0,
-                    dataFormat, GL_UNSIGNED_BYTE, data);
+                    dataFormat, dataType, data);
 
         // Default filtering
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -221,7 +278,7 @@ namespace Render {
 
         glBindTexture(GL_TEXTURE_2D, 0);
 
-        size_t memSize = static_cast<size_t>(width) * height * 4;
+        size_t memSize = static_cast<size_t>(width) * height * bytesPerPixel;
         uint32_t handle = AllocHandle();
         m_textures[handle] = {glId, width, height, memSize};
 
@@ -389,6 +446,14 @@ namespace Render {
         if (loc != -1) glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(value));
     }
 
+    void GLBackend::SetUniformVec4(ShaderHandle handle, const std::string& name,
+                                   const glm::vec4& value) {
+        auto it = m_shaders.find(handle);
+        if (it == m_shaders.end()) return;
+        GLint loc = it->second.GetUniform(name);
+        if (loc != -1) glUniform4fv(loc, 1, glm::value_ptr(value));
+    }
+
     void GLBackend::SetUniformVec3(ShaderHandle handle, const std::string& name,
                                    const glm::vec3& value) {
         auto it = m_shaders.find(handle);
@@ -482,7 +547,170 @@ namespace Render {
         m_stateInitialized = false;
     }
 
-    void GLBackend::SetPipelineState(const PipelineState& state) {
+    void GLBackend::CopyFramebufferToTexture(TextureHandle dst) {
+        auto it = m_textures.find(dst);
+        if (it == m_textures.end()) return;
+        // glCopyTexSubImage2D copies from the currently-bound READ
+        // framebuffer (default = window) into the bound 2D texture.
+        // No reformat — texture must be RGBA8 sized to (w, h).
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        glCopyTexSubImage2D(GL_TEXTURE_2D, 0,
+                            /*xoffset*/ 0, /*yoffset*/ 0,
+                            /*x*/       0, /*y*/       0,
+                            it->second.width, it->second.height);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    // ========================================================================
+    // RENDER TARGETS (offscreen FBOs)
+    // ========================================================================
+
+    RenderTargetHandle GLBackend::CreateRenderTarget(const RenderTargetDesc& desc) {
+        if (desc.width <= 0 || desc.height <= 0) return INVALID_RENDER_TARGET;
+
+        GLRenderTargetInfo info;
+        info.width       = desc.width;
+        info.height      = desc.height;
+        info.colorFormat = desc.colorFormat;
+        info.depthFormat = desc.depthFormat;
+
+        // 1. Color texture (sampleable). Reuse CreateTexture2D — handles
+        //    HDR formats. nullptr data = uninitialized backing storage.
+        info.colorTexture = CreateTexture2D(desc.width, desc.height,
+                                            desc.colorFormat, nullptr);
+        if (info.colorTexture == INVALID_TEXTURE) {
+            return INVALID_RENDER_TARGET;
+        }
+        // Override the default nearest filter — RTs are typically
+        // sampled with linear filtering by post-process shaders.
+        SetTextureFilter(info.colorTexture, TextureFilter::Linear, TextureFilter::Linear);
+
+        // 2. Depth+stencil renderbuffer. Cheap, not sampleable. (Use a
+        //    depth texture instead if a future feature needs to sample
+        //    the depth buffer.)
+        glGenRenderbuffers(1, &info.depthRBO);
+        glBindRenderbuffer(GL_RENDERBUFFER, info.depthRBO);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+                              desc.width, desc.height);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        // 3. FBO with the color texture + depth RBO attached.
+        glGenFramebuffers(1, &info.fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, info.fbo);
+
+        auto colorIt = m_textures.find(info.colorTexture);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, colorIt->second.glId, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                  GL_RENDERBUFFER, info.depthRBO);
+
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            // Roll back.
+            glDeleteFramebuffers(1, &info.fbo);
+            glDeleteRenderbuffers(1, &info.depthRBO);
+            DestroyTexture(info.colorTexture);
+            return INVALID_RENDER_TARGET;
+        }
+
+        const uint32_t handle = AllocHandle();
+        m_renderTargets[handle] = info;
+        return handle;
+    }
+
+    void GLBackend::DestroyRenderTarget(RenderTargetHandle rt) {
+        if (rt == INVALID_RENDER_TARGET) return;
+        auto it = m_renderTargets.find(rt);
+        if (it == m_renderTargets.end()) return;
+        glDeleteFramebuffers(1, &it->second.fbo);
+        glDeleteRenderbuffers(1, &it->second.depthRBO);
+        DestroyTexture(it->second.colorTexture);
+        m_renderTargets.erase(it);
+    }
+
+    void GLBackend::BindRenderTarget(RenderTargetHandle rt) {
+        if (rt == INVALID_RENDER_TARGET) {
+            // Bind default backbuffer.
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            return;
+        }
+        auto it = m_renderTargets.find(rt);
+        if (it == m_renderTargets.end()) return;
+        glBindFramebuffer(GL_FRAMEBUFFER, it->second.fbo);
+        glViewport(0, 0, it->second.width, it->second.height);
+    }
+
+    TextureHandle GLBackend::GetRenderTargetColorTexture(RenderTargetHandle rt) const {
+        auto it = m_renderTargets.find(rt);
+        if (it == m_renderTargets.end()) return INVALID_TEXTURE;
+        return it->second.colorTexture;
+    }
+
+    void GLBackend::ResizeRenderTarget(RenderTargetHandle rt, int w, int h) {
+        if (rt == INVALID_RENDER_TARGET || w <= 0 || h <= 0) return;
+        auto it = m_renderTargets.find(rt);
+        if (it == m_renderTargets.end()) return;
+        if (it->second.width == w && it->second.height == h) return;
+
+        // Destroy + recreate the color texture and depth RBO at the
+        // new size; reuse the FBO id.
+        DestroyTexture(it->second.colorTexture);
+        glDeleteRenderbuffers(1, &it->second.depthRBO);
+
+        it->second.colorTexture = CreateTexture2D(w, h, it->second.colorFormat, nullptr);
+        SetTextureFilter(it->second.colorTexture,
+                         TextureFilter::Linear, TextureFilter::Linear);
+
+        glGenRenderbuffers(1, &it->second.depthRBO);
+        glBindRenderbuffer(GL_RENDERBUFFER, it->second.depthRBO);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, it->second.fbo);
+        auto colorIt = m_textures.find(it->second.colorTexture);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, colorIt->second.glId, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                  GL_RENDERBUFFER, it->second.depthRBO);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+        it->second.width  = w;
+        it->second.height = h;
+    }
+
+    void GLBackend::SetStencilOverride(bool enabled,
+                                       CompareOp compareOp,
+                                       StencilOp passOp,
+                                       uint32_t  reference,
+                                       uint32_t  readMask,
+                                       uint32_t  writeMask) {
+        m_stencilOverride = {enabled, compareOp, passOp, reference, readMask, writeMask};
+        // Force the next SetPipelineState call to re-apply EVERYTHING.
+        // Without this, callers that re-set the same PipelineState would
+        // skip the stencil branch via the dirty-tracking optimisation and
+        // the override would silently fail to take effect.
+        m_stateInitialized = false;
+    }
+
+    void GLBackend::SetPipelineState(const PipelineState& state_) {
+        // If a stencil override is active, splice its values into the state
+        // BEFORE the dirty-tracking compare. The fail / depthFail ops stay
+        // Keep — the portal renderer only ever wants to mark or compare,
+        // not modify-on-fail — and the override always enables stencil
+        // testing.
+        PipelineState state = state_;
+        if (m_stencilOverride.enabled) {
+            state.stencilTestEnabled = true;
+            state.stencilCompareOp   = m_stencilOverride.compareOp;
+            state.stencilFailOp      = StencilOp::Keep;
+            state.stencilDepthFailOp = StencilOp::Keep;
+            state.stencilPassOp      = m_stencilOverride.passOp;
+            state.stencilReference   = m_stencilOverride.reference;
+            state.stencilReadMask    = m_stencilOverride.readMask;
+            state.stencilWriteMask   = m_stencilOverride.writeMask;
+        }
+
         // Depth test
         if (!m_stateInitialized || state.depthTestEnabled != m_currentState.depthTestEnabled) {
             if (state.depthTestEnabled) {
@@ -541,6 +769,66 @@ namespace Render {
         // Line width
         if (!m_stateInitialized || state.lineWidth != m_currentState.lineWidth) {
             glLineWidth(state.lineWidth);
+        }
+
+        // Color write mask — all 4 channels on or all off. The portal
+        // renderer (Phase 6) toggles this when stencil-marking and
+        // depth-refilling so those sub-passes don't disturb framebuffer
+        // colors that the prior scene draw established.
+        if (!m_stateInitialized || state.colorWriteEnabled != m_currentState.colorWriteEnabled) {
+            const GLboolean m = state.colorWriteEnabled ? GL_TRUE : GL_FALSE;
+            glColorMask(m, m, m, m);
+        }
+
+        // Polygon offset (depth bias). Used by the portal renderer to push
+        // the portal mesh's depth toward the camera so it reliably wins
+        // z-fighting against the wall block it's stuck to (the portal sits
+        // ~1 mm in front of the wall surface, which collapses to z-fighting
+        // at grazing angles — visible to the user as "the wall shows
+        // through the portal at low viewing angles"). Negative units pull
+        // depth toward the near plane.
+        if (!m_stateInitialized || state.depthBiasEnabled != m_currentState.depthBiasEnabled) {
+            if (state.depthBiasEnabled) glEnable(GL_POLYGON_OFFSET_FILL);
+            else                        glDisable(GL_POLYGON_OFFSET_FILL);
+        }
+        if (state.depthBiasEnabled &&
+            (!m_stateInitialized
+             || state.depthBiasConstant != m_currentState.depthBiasConstant
+             || state.depthBiasSlope    != m_currentState.depthBiasSlope)) {
+            glPolygonOffset(state.depthBiasSlope, state.depthBiasConstant);
+        }
+
+        // Stencil — only do work when the test flips on/off OR the
+        // reference / ops / masks change while it's enabled. Same shape as
+        // the depth/blend branches above.
+        if (!m_stateInitialized || state.stencilTestEnabled != m_currentState.stencilTestEnabled) {
+            if (state.stencilTestEnabled) glEnable(GL_STENCIL_TEST);
+            else                          glDisable(GL_STENCIL_TEST);
+        }
+        if (state.stencilTestEnabled) {
+            const bool funcChanged =
+                !m_stateInitialized
+                || state.stencilCompareOp != m_currentState.stencilCompareOp
+                || state.stencilReference != m_currentState.stencilReference
+                || state.stencilReadMask  != m_currentState.stencilReadMask;
+            if (funcChanged) {
+                glStencilFunc(ToGLCompareOp(state.stencilCompareOp),
+                              static_cast<GLint>(state.stencilReference),
+                              state.stencilReadMask);
+            }
+            const bool opChanged =
+                !m_stateInitialized
+                || state.stencilFailOp      != m_currentState.stencilFailOp
+                || state.stencilDepthFailOp != m_currentState.stencilDepthFailOp
+                || state.stencilPassOp      != m_currentState.stencilPassOp;
+            if (opChanged) {
+                glStencilOp(ToGLStencilOp(state.stencilFailOp),
+                            ToGLStencilOp(state.stencilDepthFailOp),
+                            ToGLStencilOp(state.stencilPassOp));
+            }
+            if (!m_stateInitialized || state.stencilWriteMask != m_currentState.stencilWriteMask) {
+                glStencilMask(state.stencilWriteMask);
+            }
         }
 
         m_currentState = state;
@@ -843,6 +1131,20 @@ namespace Render {
             case CompareOp::Always:       return GL_ALWAYS;
         }
         return GL_LEQUAL;
+    }
+
+    GLenum GLBackend::ToGLStencilOp(StencilOp op) const {
+        switch (op) {
+            case StencilOp::Keep:      return GL_KEEP;
+            case StencilOp::Zero:      return GL_ZERO;
+            case StencilOp::Replace:   return GL_REPLACE;
+            case StencilOp::IncrClamp: return GL_INCR;
+            case StencilOp::DecrClamp: return GL_DECR;
+            case StencilOp::Invert:    return GL_INVERT;
+            case StencilOp::IncrWrap:  return GL_INCR_WRAP;
+            case StencilOp::DecrWrap:  return GL_DECR_WRAP;
+        }
+        return GL_KEEP;
     }
 
     std::string GLBackend::ReadFileContents(const std::string& path) const {

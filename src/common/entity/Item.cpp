@@ -20,6 +20,26 @@
 namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
 
 namespace Game {
+    // Implemented in ItemBehaviors.cpp — wires up FlintAndSteel/Hoe/Shovel etc.
+    void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems);
+
+#if ENABLE_PORTAL_GUN
+    // Implemented in PortalGunBehavior.cpp — the right-click handler that
+    // toggles next-color and (in Phase 2+) drives the server PortalRegistry.
+    namespace Portal {
+        UseResult OnGunUseOn(const UseOnContext& ctx, ItemStack& stack);
+    }
+
+    // Storage for the mutable ItemID declared in Item.hpp's Items::
+    // namespace under the same #if guard. Assigned at registration time
+    // inside ItemRegistry::Initialize.
+    namespace Items {
+        ItemID PortalGun = 0;
+    }
+#endif
+}
+
+namespace Game {
 
     namespace {
         // Block items: dense vector indexed by BlockID's numeric value (0..BlockID::Count-1).
@@ -360,6 +380,37 @@ namespace Game {
             it->second.defaultComponents.set(DataComponents::ENCHANTMENT_GLINT_OVERRIDE, true);
         }
 
+        // Wire per-item useOn / use callbacks (FlintAndSteel, Hoe, Shovel, …).
+        // Mirrors MC's per-Item-subclass override pattern — see ItemBehaviors.cpp.
+        ItemRegistry_RegisterBehaviors(g_pureItems);
+
+#if ENABLE_PORTAL_GUN
+        // ── Portal Gun (custom non-MC item, behind compile-time feature flag) ──
+        // Registered AFTER the MC-table loop so it picks up an ItemID safely
+        // past anything in kPureItemTable. Keeping the assigned ID in
+        // Items::PortalGun (declared in Item.hpp under the same #if guard)
+        // means rest of code can refer to `Items::PortalGun` without doing
+        // hash lookups. When ENABLE_PORTAL_GUN=0, this whole block strips
+        // out and no portal-gun item exists in the registry.
+        {
+            const ItemID gunId = PURE_ITEM_BASE
+                               + static_cast<ItemID>(kPureItemTableSize)
+                               + 0;  // first custom slot
+            Item gun;
+            gun.name         = "Portal Gun";
+            gun.renderType   = ItemRenderType::Sprite;
+            gun.spriteName   = "portal_gun";  // assets/textures/item/portal_gun.png
+            gun.maxStackSize = 1;             // sword-like — never stacks
+            gun.useOn        = &Portal::OnGunUseOn;  // PortalGunBehavior.cpp
+            // Default per-stack state — fresh guns shoot blue first to
+            // match Portal-game muscle memory.
+            gun.defaultComponents.set(DataComponents::PORTAL_GUN_NEXT_COLOR, uint8_t{0});
+            g_pureItems[gunId] = std::move(gun);
+            Items::PortalGun   = gunId;
+            Log::Info("[ItemRegistry] Registered Portal Gun at ItemID %u", gunId);
+        }
+#endif
+
         g_initialized = true;
         Log::Info("[ItemRegistry] Initialized: %zu block items, %zu pure items",
                   g_blockItems.size(), g_pureItems.size());
@@ -418,6 +469,10 @@ namespace Game {
             return !stored->entries.empty();
         }
         return false;
+    }
+
+    const std::unordered_map<ItemID, Item>& ItemRegistry::AllPureItems() {
+        return g_pureItems;
     }
 
     void ItemRegistry::SetRenderContext(const ItemRenderContext& ctx) {

@@ -115,8 +115,18 @@ namespace Render {
         bool Initialize();
         void Shutdown();
 
-        // Convenience method to render all layers
+        // Convenience method to render all layers. Computes projection
+        // internally using the standard glm::perspective(fov, aspect, ...).
         void RenderAll(const Camera& camera, const Frustum& frustum);
+
+        // Variant for callers that need a NON-standard projection — e.g.
+        // the portal renderer's see-through pass uses an oblique near-plane
+        // projection so the destination wall block doesn't occlude the
+        // destination room from the virtual camera. The override is used as
+        // the projection matrix for ALL render passes; pass the same matrix
+        // you used to derive `frustum`.
+        void RenderAll(const Camera& camera, const Frustum& frustum,
+                       const glm::mat4& projectionOverride);
 
         // Configuration - **UPDATED**: Now reads from game settings
         void RefreshSettings(); // Call when settings change
@@ -154,6 +164,28 @@ namespace Render {
         ShaderHandle m_activeShader = INVALID_SHADER;        // Currently bound shader
         TextureHandle m_backendAtlasTexture = INVALID_TEXTURE;
         glm::mat4 m_cachedMVP{1.0f};                         // Cached for shader switches
+
+        // Projection override — used by the portal renderer's see-through
+        // pass to inject an oblique near-plane projection. When
+        // m_useProjectionOverride is true, RenderAll uses m_projectionOverride
+        // instead of computing its own glm::perspective; reset to false
+        // automatically by the (camera, frustum, projection) overload after
+        // the call returns.
+        bool      m_useProjectionOverride = false;
+        glm::mat4 m_projectionOverride{1.0f};
+
+        // World-space portal clip plane — set by PortalRenderer before the
+        // see-through scene render. Mirrors Portal's PushCustomClipPlane
+        // (portalrenderable_flatbasic.cpp:454). xyz = plane normal,
+        // w = -dot(normal, point on plane). Fragments with positive
+        // distance are kept; negative are clipped via gl_ClipDistance[0].
+        // vec4(0) = no clipping.
+    public:
+        static void SetPortalClipPlane(const glm::vec4& plane) {
+            s_portalClipPlane = plane;
+        }
+    private:
+        static glm::vec4 s_portalClipPlane;
 
         // Render configuration
         bool m_enableFrustumCulling = true;
@@ -243,6 +275,10 @@ namespace Render {
     void RenderChunksCutout(const Camera& camera, const Frustum& frustum);
     void RenderChunksTranslucent(const Camera& camera, const Frustum& frustum);
     void RenderChunksAll(const Camera& camera, const Frustum& frustum);
+    // Variant that lets the caller (portal see-through pass) inject a
+    // non-standard projection matrix. See ChunkRenderer::RenderAll above.
+    void RenderChunksAll(const Camera& camera, const Frustum& frustum,
+                         const glm::mat4& projectionOverride);
     
     // Get current frame's rendering statistics
     const RenderStats* GetChunkRendererStats();

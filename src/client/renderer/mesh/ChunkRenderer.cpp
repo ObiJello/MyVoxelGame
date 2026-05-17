@@ -3,6 +3,7 @@
 #include "ChunkMegaBuffer.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -18,6 +19,9 @@ namespace Render {
 
     // Global chunk renderer instance
     std::unique_ptr<ChunkRenderer> g_chunkRenderer = nullptr;
+
+    // Static portal clip plane (no clipping by default).
+    glm::vec4 ChunkRenderer::s_portalClipPlane{0.0f};
 
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
@@ -191,6 +195,14 @@ namespace Render {
         m_stats.translucentPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
+    void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum,
+                                  const glm::mat4& projectionOverride) {
+        m_useProjectionOverride = true;
+        m_projectionOverride    = projectionOverride;
+        RenderAll(camera, frustum);
+        m_useProjectionOverride = false;
+    }
+
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum) {
         PROFILE_ZONE;
         m_stats.Reset();
@@ -220,6 +232,7 @@ namespace Render {
             m_activeShader = m_cutoutShader;
             g_renderBackend->BindShader(m_cutoutShader);
             g_renderBackend->SetUniformMat4(m_cutoutShader, "uMVP", m_cachedMVP);
+            g_renderBackend->SetUniformVec4(m_cutoutShader, "uPortalClipPlane", s_portalClipPlane);
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
@@ -231,6 +244,7 @@ namespace Render {
             m_activeShader = m_solidShader;
             g_renderBackend->BindShader(m_solidShader);
             g_renderBackend->SetUniformMat4(m_solidShader, "uMVP", m_cachedMVP);
+            g_renderBackend->SetUniformVec4(m_solidShader, "uPortalClipPlane", s_portalClipPlane);
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
@@ -349,9 +363,14 @@ namespace Render {
             effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
         }
         float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
-        glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
+        // Use the caller-supplied projection (oblique-near-plane from the
+        // portal renderer) when present; otherwise build the standard one.
+        const glm::mat4 proj = m_useProjectionOverride
+            ? m_projectionOverride
+            : glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
         m_cachedMVP = proj * view;
         g_renderBackend->SetUniformMat4(m_opaqueShader, "uMVP", m_cachedMVP);
+        g_renderBackend->SetUniformVec4(m_opaqueShader, "uPortalClipPlane", s_portalClipPlane);
 
         // Fetch and bind atlas texture once (fresh handle in case atlas was rebuilt)
         if (g_atlasBuilder) {
@@ -577,6 +596,13 @@ namespace Render {
     void RenderChunksAll(const Camera& camera, const Frustum& frustum) {
         if (g_chunkRenderer) {
             g_chunkRenderer->RenderAll(camera, frustum);
+        }
+    }
+
+    void RenderChunksAll(const Camera& camera, const Frustum& frustum,
+                         const glm::mat4& projectionOverride) {
+        if (g_chunkRenderer) {
+            g_chunkRenderer->RenderAll(camera, frustum, projectionOverride);
         }
     }
     

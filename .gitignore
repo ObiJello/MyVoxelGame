@@ -41,6 +41,11 @@ depreciated/
 decompiled_net/
 decompiled_com/
 
+# Portal SDK source + game assets (vendored locally for reference, not
+# part of the repo — multi-GB and licensed separately by Valve)
+Portal code/
+Portal-Root/
+
 # Windows build number (platform-specific counter, not shared)
 tools/game_build_number_win
 

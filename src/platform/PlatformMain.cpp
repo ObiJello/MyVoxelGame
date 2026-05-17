@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include <sentry.h>
 #include "common/core/Config.hpp"
+#include "common/core/Features.hpp"
 #include "common/core/ThreadAllocator.hpp"
 #include "client/renderer/debug/DebugSystem.hpp"
 // Include game headers
@@ -29,6 +30,16 @@
 #include "client/renderer/shader/Shader.hpp"
 #include "client/renderer/mesh/BlockHighlight.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
+#if ENABLE_PORTAL_GUN
+#include "client/renderer/portal/PortalRenderer.hpp"
+#include "client/renderer/portal/PortalParticleSystem.hpp"
+#include "client/renderer/portal/HDRPipeline.hpp"
+#include "client/renderer/portal/BloomPipeline.hpp"
+#include "client/renderer/viewmodel/PortalGunViewmodel.hpp"
+#include "client/renderer/portal/PortalCrosshair.hpp"
+#include "common/entity/Item.hpp"
+#include "client/portal/ClientPortalManager.hpp"
+#endif
 #include "client/renderer/gui/GuiAtlas.hpp"
 #include "client/renderer/gui/GuiRenderState.hpp"
 #include "client/renderer/gui/GuiRenderer.hpp"
@@ -39,11 +50,13 @@
 #include "client/renderer/gui/ChatScreen.hpp"
 #include <functional>
 #include <sstream>
+#include <unordered_set>
 
 // Declared in ClientConnection.cpp
 extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
 extern void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback);
-extern void SetTeleportCallback(std::function<void(double, double, double, float, float)> callback);
+extern void SetTeleportCallback(std::function<void(double, double, double, float, float,
+                                                    double, double, double)> callback);
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/texture/TextureAnimator.hpp"
 #include "common/core/Profiling.hpp"
@@ -356,27 +369,42 @@ bool s_eKeyHeld = false;
         return true;
     }
 
-    void HandlePlayerInput(Game::ClientPlayer& player, Game::ClientPlayerController& controller, Render::Camera& camera) {
-        // Movement input
-        glm::vec3 movementInput = camera.CalculateMovementInput();
-        player.SetMovementInput(movementInput);
+    void HandlePlayerInput(Game::ClientPlayer& player, Game::ClientPlayerController& controller, Render::Camera& camera, bool cursorVisible) {
+        // When the cursor is visible (Tab-toggle, inventory or chat
+        // open) the player is interacting with UI, not the world —
+        // drop world-space movement & action input so WASD held when
+        // opening an overlay doesn't keep walking, and clicks don't
+        // shoot portals / break blocks behind the cursor.
+        if (cursorVisible) {
+            player.SetMovementInput(glm::vec3(0.0f));
+            player.SetJumpPressed(false);
+            player.SetJumpHeld(false);
+            player.SetSprintPressed(false);
+            player.SetSneakPressed(false);
+        } else {
+            glm::vec3 movementInput = camera.CalculateMovementInput();
+            player.SetMovementInput(movementInput);
+            player.SetJumpPressed(camera.IsJumpPressed());
+            player.SetJumpHeld(camera.IsJumpPressed());
+            player.SetSprintPressed(camera.IsSprintPressed());
+            player.SetSneakPressed(camera.IsSneakPressed());
+        }
 
-        // Action inputs
-        player.SetJumpPressed(camera.IsJumpPressed());
-        player.SetJumpHeld(camera.IsJumpPressed());
-        player.SetSprintPressed(camera.IsSprintPressed());
-        player.SetSneakPressed(camera.IsSneakPressed());
-
-        // Block interaction
+        // Block interaction — treat the mouse as released while the
+        // cursor is visible so any in-progress break/place aborts and
+        // no new clicks register. The static "wasDown" trackers will
+        // re-arm naturally when the cursor returns to game mode.
         static bool leftMouseWasDown = false;
-        bool leftMouseDown = Input::IsMouseButtonDown(Input::Key::LeftMouse);
+        bool leftMouseDown = !cursorVisible &&
+                             Input::IsMouseButtonDown(Input::Key::LeftMouse);
         if (leftMouseDown != leftMouseWasDown) {
             controller.OnLMB(leftMouseDown);
             leftMouseWasDown = leftMouseDown;
         }
 
         static bool rightMouseWasDown = false;
-        bool rightMouseDown = Input::IsMouseButtonDown(Input::Key::RightMouse);
+        bool rightMouseDown = !cursorVisible &&
+                              Input::IsMouseButtonDown(Input::Key::RightMouse);
         if (rightMouseDown != rightMouseWasDown) {
             controller.OnRMB(rightMouseDown);
             rightMouseWasDown = rightMouseDown;
@@ -561,6 +589,56 @@ bool s_eKeyHeld = false;
             return false;
         }
 
+#if ENABLE_PORTAL_GUN
+        // Phase 4 placeholder portal renderer. Failure is non-fatal — log and
+        // continue (the rest of the game should still work; portals just
+        // don't render).
+        if (!Render::g_portalRenderer.Initialize()) {
+            Log::Warning("Portal renderer init failed — portals will not draw");
+        }
+        // Particle system for the rim sparks. Same non-fatal contract.
+        if (!Render::g_portalParticleSystem.Initialize()) {
+            Log::Warning("Portal particle system init failed — sparks will not draw");
+        }
+        // HDR pipeline — wraps the main scene render in an offscreen
+        // RGBA16F target and tone-maps to the LDR backbuffer. Required
+        // for the bright rim crest to drive the bloom pass (Phase C).
+        // Non-fatal: if the backend lacks RT support (early Vulkan),
+        // BeginHDRPass / EndHDRPassAndComposite become no-ops and
+        // rendering proceeds to the LDR backbuffer like pre-portal-feature.
+        if (!Render::g_hdrPipeline.Initialize()) {
+            Log::Warning("HDR pipeline init failed — portal will render LDR (no bloom)");
+        }
+        // Bloom pipeline — runs on the HDR RT before tone map. Non-fatal:
+        // if shaders fail to compile, bloom is skipped (HDR + tone map
+        // still works).
+        if (!Render::g_bloomPipeline.Initialize()) {
+            Log::Warning("Bloom pipeline init failed — portals will render without bloom");
+        }
+        // First-person portal-gun viewmodel — loads the real Portal v_portalgun
+        // mesh (extracted via SourceIO from Portal-Root/) + its VTF→PNG
+        // textures. Non-fatal: failure just hides the viewmodel.
+        if (!Render::g_portalGunViewmodel.Initialize()) {
+            Log::Warning("Portal gun viewmodel init failed — gun will not appear in hand");
+        }
+        // Portal quickinfo crosshair overlay — the bracket pair with
+        // last-placed pulses. Non-fatal: if the atlas PNG is missing
+        // we just don't draw the brackets.
+        if (!Render::g_portalCrosshair.Initialize()) {
+            Log::Warning("Portal crosshair init failed — bracket overlay disabled");
+        }
+        // Wire client physics to consult ClientPortalManager when checking
+        // block solidity. Lets the player walk through the wall in the 1×2
+        // opening behind a fully-paired portal — but only when their AABB
+        // fits inside the opening laterally (so they can't tunnel through
+        // the block from the side). Server physics doesn't touch this hook.
+        Game::SetPortalPassthroughFn(
+            [](int x, int y, int z, const Game::AABB& aabb) -> bool {
+                return Client::GetClientPortalManager()
+                    .IsBlockBehindActivePortal(x, y, z, aabb);
+            });
+#endif
+
         // Initialize crosshair with proper asset path
         std::string crosshairPath = GetAssetPath("assets/textures/gui/sprites/hud/crosshair.png");
         if (!Render::g_crosshair.Initialize(crosshairPath)) {
@@ -728,6 +806,12 @@ bool s_eKeyHeld = false;
             glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, GLFW_TRUE);
     #endif
             glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GLFW_TRUE);
+            // Explicitly request 8 stencil bits for the default framebuffer.
+            // GLFW defaults to 8 already on every modern desktop driver, but
+            // making this explicit guarantees the portal renderer (Phase 6+)
+            // gets a stencil buffer regardless of platform-specific defaults.
+            glfwWindowHint(GLFW_STENCIL_BITS, 8);
+            glfwWindowHint(GLFW_DEPTH_BITS,   24);
         }
 
         // Create window
@@ -919,19 +1003,12 @@ bool s_eKeyHeld = false;
             Server::g_integratedServer->SetPlayer(&player);
         }
 
-        // Wire teleport packet → local player snap (matches MC client's handleMovePlayer:
-        // always snap, no prediction-error threshold; also zero velocity to match server's
-        // Vec3.ZERO delta in connection.teleport(x,y,z,yRot,xRot)).
-        SetTeleportCallback([&player](double x, double y, double z, float yRot, float xRot) {
-            glm::dvec3 dpos(x, y, z);
-            player.physics.position = glm::vec3(dpos);
-            player.physics.velocity = glm::vec3(0.0f);
-            player.predictedPos = dpos;
-            player.serverPos    = dpos;
-            player.visualPos    = dpos;
-            player.yaw   = yRot;
-            player.pitch = xRot;
-        });
+        // NOTE: SetTeleportCallback now lives after `camera` is declared
+        // (right before the main loop) so the lambda can capture &camera.
+        // Without that, mouse-look's `camera.yaw` keeps the player looking
+        // in the pre-teleport direction even after a server snap — visible
+        // as portals teleporting position but not view, and as /tp <x y z
+        // yaw pitch> ignoring the rotation arguments.
 
         // 7. Initialize rendering systems (keeping existing ones that still work)
         if (!Render::InitializeChunkRenderer()) {
@@ -1052,6 +1129,36 @@ bool s_eKeyHeld = false;
         Render::Camera camera;
         camera.position = glm::vec3(0.0f, 67.0f, 0.0f);
         camera.physicsControlled = true;
+
+        // Wire teleport packet → local player snap (matches MC client's
+        // handleMovePlayer: always snap, no prediction-error threshold; zero
+        // velocity to match server's Vec3.ZERO delta in
+        // connection.teleport(x,y,z,yRot,xRot)). Yaw/pitch on the wire come
+        // from `camera.yaw` (sent in PlayerMoveC2S) so we write them BACK to
+        // `camera.yaw` here — `player.yaw` is informational only and doesn't
+        // drive rendering. Without the camera write, portal teleports and
+        // `/tp ... <yaw> <pitch>` would snap position but ignore rotation.
+        SetTeleportCallback([&player, &camera](double x, double y, double z,
+                                                float yRot, float xRot,
+                                                double dx, double dy, double dz) {
+            glm::dvec3 dpos(x, y, z);
+            player.physics.position = glm::vec3(dpos);
+            // Velocity in blocks/sec from the server (rotated through the
+            // portal pair for portal teleports, zero for /tp). Writing to
+            // physics.velocity preserves the player's momentum across the
+            // teleport instead of stopping them on landing.
+            player.physics.velocity = glm::vec3(
+                static_cast<float>(dx),
+                static_cast<float>(dy),
+                static_cast<float>(dz));
+            player.predictedPos = dpos;
+            player.serverPos    = dpos;
+            player.visualPos    = dpos;
+            player.yaw   = yRot;
+            player.pitch = xRot;
+            camera.yaw   = yRot;
+            camera.pitch = xRot;
+        });
 
         // Network tracking
         uint32_t playerMoveSequence = 0;
@@ -1251,7 +1358,16 @@ bool s_eKeyHeld = false;
                 if (eDown && !s_eKeyHeld) Render::GetInventoryScreen().Open();
                 s_eKeyHeld = eDown;
 
-                HandlePlayerInput(player, playerController, camera);
+                // Cursor-visible covers BOTH the Tab manual toggle and
+                // any overlay opened this frame (chat via T/Slash,
+                // inventory via E). GLFW reflects the manual toggle's
+                // last-frame state; we OR in the just-opened overlays
+                // so the very frame they pop, WASD input is dropped.
+                const bool overlayJustOpened = g_chatScreen.IsOpen() ||
+                                               Render::GetInventoryScreen().IsOpen();
+                const bool cursorVisible = overlayJustOpened ||
+                    (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
+                HandlePlayerInput(player, playerController, camera, cursorVisible);
             }
 
             // Resolve cursor state AFTER chat/inventory handling so opening/closing this
@@ -1323,7 +1439,52 @@ bool s_eKeyHeld = false;
             dt = static_cast<float>(Time::Delta());
             metrics.AddFrameTimeSample(dt * 1000.0f);
 
+            // Capture pre-physics state for the portal prediction below.
+            // Critically, prevVel is the velocity BEFORE the physics
+            // step's collision snap might have zeroed it — for fast
+            // falls (>1 m/frame, i.e. > ~62 m/s) the player AABB can
+            // pass through the 1 m thick portal block in a single frame
+            // and trigger the snap on the SOLID block below the portal.
+            // Without saving prevVel, the trigger would then apply M to
+            // a zeroed velocity → player exits the destination at 0 m/s
+            // → infinite-fall acceleration restarts from scratch.
+#if ENABLE_PORTAL_GUN
+            const glm::vec3 prevEye = player.GetEyePosition();
+            const glm::vec3 prevVel = player.physics.velocity;
+#endif
+
             player.UpdatePhysics(dt, blockAccessForPhysics);
+
+#if ENABLE_PORTAL_GUN
+            // Client-side teleport prediction. Server still detects
+            // independently (its own crossing test on the next 50 ms
+            // tick) — when its packet arrives the position will already
+            // match, so the snap is invisible. This eliminates the
+            // ~50 ms (3 frames at 60 fps) gap where the camera was past
+            // the source plane and the portal mesh stopped drawing.
+            {
+                const glm::vec3 currEye = player.GetEyePosition();
+                auto pred = Client::GetClientPortalManager().CheckEyeCrossing(
+                    prevEye, currEye, player.physics.position,
+                    prevVel, camera.yaw, camera.pitch,
+                    player.physics.GetCurrentHeight(),
+                    Game::PlayerPhysics::WIDTH * 0.5f);
+                if (pred.valid) {
+                    player.physics.position = pred.newFeet;
+                    player.physics.velocity = pred.newVelocity;
+                    camera.yaw              = pred.newYawDeg;
+                    camera.pitch            = pred.newPitchDeg;
+                    player.predictedPos     = glm::dvec3(pred.newFeet);
+                    player.serverPos        = glm::dvec3(pred.newFeet);
+                    player.visualPos        = glm::dvec3(pred.newFeet);
+                    Log::Info("[PortalPredict] Client predicted teleport "
+                              "to (%.2f,%.2f,%.2f) yaw %.1f pitch %.1f",
+                              pred.newFeet.x, pred.newFeet.y, pred.newFeet.z,
+                              pred.newYawDeg, pred.newPitchDeg);
+                }
+            }
+#endif
+
             camera.position = player.GetEyePosition();
             camera.Update(dt);
             player.UpdateRaycast(camera);
@@ -1382,18 +1543,41 @@ bool s_eKeyHeld = false;
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
 
-            // Clear framebuffer via render backend
+            // Get framebuffer size — needed by HDR pass setup AND viewport.
+            glfwGetFramebufferSize(window, &width, &height);
+
+#if ENABLE_PORTAL_GUN
+            // Redirect main scene + portal rendering into the HDR
+            // offscreen RT. Binds the RT, clears it. If HDR pipeline
+            // is inactive (backend lacks RT support), this is a no-op
+            // and rendering continues to the backbuffer like below.
+            Render::g_hdrPipeline.BeginHDRPass(width, height);
+#endif
+
+            // Clear framebuffer via render backend.
+            // Stencil is cleared too — the portal renderer (Phase 6+) reads
+            // stencil values to gate per-portal scene re-renders, and any
+            // leftover bits from the previous frame would silently mask the
+            // wrong region. The stencil clear is a no-op cost when no
+            // portals are visible.
+            //
+            // When HDR pipeline is active, BeginHDRPass above already
+            // cleared the bound HDR RT. Re-clearing here is harmless
+            // (idempotent) but wastes a tiny bit of fill rate; left for
+            // simplicity since when HDR is OFF this is the primary clear.
             if (Render::g_renderBackend) {
                 // Sky color RGB(120, 167, 255)
                 Render::g_renderBackend->SetClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
-                Render::g_renderBackend->Clear(true, true);
+                Render::g_renderBackend->Clear(true, true, true);
             } else {
                 glClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
-                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             }
 
-            // Calculate view-projection matrices
-            glfwGetFramebufferSize(window, &width, &height);
+            // Set viewport (must come after BindRenderTarget — BindRenderTarget
+            // already sets viewport to RT size, which equals framebuffer
+            // size for the HDR pass; this call is redundant in that case
+            // but required when HDR is inactive).
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->SetViewport(0, 0, width, height);
             }
@@ -1432,10 +1616,119 @@ bool s_eKeyHeld = false;
                 metrics.occlusionOccluded = renderStats->sectionsSkipped;
             }
 
-            // Render remote players (stick figures) before UI overlays
+            // Render remote players (stick figures) before UI overlays.
+            //
+            // partialTick = how far through the current 50ms client tick we are.
+            // 0.0 = just ticked, 1.0 = about to tick again. After the tick
+            // catch-up loop above, `nextClientTick` points at the NEXT tick
+            // boundary, so the time since the last tick = TICK - (nextTick - now).
+            // Mirrors MC's `Minecraft.getDeltaTracker().getGameTimeDeltaPartialTick()`.
+            // The renderer uses this to lerp each remote player's render
+            // position between its previous-tick snapshot and current value
+            // (see RemotePlayer::renderPrev*) → smooth motion at any FPS.
             if (Client::g_remotePlayerManager) {
-                playerRenderer.Render(proj, view, camera.position, *Client::g_remotePlayerManager);
+                const auto nowForPartial = std::chrono::steady_clock::now();
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float partialTick =
+                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+#if ENABLE_PORTAL_GUN
+                // Phase G (remote): for each remote player straddling an
+                // active portal pair we need BOTH halves drawn — entry-clipped
+                // body on the source side, exit-clipped ghost on the
+                // destination side. Skip them in the bulk pass below and
+                // re-render each individually so the per-player clip
+                // planes can be applied.
+                std::unordered_set<uint32_t> straddlingIds;
+                {
+                    auto& portals = Client::GetClientPortalManager();
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        const glm::vec3 renderPosCheck {
+                            glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
+                            glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
+                            glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
+                        };
+                        if (portals.GetStraddlingGhost(renderPosCheck, 1.8f).valid) {
+                            straddlingIds.insert(id);
+                        }
+                    }
+                }
+                playerRenderer.Render(proj, view, camera.position,
+                                      *Client::g_remotePlayerManager,
+                                      partialTick, &straddlingIds);
+#else
+                playerRenderer.Render(proj, view, camera.position,
+                                      *Client::g_remotePlayerManager, partialTick);
+#endif
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
+
+#if ENABLE_PORTAL_GUN
+                // Ghost rendering — for each remote player straddling an
+                // active portal pair, draw BOTH halves:
+                //   • Entry-clipped body on the source side (so the half
+                //     that's already passed through the portal isn't drawn)
+                //   • Exit-clipped ghost on the destination side (only the
+                //     emerged half visible)
+                // Together this produces Portal's iconic "see yourself
+                // bisected by the portal" effect — but in multiplayer for
+                // remote players.
+                {
+                    auto& portals = Client::GetClientPortalManager();
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        const glm::vec3 renderPos {
+                            glm::mix(rp.renderPrevPosition.x, rp.position.x, partialTick),
+                            glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
+                            glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
+                        };
+                        const float headYaw = Client::RotLerp(partialTick,
+                            rp.renderPrevRotation.x, rp.rotation.x);
+                        const float pitch   = glm::mix(rp.renderPrevRotation.y,
+                            rp.rotation.y, partialTick);
+                        const float bodyYaw = Client::RotLerp(partialTick,
+                            rp.renderPrevBodyYaw, rp.bodyYaw);
+                        auto g = portals.GetStraddlingGhost(renderPos, 1.8f);
+                        if (!g.valid) continue;
+                        // 1) Entry-side body, clipped to the half on the
+                        //    source side of the source portal plane. Uses
+                        //    identity model — same world position as the
+                        //    bulk render would have produced.
+                        playerRenderer.RenderSingle(
+                            proj, view, renderPos,
+                            headYaw, bodyYaw, pitch, rp.isCrouching,
+                            static_cast<uint8_t>(rp.color),
+                            glm::mat4(1.0f), g.entryClipPlane);
+                        // 2) Exit-side ghost, transformed through the
+                        //    portal pair matrix and clipped to the
+                        //    emerged half on the destination side.
+                        playerRenderer.RenderSingle(
+                            proj, view, renderPos,
+                            headYaw, bodyYaw, pitch, rp.isCrouching,
+                            static_cast<uint8_t>(rp.color),
+                            g.transform, g.exitClipPlane);
+                    }
+
+                    // Local-player ghost — when straddling, render the
+                    // local player on the destination side too. Visible
+                    // through the destination portal from outside (and via
+                    // the see-through pass below). The local body itself
+                    // is invisible in first person, so no entry-side
+                    // render here.
+                    auto gLocal = portals.GetStraddlingGhost(
+                        player.physics.position, 1.8f);
+                    if (gLocal.valid) {
+                        const bool isCrouching =
+                            Input::IsKeyDown(Input::Key::LeftShift);
+                        playerRenderer.RenderSingle(
+                            proj, view, player.physics.position,
+                            camera.yaw, camera.yaw, camera.pitch,
+                            isCrouching,
+                            static_cast<uint8_t>(player.color),
+                            gLocal.transform, gLocal.exitClipPlane);
+                    }
+                }
+#endif
             }
 
             // Update per-frame item render context so animated items (compass, clock, etc.)
@@ -1462,10 +1755,183 @@ bool s_eKeyHeld = false;
 
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
+#if ENABLE_PORTAL_GUN
+            // Phase 7 portal pass: recursive see-through rendering. The
+            // lambda is invoked once per recursion level by the portal
+            // renderer with that level's virtual camera + oblique
+            // projection — it draws chunks, remote players, AND the local
+            // player (rendered as a stick figure since the player can see
+            // themselves through the portal). Stencil setup is handled by
+            // the portal renderer; the lambda just renders. No nametags or
+            // chat bubbles in see-through (per user request — model only).
+            {
+                // partialTick — interpolation fraction within the current
+                // 50ms client tick. Same calc as the main remote-player
+                // render below; recomputed here so it's in lambda scope.
+                const auto nowForPartial = std::chrono::steady_clock::now();
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float partialTickPortal =
+                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+
+                Render::g_portalRenderer.Render(
+                    proj, view, camera, frustum, aspect, farPlane,
+                    [&](const Render::Camera& virtCam,
+                        const Frustum& virtFrust,
+                        const glm::mat4& obliqueProj) {
+                        // Chunks from the virtual camera (stencil + oblique
+                        // projection both honored).
+                        Render::RenderChunksAll(virtCam, virtFrust, obliqueProj);
+
+                        const glm::mat4 virtView = virtCam.GetViewMatrix();
+
+                        // Remote players (no nametags / bubbles — those are
+                        // separate calls in the main pass below). Phase G
+                        // (remote): exclude straddlers from the bulk pass
+                        // so they get the same per-half entry/exit clip
+                        // treatment as in the main scene render.
+                        if (Client::g_remotePlayerManager) {
+                            std::unordered_set<uint32_t> stRemote;
+                            for (const auto& [id, rp] :
+                                 Client::g_remotePlayerManager->GetPlayers()) {
+                                if (Client::GetClientPortalManager()
+                                        .GetStraddlingGhost(rp.position, 1.8f).valid) {
+                                    stRemote.insert(id);
+                                }
+                            }
+                            playerRenderer.Render(obliqueProj, virtView,
+                                                  virtCam.position,
+                                                  *Client::g_remotePlayerManager,
+                                                  partialTickPortal, &stRemote);
+                        }
+
+                        // Local player as a stick figure — invisible in the
+                        // main pass (it IS the camera) but should appear
+                        // through the portal so the user sees themselves.
+                        // Use camera.yaw/pitch (live mouse-look values) —
+                        // player.yaw/pitch are stale until next teleport.
+                        // Body yaw = head yaw since the local player has no
+                        // separate body-rotation tracking.
+                        //
+                        // Phase G: when straddling, clip the body at the
+                        // src plane (entryClipPlane). Without this clip,
+                        // the see-through view shows the player's FULL
+                        // body at the entry position AND a ghost copy
+                        // on the dst side — both visible simultaneously,
+                        // breaking the "body bisects at the portal plane"
+                        // iconic Portal trick.
+                        const bool isCrouching =
+                            Input::IsKeyDown(Input::Key::LeftShift);
+                        auto& portalsST = Client::GetClientPortalManager();
+                        auto gLocalST = portalsST.GetStraddlingGhost(
+                            player.physics.position, 1.8f);
+                        const glm::vec4 entryClip =
+                            gLocalST.valid ? gLocalST.entryClipPlane
+                                           : glm::vec4(0.0f);
+                        playerRenderer.RenderSingle(
+                            obliqueProj, virtView,
+                            player.physics.position,
+                            camera.yaw, camera.yaw, camera.pitch,
+                            isCrouching,
+                            static_cast<uint8_t>(player.color),
+                            glm::mat4(1.0f), entryClip);
+
+                        // Ghost render for through-portal visibility:
+                        // when local or remote players straddle, also
+                        // draw their ghost copy at the destination so
+                        // looking back through the portal from the
+                        // virtual camera shows the emerging half-body.
+                        if (gLocalST.valid) {
+                            playerRenderer.RenderSingle(
+                                obliqueProj, virtView,
+                                player.physics.position,
+                                camera.yaw, camera.yaw, camera.pitch,
+                                isCrouching,
+                                static_cast<uint8_t>(player.color),
+                                gLocalST.transform, gLocalST.exitClipPlane);
+                        }
+                        if (Client::g_remotePlayerManager) {
+                            for (const auto& [id, rp] :
+                                 Client::g_remotePlayerManager->GetPlayers()) {
+                                auto gR = portalsST.GetStraddlingGhost(
+                                    rp.position, 1.8f);
+                                if (!gR.valid) continue;
+                                // Entry-clipped body on the source side
+                                // (replaces the bulk pass we excluded).
+                                playerRenderer.RenderSingle(
+                                    obliqueProj, virtView, rp.position,
+                                    rp.rotation.x, rp.bodyYaw, rp.rotation.y,
+                                    rp.isCrouching,
+                                    static_cast<uint8_t>(rp.color),
+                                    glm::mat4(1.0f), gR.entryClipPlane);
+                                // Exit-clipped ghost on the destination
+                                // side.
+                                playerRenderer.RenderSingle(
+                                    obliqueProj, virtView, rp.position,
+                                    rp.rotation.x, rp.bodyYaw, rp.rotation.y,
+                                    rp.isCrouching,
+                                    static_cast<uint8_t>(rp.color),
+                                    gR.transform, gR.exitClipPlane);
+                            }
+                        }
+                    });
+            }
+            // Tick + render the portal particle system. Tick uses dt
+            // (frame time) so spawn rate is FPS-independent; render
+            // happens AFTER the portal pass so sparks composite over the
+            // see-through view (additive blending).
+            Render::g_portalParticleSystem.Update(dt, Client::GetClientPortalManager());
+            Render::g_portalParticleSystem.Render(proj, view, camera.position);
+
+            // First-person portal-gun viewmodel — drawn AFTER the
+            // particle system so the rim sparks composite behind the
+            // gun, but BEFORE bloom + tone-map so the gun shading
+            // rolls into the HDR pipeline like every other 3D pass.
+            // Hidden unless the player is actually holding the gun.
+            if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
+                const float fbAspect = (height > 0)
+                    ? static_cast<float>(width) / static_cast<float>(height)
+                    : 16.0f / 9.0f;
+                Render::g_portalGunViewmodel.Render(fbAspect, dt);
+            }
+
+            // Portal bloom — toggled from the Render Controls debug
+            // panel (Debug::DebugSystem::IsBloomEnabled). Off by
+            // default; user can enable to see the HDR rim glow.
+            // INVALID_TEXTURE means "no bloom add" to the HDR composite.
+            Render::TextureHandle bloomTex = Render::INVALID_TEXTURE;
+            if (Debug::DebugSystem::IsBloomEnabled()) {
+                bloomTex = Render::g_bloomPipeline.Apply(
+                    Render::g_hdrPipeline.GetHDRColorTexture(),
+                    width, height);
+            }
+
+            // End the HDR pass: tone-maps the HDR RT to the LDR
+            // backbuffer, additively combining with the bloom texture
+            // if provided. HUD/crosshair/debug UI below render directly
+            // to the LDR backbuffer at full sRGB. No-op when HDR
+            // pipeline is inactive (early Vulkan or RT support missing).
+            Render::g_hdrPipeline.EndHDRPassAndComposite(bloomTex);
+#endif
             RenderHUD(window, player.inventory, dt, proj, view);
             // Hide crosshair when inventory is open (MC: no crosshair while a Screen is shown).
             if (!Render::GetInventoryScreen().IsOpen()) {
                 RenderCrosshair(window);
+#if ENABLE_PORTAL_GUN
+                // Portal quickinfo brackets layer on top of the base
+                // crosshair — only when holding the portal gun. The
+                // last-placed pulse fires automatically via the
+                // PortalCrosshair::NotifyPortalPlaced hook in
+                // ClientPortalManager::OnPortalSet.
+                if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
+                    int winW = 0, winH = 0, fbW = 0, fbH = 0;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    glfwGetFramebufferSize(window, &fbW, &fbH);
+                    Render::g_portalCrosshair.Render(winW, winH, fbW, fbH, dt);
+                }
+#endif
             }
             PROFILE_TIMER_END(render, metrics.renderTime);
             }

@@ -71,6 +71,11 @@ namespace Game {
         front.z = sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
         front = glm::normalize(front);
 
+        // Cache the live look direction so consumers (e.g. portal-gun
+        // projectile spawn) can use the camera-space forward without
+        // having to re-derive it from stale yaw/pitch fields.
+        lookDir = front;
+
         // Cast ray from camera position (player's eyes)
         lastBlockHit = Raycast::CastRay(camera.position, front, 5.0f); // Using default interaction range
     }

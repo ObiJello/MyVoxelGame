@@ -372,5 +372,63 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+#if ENABLE_PORTAL_GUN
+    class PortalSetS2CPacketImpl : public IS2CPacket {
+    private:
+        PortalSetS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PortalSetS2CPacketImpl(PortalSetS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPortalSetS2C(m_data); }
+        const PortalSetS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PortalSetS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PortalRemoveS2CPacketImpl : public IS2CPacket {
+    private:
+        PortalRemoveS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PortalRemoveS2CPacketImpl(PortalRemoveS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPortalRemoveS2C(m_data); }
+        const PortalRemoveS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PortalRemoveS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PortalTeleportFlashS2CPacketImpl : public IS2CPacket {
+    private:
+        PortalTeleportFlashS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PortalTeleportFlashS2CPacketImpl(PortalTeleportFlashS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPortalTeleportFlashS2C(m_data); }
+        const PortalTeleportFlashS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PortalTeleportFlashS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PortalFizzleS2CPacketImpl : public IS2CPacket {
+    private:
+        PortalFizzleS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PortalFizzleS2CPacketImpl(PortalFizzleS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPortalFizzleS2C(m_data); }
+        const PortalFizzleS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PortalFizzleS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+#endif
+
 } // namespace Packets
 } // namespace Network

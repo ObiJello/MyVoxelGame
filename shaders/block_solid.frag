@@ -16,5 +16,6 @@ out vec4 FragColor;
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
+
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
 }

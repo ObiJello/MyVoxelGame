@@ -184,9 +184,11 @@ namespace Render {
                 m_filteredItems.emplace_back((Game::ItemID)i, 1);
             }
         }
-        // Pure items — walk the generated table; IDs are PURE_ITEM_BASE + table index.
-        for (size_t k = 0; k < Game::kPureItemTableSize; ++k) {
-            const Game::ItemID id = Game::PURE_ITEM_BASE + (Game::ItemID)k;
+        // Pure items — walk the registered map directly so CUSTOM items past
+        // the kPureItemTable bounds (Portal Gun, future feature items) are
+        // included automatically. Iterating the table directly used to MISS
+        // anything registered after the MC-table loop in ItemRegistry::Initialize.
+        Game::ItemRegistry::ForEachPureItem([&](Game::ItemID id, const Game::Item&) {
             // Special case: enchanted_book expands into one stack per (enchantment,
             // level) pair — mirrors MC's CreativeModeTabs.generateEnchantmentBook
             // TypesAllLevels at CreativeModeTabs.java:1843–1844, which streams
@@ -220,13 +222,13 @@ namespace Render {
                         }
                     }
                 }
-                continue; // skip the default single-stack push for enchanted_book
+                return; // (lambda — equivalent of `continue` in the old for-loop)
             }
             const auto& it = Game::ItemRegistry::Get(id);
             if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
                 m_filteredItems.emplace_back(id, 1);
             }
-        }
+        });
         m_scrollOffs = 0.0f;
     }
 
@@ -286,6 +288,22 @@ namespace Render {
         const int lx = mx - leftPos;
         const int ly = my - topPos;
 
+        // Clear the search-grid hover-cache up front. The only writer is the
+        // creative-grid branch below, which sets it back when the cursor IS
+        // over an occupied search slot. Without this clear, the cache would
+        // hold stale data when:
+        //   • cursor moves off an item to an empty cell or off-grid,
+        //   • search results change underneath the cursor (typing in the box
+        //     filters / scrolls the grid → the slot under the mouse may now
+        //     be empty or showing a different item),
+        //   • a click on the search grid causes the server to clear the
+        //     cursor (HandleCreativePickup, "different item" branch) — the
+        //     tooltip path runs after the click and would still read the
+        //     pre-click hover stack.
+        // Resetting here makes the cache strictly tied to the current frame's
+        // hover state, matching what `m_hoveredSlot` already does.
+        m_hoveredCreativeStack = Game::ItemStack{};
+
         // Tabs are above the panel (Row.TOP): y = -28 .. -28 + TAB_H, but only the top 28px
         // are visible (the bottom 4px is covered by the panel).
         const int tabY = -28;
@@ -321,10 +339,15 @@ namespace Render {
                 if (colInSlot < SLOT_SIZE && rowInSlot < SLOT_SIZE) {
                     int rowIndex = GetRowIndex();
                     int idx = (rowIndex + row) * 9 + col;
+                    // Always claim the cell — empty cells still need hover
+                    // highlight + need to absorb clicks (so a carried item can
+                    // be dropped onto them as the search-tab "delete" gesture).
+                    // m_hoveredCreativeStack stays empty for empty cells, which
+                    // RenderTooltip already keys off to suppress the tooltip.
                     if (idx >= 0 && idx < (int)m_filteredItems.size()) {
                         m_hoveredCreativeStack = m_filteredItems[idx];
-                        return HIT_CREATIVE_GRID;
                     }
+                    return HIT_CREATIVE_GRID;
                 }
             }
         }
@@ -348,18 +371,35 @@ namespace Render {
             return (lx >= sx && lx < sx + SLOT_SIZE && ly >= sy && ly < sy + SLOT_SIZE);
         };
 
-        // Main + hotbar
-        for (int i = Game::Inventory::MAIN_BEGIN;
+        // Main inventory: ONLY hittable on the Survival tab. On the Search tab,
+        // the main inventory rows are hidden underneath the search grid (which
+        // occupies y=18..108, overlapping the main rows at y=54/72/90). MC's
+        // CreativeModeInventoryScreen.selectTab moves these slots to (-2000,-2000)
+        // when the search tab is active so they can't be clicked or hovered.
+        // Without this guard, "empty" search-grid cells route the click to a
+        // hidden main slot — picking up dirt and clicking such a cell silently
+        // dropped the dirt INTO the hidden slot, and tooltips read it back.
+        if (m_currentTab == Tab::Survival) {
+            for (int i = Game::Inventory::MAIN_BEGIN;
+                 i < Game::Inventory::MAIN_BEGIN + Game::Inventory::MAIN_SIZE; ++i) {
+                if (hitsSlot(i)) return i;
+            }
+        }
+        // Hotbar: always hittable (rendered in both tabs at y=112).
+        for (int i = Game::Inventory::HOTBAR_BEGIN;
              i < Game::Inventory::HOTBAR_BEGIN + Game::Inventory::HOTBAR_SIZE; ++i) {
             if (hitsSlot(i)) return i;
         }
-        // Armor (interactive — placement is server-validated)
-        for (int i = Game::Inventory::ARMOR_BEGIN;
-             i < Game::Inventory::ARMOR_BEGIN + Game::Inventory::ARMOR_SIZE; ++i) {
-            if (hitsSlot(i)) return i;
+        // Armor + offhand (Survival-tab only — GetSlotImagePos already returns
+        // false for these on the Search tab, but skipping the loop avoids the
+        // wasted iterations).
+        if (m_currentTab == Tab::Survival) {
+            for (int i = Game::Inventory::ARMOR_BEGIN;
+                 i < Game::Inventory::ARMOR_BEGIN + Game::Inventory::ARMOR_SIZE; ++i) {
+                if (hitsSlot(i)) return i;
+            }
+            if (hitsSlot(Game::Inventory::OFFHAND_BEGIN)) return Game::Inventory::OFFHAND_BEGIN;
         }
-        // Offhand (shield)
-        if (hitsSlot(Game::Inventory::OFFHAND_BEGIN)) return Game::Inventory::OFFHAND_BEGIN;
 
         return HIT_NONE;
     }
@@ -507,6 +547,19 @@ namespace Render {
 
         // Search-grid clicks (creative source)
         if (hit == HIT_CREATIVE_GRID) {
+            // Empty cell + held cursor → delete the held item. The search grid
+            // doubles as a trash zone (the user-facing model is "drop it
+            // anywhere on the grid to delete it"). Routes through THROW with
+            // the OUTSIDE sentinel — same path as click-outside-the-panel and
+            // shift+trash-slot, both of which already discard the cursor.
+            if (m_hoveredCreativeStack.IsEmpty()) {
+                if (!m_carriedItem.IsEmpty()) {
+                    QueueClick(Network::ContainerInput::THROW,
+                               Network::InventorySlotSentinel::OUTSIDE,
+                               1 /*full stack*/);
+                }
+                return;
+            }
             // Server-side button semantics in HandleCreativePickup:
             //   button=0 → cursor = full stack of this item
             //   button=1 → cursor = 1 of this item (or +1 if same; clear if different)
@@ -974,8 +1027,11 @@ namespace Render {
             if (GetSlotImagePos(m_hoveredSlot, sx, sy)) {
                 RenderHoverHighlight(g, leftPos + sx, topPos + sy);
             }
-        } else if (m_hoveredSlot == HIT_CREATIVE_GRID && !m_hoveredCreativeStack.IsEmpty()) {
-            // Find the cell again (cheap re-derive)
+        } else if (m_hoveredSlot == HIT_CREATIVE_GRID) {
+            // Highlight ANY hovered grid cell (occupied OR empty) — empty cells
+            // are interactive too: clicking them with a held cursor deletes
+            // the cursor (search-tab "trash zone"), so they need the same
+            // visual feedback as occupied cells.
             const int mx = (int)std::floor(m_mouseGui.x) - leftPos;
             const int my = (int)std::floor(m_mouseGui.y) - topPos;
             int col = (mx - 9) / SLOT_STEP;

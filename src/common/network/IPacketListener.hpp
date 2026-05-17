@@ -1,6 +1,8 @@
 // File: src/common/network/IPacketListener.hpp
 #pragma once
 
+#include "common/core/Features.hpp"
+
 #include <string>
 #include <cstdint>
 
@@ -19,6 +21,12 @@ namespace Network {
     struct InventoryFullS2CPacket;
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
+#if ENABLE_PORTAL_GUN
+    struct PortalSetS2CPacket;
+    struct PortalRemoveS2CPacket;
+    struct PortalTeleportFlashS2CPacket;
+    struct PortalFizzleS2CPacket;
+#endif
 
     // C2S packet types
     struct UseItemOnC2SPacket;
@@ -68,6 +76,16 @@ namespace Network {
         virtual void onInventoryFullS2C(const InventoryFullS2CPacket& packet) {}
         virtual void onInventorySetSlotS2C(const InventorySetSlotS2CPacket& packet) {}
         virtual void onInventorySetCarriedS2C(const InventorySetCarriedS2CPacket& packet) {}
+
+#if ENABLE_PORTAL_GUN
+        // Portal gun (server-authoritative pair state). Default no-op handlers
+        // — Phase 4 will override these on the client side to push portal
+        // state into the renderer.
+        virtual void onPortalSetS2C(const PortalSetS2CPacket& packet) {}
+        virtual void onPortalRemoveS2C(const PortalRemoveS2CPacket& packet) {}
+        virtual void onPortalTeleportFlashS2C(const PortalTeleportFlashS2CPacket& packet) {}
+        virtual void onPortalFizzleS2C(const PortalFizzleS2CPacket& packet) {}
+#endif
 
         // View distance
         virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}

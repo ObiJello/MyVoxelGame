@@ -102,7 +102,17 @@ namespace Server {
         // Increments awaiting-teleport id, snaps the player's ServerPlayer position, and sends
         // ClientboundPlayerPosition to the client. The client must echo the id back via
         // ServerboundAcceptTeleportation so the server can ignore stale C2S position packets.
-        void Teleport(double x, double y, double z, float yRot, float xRot);
+        //
+        // Velocity overload — used by portal teleports to carry the player's
+        // momentum through the destination, rotated by the portal-pair
+        // matrix (server side). Velocity is shipped in the packet's
+        // dx/dy/dz fields (MC's "deltaMovement"). Default zero matches MC's
+        // standard teleport behaviour (kills velocity on snap).
+        void Teleport(double x, double y, double z, float yRot, float xRot,
+                      double dx, double dy, double dz);
+        void Teleport(double x, double y, double z, float yRot, float xRot) {
+            Teleport(x, y, z, yRot, xRot, 0.0, 0.0, 0.0);
+        }
 
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)

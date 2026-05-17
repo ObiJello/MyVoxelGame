@@ -32,7 +32,7 @@ namespace Render {
         void BeginFrame() override;
         void EndFrame(GLFWwindow* window) override;
         void SetClearColor(float r, float g, float b, float a) override;
-        void Clear(bool color, bool depth) override;
+        void Clear(bool color, bool depth, bool stencil = false) override;
         void SetViewport(int x, int y, int width, int height) override;
 
         // Buffers
@@ -60,9 +60,19 @@ namespace Render {
                                  const std::string& fragmentSource) override;
         ShaderHandle CreateShaderFromFiles(const std::string& vertexPath,
                                           const std::string& fragmentPath) override;
+        // Portal-feature shaders need richer uniforms than block shaders
+        // (mat4 uModel, vec3 uPortalColor, 96-bone palette, etc.) that
+        // can't fit in push constants. These use the "portal" pipeline
+        // layout which adds a UBO descriptor set on top of the texture
+        // sampler. Distinguished from the block-style CreateShaderFromFiles
+        // so we can keep both layouts coexisting without breaking existing
+        // chunk rendering. Same _vk.spv file convention.
+        ShaderHandle CreateShaderFromFilesPortal(const std::string& vertexPath,
+                                                 const std::string& fragmentPath);
         void DestroyShader(ShaderHandle handle) override;
         void BindShader(ShaderHandle handle) override;
         void SetUniformMat4(ShaderHandle handle, const std::string& name, const glm::mat4& value) override;
+        void SetUniformVec4(ShaderHandle handle, const std::string& name, const glm::vec4& value) override;
         void SetUniformVec3(ShaderHandle handle, const std::string& name, const glm::vec3& value) override;
         void SetUniformVec2(ShaderHandle handle, const std::string& name, const glm::vec2& value) override;
         void SetUniformFloat(ShaderHandle handle, const std::string& name, float value) override;
@@ -190,15 +200,26 @@ namespace Render {
         void EnsureTexStagingBuffer(size_t requiredSize);
 
         // ====================================================================
-        // DESCRIPTOR POOL & LAYOUT
+        // DESCRIPTOR POOL & LAYOUTS
         // ====================================================================
         VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
         VkDescriptorSetLayout m_textureDescriptorLayout = VK_NULL_HANDLE;
+        // Second descriptor set layout used by portal-feature shaders that
+        // need richer uniforms (portal renderer, viewmodel skinning, etc.).
+        // Slot 0 = sampler2D (matches block shaders for texture reuse),
+        // Slot 1 = CommonUBO,
+        // Slot 2 = BonesUBO (viewmodel only — bound to a 1-mat4 dummy for
+        //                    other portal shaders).
+        VkDescriptorSetLayout m_portalDescriptorLayout = VK_NULL_HANDLE;
 
         // ====================================================================
         // PIPELINE
         // ====================================================================
         VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
+        // Second pipeline layout used by portal-feature shaders. Includes
+        // the portal descriptor set (texture + UBO + bones UBO) on top of
+        // the same 128-byte push-constant range.
+        VkPipelineLayout m_portalPipelineLayout = VK_NULL_HANDLE;
         VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;
         // We create pipelines per PipelineState
         struct PipelineKey {
@@ -256,8 +277,77 @@ namespace Render {
         struct VKShaderInfo {
             VkShaderModule vertModule = VK_NULL_HANDLE;
             VkShaderModule fragModule = VK_NULL_HANDLE;
+            // Which pipeline layout this shader expects. 0 = block (texture
+            // sampler only), 1 = portal (texture + UBO + bones UBO). Set
+            // by CreateShaderFromFiles vs CreateShaderFromFilesPortal.
+            int layoutType = 0;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
+
+        // ====================================================================
+        // PORTAL-FEATURE UNIFORM BUFFERS
+        // ====================================================================
+        // Common uniforms used across portal/viewmodel/HDR/bloom shaders.
+        // Packs every uniform we route from C++ SetUniform* into named
+        // fields. Layout matches `layout(std140, set=0, binding=1) uniform
+        // Common { ... }` in the _vk shaders. std140 means vec3 takes
+        // 16 bytes (rounded up to vec4 alignment) so we use vec4 for
+        // vec3-flavored uniforms with the 4th component carrying a
+        // related scalar.
+        struct CommonUBO {
+            glm::mat4 uMVP         = glm::mat4(1.0f);   //   0
+            glm::mat4 uModel       = glm::mat4(1.0f);   //  64
+            glm::vec4 uPortalColor = {0, 0, 0, 0};      // 128 — rgb=color, w=uPulse
+            glm::vec4 uColorDark   = {0, 0, 0, 0};      // 144 — rgb=dark, w=uOpenAmount
+            glm::vec4 uColorHot    = {0, 0, 0, 0};      // 160 — rgb=hot,  w=uOpenAmountVS
+            glm::vec4 uKeyDir      = {0, 0, 0, 0};      // 176 — xyz=keyDir, w=uKeyIntensity
+            glm::vec4 uTint        = {1, 1, 1, 1};      // 192 — rgba (crosshair / glow tint)
+            glm::vec4 uUVRange     = {0, 0, 1, 1};      // 208 — (uvMin.xy, uvMax.xy)
+            glm::vec4 uScalarsA    = {0, 0, 0, 0};      // 224 — (uTime, uTimeVS, uStaticAmount, uColorScale)
+            glm::vec4 uScalarsB    = {0, 0, 0, 0};      // 240 — (uPortalActive, uForceFarDepth, uOutlineMode, uFlashIntensity)
+            glm::vec4 uScalarsC    = {1, 0, 1, 0};      // 256 — (uAmbient, uAlphaCutoff, uExposure, uHasBloom)
+            glm::vec4 uScalarsD    = {0, 0, 0, 0};      // 272 — (uHasSprite, uUseSkin, uUseTextures, _pad)
+            glm::vec2 uScreenSize  = {0, 0};            // 288
+            glm::vec2 _pad         = {0, 0};            // 296 — pad to vec4 alignment
+        };                                              // 304 bytes
+        // 96-mat4 bone palette UBO for the viewmodel skinning shader.
+        // 6144 bytes — well within the typical UBO size limit (16 KB).
+        static constexpr int kMaxBones = 96;
+        struct BonesUBO {
+            glm::mat4 bones[kMaxBones];   // identity-initialised in CPU staging
+        };
+
+        // Per-frame UBO buffers (one set per frame-in-flight so a draw
+        // recording the current frame doesn't stomp on a buffer still
+        // being read by the GPU for the previous frame). Persistently
+        // mapped — we just memcpy into them, then submit; the writes
+        // are visible at draw time without an explicit flush because
+        // we allocate HOST_VISIBLE | HOST_COHERENT memory.
+        struct FrameUBOs {
+            VkBuffer       commonBuffer  = VK_NULL_HANDLE;
+            VkDeviceMemory commonMemory  = VK_NULL_HANDLE;
+            void*          commonMapped  = nullptr;
+            VkBuffer       bonesBuffer   = VK_NULL_HANDLE;
+            VkDeviceMemory bonesMemory   = VK_NULL_HANDLE;
+            void*          bonesMapped   = nullptr;
+            // One descriptor set per frame (also per-frame to avoid
+            // updating descriptors while previous frame is rendering).
+            // Actually we allocate one descriptor set per frame whose
+            // binding 0 (the texture sampler) is REWRITTEN per-draw
+            // via vkUpdateDescriptorSets. Bindings 1 and 2 (the UBOs)
+            // point at this frame's commonBuffer and bonesBuffer for
+            // the lifetime of the frame.
+            VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        };
+        std::array<FrameUBOs, MAX_FRAMES_IN_FLIGHT> m_frameUBOs;
+        // Working copies modified by SetUniform* between draws — copied
+        // into the active frame's UBO buffer right before vkCmdDraw*.
+        CommonUBO m_commonUBOData;
+        BonesUBO  m_bonesUBOData;
+        // Tracks whether the working copies have been modified since
+        // the last upload, so we only memcpy when needed.
+        bool m_commonUBODirty = true;
+        bool m_bonesUBODirty  = true;
 
         struct VKMeshInfo {
             BufferHandle vertexBuffer = INVALID_BUFFER;
@@ -276,13 +366,33 @@ namespace Render {
         PipelineState m_currentPipelineState;
         VkPipeline m_currentPipeline = VK_NULL_HANDLE;
 
-        // Push constant data
+        // Push constant data — must match every shader's
+        // layout(push_constant) block exactly. Vulkan guarantees 128 bytes
+        // of push constants minimum; we use ALL of it so portal-feature
+        // shaders (crosshair, particle, simple HUD) can fit their tiny
+        // uniform sets here without needing a UBO. Larger shaders
+        // (portal renderer, viewmodel skinning) use UBOs via the
+        // m_portalDescriptorLayout path below.
+        // CRITICAL: do NOT reorder the first four fields — block_vk /
+        // crosshair_vk / highlight_vk / gui_*_vk / player_billboard_vk
+        // shaders ALL declare a push_constant block ending at uAlphaTest
+        // (offset 76, total 80 bytes). They read pc.uAlphaTest by offset,
+        // so moving uAlphaTest off offset 76 breaks alpha discard for
+        // every existing shader and transparent texels render as their
+        // discarded-pixel default (black). New portal-feature uniforms
+        // append AFTER the existing tail.
         struct PushConstantBlock {
-            glm::mat4 uMVP = glm::mat4(1.0f);   // 64 bytes
-            glm::vec2 uScreenSize = {0, 0};       // 8 bytes
-            float uLineWidth = 0.0f;              // 4 bytes
-            float uAlphaTest = 0.0f;              // 4 bytes (cutout threshold)
-        } m_pushConstants;                        // 80 bytes total
+            glm::mat4 uMVP        = glm::mat4(1.0f);   // 0-63   (64) — existing
+            glm::vec2 uScreenSize = {0, 0};            // 64-71  (8)  — existing
+            float     uLineWidth  = 0.0f;              // 72-75  (4)  — existing
+            float     uAlphaTest  = 0.0f;              // 76-79  (4)  — existing
+            // ---- new fields below; safe to add because GLSL shaders that
+            // only declare the first 80 bytes simply ignore the trailing
+            // bytes of the push range. ----
+            glm::vec4 uColor      = {0, 0, 0, 0};      // 80-95  (16) — tint / portal color
+            glm::vec4 uUVRange    = {0, 0, 1, 1};      // 96-111 (16) — (uvMin.xy, uvMax.xy)
+            glm::vec4 uScalars    = {0, 0, 0, 0};      // 112-127(16) — per-shader scalar pack
+        } m_pushConstants;                              // 128 bytes — Vulkan minimum guarantee
 
         // Clear color
         VkClearColorValue m_clearColor = {{0.5f, 0.7f, 1.0f, 1.0f}};
@@ -313,6 +423,17 @@ namespace Render {
         bool CreateDescriptorSetLayout();
         bool CreatePipelineLayout();
         bool CreatePipelineCache();
+        // Portal-feature uniform infrastructure
+        bool CreatePortalDescriptorLayout();
+        bool CreatePortalPipelineLayout();
+        bool CreateFrameUBOs();           // allocate per-frame UBO buffers + descriptor sets
+        void DestroyFrameUBOs();          // counterpart called from Shutdown
+        // Per-draw: ensure the active frame's UBO buffers reflect any
+        // SetUniform* changes since last upload, then bind the portal
+        // descriptor set (with binding 0 rewritten to the current
+        // texture). Called from DrawIndexed/DrawArrays when the bound
+        // shader's layoutType == 1.
+        void BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex);
 
         // ====================================================================
         // SWAPCHAIN RECREATION
@@ -354,6 +475,14 @@ namespace Render {
         VkPipeline GetOrCreatePipeline(const PipelineState& state, ShaderHandle shader);
         VkPipeline CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader);
         size_t HashPipelineState(const PipelineState& state, ShaderHandle shader) const;
+
+        // Push the per-draw stencil reference + read/write masks. The
+        // pipeline declares these as DYNAMIC state (so we don't need a
+        // separate VkPipeline per stencil-reference value), which means
+        // they MUST be set on the command buffer before any draw that
+        // reads stencil. Cheap (3 vkCmd* calls) and skipped entirely when
+        // stencil testing is disabled in the current pipeline state.
+        void ApplyDynamicStencilState(VkCommandBuffer cmd) const;
 
         // Vulkan enum conversion
         VkFilter ToVkFilter(TextureFilter filter) const;

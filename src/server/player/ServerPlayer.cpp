@@ -132,6 +132,11 @@ namespace Server {
         m_position = pos;
         m_velocity = glm::vec3(0.0f);
         m_fallDistance = 0.0f;
+        // Open a brief grace window so the next few client-predicted
+        // move packets (which may already be in flight at the new
+        // position) don't trip the anti-cheat distance gate.
+        m_teleportGraceUntil = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(2);
     }
 
     void ServerPlayer::setRotation(float yaw, float pitch) {
@@ -146,14 +151,26 @@ namespace Server {
             return;
         }
         
-        // Check max distance from last position (anti-cheat)
+        // Check max distance from last position (anti-cheat).
+        // Threshold must exceed the max portal-pair distance (~256 m
+        // per the portal-gun reach cap) — otherwise the client's
+        // predicted-teleport moves get rejected here, m_position never
+        // advances to the destination, PortalRegistry::Tick never sees
+        // the eye cross, the server-side teleport() never fires, and
+        // the player gets wedged ("can't move past 100 blocks", chunks
+        // around the destination never load). 600 leaves headroom for
+        // long shots without disabling the check entirely.
         double distance = glm::length(pos - m_position);
-        if (distance > 100.0 && m_gameMode != GameMode::CREATIVE && m_gameMode != GameMode::SPECTATOR) {
+        const bool inTeleportGrace =
+            std::chrono::steady_clock::now() < m_teleportGraceUntil;
+        if (distance > 600.0 && !inTeleportGrace &&
+            m_gameMode != GameMode::CREATIVE &&
+            m_gameMode != GameMode::SPECTATOR) {
             Log::Warning("ServerPlayer: Player %u moved too fast (%.1f blocks)", m_playerId, distance);
             // TODO: Send position correction to client
             return;
         }
-        
+
         m_position = pos;
         updateLastUpdateTime();
     }

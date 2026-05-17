@@ -2,9 +2,13 @@
 #pragma once
 
 #include "../entity/Player.hpp"
+#include "common/core/Features.hpp"
 #include "common/physics/RayCast.hpp"
 #include <chrono>
 #include <glm/glm.hpp>
+#if ENABLE_PORTAL_GUN
+#include <vector>
+#endif
 
 // Forward declarations
 namespace Client {
@@ -85,8 +89,30 @@ namespace Game {
         void StartDig(const glm::ivec3& pos, int face);
         void AbortDig();
         void FinishDig();
-        void SendUseItemOn(const RaycastHit& hit, int hand);  // TODO: Implement for networking
+        void SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
         void SendUseItem(int hand);  // TODO: Implement for networking
+
+#if ENABLE_PORTAL_GUN
+        // True portal-gun projectile. Spawned at the eye, flies forward at
+        // Portal's BLAST_SPEED (3000 HU/s = 57.15 m/s), max lifetime
+        // sv_portal_projectile_delay = 0.5 s. Each frame we sweep a tiny
+        // segment (speed × dt) via the existing Raycast and on first solid
+        // hit we send UseItemOnC2S so the server places the portal at the
+        // impact face. No portal placement happens until impact — so the
+        // player can fire across long sight-lines, not just within the
+        // melee-range raycast.
+        struct PendingPortalProjectile {
+            glm::vec3 origin;       // spawn point (eye)
+            glm::vec3 direction;    // unit forward
+            glm::vec3 currentPos;   // advanced each tick
+            float     age = 0.0f;
+            bool      isOrange = false;
+            int       hand = 0;
+        };
+        std::vector<PendingPortalProjectile> m_pendingPortalProjectiles;
+        void SpawnPortalProjectile(bool isOrange);
+        void UpdatePendingPortalProjectiles(float deltaTime);
+#endif
 
         // Helper methods (existing functionality)
         void UpdateBreaking(float deltaTime);

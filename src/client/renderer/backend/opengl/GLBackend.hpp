@@ -25,7 +25,7 @@ namespace Render {
         void BeginFrame() override;
         void EndFrame(GLFWwindow* window) override;
         void SetClearColor(float r, float g, float b, float a) override;
-        void Clear(bool color, bool depth) override;
+        void Clear(bool color, bool depth, bool stencil = false) override;
         void SetViewport(int x, int y, int width, int height) override;
 
         // Buffers
@@ -55,6 +55,7 @@ namespace Render {
         void DestroyShader(ShaderHandle handle) override;
         void BindShader(ShaderHandle handle) override;
         void SetUniformMat4(ShaderHandle handle, const std::string& name, const glm::mat4& value) override;
+        void SetUniformVec4(ShaderHandle handle, const std::string& name, const glm::vec4& value) override;
         void SetUniformVec3(ShaderHandle handle, const std::string& name, const glm::vec3& value) override;
         void SetUniformVec2(ShaderHandle handle, const std::string& name, const glm::vec2& value) override;
         void SetUniformFloat(ShaderHandle handle, const std::string& name, float value) override;
@@ -68,6 +69,22 @@ namespace Render {
         // Pipeline state
         void SetPipelineState(const PipelineState& state) override;
         void InvalidateStateCache() override;
+
+        void CopyFramebufferToTexture(TextureHandle dst) override;
+
+        // Render targets (offscreen FBOs) — see RenderBackend.hpp.
+        RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& desc) override;
+        void               DestroyRenderTarget(RenderTargetHandle rt) override;
+        void               BindRenderTarget(RenderTargetHandle rt) override;
+        TextureHandle      GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
+        void               ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
+
+        void SetStencilOverride(bool enabled,
+                                CompareOp compareOp = CompareOp::Always,
+                                StencilOp passOp     = StencilOp::Keep,
+                                uint32_t  reference  = 0,
+                                uint32_t  readMask   = 0xFFu,
+                                uint32_t  writeMask  = 0xFFu) override;
 
         // Drawing
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
@@ -141,12 +158,35 @@ namespace Render {
         };
         std::unordered_map<uint32_t, GLTimerInfo> m_timers;
 
+        // Render target (FBO + color texture + depth attachment).
+        struct GLRenderTargetInfo {
+            GLuint        fbo               = 0;
+            GLuint        depthRBO          = 0;  // renderbuffer for depth (if no depth texture)
+            TextureHandle colorTexture      = INVALID_TEXTURE;
+            int           width             = 0;
+            int           height            = 0;
+            TextureFormat colorFormat       = TextureFormat::RGBA16F;
+            TextureFormat depthFormat       = TextureFormat::Depth24Stencil8;
+        };
+        std::unordered_map<uint32_t, GLRenderTargetInfo> m_renderTargets;
+
         // Memory tracking
         GPUMemoryStats m_memStats;
 
         // Render state cache (avoid redundant GL calls)
         PipelineState m_currentState;
         bool m_stateInitialized = false;
+
+        // Stencil override (see RenderBackend::SetStencilOverride).
+        struct StencilOverride {
+            bool      enabled    = false;
+            CompareOp compareOp  = CompareOp::Always;
+            StencilOp passOp     = StencilOp::Keep;
+            uint32_t  reference  = 0;
+            uint32_t  readMask   = 0xFFu;
+            uint32_t  writeMask  = 0xFFu;
+        };
+        StencilOverride m_stencilOverride;
 
         // Window reference
         GLFWwindow* m_window = nullptr;
@@ -165,6 +205,7 @@ namespace Render {
         GLenum ToGLWrap(TextureWrap wrap) const;
         GLenum ToGLBlendFactor(BlendFactor factor) const;
         GLenum ToGLCompareOp(CompareOp op) const;
+        GLenum ToGLStencilOp(StencilOp op) const;
         std::string ReadFileContents(const std::string& path) const;
         GLuint CompileGLShader(GLenum type, const std::string& source) const;
     };

@@ -99,6 +99,7 @@ namespace Debug {
     bool DebugSystem::s_debugEnabled = true;  // Debug: always visible
 #endif
     bool DebugSystem::s_renderDistanceChanged = false;
+    bool DebugSystem::s_bloomEnabled         = false;  // OFF by default; toggle in Render Controls
 
     bool DebugSystem::ConsumeRenderDistanceChanged() {
         bool changed = s_renderDistanceChanged;
@@ -1220,6 +1221,17 @@ namespace Debug {
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Sync frame rate with monitor refresh");
+
+        // Portal Bloom — off by default. Adds HDR glow halo around the
+        // portal rim (PortalRenderer's bright cyan/orange pixels).
+        ImGui::Checkbox("Portal Bloom", &s_bloomEnabled);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(
+                "HDR bloom post-process around bright portal rim pixels.\n"
+                "Adds a soft colored glow halo. Off by default; mostly\n"
+                "affects how the portal disc reads on plain walls.");
 
         // Rendering mode
         ImGui::Separator();

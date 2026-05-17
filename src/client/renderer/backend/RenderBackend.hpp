@@ -33,7 +33,9 @@ namespace Render {
         virtual void BeginFrame() = 0;
         virtual void EndFrame(GLFWwindow* window) = 0;
         virtual void SetClearColor(float r, float g, float b, float a) = 0;
-        virtual void Clear(bool color, bool depth) = 0;
+        // The `stencil` flag (default false) clears the stencil buffer to 0.
+        // Existing callers that pass only color+depth keep working unchanged.
+        virtual void Clear(bool color, bool depth, bool stencil = false) = 0;
         virtual void SetViewport(int x, int y, int width, int height) = 0;
 
         // ====================================================================
@@ -87,6 +89,8 @@ namespace Render {
         // Uniform setters
         virtual void SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) = 0;
+        virtual void SetUniformVec4(ShaderHandle handle, const std::string& name,
+                                   const glm::vec4& value) = 0;
         virtual void SetUniformVec3(ShaderHandle handle, const std::string& name,
                                    const glm::vec3& value) = 0;
         virtual void SetUniformVec2(ShaderHandle handle, const std::string& name,
@@ -115,6 +119,61 @@ namespace Render {
 
         // Invalidate cached pipeline state, forcing full reapplication on next SetPipelineState
         virtual void InvalidateStateCache() = 0;
+
+        // Copy the current default framebuffer's color attachment into the
+        // given texture. The texture must be RGBA8 and sized exactly to
+        // the framebuffer (renderer is responsible for sizing — backend
+        // doesn't reallocate). Used by the portal renderer to capture the
+        // see-through view as a sampleable texture for the refraction
+        // sub-pass. Default impl is a no-op so backends that don't
+        // support framebuffer copy silently skip the refraction effect.
+        virtual void CopyFramebufferToTexture(TextureHandle /*dst*/) {}
+
+        // ====================================================================
+        // RENDER TARGETS (offscreen framebuffers)
+        // ====================================================================
+        // Optional infra — added for the portal feature's HDR + bloom +
+        // recursion pipelines. Both backends should implement; default
+        // impls return INVALID_RENDER_TARGET so callers fall back gracefully
+        // on backends that don't yet have RT support.
+        //
+        // Lifecycle: Create → (Resize as window resizes) → Bind/Unbind
+        // around offscreen passes → Destroy on shutdown.
+        // `INVALID_RENDER_TARGET` passed to BindRenderTarget binds the
+        // default backbuffer (FBO 0 on GL).
+
+        virtual RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& /*desc*/) {
+            return INVALID_RENDER_TARGET;
+        }
+        virtual void DestroyRenderTarget(RenderTargetHandle /*rt*/) {}
+        virtual void BindRenderTarget(RenderTargetHandle /*rt*/) {}
+
+        // Return the color attachment as a sampleable texture (for tone
+        // map / bloom / refraction sub-pass shaders). Returns
+        // INVALID_TEXTURE on unsupported backends.
+        virtual TextureHandle GetRenderTargetColorTexture(RenderTargetHandle /*rt*/) const {
+            return INVALID_TEXTURE;
+        }
+        // Resize the RT in place (used when the window framebuffer size
+        // changes). Recreates underlying texture/FBO at the new
+        // resolution.
+        virtual void ResizeRenderTarget(RenderTargetHandle /*rt*/, int /*w*/, int /*h*/) {}
+
+        // Stencil override: while ENABLED, every subsequent SetPipelineState
+        // call gets its stencil fields replaced with these values, regardless
+        // of what the caller passed. Used by the portal renderer's see-
+        // through pass — we need ChunkRenderer's per-pass SetPipelineState
+        // calls to honour our stencil mask without modifying ChunkRenderer's
+        // API. Default implementation is a no-op so backends without state-
+        // based stencil (the Vulkan path, where stencil is partly baked into
+        // the pipeline cache) silently fall back to non-stenciled rendering.
+        // Pair every SetStencilOverride(true, ...) with a SetStencilOverride(false, ...).
+        virtual void SetStencilOverride(bool /*enabled*/,
+                                        CompareOp /*compareOp*/  = CompareOp::Always,
+                                        StencilOp /*passOp*/     = StencilOp::Keep,
+                                        uint32_t  /*reference*/  = 0,
+                                        uint32_t  /*readMask*/   = 0xFFu,
+                                        uint32_t  /*writeMask*/  = 0xFFu) {}
 
         // ====================================================================
         // DRAWING
