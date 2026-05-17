@@ -108,6 +108,19 @@ namespace Render {
         if (!CreateDescriptorPool()) return false;
         if (!CreateDescriptorSetLayout()) return false;
         if (!CreatePipelineLayout()) return false;
+        // Portal-feature path: separate descriptor set layout + pipeline
+        // layout that adds CommonUBO + BonesUBO descriptors. Non-fatal —
+        // if creation fails we lose the portal shaders but block rendering
+        // keeps working through the original layouts.
+        if (!CreatePortalDescriptorLayout()) {
+            Log::Warning("VKBackend: portal descriptor layout create failed — portal-feature shaders will not render");
+        }
+        if (m_portalDescriptorLayout != VK_NULL_HANDLE && !CreatePortalPipelineLayout()) {
+            Log::Warning("VKBackend: portal pipeline layout create failed");
+        }
+        if (m_portalPipelineLayout != VK_NULL_HANDLE && !CreateFrameUBOs()) {
+            Log::Warning("VKBackend: per-frame UBO setup failed");
+        }
         if (!CreatePipelineCache()) return false;
 
         Log::Info("VKBackend: Vulkan initialization complete");
@@ -170,6 +183,18 @@ namespace Render {
 
         // Destroy core resources
         if (m_pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
+        // Portal-feature UBO infrastructure (cleaned BEFORE descriptor
+        // pool / layouts so descriptor sets referencing the layout are
+        // released first).
+        DestroyFrameUBOs();
+        if (m_portalPipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(m_device, m_portalPipelineLayout, nullptr);
+            m_portalPipelineLayout = VK_NULL_HANDLE;
+        }
+        if (m_portalDescriptorLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_portalDescriptorLayout, nullptr);
+            m_portalDescriptorLayout = VK_NULL_HANDLE;
+        }
         if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
         if (m_textureDescriptorLayout != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(m_device, m_textureDescriptorLayout, nullptr);
@@ -272,6 +297,13 @@ namespace Render {
         m_boundShader = INVALID_SHADER;
         m_boundTexture = INVALID_TEXTURE;
 
+        // Reset the per-frame UBO ring write cursor — each frame starts
+        // writing into slot 0 of its own ring buffer. (The previous
+        // frame may still be reading its ring; that's fine, this frame
+        // gets a separate ring entirely.)
+        m_frameUBOs[m_currentFrame].commonWriteSlot = 0;
+        m_frameUBOs[m_currentFrame].bonesWriteSlot  = 0;
+
         // Set dynamic viewport and scissor
         // Negative height flips Y to match OpenGL convention without affecting winding order
         VkViewport viewport{};
@@ -339,12 +371,40 @@ namespace Render {
         m_clearColor = {{r, g, b, a}};
     }
 
-    void VKBackend::Clear(bool /*color*/, bool /*depth*/, bool /*stencil*/) {
-        // Handled by the render pass's per-attachment clear values in
-        // BeginFrame — Vulkan can't issue a free-standing clear inside an
-        // active render pass without a separate vkCmdClearAttachments call.
-        // Stencil is cleared to 0 along with depth via the depth/stencil
-        // attachment clear value (BeginFrame sets {1.0, 0}).
+    void VKBackend::Clear(bool color, bool depth, bool stencil) {
+        // The per-attachment clear values in BeginFrame handle the
+        // start-of-frame clear. Mid-frame Clear() calls (e.g. the
+        // portal renderer's `Clear(false, false, true)` between
+        // see-through pass directions, to drop the previous portal's
+        // stencil mark before the next portal's mark pass) need
+        // vkCmdClearAttachments — a render-pass-local clear that
+        // covers the current render area / scissor.
+        if (!m_frameActive) return;
+        if (!color && !depth && !stencil) return;
+
+        VkClearAttachment clears[2]{};
+        uint32_t clearCount = 0;
+        if (color) {
+            clears[clearCount].aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            clears[clearCount].colorAttachment = 0;
+            clears[clearCount].clearValue.color = m_clearColor;
+            clearCount++;
+        }
+        if (depth || stencil) {
+            VkImageAspectFlags aspect = 0;
+            if (depth)   aspect |= VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (stencil) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            clears[clearCount].aspectMask = aspect;
+            clears[clearCount].clearValue.depthStencil = {1.0f, 0};
+            clearCount++;
+        }
+        VkClearRect rect{};
+        rect.rect.offset = {0, 0};
+        rect.rect.extent = m_swapchainExtent;
+        rect.baseArrayLayer = 0;
+        rect.layerCount = 1;
+        vkCmdClearAttachments(m_commandBuffers[m_currentFrame],
+                              clearCount, clears, 1, &rect);
     }
 
     void VKBackend::SetViewport(int x, int y, int width, int height) {
@@ -763,7 +823,13 @@ namespace Render {
     }
 
     void VKBackend::BindTexture(TextureHandle handle, uint32_t slot) {
-        m_boundTexture = handle;
+        if (slot < kMaxTextureSlots) {
+            m_boundTextures[slot] = handle;
+        }
+        // Maintain the legacy single-texture alias for any code path that
+        // still reads m_boundTexture directly (block draw paths bind the
+        // texture's per-texture descriptor set using this).
+        if (slot == 0) m_boundTexture = handle;
     }
 
     uintptr_t VKBackend::GetNativeTextureID(TextureHandle handle) const {
@@ -838,49 +904,157 @@ namespace Render {
         m_boundShader = handle;
     }
 
+    // ----------------------------------------------------------------
+    // Uniform setters — write to BOTH push constants (for block-style
+    // shaders) AND the CommonUBO / BonesUBO (for portal-feature
+    // shaders). The push constants get sent fresh every draw, so the
+    // double-write costs nothing meaningful and lets a single C++
+    // setter feed either shader path transparently.
+    // ----------------------------------------------------------------
+    // GL→Vulkan depth-range conversion matrix. glm::perspective produces
+    // a GL-style matrix where the near plane maps to NDC z = -1; Vulkan's
+    // near plane is z = 0 and the rasterizer clips anything with z_ndc < 0.
+    // Without this premultiplication, half the depth range falls into the
+    // Vulkan clipped half-space. For normal scenes you barely notice
+    // (geometry is mostly distant, sitting in z_ndc > 0), but the portal
+    // renderer's oblique projection explicitly anchors geometry to the
+    // GL near plane (z_ndc = -1) so that vertices on the destination
+    // portal's clip plane land exactly on the near plane in OpenGL. In
+    // Vulkan those vertices end up at z_ndc = -1 (clipped) instead of 0
+    // (kept). Visible symptom: the see-through view goes blank at steep
+    // angles / distance where more dst-world geometry sits near the
+    // oblique clip plane. This matrix premultiplies every uMVP coming
+    // through SetUniformMat4 to map z_ndc [-1, +1] → [0, +1]:
+    //   z_clip_new = 0.5·z_clip_old + 0.5·w  →  z_ndc_new = 0.5·z_ndc_old + 0.5
+    // — so z_ndc_old = -1 → 0 (Vk near), z_ndc_old = +1 → 1 (Vk far).
+    // Applied only on Vulkan; OpenGL keeps its native GL-style matrix.
+    static const glm::mat4 kVkZCorrect = glm::mat4(
+        1.0f, 0.0f, 0.0f, 0.0f,   // col 0
+        0.0f, 1.0f, 0.0f, 0.0f,   // col 1
+        0.0f, 0.0f, 0.5f, 0.0f,   // col 2 — z_clip *= 0.5
+        0.0f, 0.0f, 0.5f, 1.0f);  // col 3 — z_clip += 0.5 * w
+
     void VKBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
                                    const glm::mat4& value) {
         if (name == "uMVP") {
-            m_pushConstants.uMVP = value;
+            const glm::mat4 vkMVP = kVkZCorrect * value;
+            m_pushConstants.uMVP    = vkMVP;
+            m_commonUBOData.uMVP    = vkMVP;
+            m_commonUBODirty = true;
+        } else if (name == "uModel") {
+            m_commonUBOData.uModel  = value;
+            m_commonUBODirty = true;
+        } else if (name.rfind("uBones[", 0) == 0) {
+            // "uBones[N]" — parse N, write into BonesUBO.
+            const size_t lbracket = 7;            // length of "uBones["
+            const size_t rbracket = name.find(']', lbracket);
+            if (rbracket != std::string::npos) {
+                int idx = std::atoi(name.c_str() + lbracket);
+                if (idx >= 0 && idx < kMaxBones) {
+                    m_bonesUBOData.bones[idx] = value;
+                    m_bonesUBODirty = true;
+                }
+            }
         }
     }
 
     void VKBackend::SetUniformVec4(ShaderHandle, const std::string& name, const glm::vec4& value) {
-        // Generic colour-style slot (used by crosshair tint, etc.)
-        if (name == "uTint" || name == "uColor") {
-            m_pushConstants.uColor = value;
+        if (name == "uTint" || name == "uColor" || name == "uClipPlane" ||
+            name == "uPortalClipPlane") {
+            // uClipPlane (PlayerRenderer's portal-ghost half-space cull)
+            // AND uPortalClipPlane (block shaders' world-space portal
+            // plane → gl_ClipDistance[0]) are aliased onto the same
+            // push-constant slot as uColor — no shader currently needs
+            // both a tint and a clip plane simultaneously, and packing
+            // them here keeps the chunk + player shaders from needing
+            // a UBO descriptor for one tiny vec4.
+            m_pushConstants.uColor  = value;
+            m_commonUBOData.uTint   = value;
+            m_commonUBODirty = true;
         }
     }
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
-        // Pack vec3 into the .rgb of the colour slot. Alpha retained
-        // from whatever was set last (e.g. uPulse via SetUniformFloat).
-        if (name == "uPortalColor" || name == "uTint" || name == "uColor") {
-            m_pushConstants.uColor = glm::vec4(value, m_pushConstants.uColor.a);
+        if (name == "uPortalColor") {
+            m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
+            m_commonUBOData.uPortalColor    = glm::vec4(value, m_commonUBOData.uPortalColor.a);
+            m_commonUBODirty = true;
+        } else if (name == "uColorDark") {
+            m_commonUBOData.uColorDark      = glm::vec4(value, m_commonUBOData.uColorDark.a);
+            m_commonUBODirty = true;
+        } else if (name == "uColorHot") {
+            m_commonUBOData.uColorHot       = glm::vec4(value, m_commonUBOData.uColorHot.a);
+            m_commonUBODirty = true;
+        } else if (name == "uKeyDir") {
+            m_commonUBOData.uKeyDir         = glm::vec4(value, m_commonUBOData.uKeyDir.a);
+            m_commonUBODirty = true;
+        } else if (name == "uTint" || name == "uColor") {
+            m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
+            m_commonUBOData.uTint           = glm::vec4(value, m_commonUBOData.uTint.a);
+            m_commonUBODirty = true;
         }
     }
     void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
         if (name == "uScreenSize") {
-            m_pushConstants.uScreenSize = value;
+            m_pushConstants.uScreenSize     = value;
+            m_commonUBOData.uScreenSize     = value;
+            m_commonUBODirty = true;
         } else if (name == "uUVMin") {
-            m_pushConstants.uUVRange.x = value.x;
-            m_pushConstants.uUVRange.y = value.y;
+            m_pushConstants.uUVRange.x = value.x; m_pushConstants.uUVRange.y = value.y;
+            m_commonUBOData.uUVRange.x = value.x; m_commonUBOData.uUVRange.y = value.y;
+            m_commonUBODirty = true;
         } else if (name == "uUVMax") {
-            m_pushConstants.uUVRange.z = value.x;
-            m_pushConstants.uUVRange.w = value.y;
+            m_pushConstants.uUVRange.z = value.x; m_pushConstants.uUVRange.w = value.y;
+            m_commonUBOData.uUVRange.z = value.x; m_commonUBOData.uUVRange.w = value.y;
+            m_commonUBODirty = true;
         }
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
-        if (name == "uLineWidth")        m_pushConstants.uLineWidth = value;
-        else if (name == "uAlphaTest")   m_pushConstants.uAlphaTest = value;
-        // Pack small per-shader scalars into the uScalars vec4 by
-        // recognised name → component. Keeps shader-side GLSL clean
-        // (just `uScalars.x` / `uScalars.y` etc.).
-        else if (name == "uPulse")       m_pushConstants.uScalars.x = value;
-        else if (name == "uTime")        m_pushConstants.uScalars.y = value;
-        else if (name == "uOpenAmount")  m_pushConstants.uScalars.z = value;
-        else if (name == "uFlashIntensity") m_pushConstants.uScalars.w = value;
+        // Push-constant block-style aliases:
+        if (name == "uLineWidth")           { m_pushConstants.uLineWidth = value; }
+        else if (name == "uAlphaTest")      { m_pushConstants.uAlphaTest = value; }
+        // Portal renderer + crosshair scalar packing:
+        else if (name == "uPulse")          { m_pushConstants.uScalars.x = value; m_commonUBOData.uPortalColor.a = value; m_commonUBODirty = true; }
+        else if (name == "uOpenAmount")     { m_pushConstants.uScalars.z = value; m_commonUBOData.uColorDark.a    = value; m_commonUBODirty = true; }
+        else if (name == "uOpenAmountVS")   { m_commonUBOData.uColorHot.a    = value; m_commonUBODirty = true; }
+        else if (name == "uKeyIntensity")   { m_commonUBOData.uKeyDir.a      = value; m_commonUBODirty = true; }
+        else if (name == "uTime")           { m_pushConstants.uScalars.y = value; m_commonUBOData.uScalarsA.x = value; m_commonUBODirty = true; }
+        else if (name == "uTimeVS")         { m_commonUBOData.uScalarsA.y = value; m_commonUBODirty = true; }
+        else if (name == "uStaticAmount")   { m_commonUBOData.uScalarsA.z = value; m_commonUBODirty = true; }
+        else if (name == "uColorScale")     { m_commonUBOData.uScalarsA.w = value; m_commonUBODirty = true; }
+        else if (name == "uPortalActive")   { m_commonUBOData.uScalarsB.x = value; m_commonUBODirty = true; }
+        else if (name == "uForceFarDepth")  { m_commonUBOData.uScalarsB.y = value; m_commonUBODirty = true; }
+        else if (name == "uOutlineMode")    { m_commonUBOData.uScalarsB.z = value; m_commonUBODirty = true; }
+        else if (name == "uFlashIntensity") { m_pushConstants.uScalars.w = value; m_commonUBOData.uScalarsB.w = value; m_commonUBODirty = true; }
+        else if (name == "uAmbient")        { m_commonUBOData.uScalarsC.x = value; m_commonUBODirty = true; }
+        else if (name == "uAlphaCutoff")    { m_commonUBOData.uScalarsC.y = value; m_commonUBODirty = true; }
+        else if (name == "uExposure")       { m_commonUBOData.uScalarsC.z = value; m_commonUBODirty = true; }
+        else if (name == "uHasBloom")       { m_commonUBOData.uScalarsC.w = value; m_commonUBODirty = true; }
+        else if (name == "uHasSprite")      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
+        else if (name == "uUseSkin")        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
+        else if (name == "uUseTextures")    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
     }
-    void VKBackend::SetUniformInt(ShaderHandle, const std::string&, int) { /* Push constants or UBO */ }
+    void VKBackend::SetUniformInt(ShaderHandle, const std::string& name, int value) {
+        // Texture-sampler bindings come through as integers (legacy
+        // GL pattern). Vulkan binds textures via descriptor sets, so
+        // we ignore those names. Other ints fall through into the
+        // float path's uUseTextures slot etc.
+        if (name == "uUseTextures") {
+            m_commonUBOData.uScalarsD.z = (float)value;
+            m_commonUBODirty = true;
+        } else if (name == "uHasSprite") {
+            // PortalParticleSystem uses uHasSprite to select between the
+            // Portal-extracted sprite texture path and the procedural
+            // soft-disc fallback. Routed into BOTH the push-constant
+            // uScalars.x (where portal_particle_vk reads it) and the
+            // CommonUBO slot (so any portal-layout shader that wants
+            // it also sees it).
+            m_pushConstants.uScalars.x        = (float)value;
+            m_commonUBOData.uScalarsD.x       = (float)value;
+            m_commonUBODirty = true;
+        }
+        // "uSprite" and other sampler-name ints are no-ops on Vulkan —
+        // textures bind via descriptor sets, not via uniform int slot.
+    }
 
     // ========================================================================
     // MESHES
@@ -903,7 +1077,33 @@ namespace Render {
     // PIPELINE STATE
     // ========================================================================
 
-    void VKBackend::SetPipelineState(const PipelineState& state) {
+    void VKBackend::SetStencilOverride(bool enabled,
+                                       CompareOp compareOp,
+                                       StencilOp passOp,
+                                       uint32_t  reference,
+                                       uint32_t  readMask,
+                                       uint32_t  writeMask) {
+        m_stencilOverride = {enabled, compareOp, passOp, reference, readMask, writeMask};
+    }
+
+    void VKBackend::SetPipelineState(const PipelineState& state_) {
+        // Splice in the portal renderer's stencil override (if active)
+        // — same logic the GL backend has. Without this, chunks
+        // rendering during a portal see-through pass make pipelines
+        // with stencilTestEnabled=false, so the silhouette mask we
+        // wrote to stencil is ignored and the destination view paints
+        // EVERYWHERE on the screen instead of only inside the portal.
+        PipelineState state = state_;
+        if (m_stencilOverride.enabled) {
+            state.stencilTestEnabled = true;
+            state.stencilCompareOp   = m_stencilOverride.compareOp;
+            state.stencilFailOp      = StencilOp::Keep;
+            state.stencilDepthFailOp = StencilOp::Keep;
+            state.stencilPassOp      = m_stencilOverride.passOp;
+            state.stencilReference   = m_stencilOverride.reference;
+            state.stencilReadMask    = m_stencilOverride.readMask;
+            state.stencilWriteMask   = m_stencilOverride.writeMask;
+        }
         m_currentPipelineState = state;
     }
 
@@ -951,29 +1151,40 @@ namespace Render {
         // keeps the overhead at zero when stencil isn't in use.
         ApplyDynamicStencilState(cmd);
 
-        // Push MVP matrix
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                          0, sizeof(PushConstantBlock), &m_pushConstants);
-
-        // Bind texture descriptor set (required by pipeline layout)
-        auto texIt = m_textures.find(m_boundTexture);
-        if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                                   0, 1, &texIt->second.descriptorSet, 0, nullptr);
-        } else {
-            // No valid texture bound - skip draw to avoid crash in MoltenVK
-            return;
+        // Select pipeline layout based on shader's layoutType.
+        VkPipelineLayout pl = m_pipelineLayout;
+        bool isPortalShader = false;
+        {
+            auto sit = m_shaders.find(m_boundShader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+                isPortalShader = true;
+            }
         }
 
-        // Bind vertex buffer
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                          0, sizeof(PushConstantBlock), &m_pushConstants);
+
+        if (isPortalShader) {
+            // Portal-feature shader: bind UBO+texture descriptor set
+            // (BindPortalDescriptorForDraw also uploads any dirty UBO data).
+            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+        } else {
+            // Block-style shader: original texture-only descriptor path.
+            auto texIt = m_textures.find(m_boundTexture);
+            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            } else {
+                return;
+            }
+        }
+
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-
-        // Bind index buffer
         vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
-
-        // Draw
         vkCmdDrawIndexed(cmd, indexCount, 1, indexOffset, 0, 0);
     }
 
@@ -1000,8 +1211,28 @@ namespace Render {
         // keeps the overhead at zero when stencil isn't in use.
         ApplyDynamicStencilState(cmd);
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        // Pipeline layout + descriptor binding (mirrors DrawIndexed).
+        VkPipelineLayout pl = m_pipelineLayout;
+        bool isPortalShader = false;
+        {
+            auto sit = m_shaders.find(m_boundShader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+                isPortalShader = true;
+            }
+        }
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
+        if (isPortalShader) {
+            BindPortalDescriptorForDraw(cmd, m_boundTexture);
+        } else {
+            auto texIt = m_textures.find(m_boundTexture);
+            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            }
+        }
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
@@ -1046,15 +1277,28 @@ namespace Render {
         // keeps the overhead at zero when stencil isn't in use.
         ApplyDynamicStencilState(cmd);
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        VkPipelineLayout pl = m_pipelineLayout;
+        bool isPortalShader = false;
+        {
+            auto sit = m_shaders.find(m_boundShader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+                isPortalShader = true;
+            }
+        }
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
-
-        auto texIt = m_textures.find(m_boundTexture);
-        if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                                   0, 1, &texIt->second.descriptorSet, 0, nullptr);
+        if (isPortalShader) {
+            BindPortalDescriptorForDraw(cmd, m_boundTexture);
         } else {
-            return;
+            auto texIt = m_textures.find(m_boundTexture);
+            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            } else {
+                return;
+            }
         }
 
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
@@ -1093,15 +1337,28 @@ namespace Render {
         // keeps the overhead at zero when stencil isn't in use.
         ApplyDynamicStencilState(cmd);
 
-        vkCmdPushConstants(cmd, m_pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        VkPipelineLayout pl = m_pipelineLayout;
+        bool isPortalShader = false;
+        {
+            auto sit = m_shaders.find(m_boundShader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+                isPortalShader = true;
+            }
+        }
+        vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                           0, sizeof(PushConstantBlock), &m_pushConstants);
-
-        auto texIt = m_textures.find(m_boundTexture);
-        if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipelineLayout,
-                                   0, 1, &texIt->second.descriptorSet, 0, nullptr);
+        if (isPortalShader) {
+            BindPortalDescriptorForDraw(cmd, m_boundTexture);
         } else {
-            return;
+            auto texIt = m_textures.find(m_boundTexture);
+            if (texIt != m_textures.end() && texIt->second.descriptorSet != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
+                                       0, 1, &texIt->second.descriptorSet, 0, nullptr);
+            } else {
+                return;
+            }
         }
 
         // Bind VBO + IBO once for the entire batch
@@ -1349,7 +1606,13 @@ namespace Render {
         }
 
         VkPhysicalDeviceFeatures deviceFeatures{};
-        deviceFeatures.fillModeNonSolid = VK_TRUE; // For wireframe
+        deviceFeatures.fillModeNonSolid  = VK_TRUE; // For wireframe
+        // Required so block_vk.vert can write gl_ClipDistance[0] for the
+        // portal-plane half-space cull. Without this, the SPIR-V loader
+        // accepts the shader but the rasterizer silently ignores the
+        // gl_ClipDistance write — the portal clip fails and the chunk
+        // shader has no way to clip at the dst plane.
+        deviceFeatures.shaderClipDistance = VK_TRUE;
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -1586,15 +1849,22 @@ namespace Render {
     }
 
     bool VKBackend::CreateDescriptorPool() {
-        VkDescriptorPoolSize poolSize{};
-        poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        poolSize.descriptorCount = 1000;
+        // Pool sized for: many block textures (one descriptor set per
+        // texture) + a handful of portal descriptor sets (one per
+        // frame-in-flight × N portal pipeline layouts; just MAX_FRAMES
+        // for now). UBO descriptors: 2 per portal set (Common + Bones).
+        VkDescriptorPoolSize poolSizes[2]{};
+        poolSizes[0].type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        poolSizes[0].descriptorCount = 1000;
+        // CommonUBO + BonesUBO are dynamic — pool must size that type.
+        poolSizes[1].type            = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        poolSizes[1].descriptorCount = 16;   // 2 × MAX_FRAMES + headroom
 
         VkDescriptorPoolCreateInfo poolInfo{};
-        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        poolInfo.poolSizeCount = 1;
-        poolInfo.pPoolSizes = &poolSize;
-        poolInfo.maxSets = 1000;
+        poolInfo.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = 2;
+        poolInfo.pPoolSizes    = poolSizes;
+        poolInfo.maxSets       = 1000 + MAX_FRAMES_IN_FLIGHT;
         return vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) == VK_SUCCESS;
     }
 
@@ -1625,6 +1895,268 @@ namespace Render {
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &pushConstant;
         return vkCreatePipelineLayout(m_device, &layoutInfo, nullptr, &m_pipelineLayout) == VK_SUCCESS;
+    }
+
+    // ------------------------------------------------------------------
+    // Portal-feature uniform infrastructure: a second descriptor set
+    // layout + pipeline layout that adds a CommonUBO + BonesUBO on top
+    // of the existing texture sampler. Portal renderer, viewmodel,
+    // crosshair-with-tint, HDR tonemap, bloom, etc. all use this.
+    // ------------------------------------------------------------------
+    bool VKBackend::CreatePortalDescriptorLayout() {
+        // PORTAL DESCRIPTOR LAYOUT lives at set=1. Texture(s) stay at
+        // set=0 reusing the existing per-texture descriptor sets so we
+        // don't have to rewrite descriptors mid-frame (which is undefined
+        // behavior in Vulkan — and caused the "grey gun" symptom because
+        // pending draws were reading from stomped descriptors).
+        //
+        // CommonUBO + BonesUBO use DYNAMIC type so each draw can address
+        // a different slice of the per-frame ring buffer via the
+        // pDynamicOffsets array passed to vkCmdBindDescriptorSets.
+        // Without this, every draw in a frame stomps the same buffer
+        // and the GPU reads only the LAST values for ALL draws.
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        // binding=0 — CommonUBO (dynamic).
+        bindings[0].binding         = 0;
+        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        bindings[0].descriptorCount = 1;
+        bindings[0].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        // binding=1 — BonesUBO (dynamic; viewmodel only, declared on all
+        // portal shaders so the layout is shared; shaders that don't
+        // sample it simply ignore the binding).
+        bindings[1].binding         = 1;
+        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        bindings[1].descriptorCount = 1;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = 2;
+        info.pBindings    = bindings;
+        return vkCreateDescriptorSetLayout(m_device, &info, nullptr,
+                                           &m_portalDescriptorLayout) == VK_SUCCESS;
+    }
+
+    bool VKBackend::CreatePortalPipelineLayout() {
+        VkPushConstantRange pushConstant{};
+        pushConstant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstant.offset = 0;
+        pushConstant.size   = sizeof(PushConstantBlock);
+
+        // set=0 = primary texture (existing per-texture descriptor layout)
+        // set=1 = UBOs (CommonUBO + BonesUBO, per-frame, stable)
+        // set=2 = secondary texture (existing per-texture descriptor layout —
+        //         reused so portal renderer's noise + colour-ramp pair maps
+        //         to (slot 0, slot 1). Pipelines using only one texture
+        //         simply bind a dummy texture at set=2 to satisfy the layout.)
+        VkDescriptorSetLayout sets[3] = { m_textureDescriptorLayout,
+                                          m_portalDescriptorLayout,
+                                          m_textureDescriptorLayout };
+
+        VkPipelineLayoutCreateInfo info{};
+        info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        info.setLayoutCount         = 3;
+        info.pSetLayouts            = sets;
+        info.pushConstantRangeCount = 1;
+        info.pPushConstantRanges    = &pushConstant;
+        return vkCreatePipelineLayout(m_device, &info, nullptr,
+                                      &m_portalPipelineLayout) == VK_SUCCESS;
+    }
+
+    bool VKBackend::CreateFrameUBOs() {
+        const VkMemoryPropertyFlags hostVisible =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        const VkBufferUsageFlags uboUsage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+        // Query device-required alignment for UBO offsets. Per-slot stride
+        // must be a multiple of this AND >= the actual UBO struct size.
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+        m_uboAlignment = static_cast<uint32_t>(
+            std::max<VkDeviceSize>(props.limits.minUniformBufferOffsetAlignment, 4));
+
+        auto AlignUp = [](uint32_t v, uint32_t a) {
+            return (v + a - 1) & ~(a - 1);
+        };
+        m_commonSlotStride = AlignUp(static_cast<uint32_t>(sizeof(CommonUBO)), m_uboAlignment);
+        m_bonesSlotStride  = AlignUp(static_cast<uint32_t>(sizeof(BonesUBO)),  m_uboAlignment);
+
+        const VkDeviceSize commonRingSize = VkDeviceSize(m_commonSlotStride) * kCommonSlotCount;
+        const VkDeviceSize bonesRingSize  = VkDeviceSize(m_bonesSlotStride)  * kBonesSlotCount;
+
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            FrameUBOs& fb = m_frameUBOs[i];
+            fb.commonWriteSlot = 0;
+            fb.bonesWriteSlot  = 0;
+            // CommonUBO ring buffer
+            if (!CreateVkBuffer(commonRingSize, uboUsage, hostVisible,
+                                fb.commonBuffer, fb.commonMemory)) {
+                Log::Error("VKBackend: failed to create CommonUBO ring[%d]", i);
+                return false;
+            }
+            void* mapped = nullptr;
+            vkMapMemory(m_device, fb.commonMemory, 0, commonRingSize, 0, &mapped);
+            fb.commonMapped = static_cast<uint8_t*>(mapped);
+
+            // Initialise slot 0 with defaults so a draw before any
+            // SetUniform call still reads sane data.
+            CommonUBO initCommon;
+            std::memcpy(fb.commonMapped, &initCommon, sizeof(CommonUBO));
+
+            // BonesUBO ring buffer
+            if (!CreateVkBuffer(bonesRingSize, uboUsage, hostVisible,
+                                fb.bonesBuffer, fb.bonesMemory)) {
+                Log::Error("VKBackend: failed to create BonesUBO ring[%d]", i);
+                return false;
+            }
+            vkMapMemory(m_device, fb.bonesMemory, 0, bonesRingSize, 0, &mapped);
+            fb.bonesMapped = static_cast<uint8_t*>(mapped);
+            BonesUBO initBones;
+            for (int k = 0; k < kMaxBones; ++k) initBones.bones[k] = glm::mat4(1.0f);
+            std::memcpy(fb.bonesMapped, &initBones, sizeof(BonesUBO));
+
+            // Allocate the portal descriptor set.
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool     = m_descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts        = &m_portalDescriptorLayout;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &fb.descriptorSet) != VK_SUCCESS) {
+                Log::Error("VKBackend: failed to allocate portal descriptor set[%d]", i);
+                return false;
+            }
+
+            // Wire CommonUBO (binding=0) and BonesUBO (binding=1) ONCE
+            // here. Descriptor type is UNIFORM_BUFFER_DYNAMIC — the
+            // pBufferInfo.range is the per-draw window size (one slot),
+            // and the per-draw byte offset comes from pDynamicOffsets
+            // passed to vkCmdBindDescriptorSets at draw time.
+            VkDescriptorBufferInfo commonInfo{fb.commonBuffer, 0, sizeof(CommonUBO)};
+            VkDescriptorBufferInfo bonesInfo {fb.bonesBuffer,  0, sizeof(BonesUBO)};
+            VkWriteDescriptorSet writes[2]{};
+            writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[0].dstSet          = fb.descriptorSet;
+            writes[0].dstBinding      = 0;
+            writes[0].descriptorCount = 1;
+            writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            writes[0].pBufferInfo     = &commonInfo;
+            writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[1].dstSet          = fb.descriptorSet;
+            writes[1].dstBinding      = 1;
+            writes[1].descriptorCount = 1;
+            writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            writes[1].pBufferInfo     = &bonesInfo;
+            vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+        }
+        return true;
+    }
+
+    void VKBackend::DestroyFrameUBOs() {
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            FrameUBOs& fb = m_frameUBOs[i];
+            if (fb.commonMapped) { vkUnmapMemory(m_device, fb.commonMemory); fb.commonMapped = nullptr; }
+            if (fb.bonesMapped)  { vkUnmapMemory(m_device, fb.bonesMemory);  fb.bonesMapped  = nullptr; }
+            fb.commonWriteSlot = 0;
+            fb.bonesWriteSlot  = 0;
+            if (fb.commonBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, fb.commonBuffer, nullptr); fb.commonBuffer = VK_NULL_HANDLE; }
+            if (fb.commonMemory != VK_NULL_HANDLE) { vkFreeMemory(m_device,   fb.commonMemory, nullptr);  fb.commonMemory = VK_NULL_HANDLE; }
+            if (fb.bonesBuffer  != VK_NULL_HANDLE) { vkDestroyBuffer(m_device, fb.bonesBuffer,  nullptr); fb.bonesBuffer  = VK_NULL_HANDLE; }
+            if (fb.bonesMemory  != VK_NULL_HANDLE) { vkFreeMemory(m_device,   fb.bonesMemory,  nullptr);  fb.bonesMemory  = VK_NULL_HANDLE; }
+            // Descriptor sets are freed when the pool is destroyed.
+        }
+    }
+
+    void VKBackend::BindPortalDescriptorForDraw(VkCommandBuffer cmd, TextureHandle tex) {
+        FrameUBOs& fb = m_frameUBOs[m_currentFrame];
+
+        // Allocate this draw's slot in the ring buffer. Each draw gets
+        // its own offset so the GPU reads exactly the uniforms set
+        // between this draw and the previous one — vs. the broken
+        // single-buffer design where every recorded draw read the LAST
+        // value of every uniform at submit time.
+        //
+        // If we run out of slots, wrap and overwrite the oldest. The
+        // ring is sized (256/32 slots) to comfortably cover an entire
+        // frame's draws; wrapping only happens in pathological cases.
+        // Wrapping silently corrupts earlier draws' uniforms (same bug
+        // as the original single-buffer design), so log a warning if
+        // we hit it so we can bump the slot count.
+        if (fb.commonWriteSlot >= kCommonSlotCount) {
+            static bool warned = false;
+            if (!warned) {
+                Log::Warning("VKBackend: CommonUBO ring overflowed (>%u draws/frame) — "
+                             "earlier draws may render with wrong uniforms",
+                             kCommonSlotCount);
+                warned = true;
+            }
+        }
+        if (fb.bonesWriteSlot >= kBonesSlotCount) {
+            static bool warned = false;
+            if (!warned) {
+                Log::Warning("VKBackend: BonesUBO ring overflowed (>%u draws/frame)",
+                             kBonesSlotCount);
+                warned = true;
+            }
+        }
+        const uint32_t commonSlot = fb.commonWriteSlot % kCommonSlotCount;
+        const uint32_t bonesSlot  = fb.bonesWriteSlot  % kBonesSlotCount;
+        fb.commonWriteSlot++;
+        fb.bonesWriteSlot++;
+
+        const uint32_t commonOffset = commonSlot * m_commonSlotStride;
+        const uint32_t bonesOffset  = bonesSlot  * m_bonesSlotStride;
+
+        // Always memcpy current working state into this draw's slot.
+        // (Even when not "dirty" — the dirty flag was only valid for the
+        // single-buffer design. With per-draw slots, each slot starts
+        // uninitialised, so we must always write.)
+        std::memcpy(fb.commonMapped + commonOffset, &m_commonUBOData, sizeof(CommonUBO));
+        std::memcpy(fb.bonesMapped  + bonesOffset,  &m_bonesUBOData,  sizeof(BonesUBO));
+        m_commonUBODirty = false;
+        m_bonesUBODirty  = false;
+
+        // Three sets to bind:
+        //   set=0 → primary texture (slot 0)
+        //   set=1 → per-frame UBO descriptor (dynamic offset = this draw's slot)
+        //   set=2 → secondary texture (slot 1) — for portal renderer's
+        //           noise + colour-ramp pair. Falls back to the primary
+        //           texture when nothing else is bound at slot 1 (any valid
+        //           descriptor satisfies the layout; the shader simply
+        //           doesn't read it).
+        auto tex0It = m_textures.find(tex);
+        if (tex0It == m_textures.end() || tex0It->second.descriptorSet == VK_NULL_HANDLE) return;
+        TextureHandle tex1Handle = m_boundTextures[1] != INVALID_TEXTURE
+                                 ? m_boundTextures[1] : tex;
+        auto tex1It = m_textures.find(tex1Handle);
+        VkDescriptorSet tex1Set = (tex1It != m_textures.end() && tex1It->second.descriptorSet != VK_NULL_HANDLE)
+                                ? tex1It->second.descriptorSet
+                                : tex0It->second.descriptorSet;
+        VkDescriptorSet sets[3] = {
+            tex0It->second.descriptorSet,
+            fb.descriptorSet,
+            tex1Set,
+        };
+        const uint32_t dynOffsets[2] = { commonOffset, bonesOffset };
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_portalPipelineLayout, 0, 3, sets, 2, dynOffsets);
+    }
+
+    void VKBackend::RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout) {
+        auto it = m_shaders.find(shader);
+        if (it != m_shaders.end()) it->second.vertexLayout = layout;
+    }
+
+    ShaderHandle VKBackend::CreateShaderFromFilesPortal(const std::string& vertexPath,
+                                                        const std::string& fragmentPath) {
+        // Same SPV-file lookup as CreateShaderFromFiles, but stamps the
+        // resulting shader with layoutType = 1 so GetOrCreatePipeline +
+        // DrawIndexed pick the portal pipeline layout / descriptor set.
+        ShaderHandle h = CreateShaderFromFiles(vertexPath, fragmentPath);
+        if (h != INVALID_SHADER) {
+            auto it = m_shaders.find(h);
+            if (it != m_shaders.end()) it->second.layoutType = 1;
+        }
+        return h;
     }
 
     bool VKBackend::CreatePipelineCache() {
@@ -1989,6 +2521,15 @@ namespace Render {
 
     size_t VKBackend::HashPipelineState(const PipelineState& state, ShaderHandle shader) const {
         size_t hash = std::hash<uint32_t>{}(shader);
+        // Mix the shader's layout type into the cache key — pipelines
+        // baked against m_pipelineLayout vs m_portalPipelineLayout must
+        // never collide because vkCmdBindDescriptorSets uses a specific
+        // layout at draw time and a mismatch is a validation error.
+        {
+            auto sit = m_shaders.find(shader);
+            int lt = (sit != m_shaders.end()) ? sit->second.layoutType : 0;
+            hash ^= std::hash<int>{}(lt) << 16;
+        }
         hash ^= std::hash<bool>{}(state.depthTestEnabled) << 1;
         hash ^= std::hash<bool>{}(state.depthWriteEnabled) << 2;
         hash ^= std::hash<bool>{}(state.blendEnabled) << 3;
@@ -2062,23 +2603,68 @@ namespace Render {
 
         VkPipelineShaderStageCreateInfo stages[] = {vertStage, fragStage};
 
-        // Vertex input (24 bytes per vertex: pos3 floats + uv2 floats + color4 ubytes)
+        // Vertex input. If the shader has a registered VertexLayout, use
+        // it (portal-feature shaders register theirs after creation). Else
+        // fall back to the hardcoded 24-byte block layout for backward
+        // compatibility with the existing chunk + crosshair + highlight
+        // + GUI shaders that all share that format.
         VkVertexInputBindingDescription bindingDesc{};
-        bindingDesc.binding = 0;
-        bindingDesc.stride = 24;
+        bindingDesc.binding   = 0;
         bindingDesc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-        std::array<VkVertexInputAttributeDescription, 3> attrDescs{};
-        attrDescs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};                          // Position: 3 floats at offset 0
-        attrDescs[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, static_cast<uint32_t>(sizeof(float) * 3)};  // UV: 2 floats at offset 12
-        attrDescs[2] = {2, 0, VK_FORMAT_R8G8B8A8_UNORM, static_cast<uint32_t>(sizeof(float) * 5)}; // Color: 4 ubytes normalized at offset 20
+        std::vector<VkVertexInputAttributeDescription> attrDescs;
+        {
+            auto sit = m_shaders.find(shader);
+            const VertexLayout* layout = (sit != m_shaders.end() && !sit->second.vertexLayout.attributes.empty())
+                ? &sit->second.vertexLayout : nullptr;
+            if (layout) {
+                bindingDesc.stride = layout->stride;
+                attrDescs.reserve(layout->attributes.size());
+                for (const auto& a : layout->attributes) {
+                    VkFormat fmt = VK_FORMAT_UNDEFINED;
+                    if (a.type == AttribType::Float) {
+                        switch (a.componentCount) {
+                            case 1: fmt = VK_FORMAT_R32_SFLOAT;             break;
+                            case 2: fmt = VK_FORMAT_R32G32_SFLOAT;          break;
+                            case 3: fmt = VK_FORMAT_R32G32B32_SFLOAT;       break;
+                            case 4: fmt = VK_FORMAT_R32G32B32A32_SFLOAT;    break;
+                        }
+                    } else { // UByte
+                        // 4 components: UNORM if normalized (vec4 0..1
+                        // in the shader), UINT if not (uvec4 0..255 in
+                        // the shader — Vulkan REQUIRES the shader-side
+                        // attribute to be uvec4 when format is _UINT).
+                        // USCALED would let us keep vec4 but it's
+                        // optional in Vulkan and MoltenVK on Apple
+                        // doesn't always support it for vertex inputs.
+                        if (a.componentCount == 4) {
+                            fmt = a.normalized ? VK_FORMAT_R8G8B8A8_UNORM
+                                               : VK_FORMAT_R8G8B8A8_UINT;
+                        }
+                    }
+                    if (fmt == VK_FORMAT_UNDEFINED) {
+                        Log::Warning("VKBackend: unsupported attrib (loc=%u count=%u type=%d) — pipeline will fail",
+                                     a.location, a.componentCount, (int)a.type);
+                    }
+                    attrDescs.push_back({a.location, 0, fmt, a.offset});
+                }
+            } else {
+                // Default block layout (pos3f + uv2f + color4u8 normalized).
+                bindingDesc.stride = 24;
+                attrDescs = {
+                    {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+                    {1, 0, VK_FORMAT_R32G32_SFLOAT,    (uint32_t)(sizeof(float) * 3)},
+                    {2, 0, VK_FORMAT_R8G8B8A8_UNORM,   (uint32_t)(sizeof(float) * 5)},
+                };
+            }
+        }
 
         VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
         vertexInputInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vertexInputInfo.vertexBindingDescriptionCount = 1;
-        vertexInputInfo.pVertexBindingDescriptions = &bindingDesc;
+        vertexInputInfo.pVertexBindingDescriptions    = &bindingDesc;
         vertexInputInfo.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrDescs.size());
-        vertexInputInfo.pVertexAttributeDescriptions = attrDescs.data();
+        vertexInputInfo.pVertexAttributeDescriptions    = attrDescs.data();
 
         // Input assembly
         VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
@@ -2193,7 +2779,18 @@ namespace Render {
         pipelineInfo.pDepthStencilState = &depthStencil;
         pipelineInfo.pColorBlendState = &colorBlending;
         pipelineInfo.pDynamicState = &dynamicState;
-        pipelineInfo.layout = m_pipelineLayout;
+        // Pick pipeline layout based on shader's layoutType (0=block,
+        // 1=portal). Portal-feature shaders need the descriptor layout
+        // that includes the CommonUBO + BonesUBO bindings.
+        VkPipelineLayout pl = m_pipelineLayout;
+        {
+            auto sit = m_shaders.find(shader);
+            if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
+                m_portalPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalPipelineLayout;
+            }
+        }
+        pipelineInfo.layout = pl;
         pipelineInfo.renderPass = m_renderPass;
         pipelineInfo.subpass = 0;
 

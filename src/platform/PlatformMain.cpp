@@ -1433,6 +1433,22 @@ bool s_eKeyHeld = false;
 
             // === PER-FRAME: Game logic (variable dt for smooth rendering) ===
             float dt;
+#if ENABLE_PORTAL_GUN
+            // Hoisted OUTSIDE the GameLogic profile scope so the render
+            // code further down (which is also outside the scope) can
+            // read it. Set when the predicted teleport snap fires THIS
+            // frame, so the render code below can suppress the local-
+            // player ghost / see-through body for one frame. Without
+            // this gate, the virtual camera for the see-through pass —
+            // computed by applying SrcToDst to the (now post-teleport)
+            // real camera — lands at a doubly-transformed location,
+            // and the local body rendered at the new player position
+            // via that virtCam briefly shows up at a garbage screen
+            // position before the next frame's render uses a fresh
+            // camera state. Visible symptom: "my player model shows
+            // up in front of me and flickers for a frame on teleport."
+            bool justTeleportedThisFrame = false;
+#endif
             { PROFILE_ZONE_N("GameLogic");
             PROFILE_TIMER_START(gamelogic);
             Time::Tick();
@@ -1477,6 +1493,7 @@ bool s_eKeyHeld = false;
                     player.predictedPos     = glm::dvec3(pred.newFeet);
                     player.serverPos        = glm::dvec3(pred.newFeet);
                     player.visualPos        = glm::dvec3(pred.newFeet);
+                    justTeleportedThisFrame = true;
                     Log::Info("[PortalPredict] Client predicted teleport "
                               "to (%.2f,%.2f,%.2f) yaw %.1f pitch %.1f",
                               pred.newFeet.x, pred.newFeet.y, pred.newFeet.z,
@@ -1626,6 +1643,26 @@ bool s_eKeyHeld = false;
             // The renderer uses this to lerp each remote player's render
             // position between its previous-tick snapshot and current value
             // (see RemotePlayer::renderPrev*) → smooth motion at any FPS.
+            // True iff the body bounding-extent actually crosses the
+            // given (entry) clip plane. GetStraddlingGhost.valid alone
+            // fires for any portal within 1m of the body center —
+            // which is too loose for the half-body split: a player
+            // standing fully on one side of a portal that happens to
+            // face the wrong way would otherwise get clipped out
+            // entirely by the entry plane test, making them invisible
+            // when viewed through the other portal. We only want the
+            // entry/exit split when the body geometrically straddles
+            // the plane. Hoisted to the outer render-loop scope so it
+            // can be used both by the main-scene ghost paths and by
+            // the see-through callback below.
+            auto BodyStraddlesEntryPlane = [](const glm::vec3& pos,
+                                              const glm::vec4& plane,
+                                              float height) {
+                const glm::vec3 n = glm::vec3(plane);
+                const float sdF = glm::dot(pos, n) + plane.w;          // feet
+                const float sdH = sdF + height * n.y;                   // head
+                return (sdF * sdH) <= 0.0f;
+            };
             if (Client::g_remotePlayerManager) {
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
@@ -1650,7 +1687,9 @@ bool s_eKeyHeld = false;
                             glm::mix(rp.renderPrevPosition.y, rp.position.y, partialTick),
                             glm::mix(rp.renderPrevPosition.z, rp.position.z, partialTick),
                         };
-                        if (portals.GetStraddlingGhost(renderPosCheck, 1.8f).valid) {
+                        auto gC = portals.GetStraddlingGhost(renderPosCheck, 1.8f);
+                        if (gC.valid && BodyStraddlesEntryPlane(renderPosCheck,
+                                                                gC.entryClipPlane, 1.8f)) {
                             straddlingIds.insert(id);
                         }
                     }
@@ -1690,6 +1729,18 @@ bool s_eKeyHeld = false;
                             rp.renderPrevBodyYaw, rp.bodyYaw);
                         auto g = portals.GetStraddlingGhost(renderPos, 1.8f);
                         if (!g.valid) continue;
+                        // Only emit the half-body split when the body
+                        // actually crosses the entry plane (matches the
+                        // straddlingIds gate so the bulk-pass exclusion
+                        // and this re-emit agree). Without the gate,
+                        // standing fully in front of a partner portal
+                        // would render the remote at its dst-side ghost
+                        // position with no src-side body — making them
+                        // appear teleported.
+                        if (!BodyStraddlesEntryPlane(renderPos,
+                                                     g.entryClipPlane, 1.8f)) {
+                            continue;
+                        }
                         // 1) Entry-side body, clipped to the half on the
                         //    source side of the source portal plane. Uses
                         //    identity model — same world position as the
@@ -1714,10 +1765,14 @@ bool s_eKeyHeld = false;
                     // through the destination portal from outside (and via
                     // the see-through pass below). The local body itself
                     // is invisible in first person, so no entry-side
-                    // render here.
+                    // render here. Same straddle gate as above so a
+                    // player just CLOSE to a portal doesn't sprout a
+                    // duplicate copy on the dst side.
                     auto gLocal = portals.GetStraddlingGhost(
                         player.physics.position, 1.8f);
-                    if (gLocal.valid) {
+                    if (!justTeleportedThisFrame && gLocal.valid &&
+                        BodyStraddlesEntryPlane(player.physics.position,
+                                                gLocal.entryClipPlane, 1.8f)) {
                         const bool isCrouching =
                             Input::IsKeyDown(Input::Key::LeftShift);
                         playerRenderer.RenderSingle(
@@ -1796,8 +1851,11 @@ bool s_eKeyHeld = false;
                             std::unordered_set<uint32_t> stRemote;
                             for (const auto& [id, rp] :
                                  Client::g_remotePlayerManager->GetPlayers()) {
-                                if (Client::GetClientPortalManager()
-                                        .GetStraddlingGhost(rp.position, 1.8f).valid) {
+                                auto gC = Client::GetClientPortalManager()
+                                              .GetStraddlingGhost(rp.position, 1.8f);
+                                if (gC.valid && BodyStraddlesEntryPlane(
+                                                    rp.position,
+                                                    gC.entryClipPlane, 1.8f)) {
                                     stRemote.insert(id);
                                 }
                             }
@@ -1827,23 +1885,48 @@ bool s_eKeyHeld = false;
                         auto& portalsST = Client::GetClientPortalManager();
                         auto gLocalST = portalsST.GetStraddlingGhost(
                             player.physics.position, 1.8f);
+                        // Only apply the entry/exit half-body split when
+                        // the body ACTUALLY crosses the plane. Without
+                        // this gate, gLocalST.valid (which fires for any
+                        // portal within 1m of the body center) makes
+                        // "standing in front of a portal that happens
+                        // to face you" clip out the whole body when the
+                        // entry plane's kept-side is the OTHER side.
+                        const bool straddlesEntry =
+                            gLocalST.valid &&
+                            BodyStraddlesEntryPlane(player.physics.position,
+                                                    gLocalST.entryClipPlane, 1.8f);
                         const glm::vec4 entryClip =
-                            gLocalST.valid ? gLocalST.entryClipPlane
+                            straddlesEntry ? gLocalST.entryClipPlane
                                            : glm::vec4(0.0f);
-                        playerRenderer.RenderSingle(
-                            obliqueProj, virtView,
-                            player.physics.position,
-                            camera.yaw, camera.yaw, camera.pitch,
-                            isCrouching,
-                            static_cast<uint8_t>(player.color),
-                            glm::mat4(1.0f), entryClip);
+                        // Skip the local body for the teleport frame
+                        // itself. virtCam was derived from the just-
+                        // snapped real camera, so applying SrcToDst
+                        // again places the local body at a junk screen
+                        // position for one frame; the next frame's
+                        // render produces the correct view.
+                        if (!justTeleportedThisFrame) {
+                            playerRenderer.RenderSingle(
+                                obliqueProj, virtView,
+                                player.physics.position,
+                                camera.yaw, camera.yaw, camera.pitch,
+                                isCrouching,
+                                static_cast<uint8_t>(player.color),
+                                glm::mat4(1.0f), entryClip);
+                        }
 
                         // Ghost render for through-portal visibility:
                         // when local or remote players straddle, also
                         // draw their ghost copy at the destination so
                         // looking back through the portal from the
                         // virtual camera shows the emerging half-body.
-                        if (gLocalST.valid) {
+                        // Same straddle gate — only emit when there's
+                        // an actual half-body to show; otherwise the
+                        // ghost is fully in dst space already and the
+                        // see-through pass renders it via the entry-
+                        // render above. Also skip on the teleport
+                        // frame (same reason as the body render).
+                        if (straddlesEntry && !justTeleportedThisFrame) {
                             playerRenderer.RenderSingle(
                                 obliqueProj, virtView,
                                 player.physics.position,
@@ -1858,6 +1941,24 @@ bool s_eKeyHeld = false;
                                 auto gR = portalsST.GetStraddlingGhost(
                                     rp.position, 1.8f);
                                 if (!gR.valid) continue;
+                                // Same body-straddles-plane gate as
+                                // the local-player block above. When
+                                // the remote is fully on one side,
+                                // skip the half-body split entirely;
+                                // the bulk pass already excluded them
+                                // expecting the split (when stRemote
+                                // also gates on this), so re-emit a
+                                // single unclipped body here.
+                                if (!BodyStraddlesEntryPlane(
+                                        rp.position, gR.entryClipPlane, 1.8f)) {
+                                    playerRenderer.RenderSingle(
+                                        obliqueProj, virtView, rp.position,
+                                        rp.rotation.x, rp.bodyYaw, rp.rotation.y,
+                                        rp.isCrouching,
+                                        static_cast<uint8_t>(rp.color),
+                                        glm::mat4(1.0f), glm::vec4(0.0f));
+                                    continue;
+                                }
                                 // Entry-clipped body on the source side
                                 // (replaces the bulk pass we excluded).
                                 playerRenderer.RenderSingle(

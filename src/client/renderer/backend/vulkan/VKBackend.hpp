@@ -87,6 +87,17 @@ namespace Render {
         // Pipeline state
         void SetPipelineState(const PipelineState& state) override;
         void InvalidateStateCache() override;
+        // Portal renderer's stencil override — when enabled, every
+        // subsequent SetPipelineState call has its stencil fields
+        // replaced with these values. Mirrors the GL backend's
+        // implementation so the same C++ portal code paths work on
+        // both backends without per-backend special-casing.
+        void SetStencilOverride(bool enabled,
+                                CompareOp compareOp,
+                                StencilOp passOp,
+                                uint32_t  reference,
+                                uint32_t  readMask,
+                                uint32_t  writeMask) override;
 
         // Drawing
         void DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) override;
@@ -278,11 +289,27 @@ namespace Render {
             VkShaderModule vertModule = VK_NULL_HANDLE;
             VkShaderModule fragModule = VK_NULL_HANDLE;
             // Which pipeline layout this shader expects. 0 = block (texture
-            // sampler only), 1 = portal (texture + UBO + bones UBO). Set
-            // by CreateShaderFromFiles vs CreateShaderFromFilesPortal.
+            // sampler only), 1 = portal (texture + UBO + bones UBO).
             int layoutType = 0;
+            // Vertex input layout this shader's pipelines should bake in.
+            // If empty (default for block shaders), CreateGraphicsPipeline
+            // falls back to the hardcoded 24-byte block layout. Portal/
+            // viewmodel shaders register their own layout via
+            // RegisterShaderVertexLayout so pipelines get the right
+            // VkVertexInputAttributeDescription entries.
+            VertexLayout vertexLayout;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
+
+    public:
+        // Stamp a per-shader vertex layout used when building pipelines.
+        // Subsystems with non-block vertex formats (viewmodel: 52-byte
+        // pos+uv+normal+joints+weights; particle billboards: 24-byte
+        // pos+uv+color; etc.) call this after creating their shader so
+        // the backend can build matching VkVertexInputAttributeDescription
+        // arrays in CreateGraphicsPipeline.
+        void RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout);
+    private:
 
         // ====================================================================
         // PORTAL-FEATURE UNIFORM BUFFERS
@@ -317,29 +344,51 @@ namespace Render {
             glm::mat4 bones[kMaxBones];   // identity-initialised in CPU staging
         };
 
-        // Per-frame UBO buffers (one set per frame-in-flight so a draw
-        // recording the current frame doesn't stomp on a buffer still
-        // being read by the GPU for the previous frame). Persistently
-        // mapped — we just memcpy into them, then submit; the writes
-        // are visible at draw time without an explicit flush because
-        // we allocate HOST_VISIBLE | HOST_COHERENT memory.
+        // Per-frame UBO RING BUFFERS (one ring per frame-in-flight so a
+        // draw recording the current frame doesn't stomp on a buffer
+        // still being read by the GPU for the previous frame).
+        // Persistently mapped — we just memcpy into the next slot, then
+        // submit; the writes are visible at draw time without an explicit
+        // flush because we allocate HOST_VISIBLE | HOST_COHERENT memory.
+        //
+        // CRITICAL: each portal frame issues MANY draws (stencil mark +
+        // depth clear + depth refill + outline = 4 draws per portal pair
+        // direction, ×2 directions = 8 per pair, plus crosshair, plus
+        // viewmodel parts). vkCmdDrawIndexed only RECORDS the draw —
+        // the GPU executes after vkQueueSubmit, at which point every
+        // recorded draw reads the FINAL state of any non-versioned UBO.
+        // Without per-draw slots, draw N would render with draw M's
+        // uniforms (M > N), making the entire portal effect garbage.
+        //
+        // The descriptors are bound as VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC
+        // so we pass a per-draw dynamic offset to vkCmdBindDescriptorSets
+        // instead of re-creating the descriptor set per draw.
         struct FrameUBOs {
-            VkBuffer       commonBuffer  = VK_NULL_HANDLE;
-            VkDeviceMemory commonMemory  = VK_NULL_HANDLE;
-            void*          commonMapped  = nullptr;
-            VkBuffer       bonesBuffer   = VK_NULL_HANDLE;
-            VkDeviceMemory bonesMemory   = VK_NULL_HANDLE;
-            void*          bonesMapped   = nullptr;
-            // One descriptor set per frame (also per-frame to avoid
-            // updating descriptors while previous frame is rendering).
-            // Actually we allocate one descriptor set per frame whose
-            // binding 0 (the texture sampler) is REWRITTEN per-draw
-            // via vkUpdateDescriptorSets. Bindings 1 and 2 (the UBOs)
-            // point at this frame's commonBuffer and bonesBuffer for
-            // the lifetime of the frame.
-            VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+            VkBuffer       commonBuffer    = VK_NULL_HANDLE;
+            VkDeviceMemory commonMemory    = VK_NULL_HANDLE;
+            uint8_t*       commonMapped    = nullptr;   // byte ptr for slot math
+            uint32_t       commonWriteSlot = 0;         // reset to 0 each BeginFrame
+            VkBuffer       bonesBuffer     = VK_NULL_HANDLE;
+            VkDeviceMemory bonesMemory     = VK_NULL_HANDLE;
+            uint8_t*       bonesMapped     = nullptr;
+            uint32_t       bonesWriteSlot  = 0;
+            // Per-frame descriptor set bound at set=1. Its CommonUBO
+            // (binding=0) and BonesUBO (binding=1) entries point at the
+            // BASE of the ring buffer with size = kCommonSlotStride /
+            // kBonesSlotStride; the per-draw offset is supplied via
+            // pDynamicOffsets to vkCmdBindDescriptorSets.
+            VkDescriptorSet descriptorSet  = VK_NULL_HANDLE;
         };
         std::array<FrameUBOs, MAX_FRAMES_IN_FLIGHT> m_frameUBOs;
+        // Slot count + per-slot stride for the ring buffers. Stride is
+        // initialized from minUniformBufferOffsetAlignment at device
+        // creation time (MoltenVK on Apple typically reports 16/64/256
+        // — we round up to whichever covers both UBO sizes).
+        static constexpr uint32_t kCommonSlotCount = 256;
+        static constexpr uint32_t kBonesSlotCount  = 32;
+        uint32_t m_commonSlotStride = 0;   // aligned to device alignment, >= sizeof(CommonUBO)
+        uint32_t m_bonesSlotStride  = 0;   // aligned, >= sizeof(BonesUBO)
+        uint32_t m_uboAlignment     = 256; // discovered via VkPhysicalDeviceLimits
         // Working copies modified by SetUniform* between draws — copied
         // into the active frame's UBO buffer right before vkCmdDraw*.
         CommonUBO m_commonUBOData;
@@ -358,13 +407,39 @@ namespace Render {
 
         // Currently bound state
         ShaderHandle m_boundShader = INVALID_SHADER;
-        TextureHandle m_boundTexture = INVALID_TEXTURE;
+        // Slot 0 is the "primary" texture (used by every shader that
+        // samples a texture and by the block pipeline layout). Higher
+        // slots are for shaders that need multiple textures (portal
+        // renderer needs slot 0 = noise + slot 1 = colour ramp; HDR
+        // tonemap will use slot 1 too). The portal pipeline layout has
+        // a third descriptor set just for the secondary texture so
+        // BindTexture(handle, slot=1) can attach a real texture there
+        // without rewriting any descriptors mid-frame.
+        static constexpr uint32_t kMaxTextureSlots = 4;
+        TextureHandle m_boundTexture = INVALID_TEXTURE;       // legacy alias for slot 0
+        TextureHandle m_boundTextures[kMaxTextureSlots] = {
+            INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
+        };
 
         // Mega-buffer bound state
         BufferHandle m_megaBoundVBO = INVALID_BUFFER;
         BufferHandle m_megaBoundIBO = INVALID_BUFFER;
         PipelineState m_currentPipelineState;
         VkPipeline m_currentPipeline = VK_NULL_HANDLE;
+
+        // Portal renderer's stencil override. While enabled, SetPipeline-
+        // State splices these values into every state it receives so
+        // chunks rendered inside the see-through pass test against
+        // the portal silhouette stencil mask.
+        struct StencilOverride {
+            bool      enabled   = false;
+            CompareOp compareOp = CompareOp::Always;
+            StencilOp passOp    = StencilOp::Keep;
+            uint32_t  reference = 0;
+            uint32_t  readMask  = 0xFFu;
+            uint32_t  writeMask = 0xFFu;
+        };
+        StencilOverride m_stencilOverride;
 
         // Push constant data — must match every shader's
         // layout(push_constant) block exactly. Vulkan guarantees 128 bytes

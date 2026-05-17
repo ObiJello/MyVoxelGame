@@ -365,7 +365,21 @@ namespace Render {
         float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
         // Use the caller-supplied projection (oblique-near-plane from the
         // portal renderer) when present; otherwise build the standard one.
-        const glm::mat4 proj = m_useProjectionOverride
+        //
+        // Vulkan special-case: skip the oblique override. The Vulkan
+        // backend's GL→VK depth remap (kVkZCorrect in VKBackend.cpp)
+        // interacts with the Lengyel oblique modification such that
+        // kept-side geometry past the clip plane's asymptote ends up at
+        // z_ndc > 1 in Vulkan NDC, getting clipped by the rasterizer's
+        // far plane and producing the "stand 5+ blocks from a portal
+        // and the see-through view collapses to sky color" bug. On
+        // Vulkan we instead rely on block_vk.vert's gl_ClipDistance[0]
+        // write (using the world-space uPortalClipPlane uniform set by
+        // PortalRenderer::SetPortalClipPlane) to clip at the dst plane —
+        // same end result as the oblique math, no depth compression.
+        const bool useOverride = m_useProjectionOverride && g_renderBackend &&
+                                 g_renderBackend->GetType() != BackendType::Vulkan;
+        const glm::mat4 proj = useOverride
             ? m_projectionOverride
             : glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
         m_cachedMVP = proj * view;

@@ -279,9 +279,21 @@ void main() {
 
     bool PortalParticleSystem::Initialize() {
         if (!g_renderBackend) return false;
-        m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
+        // Vulkan can't compile GLSL strings at runtime — load the pre-
+        // compiled SPIR-V (shaders/portal_particle_vk.{vert,frag}.spv)
+        // built by CMake's compile_shaders target. Same vertex format
+        // (block layout, 24 bytes) and same push-constant uMVP, so no
+        // RegisterShaderVertexLayout or portal-pipeline-layout calls
+        // are needed — the default block layout path handles it.
+        if (g_renderBackend->GetType() == BackendType::OpenGL) {
+            m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
+        } else {
+            m_shader = g_renderBackend->CreateShaderFromFiles(
+                "shaders/portal_particle.vert", "shaders/portal_particle.frag");
+        }
         if (m_shader == INVALID_SHADER) {
-            Log::Warning("[PortalParticleSystem] Shader compile failed (likely Vulkan backend without SPIR-V)");
+            Log::Warning("[PortalParticleSystem] Failed to load shader for backend %s",
+                         g_renderBackend->GetName());
             return false;
         }
         unsigned char white[] = {255, 255, 255, 255};
@@ -1060,38 +1072,36 @@ void main() {
         const glm::mat4 mvp = projection * view;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
 
-        // Two draw calls, one per color, each binding its sprite. The
-        // RenderBackend's DrawArrays takes a total vertex count starting
-        // from offset 0, so for the orange batch we'd need a sub-range
-        // draw. Lacking that, walk the batches with explicit offsets via
-        // a buffer-sub-update trick: build the orange batch into the VB
-        // starting at offset 0 for each pass. To keep it simple here,
-        // upload everything in one go but issue one DrawArrays per batch
-        // by manipulating the bound vertex pointer (UpdateBuffer with
-        // partial offset reuses the same VB).
+        // Issue one DrawArrays per colour batch using `firstVertex` to
+        // split them (blue occupies [0, blueVerts), orange occupies
+        // [blueVerts, blueVerts+orangeVerts)). The full upload happened
+        // above (single UpdateBuffer with all verts).
         //
-        // Simpler approach that works with the current backend API:
-        // upload blue verts to offset 0, draw blueVerts; then upload
-        // orange verts to offset 0 (overwrites blue, which is fine —
-        // we're done drawing them), draw orangeVerts. Two updates per
-        // frame but particle counts are small.
+        // We can't double-buffer at offset 0 like the original GL code
+        // did: Vulkan's UpdateBuffer maps + memcpys immediately at
+        // command-recording time, but the recorded vkCmdDraws don't
+        // execute until vkQueueSubmit at end-of-frame. If we memcpy
+        // blue→offset 0, record draw, memcpy orange→offset 0, record
+        // draw, then at GPU-exec time BOTH draws see the second memcpy
+        // (orange data). Visible symptom on Vulkan: "no particles for
+        // an activated blue portal" — the blue draw renders orange
+        // vertex positions, so nothing appears at the blue portal,
+        // while the orange draw works correctly.
         if (blueVerts > 0) {
-            g_renderBackend->UpdateBuffer(m_vb, 0, blueVerts * 24, verts.data());
             g_renderBackend->BindTexture(
                 m_blueSprite != INVALID_TEXTURE ? m_blueSprite : m_dummyTexture, 0);
             g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
             g_renderBackend->SetUniformInt(m_shader, "uHasSprite",
                 m_blueSprite != INVALID_TEXTURE ? 1 : 0);
-            g_renderBackend->DrawArrays(m_mesh, blueVerts);
+            g_renderBackend->DrawArrays(m_mesh, blueVerts, /*firstVertex=*/0);
         }
         if (orangeVerts > 0) {
-            g_renderBackend->UpdateBuffer(m_vb, 0, orangeVerts * 24, verts.data() + blueVerts);
             g_renderBackend->BindTexture(
                 m_orangeSprite != INVALID_TEXTURE ? m_orangeSprite : m_dummyTexture, 0);
             g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
             g_renderBackend->SetUniformInt(m_shader, "uHasSprite",
                 m_orangeSprite != INVALID_TEXTURE ? 1 : 0);
-            g_renderBackend->DrawArrays(m_mesh, orangeVerts);
+            g_renderBackend->DrawArrays(m_mesh, orangeVerts, /*firstVertex=*/blueVerts);
         }
         g_renderBackend->UnbindMesh();
 

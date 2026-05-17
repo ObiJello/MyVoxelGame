@@ -7,6 +7,9 @@
 #include "PortalGunViewmodel.hpp"
 #include "GltfLoader.hpp"
 #include "../backend/RenderBackend.hpp"
+#ifdef HAS_VULKAN
+#include "../backend/vulkan/VKBackend.hpp"
+#endif
 #include "common/core/Log.hpp"
 
 #include <glm/glm.hpp>
@@ -201,7 +204,27 @@ void main() {
         if (m_initialized) return true;
         if (!g_renderBackend) return false;
 
-        m_shader = g_renderBackend->CreateShader(kSkinnedVS, kSkinnedFS);
+        // On Vulkan, the viewmodel needs the portal pipeline layout
+        // (with the BonesUBO at binding=2). On OpenGL, fall back to
+        // the inline GLSL source. Both load the same uniforms by name.
+        if (g_renderBackend->GetType() == BackendType::Vulkan) {
+#ifdef HAS_VULKAN
+            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
+            m_shader = vk->CreateShaderFromFilesPortal(
+                "shaders/viewmodel_skinned.vert",
+                "shaders/viewmodel_skinned.frag");
+            // Tell the backend the viewmodel uses our 52-byte skinned
+            // vertex layout (pos3 + uv2 + normal3 + joints4u8 + weights4f).
+            // Without this, pipeline creation falls back to the 24-byte
+            // block layout, the shader's attribute slots 3+4 are missing
+            // their bindings, and VkPipeline creation fails with -3.
+            if (m_shader != INVALID_SHADER) {
+                vk->RegisterShaderVertexLayout(m_shader, BuildSkinnedLayout());
+            }
+#endif
+        } else {
+            m_shader = g_renderBackend->CreateShader(kSkinnedVS, kSkinnedFS);
+        }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[PortalGunViewmodel] skinned shader compile failed");
             return false;

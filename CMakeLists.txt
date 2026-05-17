@@ -315,6 +315,12 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/player_billboard_vk.frag
             ${VK_SHADER_DIR}/portal_crosshair_vk.vert
             ${VK_SHADER_DIR}/portal_crosshair_vk.frag
+            ${VK_SHADER_DIR}/portal_vk.vert
+            ${VK_SHADER_DIR}/portal_vk.frag
+            ${VK_SHADER_DIR}/portal_particle_vk.vert
+            ${VK_SHADER_DIR}/portal_particle_vk.frag
+            ${VK_SHADER_DIR}/viewmodel_skinned_vk.vert
+            ${VK_SHADER_DIR}/viewmodel_skinned_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})

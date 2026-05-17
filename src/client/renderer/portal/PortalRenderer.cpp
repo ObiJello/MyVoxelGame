@@ -7,6 +7,9 @@
 #include "PortalRenderer.hpp"
 #include "PortalCameraTransform.hpp"
 #include "../backend/RenderBackend.hpp"
+#ifdef HAS_VULKAN
+#include "../backend/vulkan/VKBackend.hpp"
+#endif
 #include "../mesh/ChunkRenderer.hpp"     // RenderChunksAll for the see-through scene re-render
 #include "client/portal/ClientPortalManager.hpp"
 #include "common/core/Log.hpp"
@@ -674,16 +677,30 @@ void main() {
         // currently fall through to the source compile, which the Vulkan
         // backend rejects → m_shader stays INVALID and Render() no-ops
         // gracefully. Acceptable: the user is on GL by default.
-        m_shader = g_renderBackend->CreateShaderFromFiles(
-            "shaders/portal.vert", "shaders/portal.frag");
-        if (m_shader == INVALID_SHADER) {
-            m_shader = g_renderBackend->CreateShader(
-                vertexShaderSource, fragmentShaderSource);
+        // On Vulkan, this needs the *portal* pipeline layout (UBO-aware),
+        // which only CreateShaderFromFilesPortal sets up. We do a backend
+        // type check rather than always calling the Portal variant because
+        // the OpenGL backend's CreateShaderFromFilesPortal symbol isn't
+        // defined — the static dispatch in the abstract RenderBackend
+        // only knows CreateShaderFromFiles. So we cast and call directly
+        // on Vulkan.
+        if (g_renderBackend->GetType() == BackendType::Vulkan) {
+#ifdef HAS_VULKAN
+            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
+            m_shader = vk->CreateShaderFromFilesPortal(
+                "shaders/portal.vert", "shaders/portal.frag");
+#endif
+        } else {
+            m_shader = g_renderBackend->CreateShaderFromFiles(
+                "shaders/portal.vert", "shaders/portal.frag");
+            if (m_shader == INVALID_SHADER) {
+                m_shader = g_renderBackend->CreateShader(
+                    vertexShaderSource, fragmentShaderSource);
+            }
         }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[PortalRenderer] Failed to create shader — portal "
-                         "rendering disabled (likely Vulkan backend without "
-                         "portal SPIR-V; will be addressed in Phase 5)");
+                         "rendering disabled");
             return false;
         }
 

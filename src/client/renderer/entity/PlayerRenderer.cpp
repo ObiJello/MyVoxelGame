@@ -313,6 +313,29 @@ void main() {
         BuildStickFigure(lineVerts, triVerts, triVerts, position,
                          headYaw, bodyYaw, pitch, isCrouching, color);
 
+        // Pre-multiply the per-call `model` transform into the vertex
+        // positions on the CPU. This is the portal pair matrix for ghost
+        // renders (sends the player from src to dst side) and identity
+        // for the normal path. Doing it CPU-side keeps uModel out of the
+        // push-constant range — which matters on Vulkan where a mat4 won't
+        // fit alongside uMVP (128-byte push-constant guarantee), and was
+        // the cause of the ghost rendering at the ENTRY position with no
+        // clipping in Vulkan ("can see my body when I look down at the
+        // portal") because the Vulkan player shader silently ignored
+        // uModel. After this transform `aPos` already IS the desired
+        // world-space position, so the clip-plane test in the fragment
+        // shader can use `vWorldPos = aPos` directly without uModel.
+        if (model != glm::mat4(1.0f)) {
+            for (auto& v : triVerts) {
+                glm::vec4 w = model * glm::vec4(v.x, v.y, v.z, 1.0f);
+                v.x = w.x; v.y = w.y; v.z = w.z;
+            }
+            for (auto& v : lineVerts) {
+                glm::vec4 w = model * glm::vec4(v.x, v.y, v.z, 1.0f);
+                v.x = w.x; v.y = w.y; v.z = w.z;
+            }
+        }
+
         const glm::mat4 mvp = projection * view;
 
         // Mirrors the existing Render() impl — same two-pass triangle then
@@ -333,7 +356,8 @@ void main() {
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP",   mvp);
-            g_renderBackend->SetUniformMat4(m_shader, "uModel", model);
+            // Verts were pre-multiplied by `model` above; pass identity.
+            g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
             g_renderBackend->SetUniformVec4(m_shader, "uClipPlane", clipPlane);
             g_renderBackend->DrawArrays(m_triMesh, static_cast<uint32_t>(triVerts.size()));
             g_renderBackend->UnbindMesh();
