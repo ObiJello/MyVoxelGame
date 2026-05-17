@@ -790,6 +790,53 @@ else()
             # Render backend abstraction
             src/client/renderer/backend/opengl/GLBackend.cpp
             src/client/renderer/backend/opengl/GLBackend.hpp
+
+            # Item system + data components + enchantments — present on
+            # macOS list but were missing from this Windows/Linux block,
+            # causing LNK2019 for ItemRegistry::Initialize/Get/Size etc.
+            src/common/entity/Item.cpp
+            src/common/entity/Item.hpp
+            src/common/entity/ItemBehaviors.cpp
+            src/common/entity/ItemModelLoader.cpp
+            src/common/entity/ItemModelLoader.hpp
+            src/common/entity/ClientItemLoader.cpp
+            src/common/entity/ClientItemLoader.hpp
+            src/common/data/DataComponentMap.cpp
+            src/common/data/DataComponentMap.hpp
+            src/common/data/DataComponents.cpp
+            src/common/data/DataComponents.hpp
+            src/common/world/enchantment/Enchantment.cpp
+            src/common/world/enchantment/Enchantment.hpp
+            src/common/world/enchantment/ItemEnchantments.cpp
+            src/common/world/enchantment/ItemEnchantments.hpp
+            src/common/world/enchantment/EnchantmentHelper.cpp
+            src/common/world/enchantment/EnchantmentHelper.hpp
+
+            # Portal Gun feature — Features.hpp ENABLE_PORTAL_GUN strips
+            # bodies when off (so safe to always list). Missing from this
+            # block was causing LNK2019 for every Render::g_portal*,
+            # ClientPortalManager, PortalRegistry, HDRPipeline, etc.
+            src/common/entity/PortalGunBehavior.cpp
+            src/server/portal/PortalRegistry.cpp
+            src/server/portal/PortalRegistry.hpp
+            src/client/portal/ClientPortalManager.cpp
+            src/client/portal/ClientPortalManager.hpp
+            src/client/renderer/portal/PortalRenderer.cpp
+            src/client/renderer/portal/PortalRenderer.hpp
+            src/client/renderer/portal/PortalCameraTransform.cpp
+            src/client/renderer/portal/PortalCameraTransform.hpp
+            src/client/renderer/portal/PortalParticleSystem.cpp
+            src/client/renderer/portal/PortalParticleSystem.hpp
+            src/client/renderer/portal/HDRPipeline.cpp
+            src/client/renderer/portal/HDRPipeline.hpp
+            src/client/renderer/portal/BloomPipeline.cpp
+            src/client/renderer/portal/BloomPipeline.hpp
+            src/client/renderer/portal/PortalCrosshair.cpp
+            src/client/renderer/portal/PortalCrosshair.hpp
+            src/client/renderer/viewmodel/GltfLoader.cpp
+            src/client/renderer/viewmodel/GltfLoader.hpp
+            src/client/renderer/viewmodel/PortalGunViewmodel.cpp
+            src/client/renderer/viewmodel/PortalGunViewmodel.hpp
     )
     # Add Vulkan backend source if available (non-Apple builds)
     if(HAS_VULKAN)
