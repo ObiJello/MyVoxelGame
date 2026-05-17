@@ -355,7 +355,7 @@ vec4 PortalFlame(bool transparentCenter) {
         return vec4(finalCol, 1.0);
     }
 }
-
+)" R"(
 // ─── PortalRefract Stage 2 — direct port of Valve's portal_refract_ps2x.fxc ──
 //
 // Algorithm and constants from Source SDK 2013

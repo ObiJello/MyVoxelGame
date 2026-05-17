@@ -16,6 +16,8 @@
 #include "client/renderer/portal/PortalCrosshair.hpp"
 
 #include <GLFW/glfw3.h>
+#include <algorithm>  // std::clamp — required for MSVC, transitively
+                      // included on libc++/libstdc++ but not on MSVC's STL
 
 namespace Client {
 
