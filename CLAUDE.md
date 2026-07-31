@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Network Info
 
-- **Mac Public IP:** 74.105.150.36
+- **Mac Public IP:** 108.35.220.113 (was 74.105.150.36; residential IP — re-check with `curl https://api.ipify.org` and update `src/common/core/FriendsServiceConfig.hpp` when it rotates)
 
 ## Git Policy
 
@@ -62,10 +62,17 @@ All parsed in `src/platform/PlatformMain.cpp:Run()`. The launcher (`src/launcher
 | `--server` | `host[:port]` | Connect to a remote dedicated server instead of running the integrated one. Defaults to port 25565. Launcher: "Join Server" dialog (IP + port). |
 | `--name` | `<string>` | Player name. Empty/missing → server auto-assigns "PlayerN" based on connection ID. Launcher: "Username" field. |
 | `--color` | `<slug>` | Player stick-figure colour. Slug is one of `default`, `red`, `orange`, `yellow`, `blue`, `purple`, `pink`, `white`, `black`, `brown` (case-insensitive). Empty/missing/`default` → neon green (`#00FF3C`). Launcher: swatch grid in settings. |
+| `--session` | `<token>` | Friends-service session token from a launcher login. Missing → guest (Friends UI disabled). Launcher: added automatically when logged in. |
+| `--account-id` | `<n>` | Friends-service account id paired with `--session`. |
+| `--friends-service` | `host[:port]` | Overrides the friends-service address (defaults in `src/common/core/FriendsServiceConfig.hpp`). Launcher: forwarded from the `friends_service` key in `launcher.json`. |
 
 **Player color flow** (added 2026-05): launcher persists slug to `launcher.json` `"player_color"` → passes `--color <slug>` on launch → `PlatformMain` parses via `Game::ParsePlayerColorName` (`src/common/entity/PlayerColors.{hpp,cpp}`) → stored on `ClientPlayer.color` → forwarded to network as a uint8_t via `NetworkClient::SetPlayerColor` → tail-appended byte after username in the `LoginStart` packet → server's `LoginPacketListener::onLoginStart` calls `m_connection.SetPlayerColor(packet.colorId)` → IntegratedServer's `OnPlayerJoined` reads `connection->GetPlayerColor()` onto the new `ServerPlayer.colorId` → broadcast in both `PlayerInfoS2C ADD` paths (existing-players-to-new-client and new-player-to-all) → client writes onto `RemotePlayer.color` → `PlayerRenderer` looks up the RGB via `Game::LookupPlayerColor` and passes it to `BuildStickFigure`. Same for the local inventory preview via `PlayerInventoryPreview`. Default (id=0) is the historical neon green so old clients/servers stay compatible.
 
 To add a new color, append one row to `Game::kPlayerColorTable` in `src/common/entity/PlayerColors.hpp` and bump `PlayerColorId::Count`. The launcher swatch grid auto-includes it.
+
+**Friend hosting without port-forwarding** (added 2026-07): when a player hosts, the game tries to open its port automatically via UPnP IGD (`src/client/network/UPnPPortMapper` — hand-rolled SSDP+SOAP on Asio, no new dependency; runs on a worker thread, failure is non-fatal) and reports the WAN address in its presence. The service then TCP-probes that address to *verify* reachability (`probe_reachable`; a host claiming success isn't enough — double-NAT/ISP filtering). `join_info` returns `mode:"direct"` with the host address when the probe passed, otherwise `mode:"relay"` with a ticket: the service pushes `relay_open` to the host, whose FriendsClient dials OUT to the service and hands the resulting socket to `NetworkServer::AdoptConnection` (native-handle transfer between io_contexts); the joiner sets `NetworkClient::SetConnectPreamble` with a `relay_attach` line and connects to the service, which splices the two streams. Relay traffic rides the SAME port as the control protocol (first-line sniff), so only 25570 needs forwarding on the service machine. `--allow-private-hosts` treats private addresses as directly joinable (LAN-only setups and local testing).
+
+**Friends system flow** (added 2026-07): self-hosted backend `tools/friends_server/friends_service.py` (Python 3 stdlib, port 25570, sqlite; run it next to the game server and port-forward TCP 25570). One port, two protocols sniffed by first byte: HTTP POST `/api` (launcher: signup/login/logout/check_name/rename via `src/launcher/net/FriendsServiceClient`) and persistent NDJSON (game: `src/client/network/FriendsClient` — own io thread, app lifetime, hello(token) → server pushes `roster`/`invite` events; friend-op targets travel in `"friend"`, `"id"` is the correlation field). Launcher login stores `session_token`/`account_id`/`account_name` in `launcher.json`, forces the username to the account name, shows a debounced availability checkmark (rename commits via the service; friendships key on account id so renames propagate). Launch passes `--session`/`--account-id` → PlatformMain constructs `Client::g_friendsClient` (null = guest). Presence transitions live in PlatformMain only: Menu (title) / Hosting(worldName, 25565) / Playing(addr). Friends UI: `screens/FriendsScreen` (title screen's old Realms slot + pause menu). Join posts a `Multiplayer` TitleAction; from in-game the pause branch stashes it in `pendingSessionAction` and the outer session loop auto-joins without showing the title. Transport is plaintext by design (personal scale); the hosting machine's launcher should set `friends_service` to `127.0.0.1` (NAT hairpin).
 
 ## Updating to a Newer Minecraft Version
 
@@ -140,6 +147,11 @@ The terrain library uses GCC/Clang-specific features that need MSVC equivalents:
 
 ### MapBlockType thread safety
 `MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. The `m_blockIdCache` unordered_map must be protected with `m_blockIdCacheMutex` (already in MyTerrainGenerator.hpp/cpp, not in the terrain library).
+
+### DensityFunctionRegistry re-bootstrap (quit-to-title support)
+`DensityFunctionRegistry::clear()` must NOT delete the `zero()` density function — it is `Constant::ZERO()`, a process-lifetime singleton whose static accessor caches the pointer. Deleting it leaves the cache dangling; the next `bootstrap()` (second world in one process via quit-to-title → rejoin) re-registers the freed pointer and the first `NoiseRouterData::overworld()` build segfaults.
+
+**Source** (`src/levelgen/DensityFunctionRegistry.cpp`): in `clear()`, skip the delete when `pair.second == zero()`.
 
 ## Architecture Overview
 

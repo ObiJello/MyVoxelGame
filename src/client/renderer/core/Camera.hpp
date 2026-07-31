@@ -37,6 +37,7 @@ namespace Render {
         // Movement settings (not used when physics is enabled)
         float moveSpeed      =  10.0f;  // units per second
         float mouseSensitivity = 0.1f;   // degrees per pixel
+        bool  invertY        = false;    // "Invert Mouse" option (pitch axis)
 
         // Control flags
         bool enableMouseLook = true;  // Whether mouse movement affects camera
@@ -101,7 +102,7 @@ namespace Render {
                 auto [dx, dy] = Input::GetMouseDelta();
 
                 yaw   += dx * mouseSensitivity;
-                pitch += dy * mouseSensitivity;
+                pitch += (invertY ? -dy : dy) * mouseSensitivity;
 
                 // Clamp pitch to avoid gimbal flip
                 if (pitch >  89.0f) pitch =  89.0f;

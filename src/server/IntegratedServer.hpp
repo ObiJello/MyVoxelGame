@@ -209,6 +209,13 @@ namespace Server {
 
         // New player architecture
         std::unique_ptr<ServerPlayer> m_serverPlayer;     // Host player (ID 1)
+
+        // World spawn (block-centered feet position). Legacy default until the
+        // server thread computes the real spawn at startup — the MC algorithm
+        // via IChunkGenerator::FindSpawnPosition for generated worlds. Written
+        // once on the server thread before any player joins; joins run on the
+        // same thread, so no further synchronization is needed.
+        glm::vec3 m_worldSpawn{0.5f, 67.0f, 0.5f};
         std::unordered_map<uint32_t, std::unique_ptr<ServerPlayer>> m_remotePlayers; // Remote players by ID
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 

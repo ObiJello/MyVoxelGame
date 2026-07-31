@@ -50,6 +50,15 @@ namespace Server {
         // CONNECTION MANAGEMENT
         // ========================================================================
 
+        // Adopt an ALREADY-CONNECTED socket as a normal client connection.
+        // Used by the friends relay: when a friend can't reach us directly,
+        // our game dials OUT to the relay and hands the resulting socket
+        // here, so the rest of the server treats it like any inbound join.
+        // `handle` is a native descriptor created on another io_context;
+        // ownership transfers to the server. Thread-safe (posts onto the
+        // server's io thread).
+        void AdoptConnection(tcp::socket::native_handle_type handle);
+
         // Get all active connections
         std::vector<ServerConnectionPtr> GetConnections() const;
         
@@ -114,6 +123,10 @@ namespace Server {
 
         // Start async accept
         void StartAccept();
+
+        // Shared tail of HandleAccept / AdoptConnection: configure the
+        // socket, wrap it in a ServerConnection, register and start it.
+        void SetupConnection(tcp::socket socket, const char* origin);
         
         // Handle accept completion
         void HandleAccept(const error_code& error, tcp::socket socket);

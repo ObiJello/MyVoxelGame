@@ -89,6 +89,14 @@ namespace Client {
         // chosen colour.
         void SetPlayerColor(uint8_t colorId) { m_playerColor = colorId; }
         uint8_t GetPlayerColor() const { return m_playerColor; }
+
+        // Raw bytes written immediately after TCP connect, BEFORE the game
+        // handshake. Used only for relayed joins (friends service): the
+        // relay needs a ticket line to pair us with the host. Cleared after
+        // one use; empty for normal direct connections.
+        void SetConnectPreamble(std::string preamble) {
+            m_connectPreamble = std::move(preamble);
+        }
         
         // Server-sent view distance (effective render distance capped by server)
         void SetServerViewDistance(int distance) { m_serverViewDistance.store(distance); }
@@ -158,6 +166,7 @@ namespace Client {
 
         // Player name for handshake (empty → server auto-assigns "PlayerN")
         std::string m_playerName;
+        std::string m_connectPreamble;   // relay ticket line (see SetConnectPreamble)
         uint8_t     m_playerColor = 0; // Game::PlayerColorId::Default
         
         // Client state

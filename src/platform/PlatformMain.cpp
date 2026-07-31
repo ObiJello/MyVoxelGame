@@ -50,6 +50,15 @@
 #include "client/renderer/gui/HudRenderer.hpp"
 #include "client/renderer/gui/ChatComponent.hpp"
 #include "client/renderer/gui/ChatScreen.hpp"
+#include "client/renderer/gui/screens/Screen.hpp"
+#include "client/renderer/gui/screens/TitleScreen.hpp"
+#include "client/renderer/gui/screens/PauseScreen.hpp"
+#include "client/renderer/gui/screens/PanoramaRenderer.hpp"
+#include "client/renderer/gui/screens/WorldSelectScreens.hpp"
+#include "client/network/FriendsClient.hpp"
+#include "client/network/UPnPPortMapper.hpp"
+#include "common/core/FriendsServiceConfig.hpp"
+#include <cstdlib>   // getenv (temp autoplay diagnostic)
 #include <functional>
 #include <sstream>
 #include <unordered_set>
@@ -97,6 +106,8 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include <filesystem>
 #include <memory>
 #include <atomic>
+#include <optional>
+#include <thread>   // frame limiter sleep_until
 
 #include "platform/GameDirectory.hpp"
 #include "common/core/JobSystem.hpp"
@@ -130,6 +141,21 @@ namespace PlatformMain {
 // double-firing on the frame the inventory opens). The local `extern bool s_eKeyHeld;`
 // declarations inside Run() resolve to this via the enclosing namespace.
 bool s_eKeyHeld = false;
+
+// Same cross-branch pattern for ESC: the game branch opens the pause menu,
+// the pause branch closes it — one shared held-state so the opening press
+// doesn't immediately re-edge in the other branch and close the menu.
+bool s_escKeyHeld = false;
+
+// ImGui/debug-system init happens once per process (not per session of the
+// outer title↔world loop) and must be visible to both the session init and
+// the title-screen quit path so shutdown only runs when init actually did.
+static bool s_debugSystemInitialized = false;
+
+// Router port mapping for hosted worlds (UPnP). Created on the first hosted
+// session and kept for the process: the mapping is the same port every time,
+// so re-mapping per session would be pointless churn. Removed once at exit.
+static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
 
     std::string GetAssetPath(const std::string& relativePath) {
@@ -197,6 +223,29 @@ bool s_eKeyHeld = false;
         Render::g_crosshair.Render(windowWidth, windowHeight, framebufferWidth, framebufferHeight);
     }
 
+    // GUI scale in FRAMEBUFFER pixels per GUI pixel, honoring the "GUI Scale"
+    // option (0 = Auto). Byte-for-byte MC Window.calculateScale() semantics:
+    // everything counts in raw FRAMEBUFFER pixels (so on a retina display
+    // "4" means 4 device px per GUI px, exactly like MC's 4). The scale
+    // grows to the largest value that still leaves at least a 320×240 GUI
+    // space; an explicit setting caps that growth and still steps down
+    // automatically when the window is too small for it. This is what makes
+    // the UI hold a constant on-screen size as the window shrinks (taking up
+    // a growing fraction of it) instead of shrinking with the window.
+    float ComputeGuiScale(int framebufferWidth, int framebufferHeight, int /*windowWidth*/) {
+        const int setting = Platform::g_gameSettings.GetGuiScale();
+        const int cap = setting >= 1 ? setting : 0x7FFFFFFF; // 0 → Auto (uncapped)
+
+        int scale = 1;
+        while (scale != cap &&
+               scale < framebufferWidth && scale < framebufferHeight &&
+               framebufferWidth / (scale + 1) >= 320 &&
+               framebufferHeight / (scale + 1) >= 240) {
+            ++scale;
+        }
+        return static_cast<float>(scale);
+    }
+
     void RenderHUD(GLFWwindow* window, const Game::Inventory& inventory, float deltaTime,
                    const glm::mat4& proj = glm::mat4(1.0f), const glm::mat4& view = glm::mat4(1.0f)) {
         int windowWidth, windowHeight, framebufferWidth, framebufferHeight;
@@ -205,10 +254,7 @@ bool s_eKeyHeld = false;
 
         if (framebufferWidth <= 0 || framebufferHeight <= 0) return;
 
-        // Calculate GUI scale (MC: auto scale based on window size)
-        float scaleX = static_cast<float>(framebufferWidth) / static_cast<float>(windowWidth);
-        float guiScale = std::max(1.0f, std::floor(scaleX * 2.0f)); // 2x default, higher on Retina
-
+        float guiScale = ComputeGuiScale(framebufferWidth, framebufferHeight, windowWidth);
         int guiWidth = static_cast<int>(static_cast<float>(framebufferWidth) / guiScale);
         int guiHeight = static_cast<int>(static_cast<float>(framebufferHeight) / guiScale);
 
@@ -221,6 +267,21 @@ bool s_eKeyHeld = false;
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
         Render::GetInventoryScreen().Render(graphics);
+
+        // ── Pause menu / options overlay (ESC) — drawn above everything ────
+        {
+            auto& screens = Render::GetScreenManager();
+            if (!screens.Empty()) {
+                screens.Update(guiWidth, guiHeight);
+                auto [smx, smy] = Input::GetMousePosition();
+                const int sgx = static_cast<int>(
+                    smx * (static_cast<double>(framebufferWidth) / windowWidth) / guiScale);
+                const int sgy = static_cast<int>(
+                    smy * (static_cast<double>(framebufferHeight) / windowHeight) / guiScale);
+                graphics.NextStratum();
+                screens.Render(graphics, sgx, sgy, 0.0f);
+            }
+        }
 
         // ── Nametags above remote players ─────────────────────────────────────
         // Matches MC's NameTagFeatureRenderer (line 45): poseStack.scale(0.025F, -0.025F, 0.025F)
@@ -533,6 +594,167 @@ bool s_eKeyHeld = false;
         Platform::g_gameSettings.Save();
     }
 
+    // ════════════════════════════════════════════════════════════════════════
+    // TITLE SCREEN PHASE
+    // ════════════════════════════════════════════════════════════════════════
+    // Self-contained menu loop that runs after the render/GUI systems are up
+    // but BEFORE any server/world/network initialization — mirroring how MC
+    // sits on TitleScreen until the player commits to a world. Returns the
+    // player's choice; Run() then continues into the normal boot path
+    // (integrated server for Singleplayer, remote connect for Multiplayer)
+    // or shuts down for Quit.
+    Render::TitleAction RunTitleScreenPhase(GLFWwindow* window) {
+        using Render::TitleAction;
+
+        if (!Render::g_panoramaRenderer.Initialize()) {
+            Log::Warning("Panorama init failed — title background will be a gradient");
+        }
+
+        auto& screens = Render::GetScreenManager();
+        screens.SetVersionString(std::string("MyVoxelGame ") + GAME_VERSION);
+        // Back in menu-land: opaque menu backgrounds again (a quit-to-title
+        // session left this set to the in-world transparent mode).
+        screens.SetInWorld(false);
+        screens.Set(std::make_unique<Render::TitleScreen>(/*fadeIn=*/true));
+
+        // Presence: browsing menus.
+        if (Client::g_friendsClient) {
+            Client::g_friendsClient->SetPresence(
+                Client::FriendPresence::State::Menu, "", 0);
+        }
+
+        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+
+        // Edge-detection state (same polled-GLFW pattern as the inventory
+        // overlay branch — Input.cpp registers no key/button callbacks).
+        static constexpr int kMenuKeys[] = {
+            GLFW_KEY_ESCAPE, GLFW_KEY_ENTER, GLFW_KEY_KP_ENTER, GLFW_KEY_TAB,
+            GLFW_KEY_SPACE, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP,
+            GLFW_KEY_DOWN, GLFW_KEY_BACKSPACE, GLFW_KEY_DELETE, GLFW_KEY_HOME,
+            GLFW_KEY_END,
+        };
+        bool keyHeld[std::size(kMenuKeys)] = {};
+        bool lmbHeld = false;
+
+        double lastTime  = glfwGetTime();
+        double tickAccum = 0.0;
+
+        while (!glfwWindowShouldClose(window)) {
+            glfwPollEvents();
+            Input::UpdateKeyStates();
+
+            const double now = glfwGetTime();
+            const float  dt  = static_cast<float>(now - lastTime);
+            lastTime = now;
+
+            int winW = 0, winH = 0, fbW = 0, fbH = 0;
+            glfwGetWindowSize(window, &winW, &winH);
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            if (fbW <= 0 || fbH <= 0 || winW <= 0 || winH <= 0) continue; // minimized
+
+            const float guiScale = ComputeGuiScale(fbW, fbH, winW);
+            const int guiW = static_cast<int>(static_cast<float>(fbW) / guiScale);
+            const int guiH = static_cast<int>(static_cast<float>(fbH) / guiScale);
+
+            screens.Update(guiW, guiH);
+
+            // ── Input (window coords → GUI coords) ─────────────────────────
+            auto [mx, my] = Input::GetMousePosition();
+            const double gx = mx * (static_cast<double>(fbW) / winW) / guiScale;
+            const double gy = my * (static_cast<double>(fbH) / winH) / guiScale;
+
+            const bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+            if (lmb && !lmbHeld)      screens.MouseClicked(gx, gy, GLFW_MOUSE_BUTTON_LEFT);
+            else if (!lmb && lmbHeld) screens.MouseReleased(gx, gy, GLFW_MOUSE_BUTTON_LEFT);
+            else if (lmb)             screens.MouseDragged(gx, gy);
+            lmbHeld = lmb;
+
+            auto [scrollX, scrollY] = Input::GetScrollOffset();
+            if (scrollY != 0.0) screens.MouseScrolled(gx, gy, scrollY);
+            Input::ResetScrollOffset();
+
+            while (Input::HasCharInput()) screens.CharTyped(Input::PopCharInput());
+
+            int mods = 0;
+            if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) mods |= GLFW_MOD_SHIFT;
+            if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) mods |= GLFW_MOD_CONTROL;
+            for (size_t i = 0; i < std::size(kMenuKeys); ++i) {
+                const bool down = glfwGetKey(window, kMenuKeys[i]) == GLFW_PRESS;
+                if (down && !keyHeld[i]) screens.KeyPressed(kMenuKeys[i], mods);
+                keyHeld[i] = down;
+            }
+
+            if (Input::IsKeyPressed(Input::Key::F11)) ToggleFullscreen(window);
+
+            // ── One-shot option applications from the options screens ──────
+            const uint32_t applied = screens.ConsumeAppliedSettings();
+            if (applied & Render::ScreenManager::APPLY_VSYNC) {
+                if (Render::g_renderBackend)
+                    Render::g_renderBackend->SetVSync(Platform::g_gameSettings.GetVSync());
+            }
+            if (applied & Render::ScreenManager::APPLY_FULLSCREEN) {
+                if (Platform::g_gameSettings.GetFullscreen() != s_isFullscreen)
+                    ToggleFullscreen(window);
+            }
+            if (applied & Render::ScreenManager::APPLY_RAW_MOUSE) {
+                if (glfwRawMouseMotionSupported()) {
+                    glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION,
+                        Platform::g_gameSettings.GetBool("rawMouseInput", false)
+                            ? GLFW_TRUE : GLFW_FALSE);
+                }
+            }
+            // APPLY_RENDER_DISTANCE / APPLY_MAX_FPS need no immediate action
+            // here — the game loop reads both settings when it starts.
+
+            // ── 20Hz screen ticks (caret blink etc.) ───────────────────────
+            tickAccum += dt;
+            while (tickAccum >= 0.05) { screens.Tick(); tickAccum -= 0.05; }
+
+            // ── Render: skybox pass, then GUI pass ─────────────────────────
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->BeginFrame();
+                Render::g_renderBackend->SetClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                Render::g_renderBackend->Clear(true, true, true);
+                Render::g_renderBackend->SetViewport(0, 0, fbW, fbH);
+            }
+
+            const float panoramaSpeed =
+                Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f);
+            Render::g_panoramaRenderer.Render(fbW, fbH, dt, panoramaSpeed);
+
+            {
+                Render::GuiRenderState renderState;
+                Render::GuiGraphics graphics(guiW, guiH, &g_guiAtlas, &renderState,
+                                             &g_fontRenderer);
+                screens.Render(graphics, static_cast<int>(gx), static_cast<int>(gy), 0.0f);
+                g_guiRenderer.Render(renderState, winW, winH, fbW, fbH, guiScale,
+                                     &g_fontRenderer);
+            }
+
+            if (Render::g_renderBackend) {
+                Render::g_renderBackend->EndFrame(window);
+            } else {
+                glfwSwapBuffers(window);
+            }
+            Input::ResetMouseDelta();
+
+            // ── Did a button commit to something? ──────────────────────────
+            TitleAction action = Render::ConsumeTitleAction();
+            if (action.kind != TitleAction::Kind::None) {
+                screens.Clear();
+                screens.Update(guiW, guiH);
+                return action;
+            }
+        }
+
+        // Window closed from the title screen → quit.
+        TitleAction quit;
+        quit.kind = TitleAction::Kind::Quit;
+        return quit;
+    }
+
     void APIENTRY glDebugOutput(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
                                 const GLchar* message, const void* userParam) {
         // Classify severity
@@ -709,6 +931,11 @@ bool s_eKeyHeld = false;
         uint16_t remoteServerPort = 25565;
         std::string playerName; // Empty → server auto-assigns "PlayerN" based on connection ID
         Game::PlayerColorId playerColor = Game::PlayerColorId::Default;
+        // Friends-service identity (from the launcher; empty token = guest).
+        std::string friendsSessionToken;
+        int64_t friendsAccountId = 0;
+        std::string friendsServiceHost = Friends::kDefaultServiceHost;
+        uint16_t friendsServicePort = Friends::kDefaultServicePort;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--vulkan") {
@@ -743,6 +970,30 @@ bool s_eKeyHeld = false;
                           Game::LookupPlayerColor(playerColor).name,
                           static_cast<unsigned>(playerColor));
             }
+            if (arg == "--session" && i + 1 < argc) {
+                friendsSessionToken = argv[++i];
+            }
+            if (arg == "--account-id" && i + 1 < argc) {
+                friendsAccountId = std::atoll(argv[++i]);
+            }
+            if (arg == "--friends-service" && i + 1 < argc) {
+                // "host" or "host:port" override of the shared defaults.
+                std::string hostPort = argv[++i];
+                auto colonPos = hostPort.rfind(':');
+                if (colonPos != std::string::npos && colonPos + 1 < hostPort.size()) {
+                    friendsServiceHost = hostPort.substr(0, colonPos);
+                    int p = std::atoi(hostPort.c_str() + colonPos + 1);
+                    if (p > 0 && p <= 65535) friendsServicePort = static_cast<uint16_t>(p);
+                } else {
+                    friendsServiceHost = hostPort;
+                }
+            }
+        }
+        if (!friendsSessionToken.empty()) {
+            Log::Info("Friends session provided (account %lld, service %s:%u)",
+                      static_cast<long long>(friendsAccountId),
+                      friendsServiceHost.c_str(),
+                      static_cast<unsigned>(friendsServicePort));
         }
 
         // Initialize crash reporting (must be first — catches crashes during all other init)
@@ -941,6 +1192,108 @@ bool s_eKeyHeld = false;
             return 1;
         }
 
+        // === TITLE SCREEN PHASE ===
+        // Runs before any server/world/network init — the player chooses
+        // Singleplayer / Multiplayer / Quit. The CLI --server flag skips the
+        // menu so the launcher's "Join Server" flow still connects directly.
+        // ── Friends service connection (app lifetime, spans all sessions) ──
+        // Guests (no --session) get no client; every friends feature checks
+        // for null and disables itself.
+        if (!friendsSessionToken.empty()) {
+            Client::g_friendsClient = std::make_unique<Client::FriendsClient>();
+            Client::g_friendsClient->Start(friendsServiceHost, friendsServicePort,
+                                           friendsSessionToken, friendsAccountId);
+        }
+
+        // ═══════════════ OUTER SESSION LOOP ═══════════════
+        // Each iteration is: title screen → one world/server session →
+        // session teardown. "Save and Quit to Title" loops back here;
+        // closing the window or "Quit Game" breaks out to the process-level
+        // cleanup after the loop. The loop body keeps its original
+        // indentation — it is the whole remainder of Run() minus the final
+        // process cleanup.
+        const bool cliRemoteClient = isRemoteClient;
+        bool firstSession = true;
+        // Set when an in-game "Join friend" tears down the current session:
+        // the next outer-loop iteration consumes it directly instead of
+        // showing the title screen.
+        std::optional<Render::TitleAction> pendingSessionAction;
+        for (;;) {
+        // CLI --server bypasses the title screen for the FIRST session only;
+        // after a quit-to-title the menu shows normally.
+        isRemoteClient = cliRemoteClient && firstSession;
+        firstSession = false;
+
+        Render::TitleAction titleAction;   // world choice consumed by server init below
+        if (pendingSessionAction) {
+            // In-game friend join: skip the title phase, go straight into
+            // the new session with the stashed action.
+            titleAction = *pendingSessionAction;
+            pendingSessionAction.reset();
+            if (titleAction.kind == Render::TitleAction::Kind::Multiplayer) {
+                isRemoteClient = true;
+                remoteServerAddress = titleAction.host;
+                remoteServerPort = titleAction.port;
+                Log::Info("Auto-joining %s:%u (friend join)",
+                          remoteServerAddress.c_str(),
+                          static_cast<unsigned>(remoteServerPort));
+            }
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        } else if (!isRemoteClient) {
+            titleAction = RunTitleScreenPhase(window);
+            if (titleAction.kind == Render::TitleAction::Kind::Quit) {
+                Log::Info("Quit from title screen — shutting down");
+                // Only render/GUI systems exist at this point; release them in
+                // the same order as the main shutdown sequence (dependents
+                // before the backend).
+                Render::g_panoramaRenderer.Shutdown();
+                g_hudRenderer = Render::HudRenderer();
+                g_guiRenderer.Shutdown();
+                g_fontRenderer.Shutdown();
+                g_guiAtlas.Shutdown();
+                Render::g_crosshair.Shutdown();
+                Render::g_blockHighlight.Shutdown();
+                Render::g_blockBreakOverlay.Shutdown();
+                if (Render::g_atlasBuilder)    Render::g_atlasBuilder.reset();
+                if (Render::g_textureAnimator) Render::g_textureAnimator.reset();
+                if (Client::g_friendsClient) {
+                    Client::g_friendsClient->Stop();
+                    Client::g_friendsClient.reset();
+                }
+                // A prior session (quit-to-title) may have initialized the
+                // debug system; ImGui must go down before the backend.
+                if (s_debugSystemInitialized) {
+                    Debug::DebugSystem::Shutdown();
+                    s_debugSystemInitialized = false;
+                }
+                if (Render::g_renderBackend) {
+                    Render::g_renderBackend->Shutdown();
+                    Render::g_renderBackend.reset();
+                }
+                glfwDestroyWindow(window);
+                glfwTerminate();
+                return 0;
+            }
+            if (titleAction.kind == Render::TitleAction::Kind::Multiplayer) {
+                isRemoteClient = true;
+                remoteServerAddress = titleAction.host;
+                remoteServerPort = titleAction.port;
+                Log::Info("Title screen: joining server %s:%u",
+                          remoteServerAddress.c_str(),
+                          static_cast<unsigned>(remoteServerPort));
+            }
+            // Singleplayer (or Multiplayer) — panorama is done, gameplay owns
+            // the cursor again.
+            Render::g_panoramaRenderer.Shutdown();
+            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        }
+
+        // Raw-input preference for gameplay mouse-look (Mouse Settings).
+        if (glfwRawMouseMotionSupported() &&
+            Platform::g_gameSettings.GetBool("rawMouseInput", false)) {
+            glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+        }
+
         // Register custom item renderers (MC's BlockEntityWithoutLevelRenderer equivalent).
         // These render block entities via 3D entity-texture models, not the standard
         // block-model JSON system. Add more entries here for sign, banner, head, etc.
@@ -973,6 +1326,13 @@ bool s_eKeyHeld = false;
             serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
             serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
 
+            // World chosen on the Select World screen: created worlds are
+            // procedural-from-seed (metadata only, no save path yet), while
+            // the "world" list entry keeps the auto-detected Anvil save.
+            if (!titleAction.useMinecraftSave) {
+                serverConfig.useLocalSaveDirectory = false;
+            }
+
             // Automatically use local save directory if available (temporary feature)
             if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
                 // Point to the saves/world folder (not /region, as MinecraftChunkLoader adds that)
@@ -988,6 +1348,15 @@ bool s_eKeyHeld = false;
             // Get world reference for legacy systems (temporary)
             world = Server::g_integratedServer->GetWorld();
             Game::g_world = world;
+
+            // Seed the generator for created worlds BEFORE any chunk
+            // generation kicks off (server thread starts further down).
+            if (!titleAction.useMinecraftSave) {
+                world->SetGenerationSeed(titleAction.seed);
+                Log::Info("World '%s': procedural generation from seed %d (%s)",
+                          titleAction.worldName.c_str(), titleAction.seed,
+                          titleAction.gameMode == 0 ? "Survival" : "Creative");
+            }
 
             // 3. Initialize worker pools with dynamic thread allocation
             Core::ThreadAllocation threadAlloc = Core::ThreadAllocator::GetOptimalAllocation();
@@ -1041,8 +1410,12 @@ bool s_eKeyHeld = false;
             return -7;
         }
 
-        // 8. Initialize debug system
-        Debug::DebugSystem::Initialize(window);
+        // 8. Initialize debug system — ONCE per process (ImGui backend init
+        // is not re-entrant); later sessions in the outer loop reuse it.
+        if (!s_debugSystemInitialized) {
+            Debug::DebugSystem::Initialize(window);
+            s_debugSystemInitialized = true;
+        }
 
         // 9. Start the IntegratedServer thread (host only)
         if (!isRemoteClient) {
@@ -1110,6 +1483,18 @@ bool s_eKeyHeld = false;
             serverPort = Server::g_integratedServer->GetNetworkServer()->GetPort();
         }
 
+        // Relayed friend join: connectHost/serverPort point at the friends
+        // service, not the host's machine. Present the ticket first so the
+        // relay can splice us to the host's outbound tunnel; the game
+        // protocol then proceeds untouched. The ticket is service-generated
+        // hex, so it needs no escaping here.
+        if (!titleAction.relayTicket.empty()) {
+            networkClient->SetConnectPreamble(
+                std::string("{\"op\":\"relay_attach\",\"role\":\"joiner\",\"ticket\":\"")
+                + titleAction.relayTicket + "\"}\n");
+            Log::Info("Joining through the friends relay");
+        }
+
         // Start async connection (all socket ops on I/O thread)
         Log::Info("Connecting to %s:%d...", connectHost.c_str(), serverPort);
         networkClient->ConnectAsync(connectHost, serverPort);
@@ -1145,6 +1530,62 @@ bool s_eKeyHeld = false;
             Log::Info("   Client connected via TCP to localhost:%d", serverPort);
         }
         Log::Info("=== ENTERING CLIENT RENDER LOOP (UNLOCKED FPS) ===");
+
+        // Menus opened from here on (ESC pause menu) render over the live
+        // world — switch the screen stack to the transparent background mode.
+        Render::GetScreenManager().SetInWorld(true);
+
+        // Presence: in a world. Hosting = integrated server (friends can
+        // join via join_info); Playing = we're a client on someone's server.
+        if (Client::g_friendsClient) {
+            if (!isRemoteClient) {
+                const std::string worldName = titleAction.worldName.empty()
+                    ? std::string("world") : titleAction.worldName;
+                const uint16_t hostPort =
+                    Server::g_integratedServer && Server::g_integratedServer->GetNetworkServer()
+                        ? Server::g_integratedServer->GetNetworkServer()->GetPort()
+                        : uint16_t(25565);
+
+                // Announce immediately so friends see the world right away;
+                // the UPnP attempt below refines this with the WAN address.
+                Client::g_friendsClient->SetPresence(
+                    Client::FriendPresence::State::Hosting, worldName, hostPort);
+
+                // Friends who can't reach us directly are relayed: the
+                // service pushes relay_open, our friends client dials out,
+                // and the resulting socket is adopted here as a normal
+                // player connection. Looked up per-call so a torn-down
+                // session can't leave a dangling server pointer.
+                Client::g_friendsClient->SetRelaySocketHandler([](auto handle) {
+                    if (Server::g_integratedServer) {
+                        if (auto* netServer = Server::g_integratedServer->GetNetworkServer()) {
+                            netServer->AdoptConnection(handle);
+                            return;
+                        }
+                    }
+                    Log::Warning("Relay tunnel arrived with no server to adopt it");
+                });
+
+                // Try to open the router port so friends connect DIRECTLY
+                // (no relay hop). Blocking + slow, so it runs on a worker;
+                // failure is fine — the service verifies reachability and
+                // falls back to relaying either way.
+                if (!g_portMapper) {
+                    g_portMapper = std::make_unique<Client::UPnPPortMapper>();
+                }
+                std::thread([worldName, hostPort]() {
+                    const auto mapping = g_portMapper->Map(hostPort);
+                    if (Client::g_friendsClient) {
+                        Client::g_friendsClient->SetPresence(
+                            Client::FriendPresence::State::Hosting,
+                            worldName, hostPort, mapping.externalIp);
+                    }
+                }).detach();
+            } else {
+                Client::g_friendsClient->SetPresence(
+                    Client::FriendPresence::State::Playing, connectHost, 0);
+            }
+        }
 
         // === MINECRAFT-STYLE MAIN LOOP ===
         // Matches Minecraft.java: processQueuedPackets() → tick() (20 TPS) → render() (uncapped)
@@ -1197,7 +1638,12 @@ bool s_eKeyHeld = false;
         static constexpr int MAX_TICKS_PER_FRAME = 10;
         auto nextClientTick = std::chrono::steady_clock::now();
 
-        while (!glfwWindowShouldClose(window)) {
+        // Set by the pause menu's "Save and Quit to Title": breaks the main
+        // loop, the session teardown below runs, and the outer session loop
+        // returns to the title screen.
+        bool returnToTitle = false;
+
+        while (!glfwWindowShouldClose(window) && !returnToTitle) {
             frameStartTime = std::chrono::high_resolution_clock::now();
 
             // === PER-FRAME: Poll events and handle input (must be every frame for responsiveness) ===
@@ -1207,14 +1653,141 @@ bool s_eKeyHeld = false;
             glfwPollEvents();
             Input::UpdateKeyStates();
 
+            // Apply menu-editable options every frame (cheap settings-map
+            // lookups). FOV feeds the projection below; sensitivity/invert
+            // feed Camera::Update's mouse-look. Sensitivity 1.0 (= 100% on
+            // the slider, the default) maps to the engine's historical
+            // 0.1°/px feel; the slider scales linearly around that.
+            camera.fov              = Platform::g_gameSettings.GetFOV();
+            camera.mouseSensitivity = Platform::g_gameSettings.GetMouseSensitivity() * 0.1f;
+            camera.invertY          = Platform::g_gameSettings.GetInvertYMouse();
+
             // Escape no longer closes the game — use the window close button instead
 
             if (Input::IsKeyPressed(Input::Key::F11)) {
                 ToggleFullscreen(window);
             }
 
+            // ESC edge-detection is SHARED across every branch below. The
+            // chat and inventory branches consume ESC to close themselves via
+            // their own trackers; updating the shared held-state up here
+            // guarantees that same physical press can't re-edge in the game
+            // branch one frame later and pop the pause menu open.
+            extern bool s_escKeyHeld;
+            const bool escIsDown = glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS;
+            const bool escPressedThisFrame = escIsDown && !s_escKeyHeld;
+            s_escKeyHeld = escIsDown;
+
+            // ── Pause-menu / options overlay (ESC — MC Game Menu) ──────────
+            // Takes priority over chat/inventory (those close before the
+            // pause menu can open, so they're never open simultaneously).
+            if (!Render::GetScreenManager().Empty()) {
+                auto& screens = Render::GetScreenManager();
+
+                // Mouse position in GUI coords (same mapping as the render
+                // pass in RenderHUD).
+                auto [pmx, pmy] = Input::GetMousePosition();
+                double pgx = 0.0, pgy = 0.0;
+                {
+                    int winW = 0, winH = 0, fbW = 0, fbH = 0;
+                    glfwGetWindowSize(window, &winW, &winH);
+                    glfwGetFramebufferSize(window, &fbW, &fbH);
+                    if (winW > 0 && winH > 0 && fbW > 0 && fbH > 0) {
+                        const float pScale = ComputeGuiScale(fbW, fbH, winW);
+                        pgx = pmx * (static_cast<double>(fbW) / winW) / pScale;
+                        pgy = pmy * (static_cast<double>(fbH) / winH) / pScale;
+                    }
+                }
+
+                // LMB edge → click/drag/release.
+                static bool pauseLmbHeld = false;
+                const bool pLmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                if (pLmb && !pauseLmbHeld)      screens.MouseClicked(pgx, pgy, GLFW_MOUSE_BUTTON_LEFT);
+                else if (!pLmb && pauseLmbHeld) screens.MouseReleased(pgx, pgy, GLFW_MOUSE_BUTTON_LEFT);
+                else if (pLmb)                  screens.MouseDragged(pgx, pgy);
+                pauseLmbHeld = pLmb;
+
+                // Scroll → options lists; consume so the hotbar doesn't move.
+                auto [pScrollX, pScrollY] = Input::GetScrollOffset();
+                if (pScrollY != 0.0) screens.MouseScrolled(pgx, pgy, pScrollY);
+                Input::ResetScrollOffset();
+
+                // Chars → screens (future edit boxes); drains the queue.
+                while (Input::HasCharInput()) screens.CharTyped(Input::PopCharInput());
+
+                // ESC closes the top screen (shared edge state — see above).
+                if (escPressedThisFrame) screens.KeyPressed(GLFW_KEY_ESCAPE, 0);
+
+                int pMods = 0;
+                if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                    glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) pMods |= GLFW_MOD_SHIFT;
+                static constexpr int kPauseKeys[] = {
+                    GLFW_KEY_ENTER, GLFW_KEY_KP_ENTER, GLFW_KEY_TAB, GLFW_KEY_SPACE,
+                    GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP, GLFW_KEY_DOWN,
+                    GLFW_KEY_BACKSPACE, GLFW_KEY_DELETE, GLFW_KEY_HOME, GLFW_KEY_END,
+                };
+                static bool pauseKeyHeld[std::size(kPauseKeys)] = {};
+                for (size_t i = 0; i < std::size(kPauseKeys); ++i) {
+                    const bool down = glfwGetKey(window, kPauseKeys[i]) == GLFW_PRESS;
+                    if (down && !pauseKeyHeld[i]) screens.KeyPressed(kPauseKeys[i], pMods);
+                    pauseKeyHeld[i] = down;
+                }
+
+                // One-shot option applications (same set as the title phase,
+                // plus render distance which needs the live connection).
+                const uint32_t applied = screens.ConsumeAppliedSettings();
+                if (applied & Render::ScreenManager::APPLY_VSYNC) {
+                    if (Render::g_renderBackend)
+                        Render::g_renderBackend->SetVSync(Platform::g_gameSettings.GetVSync());
+                }
+                if (applied & Render::ScreenManager::APPLY_FULLSCREEN) {
+                    if (Platform::g_gameSettings.GetFullscreen() != s_isFullscreen)
+                        ToggleFullscreen(window);
+                }
+                if (applied & Render::ScreenManager::APPLY_RAW_MOUSE) {
+                    if (glfwRawMouseMotionSupported()) {
+                        glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION,
+                            Platform::g_gameSettings.GetBool("rawMouseInput", false)
+                                ? GLFW_TRUE : GLFW_FALSE);
+                    }
+                }
+                if (applied & Render::ScreenManager::APPLY_RENDER_DISTANCE) {
+                    // Same path as the debug-UI slider: re-send client
+                    // settings so the server retunes the watch set.
+                    const int newDist = Platform::g_gameSettings.GetRenderDistance();
+                    Log::Info("Render distance changed to %d (options)", newDist);
+                    if (networkClient) {
+                        if (auto conn = networkClient->GetConnection()) {
+                            conn->SendClientSettings(
+                                newDist,
+                                Platform::g_gameSettings.GetVSync(),
+                                Platform::g_gameSettings.GetMouseSensitivity());
+                        }
+                    }
+                }
+
+                // "Save and Quit to Title" ends the session: the main loop
+                // breaks, the session teardown saves + stops everything, and
+                // the outer loop shows the title screen again. A Multiplayer
+                // action (Friends → Join while in-game) rides the same
+                // teardown, then the outer loop consumes it as a pending
+                // auto-join instead of showing the title.
+                Render::TitleAction pauseAction = Render::ConsumeTitleAction();
+                if (pauseAction.kind == Render::TitleAction::Kind::QuitToTitle) {
+                    Log::Info("Save and Quit to Title from pause menu");
+                    returnToTitle = true;
+                } else if (pauseAction.kind == Render::TitleAction::Kind::Multiplayer) {
+                    Log::Info("Joining %s:%u from in-game (session handover)",
+                              pauseAction.host.c_str(),
+                              static_cast<unsigned>(pauseAction.port));
+                    pendingSessionAction = pauseAction;
+                    returnToTitle = true;
+                } else if (pauseAction.kind == Render::TitleAction::Kind::Quit) {
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                }
+            }
             // Chat system: open on T or /, route input when open
-            if (g_chatScreen.IsOpen()) {
+            else if (g_chatScreen.IsOpen()) {
                 // Route character input to chat
                 while (Input::HasCharInput()) {
                     g_chatScreen.OnCharInput(Input::PopCharInput());
@@ -1326,8 +1899,7 @@ bool s_eKeyHeld = false;
                 glfwGetWindowSize(window, &winW, &winH);
                 glfwGetFramebufferSize(window, &fbW, &fbH);
                 if (fbW > 0 && fbH > 0 && winW > 0) {
-                    float invScaleX = static_cast<float>(fbW) / static_cast<float>(winW);
-                    float invGuiScale = std::max(1.0f, std::floor(invScaleX * 2.0f));
+                    float invGuiScale = ComputeGuiScale(fbW, fbH, winW);
                     int   guiWp = static_cast<int>(static_cast<float>(fbW) / invGuiScale);
                     int   guiHp = static_cast<int>(static_cast<float>(fbH) / invGuiScale);
                     // mx/my are in WINDOW (logical) pixels — convert via window→GUI scale.
@@ -1387,24 +1959,43 @@ bool s_eKeyHeld = false;
                 if (eDown && !s_eKeyHeld) Render::GetInventoryScreen().Open();
                 s_eKeyHeld = eDown;
 
+                // ESC opens the pause menu (MC Game Menu). Uses the shared
+                // edge computed above so an ESC that just closed chat or the
+                // inventory can't also open the pause menu.
+                if (escPressedThisFrame) {
+                    Render::GetScreenManager().Push(std::make_unique<Render::PauseScreen>());
+                }
+
                 // Cursor-visible covers BOTH the Tab manual toggle and
                 // any overlay opened this frame (chat via T/Slash,
-                // inventory via E). GLFW reflects the manual toggle's
-                // last-frame state; we OR in the just-opened overlays
-                // so the very frame they pop, WASD input is dropped.
+                // inventory via E, pause via ESC). GLFW reflects the manual
+                // toggle's last-frame state; we OR in the just-opened
+                // overlays so the very frame they pop, WASD input is dropped.
                 const bool overlayJustOpened = g_chatScreen.IsOpen() ||
-                                               Render::GetInventoryScreen().IsOpen();
+                                               Render::GetInventoryScreen().IsOpen() ||
+                                               !Render::GetScreenManager().Empty();
                 const bool cursorVisible = overlayJustOpened ||
                     (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
                 HandlePlayerInput(player, playerController, camera, cursorVisible);
             }
 
-            // Resolve cursor state AFTER chat/inventory handling so opening/closing this
-            // frame takes effect immediately.
+            // Resolve cursor state AFTER chat/inventory/pause handling so
+            // opening/closing this frame takes effect immediately.
             cursorEnabled = HandleCursorToggle(window, camera,
-                g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen());
+                g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen() ||
+                !Render::GetScreenManager().Empty());
 
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
+            }
+
+            // Friend invites → chat notification (the Friends screen also
+            // shows the latest invite as a joinable banner row).
+            if (Client::g_friendsClient) {
+                for (const auto& invite : Client::g_friendsClient->ConsumeInvites()) {
+                    g_chatComponent.AddMessage(
+                        invite.fromName + " invited you to '" + invite.world +
+                        "' - press Esc > Friends to join");
+                }
             }
 
             // Frame counter for debugging
@@ -2115,8 +2706,13 @@ bool s_eKeyHeld = false;
                 Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld, s_walkDist);
             }
             RenderHUD(window, player.inventory, dt, proj, view);
-            // Hide crosshair when inventory is open (MC: no crosshair while a Screen is shown).
-            if (!Render::GetInventoryScreen().IsOpen()) {
+            // Hide the crosshair while any Screen is shown (inventory, pause
+            // menu, options). In MC the crosshair sits on an early HUD stratum
+            // and screens draw over it; ours is a standalone pass drawn AFTER
+            // the GUI, so "behind the screen" has to mean "not drawn at all" —
+            // same visible result: no crosshair over the menu.
+            if (!Render::GetInventoryScreen().IsOpen() &&
+                Render::GetScreenManager().Empty()) {
                 RenderCrosshair(window);
 #if ENABLE_PORTAL_GUN
                 // Portal quickinfo brackets layer on top of the base
@@ -2336,7 +2932,25 @@ bool s_eKeyHeld = false;
             }
             PROFILE_TIMER_END(vsync, metrics.vsyncWaitTime);
             }
-            
+
+            // Max Framerate option (Video Settings). 260 = Unlimited. VSync
+            // already paces the loop when enabled, so the limiter only kicks
+            // in for uncapped-swap configurations. sleep_until keeps the cap
+            // steady without burning a core.
+            {
+                const int maxFps = Platform::g_gameSettings.GetMaxFPS();
+                if (maxFps > 0 && maxFps < 260 && !Platform::g_gameSettings.GetVSync()) {
+                    static auto s_nextFrameDeadline = std::chrono::steady_clock::now();
+                    const auto frameBudget = std::chrono::nanoseconds(1'000'000'000LL / maxFps);
+                    const auto nowClock = std::chrono::steady_clock::now();
+                    if (s_nextFrameDeadline < nowClock - frameBudget) {
+                        s_nextFrameDeadline = nowClock; // fell behind — resync
+                    }
+                    s_nextFrameDeadline += frameBudget;
+                    std::this_thread::sleep_until(s_nextFrameDeadline);
+                }
+            }
+
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
@@ -2398,8 +3012,19 @@ bool s_eKeyHeld = false;
             PROFILE_FRAME_MARK;
         }
 
-        // === MINECRAFT-STYLE SHUTDOWN SEQUENCE ===
-        Log::Info("Shutting down...");
+        // === SESSION SHUTDOWN SEQUENCE (Minecraft-style) ===
+        Log::Info("Shutting down session...");
+
+        // Neutralize the disconnect callback FIRST: this is an intentional
+        // teardown, and the socket closing must not flag the window to close
+        // — that would turn "Save and Quit to Title" into an app exit.
+        networkClient->SetOnDisconnected([](const std::string&) {});
+
+        // Stop accepting relay tunnels: the server they'd be adopted into is
+        // about to go away.
+        if (Client::g_friendsClient) {
+            Client::g_friendsClient->SetRelaySocketHandler(nullptr);
+        }
 
         // Clear global block access for raycast if remote client
         if (isRemoteClient) {
@@ -2410,6 +3035,7 @@ bool s_eKeyHeld = false;
         Log::Info("Disconnecting NetworkClient...");
         networkClient->Disconnect();
         networkClient.reset();
+        Client::g_networkClient = nullptr;   // global mirror of the session-scoped client
         Log::Info("✓ NetworkClient disconnected");
 
         // 2. Stop Network I/O Service (dedicated I/O thread)
@@ -2453,9 +3079,37 @@ bool s_eKeyHeld = false;
         // 8. Shutdown rendering systems
         Render::ShutdownChunkRenderer();
 
-        // 8a. Destroy resources that depend on the render backend BEFORE destroying it
+        // 8a. Session-scoped render resources
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
+
+        // 9. Clear world reference (world was shut down by IntegratedServer)
+        Game::g_world = nullptr;
+
+        // ── End of session ──────────────────────────────────────────────
+        // Quit-to-title: everything session-scoped is down; loop back to the
+        // title screen. Window close / Quit falls through to process cleanup.
+        if (returnToTitle && !glfwWindowShouldClose(window)) {
+            Log::Info("World closed — returning to title screen");
+            continue;
+        }
+        break;
+        } // for(;;) — outer session loop
+
+        // === PROCESS-LEVEL CLEANUP (runs once, after the last session) ===
+        // Friends connection first — its io thread is independent of the
+        // renderer, and stopping it flips this player offline for friends.
+        if (Client::g_friendsClient) {
+            Client::g_friendsClient->Stop();
+            Client::g_friendsClient.reset();
+        }
+        // Hand the router port back (best-effort; routers also expire it).
+        if (g_portMapper) {
+            g_portMapper->Unmap();
+            g_portMapper.reset();
+        }
+
+        // Destroy resources that depend on the render backend BEFORE destroying it
         g_hudRenderer = Render::HudRenderer();
         g_guiRenderer.Shutdown();
         g_fontRenderer.Shutdown();
@@ -2480,9 +3134,6 @@ bool s_eKeyHeld = false;
             Log::Info("Render backend shutdown");
         }
 
-        // 9. Clear world reference (world is shutdown by IntegratedServer)
-        Game::g_world = nullptr;  // Clear global reference
-        
         // 11. Stop legacy job system
         Log::Info("Stopping legacy job system...");
         try {

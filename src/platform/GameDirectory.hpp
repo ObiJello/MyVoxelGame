@@ -95,7 +95,8 @@ namespace Platform {
         int GetGraphicsMode() const { return GetInt("graphicsMode", 1); }
         void SetGraphicsMode(int mode) { SetInt("graphicsMode", mode); }
 
-        int GetGuiScale() const { return GetInt("guiScale", 3); }
+        // 0 = Auto (MC behavior: largest scale that keeps a 320×240 GUI).
+        int GetGuiScale() const { return GetInt("guiScale", 0); }
         void SetGuiScale(int scale) { SetInt("guiScale", scale); }
 
         int GetMaxFPS() const { return GetInt("maxFps", 120); }
@@ -226,7 +227,8 @@ namespace Platform {
         bool GetHideSplashTexts() const { return GetBool("hideSplashTexts", false); }
         void SetHideSplashTexts(bool enabled) { SetBool("hideSplashTexts", enabled); }
 
-        float GetMouseSensitivity() const { return GetFloat("mouseSensitivity", 0.5f); }
+        // 1.0 = 100% on the options slider = the engine's baseline feel.
+        float GetMouseSensitivity() const { return GetFloat("mouseSensitivity", 1.0f); }
         void SetMouseSensitivity(float sensitivity) { SetFloat("mouseSensitivity", sensitivity); }
 
         float GetDamageTiltStrength() const { return GetFloat("damageTiltStrength", 1.0f); }

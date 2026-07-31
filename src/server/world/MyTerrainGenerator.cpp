@@ -9,6 +9,8 @@
 #include "levelgen/DensityFunctionRegistry.h"
 #include "levelgen/NoiseSettings.h"
 #include "levelgen/SurfaceRuleData.h"
+#include "levelgen/Heightmap.h"
+#include "world/biome/OverworldBiomeBuilder.h"
 
 using minecraft::world::level::block::Blocks;
 using minecraft::world::BlockRegistry;
@@ -77,11 +79,28 @@ namespace Game {
             auto* router = minecraft::levelgen::NoiseRouterData::overworld(false, false);
             auto noiseSettings = minecraft::levelgen::NoiseSettings::OVERWORLD_NOISE_SETTINGS;
 
+            // Spawn-target climate list (MC NoiseGeneratorSettings.overworld()
+            // passes OverworldBiomeBuilder.spawnTarget()). RandomState hands
+            // this to the Climate::Sampler, which is what makes
+            // Sampler::findSpawnPosition() work — with an empty list it just
+            // returns the origin. The settings API wants opaque
+            // ClimateParameterPoint*, so keep value storage here and pass
+            // pointers (same reinterpret pattern RandomState uses to read
+            // them back).
+            m_spawnTargetStorage =
+                minecraft::world::biome::OverworldBiomeBuilder().spawnTarget();
+            std::vector<minecraft::levelgen::ClimateParameterPoint*> spawnTargetPtrs;
+            spawnTargetPtrs.reserve(m_spawnTargetStorage.size());
+            for (auto& point : m_spawnTargetStorage) {
+                spawnTargetPtrs.push_back(
+                    reinterpret_cast<minecraft::levelgen::ClimateParameterPoint*>(&point));
+            }
+
             m_settings = new minecraft::levelgen::NoiseGeneratorSettings(
                 noiseSettings,
                 Blocks::STONE->defaultBlockState(),
                 Blocks::WATER->defaultBlockState(),
-                *router, nullptr, {}, 63, false, true, true, false
+                *router, nullptr, spawnTargetPtrs, 63, false, true, true, false
             );
 
             m_randomState = minecraft::levelgen::RandomState::create(m_settings, seed);
@@ -179,9 +198,78 @@ namespace Game {
         delete m_randomState;  m_randomState = nullptr;
         delete m_settings;     m_settings = nullptr;
         delete m_blockRegistry; m_blockRegistry = nullptr;
+        // After m_settings/m_randomState (they hold pointers into this).
+        m_spawnTargetStorage.clear();
 
         m_initialized = false;
         Log::Info("[MyTerrainGenerator] Shutdown complete");
+    }
+
+    glm::ivec3 MyTerrainGenerator::FindSpawnPosition() {
+        // Called once per world on the server thread; the generator may not
+        // have lazily initialized yet.
+        if (!m_initialized && !Initialize()) {
+            Log::Warning("[MyTerrainGenerator] FindSpawnPosition: init failed, using legacy spawn");
+            return glm::ivec3(0, 67, 0);
+        }
+
+        // ── Step 1: climate search (MC Climate.SpawnFinder) ────────────────
+        // Radial fitness search over the biome parameter space, biased toward
+        // the world origin. The library ports the whole algorithm; it needs
+        // the spawn-target list wired through NoiseGeneratorSettings (done in
+        // Initialize Step 4).
+        const auto climatePos = m_randomState->sampler()->findSpawnPosition();
+        const int spawnChunkX = climatePos.getX() >> 4;
+        const int spawnChunkZ = climatePos.getZ() >> 4;
+
+        const int32_t seaLevel = m_generator->getSeaLevel();
+        auto surfaceAt = [&](int blockX, int blockZ) {
+            return m_generator->getBaseHeight(blockX, blockZ,
+                minecraft::levelgen::Heightmap::Types::WORLD_SURFACE_WG,
+                m_randomState);
+        };
+
+        // ── Step 2: chunk spiral (MC setInitialSpawn) ──────────────────────
+        // MC walks an 11×11 chunk spiral around the climate chunk and takes
+        // the first chunk with a valid spawn block. Full block validation
+        // (PlayerSpawnFinder) needs generated chunk data, which doesn't exist
+        // yet at world init — the dry-land test (worldgen surface above sea
+        // level at the chunk centre) stands in for it, which is also what
+        // rules out ocean columns in practice.
+        const glm::ivec3 fallback(spawnChunkX * 16 + 8,
+                                  std::max(surfaceAt(spawnChunkX * 16 + 8, spawnChunkZ * 16 + 8),
+                                           seaLevel + 1),
+                                  spawnChunkZ * 16 + 8);
+
+        int xOff = 0, zOff = 0;
+        int dx = 0, dz = -1;
+        for (int i = 0; i < 11 * 11; ++i) {
+            if (xOff >= -5 && xOff <= 5 && zOff >= -5 && zOff <= 5) {
+                const int blockX = (spawnChunkX + xOff) * 16 + 8;
+                const int blockZ = (spawnChunkZ + zOff) * 16 + 8;
+                const int32_t surfaceY = surfaceAt(blockX, blockZ);
+                if (surfaceY > seaLevel) {
+                    Log::Info("[MyTerrainGenerator] Spawn selected at (%d, %d, %d) "
+                              "(climate pos %d,%d; %d chunk probes)",
+                              blockX, surfaceY, blockZ,
+                              climatePos.getX(), climatePos.getZ(), i + 1);
+                    return glm::ivec3(blockX, surfaceY, blockZ);
+                }
+            }
+            // Square-spiral turn rule (matches MC's iteration order).
+            if (xOff == zOff || (xOff < 0 && xOff == -zOff) ||
+                (xOff > 0 && xOff == 1 - zOff)) {
+                const int t = dx;
+                dx = -dz;
+                dz = t;
+            }
+            xOff += dx;
+            zOff += dz;
+        }
+
+        Log::Info("[MyTerrainGenerator] Spawn fallback at (%d, %d, %d) — no dry land "
+                  "within 5 chunks of climate pos", fallback.x, fallback.y, fallback.z);
+        return fallback;
     }
 
     ChunkGenerationResult MyTerrainGenerator::GenerateChunk(Math::ChunkPos position) {

@@ -412,6 +412,16 @@ if(APPLE)
             src/client/renderer/gui/ChatComponent.cpp
             src/client/renderer/gui/ChatScreen.cpp
             src/client/renderer/gui/InventoryScreen.cpp
+            src/client/renderer/gui/screens/Widgets.cpp
+            src/client/renderer/gui/screens/Screen.cpp
+            src/client/renderer/gui/screens/PanoramaRenderer.cpp
+            src/client/renderer/gui/screens/TitleScreen.cpp
+            src/client/renderer/gui/screens/OptionsScreens.cpp
+            src/client/renderer/gui/screens/PauseScreen.cpp
+            src/client/renderer/gui/screens/WorldSelectScreens.cpp
+            src/client/renderer/gui/screens/FriendsScreen.cpp
+            src/client/network/FriendsClient.cpp
+            src/client/network/UPnPPortMapper.cpp
             src/client/renderer/gui/items/ChestItemRenderer.cpp
             src/client/renderer/gui/items/BedItemRenderer.cpp
             src/client/renderer/gui/items/ShulkerBoxItemRenderer.cpp
@@ -605,6 +615,24 @@ else()
             src/client/renderer/gui/InventoryScreen.hpp
             src/client/renderer/gui/InventoryScreen.cpp
 
+            # Client rendering - Menu screens (title / options tree)
+            src/client/renderer/gui/screens/Widgets.hpp
+            src/client/renderer/gui/screens/Widgets.cpp
+            src/client/renderer/gui/screens/Screen.hpp
+            src/client/renderer/gui/screens/Screen.cpp
+            src/client/renderer/gui/screens/PanoramaRenderer.hpp
+            src/client/renderer/gui/screens/PanoramaRenderer.cpp
+            src/client/renderer/gui/screens/TitleScreen.hpp
+            src/client/renderer/gui/screens/TitleScreen.cpp
+            src/client/renderer/gui/screens/OptionsScreens.hpp
+            src/client/renderer/gui/screens/OptionsScreens.cpp
+            src/client/renderer/gui/screens/PauseScreen.hpp
+            src/client/renderer/gui/screens/PauseScreen.cpp
+            src/client/renderer/gui/screens/WorldSelectScreens.hpp
+            src/client/renderer/gui/screens/WorldSelectScreens.cpp
+            src/client/renderer/gui/screens/FriendsScreen.hpp
+            src/client/renderer/gui/screens/FriendsScreen.cpp
+
             # Client rendering - GUI items (3D-in-GUI renderers)
             src/client/renderer/gui/items/ItemLighting.hpp
             src/client/renderer/gui/items/ChestItemRenderer.hpp
@@ -650,6 +678,10 @@ else()
             src/client/network/NetworkClient.hpp
             src/client/network/NetworkIOService.cpp
             src/client/network/NetworkIOService.hpp
+            src/client/network/FriendsClient.cpp
+            src/client/network/FriendsClient.hpp
+            src/client/network/UPnPPortMapper.cpp
+            src/client/network/UPnPPortMapper.hpp
             src/client/network/ClientPacketHandler.cpp
             src/client/network/ClientPacketHandler.hpp
 
@@ -1389,6 +1421,7 @@ if(CURL_FOUND)
         src/launcher/updater/GitHubAPI.cpp
         src/launcher/updater/Downloader.cpp
         src/launcher/updater/Installer.cpp
+        src/launcher/net/FriendsServiceClient.cpp
         src/launcher/platform/ProcessLauncher.cpp
         # Shared code compiled into launcher
         src/common/core/Log.cpp

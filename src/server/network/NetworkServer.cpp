@@ -4,6 +4,11 @@
 #include "../IntegratedServer.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <unistd.h>   // ::close for rejected relay handles
+#endif
 
 namespace Server {
 
@@ -120,6 +125,13 @@ namespace Server {
             return;
         }
         
+        SetupConnection(std::move(socket), "accepted");
+
+        // Continue accepting
+        StartAccept();
+    }
+
+    void NetworkServer::SetupConnection(tcp::socket socket, const char* origin) {
         // Set TCP_NODELAY to disable Nagle's algorithm for low-latency
         // This is critical for real-time game networking, especially on Windows
         try {
@@ -127,22 +139,48 @@ namespace Server {
         } catch (const std::exception& e) {
             Log::Warning("Failed to set TCP_NODELAY: %s", e.what());
         }
-        
+
         // Create new ServerConnection
         auto connection = std::make_shared<ServerConnection>(std::move(socket), this);
-        
+
         // Add to connections list
         AddConnection(connection);
-        
+
         // Start the connection
         connection->Start();
-        
-        Log::Info("New connection accepted from %s (ID: %u)",
-            connection->GetRemoteEndpoint().address().to_string().c_str(),
-            connection->GetConnectionId());
-        
-        // Continue accepting
-        StartAccept();
+
+        std::string remote = "?";
+        try {
+            remote = connection->GetRemoteEndpoint().address().to_string();
+        } catch (const std::exception&) {
+            // Relay tunnels report the relay's address; not fatal either way.
+        }
+        Log::Info("New connection %s from %s (ID: %u)", origin, remote.c_str(),
+                  connection->GetConnectionId());
+    }
+
+    void NetworkServer::AdoptConnection(tcp::socket::native_handle_type handle) {
+        // Runs on the caller's thread (the friends-client io thread), so hop
+        // to the server's io context before touching server state.
+        net::post(m_ioContext, [this, handle]() {
+            if (GetConnectionCount() >= m_maxConnections) {
+                Log::Warning("Max connections reached, rejecting relay tunnel");
+#ifdef _WIN32
+                (void)::closesocket(handle);
+#else
+                (void)::close(handle);
+#endif
+                return;
+            }
+            tcp::socket socket(m_ioContext);
+            error_code ec;
+            socket.assign(tcp::v4(), handle, ec);
+            if (ec) {
+                Log::Error("Failed to adopt relay socket: %s", ec.message().c_str());
+                return;
+            }
+            SetupConnection(std::move(socket), "adopted (relay)");
+        });
     }
 
     void NetworkServer::AddConnection(ServerConnectionPtr connection) {

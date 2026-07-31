@@ -3,6 +3,7 @@
 
 #include <string>
 #include <atomic>
+#include <cstdint>
 #include <functional>
 
 typedef unsigned int GLuint;
@@ -39,18 +40,41 @@ namespace Launcher {
         std::string playerColor;            // Empty / "default" → game's neon green; otherwise palette slug
         std::string lastJoinIP;             // Pre-fills the Join Server dialog IP field
         std::string lastJoinPort = "25565"; // Pre-fills the Join Server dialog port field
+
+        // ── ObeyCraft account (friends service) ──
+        // sessionToken empty → guest (no account features).
+        std::string sessionToken;
+        int64_t     accountId = 0;
+        std::string accountName;
+
+        // Transient auth/checkmark UI state (owned by LauncherApp's drains).
+        enum class NameCheck { Idle, Checking, Available, Taken, Yours, Invalid };
+        NameCheck   nameCheckState = NameCheck::Idle;
+        std::string authStatusText;   // last login/signup/rename outcome line
+        bool        authBusy = false; // an auth op is in flight
     };
 
     class LauncherUI {
     public:
         using ActionCallback = std::function<void()>;
         using JoinCallback = std::function<void(const std::string& host, uint16_t port)>;
+        using CredentialsCallback = std::function<void(const std::string& name,
+                                                       const std::string& password)>;
+        using NameCallback = std::function<void(const std::string& name)>;
 
         void SetOnPlayClicked(ActionCallback cb) { m_onPlay = cb; }
         void SetOnUpdateClicked(ActionCallback cb) { m_onUpdate = cb; }
         void SetOnRetryClicked(ActionCallback cb) { m_onRetry = cb; }
         void SetOnRestartClicked(ActionCallback cb) { m_onRestart = cb; }
         void SetOnJoinClicked(JoinCallback cb) { m_onJoin = cb; }
+
+        // Friends-service account hooks (all dispatched to worker threads by
+        // LauncherApp — the UI just fires them).
+        void SetOnLogin(CredentialsCallback cb) { m_onLogin = cb; }
+        void SetOnSignup(CredentialsCallback cb) { m_onSignup = cb; }
+        void SetOnLogout(ActionCallback cb) { m_onLogout = cb; }
+        void SetOnRename(NameCallback cb) { m_onRename = cb; }
+        void SetOnCheckName(NameCallback cb) { m_onCheckName = cb; }
 
         void SetLogoTexture(GLuint textureId, int width, int height);
 
@@ -72,6 +96,11 @@ namespace Launcher {
         ActionCallback m_onRetry;
         ActionCallback m_onRestart;
         JoinCallback m_onJoin;
+        CredentialsCallback m_onLogin;
+        CredentialsCallback m_onSignup;
+        ActionCallback m_onLogout;
+        NameCallback m_onRename;
+        NameCallback m_onCheckName;
 
         GLuint m_logoTexture = 0;
         int m_logoWidth = 0;
@@ -83,6 +112,14 @@ namespace Launcher {
         char m_joinIP[64] = "";
         char m_joinPort[8] = "25565";
         char m_playerName[32] = "";     // Bound to LauncherUIState::playerName via Render()
+        char m_password[64] = "";       // Account password entry (never persisted)
+
+        // Two-way username sync: what the buffer last agreed with state on.
+        // When state.playerName changes elsewhere (login/rename), the buffer
+        // re-seeds — unless the user is mid-edit.
+        std::string m_lastSyncedName;
+        // Availability-check debounce: >0 when an edit is pending a check.
+        double m_nameEditTime = 0.0;
     };
 
 } // namespace Launcher

@@ -128,6 +128,13 @@ namespace Game {
 
         // Set world seed
         virtual void SetSeed(int32_t seed) = 0;
+
+        // World spawn selection — MC MinecraftServer.setInitialSpawn().
+        // Returns the block position (feet) where new players should spawn.
+        // Default: the engine's legacy fixed spawn, for generators without
+        // climate/height support. MyTerrainGenerator overrides with the real
+        // MC algorithm (Climate.SpawnFinder + chunk spiral + surface height).
+        virtual glm::ivec3 FindSpawnPosition() { return glm::ivec3(0, 67, 0); }
         virtual int32_t GetSeed() const = 0;
 
         // Set world type (affects generation algorithm)

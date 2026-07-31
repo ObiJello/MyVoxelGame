@@ -92,6 +92,7 @@ namespace Render {
         void PopMatrix();
         void Translate(float x, float y);
         void Scale(float sx, float sy);
+        void Rotate(float radians);   // 2D rotation (splash text tilt)
 
         // --- Z-ordering ---
         void NextStratum();

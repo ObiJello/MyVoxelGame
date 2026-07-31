@@ -9,6 +9,8 @@
 #include "updater/Installer.hpp"
 #include "platform/ProcessLauncher.hpp"
 #include "platform/GameDirectory.hpp"
+#include "net/FriendsServiceClient.hpp"
+#include "common/core/FriendsServiceConfig.hpp"
 #include "common/core/Log.hpp"
 
 #include <imgui.h>
@@ -22,6 +24,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 
@@ -42,6 +45,16 @@ namespace Launcher {
         std::string lastJoinIP;             // Pre-fill the Join Server dialog
         std::string lastJoinPort = "25565"; // Pre-fill the Join Server dialog
 
+        // ── ObeyCraft account (friends service) ──
+        // Empty sessionToken → guest (no account, friends features off).
+        std::string sessionToken;
+        int64_t     accountId = 0;
+        std::string accountName;
+        // Friends-service override "host" or "host:port"; empty → defaults
+        // from FriendsServiceConfig.hpp. The HOSTING machine should set
+        // "127.0.0.1" (routers rarely hairpin their own public IP).
+        std::string friendsService;
+
         void Load(const std::string& path) {
             try {
                 std::ifstream file(path);
@@ -55,6 +68,10 @@ namespace Launcher {
                 playerColor = json.value("player_color", "");
                 lastJoinIP = json.value("last_join_ip", "");
                 lastJoinPort = json.value("last_join_port", std::string("25565"));
+                sessionToken = json.value("session_token", "");
+                accountId = json.value("account_id", static_cast<int64_t>(0));
+                accountName = json.value("account_name", "");
+                friendsService = json.value("friends_service", "");
             } catch (...) {
                 Log::Warning("Failed to load launcher config");
             }
@@ -71,6 +88,10 @@ namespace Launcher {
                 json["player_color"] = playerColor;
                 json["last_join_ip"] = lastJoinIP;
                 json["last_join_port"] = lastJoinPort;
+                json["session_token"] = sessionToken;
+                json["account_id"] = accountId;
+                json["account_name"] = accountName;
+                json["friends_service"] = friendsService;
                 std::ofstream file(path);
                 file << json.dump(2);
             } catch (...) {
@@ -78,6 +99,23 @@ namespace Launcher {
             }
         }
     };
+
+    // Parse a "host" / "host:port" friends-service override, falling back to
+    // the shared defaults.
+    static void ResolveFriendsService(const std::string& override_,
+                                      std::string& outHost, uint16_t& outPort) {
+        outHost = Friends::kDefaultServiceHost;
+        outPort = Friends::kDefaultServicePort;
+        if (override_.empty()) return;
+        auto colon = override_.rfind(':');
+        if (colon != std::string::npos && colon + 1 < override_.size()) {
+            outHost = override_.substr(0, colon);
+            int p = std::atoi(override_.c_str() + colon + 1);
+            if (p > 0 && p <= 65535) outPort = static_cast<uint16_t>(p);
+        } else {
+            outHost = override_;
+        }
+    }
 
     // ── Asset path helper ──
     static std::string GetAssetPath(const std::string& relativePath) {
@@ -229,6 +267,13 @@ namespace Launcher {
         uiState.playerColor = config.playerColor;
         uiState.lastJoinIP = config.lastJoinIP;
         uiState.lastJoinPort = config.lastJoinPort;
+        uiState.sessionToken = config.sessionToken;
+        uiState.accountId = config.accountId;
+        uiState.accountName = config.accountName;
+        // Logged in → the account name IS the username (server-canonical).
+        if (!config.sessionToken.empty() && !config.accountName.empty()) {
+            uiState.playerName = config.accountName;
+        }
         if (!config.installedVersion.empty()) {
             uiState.installedVersion = config.installedVersion;
         }
@@ -259,6 +304,34 @@ namespace Launcher {
 
         std::atomic<bool> downloadComplete{false};
         std::atomic<bool> downloadSuccess{false};
+
+        // ── Friends-service auth worker state ──
+        // One auth op (login/signup/logout/rename) in flight at a time;
+        // results published under authMutex, drained at the top of the frame
+        // loop (same shape as the update-check worker above).
+        struct AuthOutcome {
+            bool        success = false;
+            std::string error;          // service error code or "network"
+            std::string token, name;    // login/signup/rename results
+            int64_t     accountId = 0;
+            bool        clearedSession = false;   // logout
+            bool        renamed = false;
+        };
+        std::atomic<bool> authBusy{false};
+        std::atomic<bool> authComplete{false};
+        std::mutex authMutex;
+        AuthOutcome authOutcome;
+
+        // Username availability checks: keyed by a generation counter so
+        // stale responses (older keystrokes) are discarded on arrival.
+        std::atomic<uint64_t> nameCheckGeneration{0};
+        std::atomic<bool> nameCheckComplete{false};
+        std::mutex nameCheckMutex;
+        struct { uint64_t generation = 0; std::string status; } nameCheckResult;
+
+        std::string friendsHost;
+        uint16_t friendsPort = 0;
+        ResolveFriendsService(config.friendsService, friendsHost, friendsPort);
 
         std::atomic<bool> installComplete{false};
         std::atomic<bool> installSuccess{false};
@@ -366,6 +439,18 @@ namespace Launcher {
             if (uiState.playerColor.empty() || uiState.playerColor == "default") return "";
             return " --color " + uiState.playerColor;
         };
+        // Build the friends-service identity args when logged in. The token
+        // only grants friends-service access (never sent to game servers).
+        // Guests get no args → the game runs exactly as before accounts.
+        auto buildSessionArgs = [&]() -> std::string {
+            if (uiState.sessionToken.empty()) return "";
+            std::string s = " --session " + uiState.sessionToken
+                          + " --account-id " + std::to_string(uiState.accountId);
+            if (!config.friendsService.empty()) {
+                s += " --friends-service " + config.friendsService;
+            }
+            return s;
+        };
 
         ui.SetOnPlayClicked([&]() {
             uiState.state = LauncherState::LaunchingGame;
@@ -375,7 +460,7 @@ namespace Launcher {
             config.playerName = uiState.playerName;
             config.playerColor = uiState.playerColor;
             config.Save(configPath);
-            std::string args = buildNameArg() + buildColorArg();
+            std::string args = buildNameArg() + buildColorArg() + buildSessionArgs();
             if (LaunchGame(gameExePath, uiState.useVulkan, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -396,7 +481,7 @@ namespace Launcher {
             config.lastJoinPort = uiState.lastJoinPort;
             config.Save(configPath);
             std::string serverArg = "--server " + host + ":" + std::to_string(port)
-                                  + buildNameArg() + buildColorArg();
+                                  + buildNameArg() + buildColorArg() + buildSessionArgs();
             if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -404,6 +489,98 @@ namespace Launcher {
                 uiState.statusText = "Failed to launch game";
                 uiState.errorText = "Could not start the game executable";
             }
+        });
+
+        // ── Friends-service account callbacks ──
+        // Each spawns a detached worker (FriendsServiceClient blocks);
+        // results land in authOutcome and are drained each frame below.
+        auto runAuthOp = [&](std::function<AuthOutcome(FriendsServiceClient&)> op) {
+            if (authBusy.exchange(true)) return;   // one at a time
+            uiState.authBusy = true;
+            std::thread t([&, op = std::move(op)]() {
+                FriendsServiceClient client(friendsHost, friendsPort);
+                AuthOutcome outcome = op(client);
+                {
+                    std::lock_guard<std::mutex> lock(authMutex);
+                    authOutcome = std::move(outcome);
+                }
+                authComplete = true;
+            });
+            t.detach();
+        };
+
+        ui.SetOnLogin([&](const std::string& name, const std::string& password) {
+            runAuthOp([name, password](FriendsServiceClient& client) {
+                auto r = client.Login(name, password);
+                AuthOutcome o;
+                o.success = r.ok;
+                o.error = r.error;
+                if (r.ok) {
+                    o.token = r.body.value("token", "");
+                    o.name = r.body.value("name", "");
+                    o.accountId = r.body.value("account_id", static_cast<int64_t>(0));
+                }
+                return o;
+            });
+        });
+
+        ui.SetOnSignup([&](const std::string& name, const std::string& password) {
+            runAuthOp([name, password](FriendsServiceClient& client) {
+                auto r = client.Signup(name, password);
+                AuthOutcome o;
+                o.success = r.ok;
+                o.error = r.error;
+                if (r.ok) {
+                    o.token = r.body.value("token", "");
+                    o.name = r.body.value("name", "");
+                    o.accountId = r.body.value("account_id", static_cast<int64_t>(0));
+                }
+                return o;
+            });
+        });
+
+        ui.SetOnLogout([&]() {
+            const std::string token = uiState.sessionToken;
+            runAuthOp([token](FriendsServiceClient& client) {
+                client.Logout(token);   // best-effort; local session clears regardless
+                AuthOutcome o;
+                o.success = true;
+                o.clearedSession = true;
+                return o;
+            });
+        });
+
+        ui.SetOnRename([&](const std::string& newName) {
+            const std::string token = uiState.sessionToken;
+            runAuthOp([token, newName](FriendsServiceClient& client) {
+                auto r = client.Rename(token, newName);
+                AuthOutcome o;
+                o.success = r.ok;
+                o.error = r.error;
+                o.renamed = r.ok;
+                if (r.ok) o.name = r.body.value("name", newName);
+                return o;
+            });
+        });
+
+        ui.SetOnCheckName([&](const std::string& name) {
+            const uint64_t generation = ++nameCheckGeneration;
+            const std::string token = uiState.sessionToken;
+            std::thread t([&, generation, name, token]() {
+                FriendsServiceClient client(friendsHost, friendsPort);
+                auto r = client.CheckName(name, token);
+                const std::string status =
+                    r.ok ? r.body.value("status", "invalid") : "network";
+                {
+                    std::lock_guard<std::mutex> lock(nameCheckMutex);
+                    // Stale keystrokes lose: only the newest generation wins.
+                    if (generation >= nameCheckResult.generation) {
+                        nameCheckResult = {generation, status};
+                        nameCheckComplete = true;
+                    }
+                }
+            });
+            t.detach();
         });
 
         ui.SetOnUpdateClicked([&]() {
@@ -483,6 +660,81 @@ namespace Launcher {
         // ── Main Loop ──
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
+
+            // ── Drain friends-service auth results ──
+            if (authComplete.load()) {
+                authComplete = false;
+                authBusy = false;
+                uiState.authBusy = false;
+                AuthOutcome outcome;
+                {
+                    std::lock_guard<std::mutex> lock(authMutex);
+                    outcome = authOutcome;
+                }
+                if (outcome.clearedSession) {
+                    // Logout: drop the local session no matter what the
+                    // service said (it may simply be unreachable).
+                    config.sessionToken.clear();
+                    config.accountId = 0;
+                    config.accountName.clear();
+                    uiState.sessionToken.clear();
+                    uiState.accountId = 0;
+                    uiState.accountName.clear();
+                    uiState.authStatusText = "Logged out.";
+                    config.Save(configPath);
+                } else if (outcome.success) {
+                    if (!outcome.token.empty()) {   // login / signup
+                        config.sessionToken = outcome.token;
+                        config.accountId = outcome.accountId;
+                        uiState.sessionToken = outcome.token;
+                        uiState.accountId = outcome.accountId;
+                    }
+                    if (!outcome.name.empty()) {    // login / signup / rename
+                        config.accountName = outcome.name;
+                        uiState.accountName = outcome.name;
+                        // The account name is the canonical username.
+                        config.playerName = outcome.name;
+                        uiState.playerName = outcome.name;
+                    }
+                    uiState.authStatusText = outcome.renamed
+                        ? "Renamed to " + outcome.name
+                        : "Logged in as " + uiState.accountName;
+                    uiState.nameCheckState = LauncherUIState::NameCheck::Idle;
+                    config.Save(configPath);
+                } else {
+                    // Human-readable error mapping for the settings popup.
+                    const std::string& e = outcome.error;
+                    uiState.authStatusText =
+                        e == "bad_credentials"    ? "Wrong username or password." :
+                        e == "name_taken"         ? "That username is taken." :
+                        e == "name_invalid"       ? "Names are 3-16 letters, numbers, _." :
+                        e == "password_too_short" ? "Password must be at least 4 characters." :
+                        e == "network"            ? "Can't reach the friends server." :
+                                                    "Error: " + e;
+                }
+            }
+
+            // ── Drain username availability results ──
+            if (nameCheckComplete.load()) {
+                nameCheckComplete = false;
+                std::string status;
+                uint64_t generation;
+                {
+                    std::lock_guard<std::mutex> lock(nameCheckMutex);
+                    status = nameCheckResult.status;
+                    generation = nameCheckResult.generation;
+                }
+                // Only the newest in-flight check may update the UI.
+                if (generation == nameCheckGeneration.load()) {
+                    using NC = LauncherUIState::NameCheck;
+                    uiState.nameCheckState =
+                        status == "available" ? NC::Available :
+                        status == "taken"     ? NC::Taken :
+                        status == "yours"     ? NC::Yours :
+                        status == "invalid"   ? NC::Invalid :
+                                                NC::Idle;   // network → no claim
+                }
+            }
 
             // Process background results
             if (checkComplete.load() && uiState.state == LauncherState::CheckingForUpdates) {
@@ -570,6 +822,9 @@ namespace Launcher {
         config.playerColor = uiState.playerColor;
         config.lastJoinIP = uiState.lastJoinIP;
         config.lastJoinPort = uiState.lastJoinPort;
+        config.sessionToken = uiState.sessionToken;
+        config.accountId = uiState.accountId;
+        config.accountName = uiState.accountName;
         config.Save(configPath);
 
         if (logoTexture != 0) {

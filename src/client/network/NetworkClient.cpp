@@ -95,6 +95,29 @@ namespace Client {
                         if (error) {
                             HandleConnect(error);
                         } else {
+                            // Relay joins: the friends service expects a
+                            // ticket line before the game protocol starts.
+                            // Written synchronously so it can't interleave
+                            // with the handshake packet below.
+                            if (!m_connectPreamble.empty()) {
+                                error_code preambleError;
+                                net::write(*socket, net::buffer(m_connectPreamble),
+                                           preambleError);
+                                // The relay answers with one ack line; consume
+                                // it so the game protocol sees a clean stream.
+                                if (!preambleError) {
+                                    net::streambuf ack;
+                                    net::read_until(*socket, ack, '\n', preambleError);
+                                }
+                                m_connectPreamble.clear();
+                                if (preambleError) {
+                                    Log::Error("NetworkClient: relay handshake failed: %s",
+                                               preambleError.message().c_str());
+                                    HandleConnect(preambleError);
+                                    return;
+                                }
+                            }
+
                             // Create ClientConnection
                             m_connection = std::make_shared<ClientConnection>(std::move(*socket), this);
                             m_connection->Start();

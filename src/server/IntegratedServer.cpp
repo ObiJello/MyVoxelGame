@@ -309,6 +309,34 @@ namespace Server {
             m_world->InitializeChunkProvider();
         }
 
+        // ── World spawn selection (MC MinecraftServer.setInitialSpawn) ─────
+        // Generated worlds ask the generator: climate SpawnFinder picks the
+        // region, a chunk spiral finds dry land, getBaseHeight supplies the
+        // surface Y. Anvil worlds keep the legacy fixed spawn for now (MC
+        // reads theirs from level.dat, which we don't parse yet). Runs before
+        // any client can join, so every player — host and remote — spawns
+        // (and is teleported on join) to this position.
+        if (m_config.minecraftWorldPath.empty() && m_world && m_world->GetChunkProvider()) {
+            if (auto* generator = m_world->GetChunkProvider()->GetGenerator()) {
+                const glm::ivec3 spawnBlock = generator->FindSpawnPosition();
+                m_worldSpawn = glm::vec3(static_cast<float>(spawnBlock.x) + 0.5f,
+                                         static_cast<float>(spawnBlock.y),
+                                         static_cast<float>(spawnBlock.z) + 0.5f);
+                Log::Info("[IntegratedServer] World spawn set to (%.1f, %.1f, %.1f)",
+                          m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
+                // The host ServerPlayer was constructed at the legacy spawn
+                // before the world could tell us better; move it now.
+                if (m_serverPlayer) {
+                    m_serverPlayer->setPosition(glm::dvec3(m_worldSpawn));
+                }
+                // Session manager drives spawn-chunk tickets + join positions
+                // off its config copy — keep it in sync.
+                if (m_sessionManager) {
+                    m_sessionManager->SetWorldSpawn(m_worldSpawn);
+                }
+            }
+        }
+
         m_lastTickTime = clock::now();
         m_lastTickStartTime = m_lastTickTime;
         
@@ -809,9 +837,8 @@ namespace Server {
             // both see the same name as chat does.
             playerPtr->setName(playerName);
         } else {
-            glm::vec3 spawnPos(0.0f, 67.0f, 0.0f);
             auto remotePlayer = std::make_unique<ServerPlayer>(playerId, playerName);
-            remotePlayer->setPosition(glm::dvec3(spawnPos));
+            remotePlayer->setPosition(glm::dvec3(m_worldSpawn));
             playerPtr = remotePlayer.get();
             m_remotePlayers[playerId] = std::move(remotePlayer);
             Log::Info("[IntegratedServer] Created ServerPlayer for remote player '%s' (ID: %u)",
@@ -852,6 +879,18 @@ namespace Server {
             // synthesize them.
             session->SendInventoryFull();
             Log::Info("[IntegratedServer] Sent full inventory sync to client");
+
+            // Teleport the new client to the player's server-side position
+            // (world spawn for fresh players). The client boots at its own
+            // hardcoded coords; without this, it stays there no matter what
+            // spawn the server picked. Mirrors MC PlayerList.placeNewPlayer's
+            // connection.teleport(...) on login.
+            {
+                const glm::dvec3 pos = playerPtr->getPosition();
+                connection->Teleport(pos.x, pos.y, pos.z, 0.0f, 0.0f);
+                Log::Info("[IntegratedServer] Teleported '%s' to spawn (%.1f, %.1f, %.1f)",
+                          playerName.c_str(), pos.x, pos.y, pos.z);
+            }
 
             // PlayerInfo: broadcast new player to ALL clients (including the new one, so they see
             // themselves in the player list — matching MC's PlayerList.placeNewPlayer line 188)
@@ -1140,7 +1179,9 @@ namespace Server {
         sessionConfig.defaultSimulationDistance = 8;
         sessionConfig.defaultViewDistance = m_config.defaultViewDistance;
         sessionConfig.maxViewDistance = m_config.serverViewDistance;  // Server's view distance cap
-        sessionConfig.worldSpawn = glm::vec3(0.0f, 67.0f, 0.0f);
+        // Placeholder at init time — the server thread recomputes the real
+        // spawn at startup and pushes it via SetWorldSpawn (see Start()).
+        sessionConfig.worldSpawn = m_worldSpawn;
         sessionConfig.spawnChunkRadius = 2;
         sessionConfig.maxChunksPerPlayerPerTick = m_config.maxChunksPerTick;
         sessionConfig.kickOnTimeout = false;  // Integrated server: never kick local player

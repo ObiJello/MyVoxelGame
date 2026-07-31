@@ -988,6 +988,19 @@ namespace Render {
         m_currentTransform[1][1] *= sy;
     }
 
+    void GuiGraphics::Rotate(float radians) {
+        // Post-multiply a 2D rotation onto the current basis (same convention
+        // as Translate/Scale above — local-space transform).
+        const float c = std::cos(radians);
+        const float s = std::sin(radians);
+        const glm::vec2 colX(m_currentTransform[0][0], m_currentTransform[0][1]);
+        const glm::vec2 colY(m_currentTransform[1][0], m_currentTransform[1][1]);
+        m_currentTransform[0][0] = colX.x * c + colY.x * s;
+        m_currentTransform[0][1] = colX.y * c + colY.y * s;
+        m_currentTransform[1][0] = colX.x * -s + colY.x * c;
+        m_currentTransform[1][1] = colX.y * -s + colY.y * c;
+    }
+
     void GuiGraphics::NextStratum() {
         m_renderState->NextStratum();
     }

@@ -166,7 +166,14 @@ namespace Game {
         void Shutdown() override;
 
         // Signal the terrain library to abort blocking getChunk() loops (for clean shutdown)
-        void RequestAbort();
+        void RequestAbort() override;
+
+        // MC MinecraftServer.setInitialSpawn(): climate SpawnFinder picks the
+        // (x, z) region, then a spiral over the surrounding chunks finds the
+        // first dry-land column (surface above sea level) via getBaseHeight.
+        // Self-initializes the generator if needed (safe on server thread).
+        glm::ivec3 FindSpawnPosition() override;
+
         ChunkGenerationResult GenerateChunk(Math::ChunkPos position) override;
         std::future<ChunkGenerationResult> GenerateChunkAsync(Math::ChunkPos position) override;
         std::vector<int> GenerateHeightMap(Math::ChunkPos position) override;
@@ -226,6 +233,10 @@ namespace Game {
         // Terrain library components
         minecraft::levelgen::NoiseGeneratorSettings* m_settings = nullptr;
         minecraft::levelgen::RandomState* m_randomState = nullptr;
+        // Value storage behind the ClimateParameterPoint* list handed to
+        // m_settings (the spawn-target climates for Climate::SpawnFinder).
+        // Must outlive m_settings/m_randomState — freed together in Shutdown.
+        std::vector<minecraft::world::biome::Climate::ParameterPoint> m_spawnTargetStorage;
         minecraft::levelgen::FluidPicker* m_fluidPicker = nullptr;
         minecraft::levelgen::NoiseBasedChunkGenerator* m_generator = nullptr;
         std::unique_ptr<minecraft::world::biome::MultiNoiseBiomeSource> m_biomeSource;

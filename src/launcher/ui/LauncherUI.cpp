@@ -6,9 +6,39 @@
 #include "common/entity/PlayerColors.hpp"
 #include <imgui.h>
 #include <algorithm>
+#include <cstring>
 #include <sstream>
 
 namespace Launcher {
+
+    // Account-name charset filter for InputText — [A-Za-z0-9_] only, the
+    // friends service's rule (also keeps the unquoted launch args safe).
+    static int UsernameCharFilter(ImGuiInputTextCallbackData* data) {
+        const ImWchar c = data->EventChar;
+        const bool allowed = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                             (c >= '0' && c <= '9') || c == '_';
+        return allowed ? 0 : 1;
+    }
+
+    // Small vector checkmark / cross drawn with the draw list (the bundled
+    // font has no check/cross glyphs). Advances the cursor by one glyph box.
+    static void DrawStatusGlyph(bool check, unsigned int color) {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        const float s = ImGui::GetFontSize();
+        if (check) {
+            drawList->AddLine(ImVec2(p.x + 0.10f * s, p.y + 0.55f * s),
+                              ImVec2(p.x + 0.38f * s, p.y + 0.82f * s), color, 2.0f);
+            drawList->AddLine(ImVec2(p.x + 0.38f * s, p.y + 0.82f * s),
+                              ImVec2(p.x + 0.88f * s, p.y + 0.22f * s), color, 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(p.x + 0.20f * s, p.y + 0.25f * s),
+                              ImVec2(p.x + 0.80f * s, p.y + 0.85f * s), color, 2.0f);
+            drawList->AddLine(ImVec2(p.x + 0.80f * s, p.y + 0.25f * s),
+                              ImVec2(p.x + 0.20f * s, p.y + 0.85f * s), color, 2.0f);
+        }
+        ImGui::Dummy(ImVec2(s, s));
+    }
 
     void LauncherUI::SetLogoTexture(GLuint textureId, int width, int height) {
         m_logoTexture = textureId;
@@ -427,7 +457,7 @@ namespace Launcher {
     }
 
     void LauncherUI::DrawSettingsPopup(LauncherUIState& state) {
-        ImGui::SetNextWindowSize(ImVec2(400, 320), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(400, 440), ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowPos(
             ImVec2(static_cast<float>(WindowWidth) * 0.5f, static_cast<float>(WindowHeight) * 0.5f),
             ImGuiCond_FirstUseEver,
@@ -445,17 +475,119 @@ namespace Launcher {
             if (g_fontSmall) ImGui::PushFont(g_fontSmall);
 
             // ── Username (passed to the game as --name <X>; empty → server auto-assigns) ──
-            // Sync the char buffer from state on first paint and whenever state was loaded.
-            // We keep them in sync by writing back into state on every edit.
-            if (m_playerName[0] == '\0' && !state.playerName.empty()) {
-                std::snprintf(m_playerName, sizeof(m_playerName), "%s", state.playerName.c_str());
+            // Two-way sync: whenever state.playerName changed elsewhere
+            // (config load, login, rename) re-seed the buffer — unless the
+            // user is actively typing in the field.
+            const bool loggedIn = !state.sessionToken.empty();
+            if (state.playerName != m_lastSyncedName) {
+                std::snprintf(m_playerName, sizeof(m_playerName), "%s",
+                              state.playerName.c_str());
+                m_lastSyncedName = state.playerName;
             }
             ImGui::Text("Username");
             ImGui::SetNextItemWidth(220.0f);
-            if (ImGui::InputText("##username", m_playerName, sizeof(m_playerName))) {
+            if (ImGui::InputText("##username", m_playerName, sizeof(m_playerName),
+                                 ImGuiInputTextFlags_CallbackCharFilter,
+                                 UsernameCharFilter)) {
+                if (std::strlen(m_playerName) > 16) m_playerName[16] = '\0';
                 state.playerName = m_playerName;
+                m_lastSyncedName = state.playerName;
+                m_nameEditTime = ImGui::GetTime();
+                state.nameCheckState = LauncherUIState::NameCheck::Idle;
             }
-            ImGui::TextDisabled("Leave blank to use the default (Player1, Player2, ...)");
+            if (m_nameEditTime > 0.0 && ImGui::GetTime() - m_nameEditTime > 0.5) {
+                m_nameEditTime = 0.0;
+                if (m_playerName[0] != '\0' && m_onCheckName) {
+                    state.nameCheckState = LauncherUIState::NameCheck::Checking;
+                    m_onCheckName(m_playerName);
+                }
+            }
+
+            // Availability indicator next to the field.
+            {
+                using NC = LauncherUIState::NameCheck;
+                const unsigned int green = IM_COL32(80, 220, 100, 255);
+                const unsigned int red   = IM_COL32(235, 80, 80, 255);
+                const unsigned int gray  = IM_COL32(150, 150, 150, 255);
+                switch (state.nameCheckState) {
+                    case NC::Checking:
+                        ImGui::SameLine(); ImGui::TextDisabled("checking...");
+                        break;
+                    case NC::Available:
+                        ImGui::SameLine(); DrawStatusGlyph(true, green); ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.3f, 0.86f, 0.4f, 1.0f), "Available");
+                        break;
+                    case NC::Taken:
+                        ImGui::SameLine(); DrawStatusGlyph(false, red); ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.92f, 0.3f, 0.3f, 1.0f), "Taken");
+                        break;
+                    case NC::Yours:
+                        ImGui::SameLine(); DrawStatusGlyph(true, gray); ImGui::SameLine();
+                        ImGui::TextDisabled("This is you");
+                        break;
+                    case NC::Invalid:
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.92f, 0.3f, 0.3f, 1.0f),
+                                           "3-16 letters, numbers, _");
+                        break;
+                    case NC::Idle: break;
+                }
+            }
+
+            // Rename commit: logged in, name changed, service said Available.
+            if (loggedIn && state.playerName != state.accountName &&
+                state.nameCheckState == LauncherUIState::NameCheck::Available &&
+                !state.authBusy) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Rename") && m_onRename) {
+                    m_onRename(state.playerName);
+                }
+            }
+
+            if (loggedIn) {
+                ImGui::TextDisabled("Your account name - rename via the check above.");
+            } else {
+                ImGui::TextDisabled("Leave blank to use the default (Player1, Player2, ...)");
+            }
+
+            ImGui::Spacing();
+
+            // ── ObeyCraft Account (friends service) ──
+            ImGui::Text("Account");
+            if (loggedIn) {
+                ImGui::TextColored(ImVec4(0.3f, 0.86f, 0.4f, 1.0f),
+                                   "Logged in as %s", state.accountName.c_str());
+                if (state.authBusy) {
+                    ImGui::TextDisabled("Working...");
+                } else if (ImGui::Button("Log Out") && m_onLogout) {
+                    m_onLogout();
+                }
+            } else {
+                ImGui::SetNextItemWidth(220.0f);
+                ImGui::InputText("##password", m_password, sizeof(m_password),
+                                 ImGuiInputTextFlags_Password);
+                ImGui::SameLine();
+                ImGui::TextDisabled("Password");
+                if (state.authBusy) {
+                    ImGui::TextDisabled("Working...");
+                } else {
+                    const bool haveCreds = m_playerName[0] != '\0' && m_password[0] != '\0';
+                    if (!haveCreds) ImGui::BeginDisabled();
+                    if (ImGui::Button("Log In") && m_onLogin) {
+                        m_onLogin(m_playerName, m_password);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Sign Up") && m_onSignup) {
+                        m_onSignup(m_playerName, m_password);
+                    }
+                    if (!haveCreds) ImGui::EndDisabled();
+                }
+                ImGui::TextDisabled("Uses the username above. Accounts enable the");
+                ImGui::TextDisabled("in-game Friends tab (add, invite, join).");
+            }
+            if (!state.authStatusText.empty()) {
+                ImGui::TextWrapped("%s", state.authStatusText.c_str());
+            }
 
             ImGui::Spacing();
             ImGui::Separator();
