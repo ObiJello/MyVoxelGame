@@ -89,6 +89,13 @@ namespace Client {
         
         // Handle block change
         void HandleBlockChange(const std::vector<uint8_t>& payload);
+
+        // BlockEntity create/update and remove (Stage 2 of the BE system).
+        // Materialise (or destroy) a client-side BlockEntity in the
+        // corresponding chunk's per-cell BE map so the dispatcher can render
+        // it next frame.
+        void HandleBlockEntityData(const std::vector<uint8_t>& payload);
+        void HandleBlockEntityRemove(const std::vector<uint8_t>& payload);
         
         // Handle chat message
         void HandleChatMessage(const std::vector<uint8_t>& payload);

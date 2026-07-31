@@ -266,7 +266,29 @@ namespace Game {
             // to block.modelName if no client-item file exists (vanilla full
             // cubes like dirt/oak_planks may rely on the block's own model).
             if (!block.modelName.empty()) {
-                applyClientItem(item, block.modelName);
+                bool ok = applyClientItem(item, block.modelName);
+                // Multi-segment blocks (leaf_litter, wildflowers, pink_petals,
+                // ...) register a separate BlockID per segment_amount value with
+                // modelName "{name}_{N}". MC keeps just ONE Items.X for the bare
+                // name, so assets/items/{name}.json exists but {name}_N.json
+                // doesn't. Strip a trailing _<digits> suffix and retry so the
+                // segment_amount=1 form picks up its FlatSprite item model
+                // instead of falling through to the 3D mini-cube renderer.
+                if (!ok) {
+                    const auto& s = block.modelName;
+                    auto underscore = s.find_last_of('_');
+                    if (underscore != std::string::npos && underscore + 1 < s.size()) {
+                        bool allDigits = true;
+                        for (size_t k = underscore + 1; k < s.size(); ++k) {
+                            if (!std::isdigit(static_cast<unsigned char>(s[k]))) {
+                                allDigits = false; break;
+                            }
+                        }
+                        if (allDigits) {
+                            applyClientItem(item, s.substr(0, underscore));
+                        }
+                    }
+                }
             }
         }
         // Slot 0 (Air) is special — render type doesn't matter, but mark it as a sprite

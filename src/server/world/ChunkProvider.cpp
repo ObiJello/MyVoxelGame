@@ -810,7 +810,15 @@ namespace Game {
     }
 
     bool ChunkProvider::IsValidBlockID(BlockID block) const {
-        return static_cast<int>(block) >= 0 && static_cast<int>(block) < 1000;
+        // Range check against the actual enum extent — NOT a hardcoded
+        // constant. The old `< 1000` bound silently rejected every BlockID
+        // added after the first ~1000, including SnowGrass/Lilac/leaf-litter
+        // variants and the entire SlabTop family. SetBlock would silently
+        // no-op for those, so the server's chunk stayed Air at the cell
+        // while the BlockChangeS2C broadcast still told the client to
+        // render the new block — producing the "slab renders but has no
+        // collision" failure mode (player physics reads the server world).
+        return static_cast<unsigned>(block) < static_cast<unsigned>(BlockID::Count);
     }
 
     bool ChunkProvider::GetBlockProperties(BlockID block, bool& isSolid, bool& isFluid, bool& isTransparent) const {

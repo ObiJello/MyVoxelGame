@@ -45,6 +45,27 @@ namespace Render {
         std::vector<std::string> m_history;
         int m_historyIndex = -1;
 
+        // ── Tab-completion suggestions popup — mirrors MC's
+        //    CommandSuggestions / SuggestionsList. Closed by default; TAB
+        //    opens (computes suggestions for the word at the cursor) and
+        //    applies the selected one. UP/DOWN cycle while open. Any
+        //    other text-mutating input closes it.
+        std::vector<std::string> m_suggestions;
+        int  m_suggestionIndex = 0;
+        int  m_suggestionAnchor = 0;   // Start of the word being completed (index in m_inputText)
+        bool m_suggestionsOpen = false;
+        // MC's SuggestionsList shows up to 10 entries at once and scrolls
+        // for more. Match the constant.
+        static constexpr int MAX_VISIBLE_SUGGESTIONS = 10;
+
+        // Suggestion lifecycle. ComputeSuggestions tokenises the input,
+        // dispatches per command, fills m_suggestions / m_suggestionAnchor.
+        void OpenSuggestions();
+        void CloseSuggestions();
+        void ApplySelectedSuggestion();
+        void CycleSuggestion(int delta);
+        void RenderSuggestions(GuiGraphics& graphics, int inputX, int inputY);
+
         // Helpers — MC's EditBox.setCursorPosition / moveCursor / moveCursorToStart / End
         void SetCursorPosition(int pos);
         void MoveCursor(int dir);

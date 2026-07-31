@@ -114,6 +114,15 @@ namespace Server {
             Teleport(x, y, z, yRot, xRot, 0.0, 0.0, 0.0);
         }
 
+        // True while a server-initiated teleport is outstanding (Teleport() was called
+        // but the client hasn't echoed the matching ServerboundAcceptTeleportation id
+        // yet). PlayerSession uses this to drop stale C2S position packets that were
+        // already in flight at the old location — otherwise they snap the server-side
+        // ServerPlayer back to the pre-teleport position and other clients see the
+        // teleported player flicker / stay at the old spot. Mirrors MC's
+        // ServerGamePacketListenerImpl.awaitingPositionFromClient null-check.
+        bool IsAwaitingTeleportAck() const { return m_awaitingTeleportAck; }
+
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)
         // ========================================================================
@@ -195,6 +204,9 @@ namespace Server {
         // client must echo this id back so we can ignore stale C2S position packets that
         // were in flight before the teleport.
         int32_t m_awaitingTeleport = 0;
+        // True between Teleport() and the matching HandleAcceptTeleportation. See
+        // IsAwaitingTeleportAck() above for the gory details.
+        bool    m_awaitingTeleportAck = false;
         
         // Connection state
         ConnectionPhase m_phase = ConnectionPhase::HANDSHAKING;

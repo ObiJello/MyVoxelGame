@@ -149,9 +149,16 @@ namespace Render {
         glm::vec4 CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateBiomeTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
 
-        // Geometry helpers
+        // Geometry helpers. `elemMin`/`elemMax` are the element's bounds in
+        // [0,1] block-space (already divided by 16 from MC's pixel-space
+        // from/to). `faceUv` is the element-face's `uv` field in MC pixel
+        // units [0,16] — it selects a sub-rect of the atlas sprite `uvRect`.
+        // Full-cube blocks pass elemMin=(0,0,0), elemMax=(1,1,1), faceUv=
+        // (0,0,16,16) and behave exactly as before.
         std::array<Vertex, 4> CreateFaceVertices(glm::vec3 blockPos, BlockFace face,
-                                              const glm::vec4& uvRect, const glm::vec4& tint);
+                                              const glm::vec4& uvRect, const glm::vec4& tint,
+                                              const glm::vec3& elemMin, const glm::vec3& elemMax,
+                                              const glm::vec4& faceUv);
         glm::vec3 GetFaceNormal(BlockFace face);
 
         // Minecraft-style per-vertex ambient occlusion

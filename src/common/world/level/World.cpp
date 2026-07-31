@@ -2,9 +2,16 @@
 #include "World.hpp"
 #include "../../core/Log.hpp"
 #include "../block/BlockRegistry.hpp"
+#include "../block/entity/BlockEntity.hpp"
+#include "../block/entity/BlockEntityType.hpp"
+#include "../block/entity/BlockEntityTypes.hpp"
+#include "../chunk/Chunk.hpp"
 #include "../../physics/RayCast.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/network/NetworkServer.hpp"
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
+#include "common/network/PacketRegistry.hpp"
+#include "common/network/packets/game/BlockEntityDataS2CPacket.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -181,6 +188,66 @@ namespace Game {
 
         // Set the block using the chunk provider
         m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId);
+
+        // ── BlockEntity lifecycle hook (mirrors MC Level.setBlock's
+        //    setBlockEntity call). If the OLD block had a BE, destroy it.
+        //    If the NEW block needs a BE, create one and broadcast it.
+        //
+        //    The chunk lookup is best-effort: a freshly-loaded chunk should
+        //    always be available immediately after SetBlock since we just
+        //    wrote into it via m_chunkProvider->SetBlock. If it's somehow
+        //    not, we silently skip — the BE will be missing but the block
+        //    update still goes out.
+        {
+            const auto chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+            auto chunk = m_chunkProvider->GetChunk(chunkPos);
+            if (chunk) {
+                const int localX = worldX - chunkPos.x * 16;
+                const int localZ = worldZ - chunkPos.z * 16;
+
+                const bool oldHadBE = BlockEntityTypes::HasBlockEntity(oldBlockId);
+                const bool newHasBE = BlockEntityTypes::HasBlockEntity(blockId);
+
+                if (oldHadBE) {
+                    chunk->RemoveBlockEntity(localX, worldY, localZ);
+                    // Tell every watcher to drop their copy. The block change
+                    // is already queued via the accumulator above, but a
+                    // separate teardown packet keeps client-side lifecycle
+                    // symmetric with the server (mirrors MC's implicit
+                    // remove-via-new-blockstate by being explicit).
+                    if (Server::g_integratedServer && Server::g_integratedServer->GetNetworkServer()) {
+                        Network::BlockEntityRemoveS2CPacket pkt{worldX, worldY, worldZ};
+                        auto data = Network::Serialization::Serialize(pkt);
+                        Server::g_integratedServer->GetNetworkServer()->BroadcastPacket(
+                            static_cast<uint8_t>(Network::PacketId::BlockEntityRemoveS2C),
+                            data);
+                    }
+                }
+                if (newHasBE) {
+                    const auto* type = BlockEntityTypes::ForBlock(blockId);
+                    if (type) {
+                        auto be = type->Create(glm::ivec3(worldX, worldY, worldZ), blockId);
+                        // Snapshot the freshly-created state for the broadcast
+                        // BEFORE handing the BE to the chunk (the chunk owns
+                        // it after SetBlockEntity).
+                        Network::BlockEntityDataS2CPacket pkt(worldX, worldY, worldZ,
+                                                              type->TypeId());
+                        Network::PacketBuffer scratch;
+                        be->Save(scratch);
+                        pkt.dataBlob = scratch.GetData();
+
+                        chunk->SetBlockEntity(localX, worldY, localZ, std::move(be));
+
+                        if (Server::g_integratedServer && Server::g_integratedServer->GetNetworkServer()) {
+                            auto data = Network::Serialization::Serialize(pkt);
+                            Server::g_integratedServer->GetNetworkServer()->BroadcastPacket(
+                                static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
+                                data);
+                        }
+                    }
+                }
+            }
+        }
 
         // Process update flags
         if (updateFlags & UpdateFlags::NotifyNeighbors) {
@@ -477,15 +544,30 @@ namespace Game {
     }
 
     void World::TileEntityTick() {
-        // Update all tile entities in loaded chunks
-        // This handles:
-        // - Furnace smelting
-        // - Chest animations
-        // - Beacon effects
-        // - Spawner logic
-        // - Hopper item transfer
-        
-        // TODO: Implement tile entity system and ticking
+        // Walk every loaded chunk and tick its BlockEntities. Mirrors MC's
+        // Level.tickBlockEntities (Level.java:401-425). Per-BE Tick() is a
+        // no-op by default; subclasses with timed behaviour (chest lid
+        // auto-close, bell decay, conduit pulse, vault preview eject, etc.)
+        // override. The NeedsTicking() filter is a cheap virtual that lets us
+        // skip the vast majority of BEs that never tick — most placed BEs
+        // are silent containers.
+        //
+        // deltaTime is a per-tick constant (50 ms / 0.05 s) since WorldLoop
+        // runs at the server tick rate; passing it through keeps subclass
+        // logic framerate-independent.
+        if (!m_chunkProvider) return;
+        constexpr float kTickDt = 1.0f / 20.0f;
+
+        const auto positions = m_chunkProvider->GetLoadedChunkPositions();
+        for (const auto& pos : positions) {
+            auto chunk = m_chunkProvider->GetChunk(pos);
+            if (!chunk) continue;
+            for (auto& [localPos, be] : chunk->MutableBlockEntities()) {
+                if (be && be->NeedsTicking()) {
+                    be->Tick(this, kTickDt);
+                }
+            }
+        }
     }
 
     void World::EntityTick() {

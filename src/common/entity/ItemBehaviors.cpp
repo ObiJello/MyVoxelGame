@@ -20,6 +20,7 @@
 
 #include "Item.hpp"
 #include "GeneratedItemList.hpp"
+#include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/level/World.hpp"
 #include "../core/Log.hpp"
@@ -319,8 +320,69 @@ namespace Game {
             wireUseOn(id, &UseOn_Shovel);
         }
 
+        // ── Tool data component (MC parity) ─────────────────────────────────
+        // Wire the TOOL data component onto every pickaxe / axe / shovel / hoe
+        // / sword / shears. Mirrors MC's `Items.java` builder usage of
+        // `Item.Properties.tool(material, blocks, speed)`. The Tool component
+        // is what Item.getDestroySpeed (Item.java:191) reads to multiply the
+        // player's base mining speed.
+        //
+        // Speeds: wood 2.0, gold 12.0, stone 4.0, iron 6.0, diamond 8.0,
+        // netherite 9.0 (vanilla Tiers.java). Copper isn't a vanilla tier — we
+        // size it between stone and iron (speed 5.0, level=stone) so the items
+        // remain useful.
+        auto setTool = [&](ItemID id, Tool t) {
+            auto it = pureItems.find(id);
+            if (it != pureItems.end()) {
+                it->second.defaultComponents.set(DataComponents::TOOL, t);
+            }
+        };
+
+        // Pickaxes
+        setTool(Items::WoodenPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Wood,      2.0f});
+        setTool(Items::CopperPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Stone,     5.0f});
+        setTool(Items::StonePickaxe,     Tool{ToolType::Pickaxe, MiningTier::Stone,     4.0f});
+        setTool(Items::GoldenPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Gold,     12.0f});
+        setTool(Items::IronPickaxe,      Tool{ToolType::Pickaxe, MiningTier::Iron,      6.0f});
+        setTool(Items::DiamondPickaxe,   Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
+        setTool(Items::NetheritePickaxe, Tool{ToolType::Pickaxe, MiningTier::Netherite, 9.0f});
+        // Axes
+        setTool(Items::WoodenAxe,        Tool{ToolType::Axe,     MiningTier::Wood,      2.0f});
+        setTool(Items::CopperAxe,        Tool{ToolType::Axe,     MiningTier::Stone,     5.0f});
+        setTool(Items::StoneAxe,         Tool{ToolType::Axe,     MiningTier::Stone,     4.0f});
+        setTool(Items::GoldenAxe,        Tool{ToolType::Axe,     MiningTier::Gold,     12.0f});
+        setTool(Items::IronAxe,          Tool{ToolType::Axe,     MiningTier::Iron,      6.0f});
+        setTool(Items::DiamondAxe,       Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::NetheriteAxe,     Tool{ToolType::Axe,     MiningTier::Netherite, 9.0f});
+        // Shovels
+        setTool(Items::WoodenShovel,     Tool{ToolType::Shovel,  MiningTier::Wood,      2.0f});
+        setTool(Items::CopperShovel,     Tool{ToolType::Shovel,  MiningTier::Stone,     5.0f});
+        setTool(Items::StoneShovel,      Tool{ToolType::Shovel,  MiningTier::Stone,     4.0f});
+        setTool(Items::GoldenShovel,     Tool{ToolType::Shovel,  MiningTier::Gold,     12.0f});
+        setTool(Items::IronShovel,       Tool{ToolType::Shovel,  MiningTier::Iron,      6.0f});
+        setTool(Items::DiamondShovel,    Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
+        setTool(Items::NetheriteShovel,  Tool{ToolType::Shovel,  MiningTier::Netherite, 9.0f});
+        // Hoes
+        setTool(Items::WoodenHoe,        Tool{ToolType::Hoe,     MiningTier::Wood,      2.0f});
+        setTool(Items::CopperHoe,        Tool{ToolType::Hoe,     MiningTier::Stone,     5.0f});
+        setTool(Items::StoneHoe,         Tool{ToolType::Hoe,     MiningTier::Stone,     4.0f});
+        setTool(Items::GoldenHoe,        Tool{ToolType::Hoe,     MiningTier::Gold,     12.0f});
+        setTool(Items::IronHoe,          Tool{ToolType::Hoe,     MiningTier::Iron,      6.0f});
+        setTool(Items::DiamondHoe,       Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
+        setTool(Items::NetheriteHoe,     Tool{ToolType::Hoe,     MiningTier::Netherite, 9.0f});
+        // Swords (used for cobweb / bamboo speedup in MC)
+        setTool(Items::WoodenSword,      Tool{ToolType::Sword,   MiningTier::Wood,      2.0f});
+        setTool(Items::CopperSword,      Tool{ToolType::Sword,   MiningTier::Stone,     5.0f});
+        setTool(Items::StoneSword,       Tool{ToolType::Sword,   MiningTier::Stone,     4.0f});
+        setTool(Items::GoldenSword,      Tool{ToolType::Sword,   MiningTier::Gold,     12.0f});
+        setTool(Items::IronSword,        Tool{ToolType::Sword,   MiningTier::Iron,      6.0f});
+        setTool(Items::DiamondSword,     Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
+        setTool(Items::NetheriteSword,   Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
+        // Shears (single tier; MC speed = 1.5 against most, 15.0 vs wool/leaves)
+        setTool(Items::Shears,           Tool{ToolType::Shears,  MiningTier::Iron,      1.5f});
+
         Log::Info("[ItemRegistry] Wired use-behaviour callbacks "
-                  "(FlintAndSteel, 7 hoes, 7 shovels)");
+                  "(FlintAndSteel, 7 hoes, 7 shovels) + Tool components on 36 tool items");
     }
 
 } // namespace Game

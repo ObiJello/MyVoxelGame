@@ -2,6 +2,7 @@
 #include "Mesher.hpp"
 #include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
@@ -56,7 +57,31 @@ namespace Render {
         for (size_t i = 0; i < BLOCK_ID_COUNT; ++i) {
             auto blockId = static_cast<Game::BlockID>(i);
             const Game::Block& block = Game::BlockRegistry::Get(blockId);
-            s_blockPropsCache[i].isOpaque = block.opaque;
+            // For face culling we need "fully occludes its faces", not just
+            // "made of opaque material." Partial-cube blocks (slabs, fences,
+            // leaf litter, trapdoors, …) have their faces only partially
+            // covering the neighbor's surface, so they MUST NOT cull the
+            // neighbor's face — otherwise placing a slab next to a wall makes
+            // the wall's whole side disappear. Mirrors MC's
+            // BlockState.canOcclude() + the per-face shape check it does in
+            // BlockBehaviour.skipRendering. v1 approximation: only full cubes
+            // (shape == 0..1 on every axis) participate in face culling. Slab
+            // tops/bottoms not culling the cube above/below them is a minor
+            // hidden-face overdraw that we accept until a proper per-face
+            // occlusion mask is added.
+            const auto& shape = Game::BlockRegistry::GetBlockShape(blockId);
+            const bool fullCube =
+                shape.min.x <= 0.0001f && shape.max.x >= 0.9999f &&
+                shape.min.y <= 0.0001f && shape.max.y >= 0.9999f &&
+                shape.min.z <= 0.0001f && shape.max.z >= 0.9999f;
+            // BE-flagged blocks (chest, shulker, sign, banner, …) draw their
+            // geometry via the BlockEntityRenderer, NOT via the chunk mesh.
+            // From the chunk-mesh's POV the cell is empty even if `block.opaque`
+            // is true and the model shape defaults to a full cube. Marking
+            // them as non-occluding here prevents the neighbour-face cull
+            // from punching visible holes in adjacent walls behind a chest.
+            const bool beFlagged = Game::BlockEntityTypes::HasBlockEntity(blockId);
+            s_blockPropsCache[i].isOpaque = block.opaque && fullCube && !beFlagged;
             switch (block.renderLayer) {
                 case Game::RenderLayer::Cutout:      s_blockPropsCache[i].renderLayer = RenderLayer::Cutout; break;
                 case Game::RenderLayer::Translucent:  s_blockPropsCache[i].renderLayer = RenderLayer::Translucent; break;
@@ -232,8 +257,15 @@ namespace Render {
         // Convert face direction to our BlockFace enum
         BlockFace blockFace = static_cast<BlockFace>(static_cast<int>(faceDir));
 
+        // Convert element from MC pixel-space [0,16] → block-space [0,1] so we can
+        // build vertices in world units. Without this, partial-cube models (leaf
+        // litter, carpets, slabs, fences, …) silently rendered as full 1×1×1 cubes.
+        const glm::vec3 elemMin = element.from * (1.0f / 16.0f);
+        const glm::vec3 elemMax = element.to   * (1.0f / 16.0f);
+
         // Create face vertices (stack-allocated, no heap alloc)
-        std::array<Vertex, 4> faceVerts = CreateFaceVertices(blockPos, blockFace, uvRect, tintColor);
+        std::array<Vertex, 4> faceVerts = CreateFaceVertices(blockPos, blockFace, uvRect, tintColor,
+                                                             elemMin, elemMax, faceDef.uv);
 
         // Bake AO and directional shading into vertex colors (Minecraft-style)
         // All math is in gamma space — shade values are direct multipliers, matching Minecraft.
@@ -350,11 +382,34 @@ namespace Render {
     }
 
     std::array<Vertex, 4> Mesher::CreateFaceVertices(glm::vec3 blockPos, BlockFace face,
-                                                  const glm::vec4& uvRect, const glm::vec4& tint) {
+                                                  const glm::vec4& uvRect, const glm::vec4& tint,
+                                                  const glm::vec3& elemMin, const glm::vec3& elemMax,
+                                                  const glm::vec4& faceUv) {
         std::array<Vertex, 4> vertices;
         glm::vec3 normal = GetFaceNormal(face);
 
-        // Exact block boundary positions (matches Minecraft — no expansion)
+        // Map MC's per-face `uv` field (pixels 0..16) into atlas-space UVs by
+        // interpolating within the texture's atlas sub-rect `uvRect`. The
+        // existing per-face winding code below maps:
+        //   uvRect.x → "u1" (left of atlas),  uvRect.z → "u2" (right)
+        //   uvRect.y → "v1" (top of atlas),   uvRect.w → "v2" (bottom)
+        // so we just lerp the faceUv pixel coords into those bounds and swap
+        // the symbols into the same vMin/vMax slots the old code used.
+        const float uSpan = uvRect.z - uvRect.x;
+        const float vSpan = uvRect.w - uvRect.y;
+        const float u1 = uvRect.x + (faceUv.x / 16.0f) * uSpan;
+        const float v1 = uvRect.y + (faceUv.y / 16.0f) * vSpan;
+        const float u2 = uvRect.x + (faceUv.z / 16.0f) * uSpan;
+        const float v2 = uvRect.y + (faceUv.w / 16.0f) * vSpan;
+
+        const float xMin = elemMin.x, yMin = elemMin.y, zMin = elemMin.z;
+        const float xMax = elemMax.x, yMax = elemMax.y, zMax = elemMax.z;
+
+        // Exact element-bounded positions. Full-cube blocks (elemMin=(0,0,0),
+        // elemMax=(1,1,1), faceUv=(0,0,16,16)) reproduce the previous hardcoded
+        // [0,1] cube behaviour exactly; partial models (leaf litter, carpets,
+        // slabs, fences, …) now render at their true geometry instead of being
+        // silently stretched to a full cube.
         switch (face) {
             case BlockFace::PositiveY: // Top face (+Y)
                 // MC FaceBakery convention (FaceInfo.UP + BlockElementFace.getU/getV):
@@ -364,46 +419,46 @@ namespace Render {
                 // MC already; only top/bottom were V-flipped before. Without this, blocks
                 // with directional top textures (beacon glass, stripped logs, sandstone)
                 // render with their top rotated 180° from MC.
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMin, yMax, zMax), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMax, yMax, zMax), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMax, yMax, zMin), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMin, yMax, zMin), normal, glm::vec2(u1, v1), tint);
                 break;
 
             case BlockFace::NegativeY: // Bottom face (-Y)
                 // MC FaceBakery (FaceInfo.DOWN): maxZ → vMin, minZ → vMax. Inverse of UP.
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMin, yMin, zMin), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMax, yMin, zMin), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMax, yMin, zMax), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMin, yMin, zMax), normal, glm::vec2(u1, v1), tint);
                 break;
 
             case BlockFace::PositiveZ: // Front face (+Z)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMin, yMin, zMax), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMax, yMin, zMax), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMax, yMax, zMax), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMin, yMax, zMax), normal, glm::vec2(u1, v1), tint);
                 break;
 
             case BlockFace::NegativeZ: // Back face (-Z)
-                vertices[0] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMax, yMin, zMin), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMin, yMin, zMin), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMin, yMax, zMin), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMax, yMax, zMin), normal, glm::vec2(u1, v1), tint);
                 break;
 
             case BlockFace::PositiveX: // Right face (+X)
-                vertices[0] = Vertex(blockPos + glm::vec3(1, 0, 1), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(1, 0, 0), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(1, 1, 0), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(1, 1, 1), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMax, yMin, zMax), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMax, yMin, zMin), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMax, yMax, zMin), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMax, yMax, zMax), normal, glm::vec2(u1, v1), tint);
                 break;
 
             case BlockFace::NegativeX: // Left face (-X)
-                vertices[0] = Vertex(blockPos + glm::vec3(0, 0, 0), normal, glm::vec2(uvRect.x, uvRect.w), tint);
-                vertices[1] = Vertex(blockPos + glm::vec3(0, 0, 1), normal, glm::vec2(uvRect.z, uvRect.w), tint);
-                vertices[2] = Vertex(blockPos + glm::vec3(0, 1, 1), normal, glm::vec2(uvRect.z, uvRect.y), tint);
-                vertices[3] = Vertex(blockPos + glm::vec3(0, 1, 0), normal, glm::vec2(uvRect.x, uvRect.y), tint);
+                vertices[0] = Vertex(blockPos + glm::vec3(xMin, yMin, zMin), normal, glm::vec2(u1, v2), tint);
+                vertices[1] = Vertex(blockPos + glm::vec3(xMin, yMin, zMax), normal, glm::vec2(u2, v2), tint);
+                vertices[2] = Vertex(blockPos + glm::vec3(xMin, yMax, zMax), normal, glm::vec2(u2, v1), tint);
+                vertices[3] = Vertex(blockPos + glm::vec3(xMin, yMax, zMin), normal, glm::vec2(u1, v1), tint);
                 break;
         }
 

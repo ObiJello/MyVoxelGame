@@ -628,6 +628,13 @@ namespace Server {
             }
         }
 
+        // Gate: drop any further C2S position packets until the client echoes the
+        // matching ack. Mirrors MC's awaitingPositionFromClient — without this,
+        // 1–2 in-flight pre-teleport MovePlayer packets revert m_position to the
+        // old location and other clients see the teleported player flicker / stay
+        // behind. Cleared in HandleAcceptTeleportation when the id matches.
+        m_awaitingTeleportAck = true;
+
         Network::ClientboundPlayerPositionPacket packet;
         packet.id = m_awaitingTeleport;
         packet.x = x;  packet.y = y;  packet.z = z;
@@ -647,8 +654,9 @@ namespace Server {
 
         auto packet = Network::Serialization::DeserializeServerboundAcceptTeleportation(payload);
         if (packet.id == m_awaitingTeleport) {
-            // MC: this is where awaitingPositionFromClient gets cleared so subsequent C2S position
-            // packets are accepted again. Our server doesn't use that gate yet — log and move on.
+            // Clear the gate — subsequent C2S position packets are now accepted again.
+            // Matches MC's handleAcceptTeleportPacket clearing awaitingPositionFromClient.
+            m_awaitingTeleportAck = false;
             Log::Info("[ServerConnection %u] Teleport id=%d acked", GetConnectionId(), packet.id);
         } else {
             Log::Warning("[ServerConnection %u] Stale teleport ack: got %d, expected %d",

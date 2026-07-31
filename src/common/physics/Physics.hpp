@@ -94,11 +94,27 @@ namespace Game {
         float baseSpeed = WALK_SPEED;
         bool wasOnGround = false;
 
-        // Get current eye position
+        // Get current eye position. Includes `stepVisualOffset` (≤ 0) so the
+        // camera lags behind a freshly-stepped position, producing MC's
+        // smooth rise instead of an instant pop. Mirrors MC's
+        // `Camera.setup()` lerp of `entity.yo → entity.getY()` across the
+        // partial-tick interval (Camera.java:85): when the physics tick
+        // snaps the player up onto a slab/stair, the rendered camera
+        // interpolates over one tick rather than teleporting.
         glm::vec3 GetEyePosition() const {
             float eyeHeight = isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING;
-            return position + glm::vec3(0.0f, eyeHeight, 0.0f);
+            return position + glm::vec3(0.0f, eyeHeight + stepVisualOffset, 0.0f);
         }
+
+        // Visual-only Y offset applied on top of the physical position. When
+        // an auto-step lifts the player by `Δy`, we shove this offset to
+        // `-Δy` so the camera starts at the OLD height and the visible
+        // model/eye smoothly rises as the offset decays to 0 each frame.
+        // Physics, raycast, and collision all continue to use the actual
+        // (post-step) position — only the camera Y reads this. Decayed in
+        // `Physics::Update` per frame with a 50 ms time-constant (= one
+        // server tick) to match MC's per-tick lerp.
+        float stepVisualOffset = 0.0f;
 
         // Get current height
         float GetCurrentHeight() const {

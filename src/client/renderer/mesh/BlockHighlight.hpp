@@ -21,8 +21,14 @@ namespace Render {
         // Release GPU resources (safe to call multiple times)
         void Shutdown();
 
-        // Render the highlight for the given block position
-        void Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix);
+        // Render the highlight for the given block position. `shapeMin`/`shapeMax`
+        // are the model-shape bounds in [0,1] block-local space — pass the values
+        // returned by BlockRegistry::GetBlockShape() so partial-cube blocks
+        // (leaf litter, slabs, fences, …) outline their actual geometry instead
+        // of the full enclosing cube.
+        void Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix,
+                    const glm::vec3& shapeMin = glm::vec3(0.0f),
+                    const glm::vec3& shapeMax = glm::vec3(1.0f));
 
         // Check if a hit is valid for highlighting (in range, solid block, etc.)
         static bool IsValidHighlight(const std::optional<Game::RaycastHit>& hit);

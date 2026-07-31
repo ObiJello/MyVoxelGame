@@ -11,10 +11,16 @@
 namespace Network {
 
     // ── Block-action tag (BlockActionC2SPacket) ─────────────────────────────
+    // Mirrors MC's net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.
+    // BREAK is kept as an alias for STOP_DESTROY for backwards compat with any
+    // caller that hasn't migrated to the staged START/STOP/ABORT protocol.
     enum class BlockActionType : uint8_t {
-        BREAK    = 0,
-        PLACE    = 1,
-        INTERACT = 2,
+        BREAK         = 0,  // legacy alias — same as STOP_DESTROY
+        PLACE         = 1,
+        INTERACT      = 2,
+        START_DESTROY = 3,  // player started mining a block
+        ABORT_DESTROY = 4,  // player released LMB / looked away mid-mine
+        STOP_DESTROY  = 5,  // mining completed; server should remove the block
     };
 
     // ── Relative-flag bitmask (ClientboundPlayerPositionPacket) ─────────────
@@ -47,6 +53,14 @@ namespace Network {
         // Mirrors CreativeModeInventoryScreen.slotClicked() line 189-193: clears every slot
         // in the player's container (crafting + armor + main + hotbar + offhand).
         CREATIVE_DESTROY_ALL = 7,
+        // Server-authoritative pick-block (P key). The client picks an item
+        // off the world (the block being looked at) and asks the server to
+        // place a full stack into `slotIndex` — matching MC's
+        // ServerboundSetCreativeModeSlotPacket. Without going through the
+        // server, the client's local inventory mutation never reaches the
+        // authoritative inventory, so subsequent placements / clicks against
+        // the slot all fail silently.
+        CREATIVE_FILL_SLOT   = 8,
     };
 
     // Sentinel slot indices for InventoryClickC2SPacket.

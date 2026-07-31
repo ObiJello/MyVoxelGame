@@ -10,7 +10,23 @@
 
 #include "DataComponentType.hpp"
 #include "../world/enchantment/ItemEnchantments.hpp"
+#include "../entity/MiningTier.hpp"
 #include "../core/Features.hpp"
+
+namespace Game {
+
+    // Mirrors net.minecraft.world.item.component.Tool (a record carrying the
+    // mining-speed table + correct-tool tier). We collapse MC's "rules list"
+    // (per-block-tag overrides) into a single (toolType, tier, miningSpeed)
+    // tuple — sufficient for vanilla tools where the speed is uniform across
+    // the entire mineable/<tag> set.
+    struct Tool {
+        ToolType   type        = ToolType::None;
+        MiningTier tier        = MiningTier::Wood;
+        float      miningSpeed = 1.0f;
+    };
+
+}
 
 namespace Game::DataComponents {
 
@@ -25,6 +41,12 @@ namespace Game::DataComponents {
     // DataComponents.java:146. Default for enchanted_book is ItemEnchantments::EMPTY
     // per Items.java:2854.
     extern const DataComponentType<ItemEnchantments> STORED_ENCHANTMENTS;
+
+    // The TOOL component carries the mining-speed table + correct-tool tier.
+    // Mirrors MC DataComponents.java:108 + world/item/component/Tool.java.
+    // Present on every tool item (pickaxe/axe/shovel/hoe/sword/shears); absent
+    // on non-tool items (Item.getDestroySpeed returns 1.0 in that case).
+    extern const DataComponentType<Tool> TOOL;
 
     // ── TODO: future component types to register, in MC parity order ────────
     // Each one unlocks a chunk of behaviour by populating Item.use() base

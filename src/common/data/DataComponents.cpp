@@ -5,6 +5,7 @@ namespace Game::DataComponents {
 
     const DataComponentType<bool>             ENCHANTMENT_GLINT_OVERRIDE{"enchantment_glint_override"};
     const DataComponentType<ItemEnchantments> STORED_ENCHANTMENTS       {"stored_enchantments"};
+    const DataComponentType<Tool>             TOOL                      {"tool"};
 
 #if ENABLE_PORTAL_GUN
     const DataComponentType<uint8_t>  PORTAL_GUN_NEXT_COLOR  {"portal_gun_next_color"};

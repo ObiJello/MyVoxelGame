@@ -1,6 +1,7 @@
 // File: src/server/IntegratedServer.cpp
 #include "IntegratedServer.hpp"
 #include "commands/TeleportCommand.hpp"
+#include "commands/KickCommand.hpp"
 #include "network/NetworkServer.hpp"
 #include "network/ServerConnection.hpp"
 #include "network/SendScheduler.hpp"
@@ -118,6 +119,7 @@ namespace Server {
 
         // Register server commands (MC: Commands.java constructor)
         TeleportCommand::Register(m_commandDispatcher);
+        KickCommand::Register(m_commandDispatcher);
         Log::Info("Server commands registered");
 
         // Wire disconnect callback so we broadcast entity removal to other clients
@@ -654,18 +656,27 @@ namespace Server {
         }
         
         switch (packet.action) {
+            // Both legacy BREAK and the staged STOP_DESTROY finalize the
+            // dig and clear the block. START/ABORT are purely informational
+            // (matches PlayerSession::HandleBlockAction).
             case Network::BlockActionType::BREAK:
+            case Network::BlockActionType::STOP_DESTROY:
                 ApplyBlockChange(packet.worldX, packet.worldY, packet.worldZ, Game::BlockID::Air);
                 break;
-                
+
             case Network::BlockActionType::PLACE:
                 ApplyBlockChange(packet.worldX, packet.worldY, packet.worldZ, packet.blockId);
                 break;
-                
+
             case Network::BlockActionType::INTERACT:
                 // TODO: Handle block interaction
-                Log::Debug("Block interaction at (%d, %d, %d)", 
+                Log::Debug("Block interaction at (%d, %d, %d)",
                           packet.worldX, packet.worldY, packet.worldZ);
+                break;
+
+            case Network::BlockActionType::START_DESTROY:
+            case Network::BlockActionType::ABORT_DESTROY:
+                // Informational only (no server-side per-player progress).
                 break;
         }
         

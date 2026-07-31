@@ -1,5 +1,6 @@
 // File: src/common/world/chunk/Chunk.cpp
 #include "Chunk.hpp"
+#include "../block/entity/BlockEntity.hpp"
 #include "../../core/Log.hpp"
 #include "../math/WorldCoordinates.hpp"
 #include <algorithm>
@@ -12,6 +13,12 @@ namespace Game {
             section = nullptr;
         }
     }
+
+    // Out-of-line so unique_ptr<BlockEntity> destructor sees the complete
+    // BlockEntity type (Chunk.hpp only forward-declares it).
+    Chunk::~Chunk()                                = default;
+    Chunk::Chunk(Chunk&&) noexcept                 = default;
+    Chunk& Chunk::operator=(Chunk&&) noexcept      = default;
 
     // Block access (local X/Z coordinates, world Y coordinate)
     BlockID Chunk::GetBlock(int localX, int worldY, int localZ) const {
@@ -110,6 +117,38 @@ namespace Game {
             return false;
         }
         return sections[sectionIndex] != nullptr;
+    }
+
+    // ========================================================================
+    // BLOCK ENTITY STORAGE
+    // ========================================================================
+
+    BlockEntity* Chunk::GetBlockEntity(int localX, int worldY, int localZ) {
+        auto it = m_blockEntities.find(glm::ivec3(localX, worldY, localZ));
+        return (it != m_blockEntities.end()) ? it->second.get() : nullptr;
+    }
+
+    const BlockEntity* Chunk::GetBlockEntity(int localX, int worldY, int localZ) const {
+        auto it = m_blockEntities.find(glm::ivec3(localX, worldY, localZ));
+        return (it != m_blockEntities.end()) ? it->second.get() : nullptr;
+    }
+
+    void Chunk::SetBlockEntity(int localX, int worldY, int localZ,
+                                std::unique_ptr<BlockEntity> entity) {
+        if (!entity) {
+            m_blockEntities.erase(glm::ivec3(localX, worldY, localZ));
+            return;
+        }
+        m_blockEntities[glm::ivec3(localX, worldY, localZ)] = std::move(entity);
+    }
+
+    std::unique_ptr<BlockEntity>
+    Chunk::RemoveBlockEntity(int localX, int worldY, int localZ) {
+        auto it = m_blockEntities.find(glm::ivec3(localX, worldY, localZ));
+        if (it == m_blockEntities.end()) return nullptr;
+        std::unique_ptr<BlockEntity> out = std::move(it->second);
+        m_blockEntities.erase(it);
+        return out;
     }
 
     // Statistics

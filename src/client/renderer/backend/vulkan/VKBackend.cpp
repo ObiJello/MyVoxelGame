@@ -1027,8 +1027,6 @@ namespace Render {
         else if (name == "uFlashIntensity") { m_pushConstants.uScalars.w = value; m_commonUBOData.uScalarsB.w = value; m_commonUBODirty = true; }
         else if (name == "uAmbient")        { m_commonUBOData.uScalarsC.x = value; m_commonUBODirty = true; }
         else if (name == "uAlphaCutoff")    { m_commonUBOData.uScalarsC.y = value; m_commonUBODirty = true; }
-        else if (name == "uExposure")       { m_commonUBOData.uScalarsC.z = value; m_commonUBODirty = true; }
-        else if (name == "uHasBloom")       { m_commonUBOData.uScalarsC.w = value; m_commonUBODirty = true; }
         else if (name == "uHasSprite")      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
         else if (name == "uUseSkin")        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
         else if (name == "uUseTextures")    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }

@@ -506,6 +506,26 @@ namespace Server {
         return result;
     }
 
+    InventoryClickResult InventoryClickHandler::HandleCreativeFillSlot(
+            ServerPlayer& player, int16_t slotIndex, uint32_t itemId) {
+        InventoryClickResult result;
+        if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return result;
+        if (itemId == Game::Items::Air) {
+            // Treat Air as "clear the slot" — matches MC pick-block on an air block.
+            InventorySlot& s = player.getInventory().MutableSlot(slotIndex);
+            if (!s.IsEmpty()) {
+                s.Clear();
+                MarkChanged(result, (uint8_t)slotIndex);
+            }
+            return result;
+        }
+        const int maxStack = ItemRegistry::Get(itemId).maxStackSize;
+        InventorySlot& s = player.getInventory().MutableSlot(slotIndex);
+        s = {itemId, maxStack};
+        MarkChanged(result, (uint8_t)slotIndex);
+        return result;
+    }
+
     // ─── DISPATCH ──────────────────────────────────────────────────────────
     InventoryClickResult InventoryClickHandler::Handle(ServerPlayer& player,
                                                        const Network::InventoryClickC2SPacket& click) {
@@ -544,6 +564,8 @@ namespace Server {
             case Network::ContainerInput::QUICK_CRAFT: return HandleQuickCraft (player, slot, click.button);
             case Network::ContainerInput::PICKUP_ALL:  return HandlePickupAll  (player, slot);
             case Network::ContainerInput::CREATIVE_DESTROY_ALL: return HandleCreativeDestroyAll(player);
+            case Network::ContainerInput::CREATIVE_FILL_SLOT:
+                return HandleCreativeFillSlot(player, slot, click.creativeItemId);
             default:
                 Log::Warning("[InventoryClickHandler] Unknown action %u", (unsigned)click.action);
                 return {};

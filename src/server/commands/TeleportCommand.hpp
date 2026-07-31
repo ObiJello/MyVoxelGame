@@ -1,6 +1,9 @@
 // File: src/server/commands/TeleportCommand.hpp
 // /tp and /teleport command — MC's TeleportCommand.java pattern.
-// Supports: /tp <x> <y> <z>, /tp <player>
+// Supports:
+//   /tp <x> <y> <z>                       — sender to coords
+//   /tp <player>                          — sender to that player
+//   /tp <sourcePlayer> <targetPlayer>     — source player to target player
 #pragma once
 
 #include "CommandDispatcher.hpp"

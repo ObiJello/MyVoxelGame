@@ -48,6 +48,22 @@ namespace Game {
 
         physics.totalTime += deltaTime;
 
+        // Decay the step-up visual offset back toward zero. MC's
+        // Camera.setup interpolates `entity.yo → entity.getY()` over the
+        // partial-tick interval (Camera.java:85) — a one-tick linear lerp.
+        // We approximate the same look with exponential decay tuned so the
+        // remaining offset is ~5% after one MC tick (50 ms) and ~0.25% after
+        // two ticks. tau ≈ tick / ln(20) = 0.05 / 3.0 ≈ 0.0166s ⇒
+        // decay = exp(-dt / tau). Capped at 0 so it never overshoots.
+        if (physics.stepVisualOffset < 0.0f) {
+            constexpr float kStepDecayTau = 0.0166f;
+            const float decay = std::exp(-deltaTime / kStepDecayTau);
+            physics.stepVisualOffset *= decay;
+            if (physics.stepVisualOffset > -1.0e-4f) {
+                physics.stepVisualOffset = 0.0f;
+            }
+        }
+
         // Update sneaking state
         physics.isSneaking = sneakPressed;
 
@@ -99,6 +115,21 @@ namespace Game {
     void HandleJump(PlayerPhysics& physics, bool jumpPressed, float deltaTime, const PhysicsContext& context) {
         if (physics.noclip) return;
         // Water jump bob is handled in the fixed-tick water loop (HandleMovement)
+
+        // Stuck-in-block escape: if the player's AABB currently overlaps
+        // a solid block (clipped into a wall, server placed a block on
+        // them, etc.) they normally can't move OR jump because
+        // isOnGround stays false. Vanilla lets you jump-out anyway —
+        // give a full jump impulse on rising edge so the player can
+        // escape upward one block at a time.
+        const bool stuckInBlock =
+            jumpPressed && !physics.isOnGround &&
+            CheckCollision(physics.position, physics, context);
+        if (stuckInBlock) {
+            physics.velocity.y = PlayerPhysics::JUMP_VELOCITY;
+            physics.lastJumpTime = physics.totalTime;
+            return;
+        }
 
         // Normal ground jump
         if (jumpPressed && physics.isOnGround) {
@@ -313,12 +344,27 @@ namespace Game {
             // MC's Entity.collide()/Shapes.collide). See the matching
             // comment in the water-physics branch above for the bug
             // this prevents.
+            //
+            // Stuck-in-block escape: if the player's current AABB is
+            // already overlapping a solid (clipped into a wall, server
+            // placed a block on them, …), the binary-search snap below
+            // would oscillate between two colliding positions and end
+            // up snapping back to where they started — killing the jump
+            // impulse. When that's the case, just accept the upward
+            // displacement so the player can climb out one jump at a
+            // time. We only relax the rule for upward motion; downward
+            // still snaps so they don't fall through the world.
+            const bool currentlyStuck =
+                CheckCollision(physics.position, physics, context);
             glm::vec3 newPosition = physics.position + glm::vec3(0.0f, movement.y, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.y = newPosition.y;
                 if (movement.y != 0.0f) {
                     physics.isOnGround = false;
                 }
+            } else if (currentlyStuck && movement.y > 0.0f) {
+                physics.position.y = newPosition.y;
+                physics.isOnGround = false;
             } else {
                 float lo = newPosition.y;
                 float hi = physics.position.y;
@@ -364,11 +410,70 @@ namespace Game {
                 }
             }
 
+            // Auto-step (MC's Entity.collide() step-up branch, Entity.java:1089-1118).
+            // When a horizontal move is blocked AND the player is on the ground,
+            // try moving up by `maxUpStep` and re-attempting the move. If that
+            // path is clear, snap the player Y back down to the highest
+            // non-colliding height (so they end up STANDING on the obstacle
+            // rather than levitating). maxUpStep = 0.6 in vanilla (Entity.java
+            // line 3932), which is just enough to clear a 0.5-block slab but
+            // not a full block.
+            constexpr float kMaxUpStep = 0.6f;
+            auto tryStepUp = [&](float dx, float dz) -> bool {
+                if (!physics.isOnGround) return false;
+                // 1. Vertical clearance above current position.
+                glm::vec3 upPos = physics.position + glm::vec3(0.0f, kMaxUpStep, 0.0f);
+                if (CheckCollision(upPos, physics, context)) return false;
+                // 2. Horizontal move at elevated height.
+                glm::vec3 stepPos = upPos + glm::vec3(dx, 0.0f, dz);
+                if (CheckCollision(stepPos, physics, context)) return false;
+                // 3. Snap Y back down to the top surface of whatever we stepped
+                //    onto (binary search between elevated Y and original Y).
+                float lo = physics.position.y;   // would collide if dropped this far
+                float hi = stepPos.y;            // confirmed clear
+                glm::vec3 testPos = stepPos;
+                for (int i = 0; i < 10; ++i) {
+                    const float mid = (lo + hi) * 0.5f;
+                    testPos.y = mid;
+                    if (CheckCollision(testPos, physics, context)) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                const float oldY = physics.position.y;
+                physics.position = glm::vec3(stepPos.x, hi, stepPos.z);
+                // Visual smoothing: shove the eye offset DOWN by the step
+                // delta we just absorbed, then let it decay back to 0 over
+                // the next ~tick. MC's Camera.setup interpolates between yo
+                // (last tick's Y) and getY() (this tick's Y) across the
+                // partial-tick interval (Camera.java:85), which produces a
+                // visibly smooth rise instead of an instant snap. We track
+                // the same delta here. Combines additively with any prior
+                // unresolved offset so back-to-back steps stack instead of
+                // cancelling out.
+                const float dy = hi - oldY;
+                if (dy > 0.0f) {
+                    physics.stepVisualOffset -= dy;
+                    // Don't let the camera drop below 0.6 m below the foot
+                    // (≈ one max step) — if you stack steps faster than the
+                    // offset can decay, just clamp rather than ending up
+                    // looking at the floor.
+                    if (physics.stepVisualOffset < -kMaxUpStep) {
+                        physics.stepVisualOffset = -kMaxUpStep;
+                    }
+                }
+                // Step counts as still on ground; preserve velocity (otherwise
+                // walking up a long slab strip stutters every tick).
+                physics.isOnGround = true;
+                return true;
+            };
+
             // Horizontal collision
             newPosition = physics.position + glm::vec3(movement.x, 0.0f, 0.0f);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.x = newPosition.x;
-            } else {
+            } else if (!tryStepUp(movement.x, 0.0f)) {
                 // Wall collision — kill residual horizontal velocity in
                 // the blocked axis so the player doesn't keep "pushing"
                 // into the wall after hitting one.
@@ -378,7 +483,7 @@ namespace Game {
             newPosition = physics.position + glm::vec3(0.0f, 0.0f, movement.z);
             if (!CheckCollision(newPosition, physics, context)) {
                 physics.position.z = newPosition.z;
-            } else {
+            } else if (!tryStepUp(0.0f, movement.z)) {
                 physics.velocity.z = 0.0f;
             }
 
@@ -417,28 +522,41 @@ namespace Game {
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
-                    if (context.IsBlockSolid(x, y, z)) {
-                        // Block is solid, check AABB intersection
-                        AABB blockAABB(
-                            glm::vec3(x + 0.5f, y + 0.5f, z + 0.5f),
-                            glm::vec3(1.0f, 1.0f, 1.0f)
-                        );
+                    if (!context.IsBlockSolid(x, y, z)) continue;
 
-                        if (playerAABB.Intersects(blockAABB)) {
-                            // Portal-passthrough exception. The block is
-                            // solid AND the player AABB overlaps it, but
-                            // the portal hook may say "this player at
-                            // this position fits inside the portal opening
-                            // — let them through." If the player AABB
-                            // exceeds the opening laterally (e.g. they're
-                            // approaching from the side), the hook returns
-                            // false and the wall stays solid.
-                            if (g_portalPassthrough &&
-                                g_portalPassthrough(x, y, z, playerAABB)) {
-                                continue;
-                            }
-                            return true; // Collision detected
+                    // Per-block collision: MC's `.noCollision()` blocks
+                    // (flowers, grasses, leaf litter, torches, vines, …)
+                    // get walked straight through, even though IsBlockSolid
+                    // still calls them "solid" for opacity / raycast.
+                    const BlockID bid = context.GetBlock(x, y, z);
+                    if (!BlockRegistry::HasCollision(bid)) continue;
+
+                    // Build the block's actual collision AABB from its model
+                    // shape. Full cubes (shape=0..1) produce the same 1×1×1
+                    // box the old code used — no regression. Partial blocks
+                    // (slabs, fences, trapdoors, leaf litter, …) get their
+                    // real shape so the player can stand on a slab without
+                    // floating at full-cube height, walk past a fence post
+                    // through the gaps, etc.
+                    const auto& shape = BlockRegistry::GetBlockShape(bid);
+                    AABB blockAABB;
+                    blockAABB.min = glm::vec3(x, y, z) + shape.min;
+                    blockAABB.max = glm::vec3(x, y, z) + shape.max;
+
+                    if (playerAABB.Intersects(blockAABB)) {
+                        // Portal-passthrough exception. The block is
+                        // solid AND the player AABB overlaps it, but
+                        // the portal hook may say "this player at
+                        // this position fits inside the portal opening
+                        // — let them through." If the player AABB
+                        // exceeds the opening laterally (e.g. they're
+                        // approaching from the side), the hook returns
+                        // false and the wall stays solid.
+                        if (g_portalPassthrough &&
+                            g_portalPassthrough(x, y, z, playerAABB)) {
+                            continue;
                         }
+                        return true; // Collision detected
                     }
                 }
             }
@@ -466,23 +584,39 @@ namespace Game {
                 int blockY = static_cast<int>(std::floor(cornerPosition.y));
                 int blockZ = static_cast<int>(std::floor(cornerPosition.z));
 
-                if (context.IsBlockSolid(blockX, blockY, blockZ)) {
-                    // Portal-passthrough at this corner — degenerate AABB
-                    // collapsed to the corner point. If the corner falls
-                    // inside the portal opening (no surrounding wall
-                    // material at that position), the corner doesn't
-                    // count as support — needed so floor/ceiling portals
-                    // let the player fall through.
-                    if (g_portalPassthrough) {
-                        AABB pointAABB;
-                        pointAABB.min = cornerPosition;
-                        pointAABB.max = cornerPosition;
-                        if (g_portalPassthrough(blockX, blockY, blockZ, pointAABB)) {
-                            continue;
-                        }
+                if (!context.IsBlockSolid(blockX, blockY, blockZ)) continue;
+
+                // noCollision blocks don't provide support — you fall through
+                // a flower / leaf-litter pile the same way you walk through it.
+                const BlockID bid = context.GetBlock(blockX, blockY, blockZ);
+                if (!BlockRegistry::HasCollision(bid)) continue;
+
+                // The check point is 0.1 below the foot — confirm it actually
+                // lies inside the block's collision shape (its top surface may
+                // be lower than the cube top for slabs / leaf litter / etc.).
+                const auto& shape = BlockRegistry::GetBlockShape(bid);
+                const float lx = cornerPosition.x - blockX;
+                const float ly = cornerPosition.y - blockY;
+                const float lz = cornerPosition.z - blockZ;
+                if (lx < shape.min.x || lx > shape.max.x) continue;
+                if (ly < shape.min.y || ly > shape.max.y) continue;
+                if (lz < shape.min.z || lz > shape.max.z) continue;
+
+                // Portal-passthrough at this corner — degenerate AABB
+                // collapsed to the corner point. If the corner falls
+                // inside the portal opening (no surrounding wall
+                // material at that position), the corner doesn't
+                // count as support — needed so floor/ceiling portals
+                // let the player fall through.
+                if (g_portalPassthrough) {
+                    AABB pointAABB;
+                    pointAABB.min = cornerPosition;
+                    pointAABB.max = cornerPosition;
+                    if (g_portalPassthrough(blockX, blockY, blockZ, pointAABB)) {
+                        continue;
                     }
-                    return true;
                 }
+                return true;
             }
         }
 

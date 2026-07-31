@@ -3,6 +3,7 @@
 
 #include "Blocks.hpp"
 #include "BlockModel.hpp"
+#include "../../entity/MiningTier.hpp"
 #include <array>
 #include <string>
 
@@ -69,6 +70,23 @@ namespace Game {
         // Per-block interaction callbacks. Default nullptr → Pass.
         BlockUseWithoutItemFn useWithoutItem = nullptr;
         BlockUseItemOnFn      useItemOn      = nullptr;
+
+        // ── Mining data (MC parity) ────────────────────────────────────────
+        // destroyTime: MC's `strength(destroyTime, ...)` first arg from
+        // Blocks.java. Units are MC seconds at the player's base mining speed
+        // (×30 ticks for the correct tool). -1 = unbreakable (bedrock).
+        // 0 = instant break (grass plant, flower, leaves).
+        float       destroyTime         = 1.0f;
+        bool        requiresCorrectTool = false;
+        ToolType    preferredTool       = ToolType::None;
+        MiningTier  minTier             = MiningTier::Wood;
+
+        // MC's BlockBehaviour.Properties.noCollision(): when false, the block
+        // is non-colliding (the player walks straight through it). Mirrors
+        // Blocks.java's `.noCollision()` on flowers, grasses, leaf litter,
+        // torches, redstone wire, vines, etc. Default true — every full-cube
+        // block keeps its existing solid collision.
+        bool        hasCollision        = true;
     };
 
     class BlockRegistry {
@@ -86,6 +104,30 @@ namespace Game {
 
         // Get model for a block (returns default if not found)
         static const BlockModel& GetBlockModel(BlockID id);
+
+        // Combined outline / selection shape for a block, in [0,1] block-local
+        // coordinates. Computed once per BlockID by unioning the AABB of every
+        // element in the block's model (mirrors MC's collapsing of multi-box
+        // VoxelShapes into a single outline AABB for raycasting + highlight).
+        // Degenerate axes (zero thickness, e.g. leaf litter's flat plane) are
+        // expanded by a sub-pixel epsilon so the wireframe shader doesn't
+        // produce NaN edges. Returns (0,0,0)-(1,1,1) for full cubes and for
+        // blocks whose model couldn't be resolved.
+        struct BlockShape { glm::vec3 min{0.0f}; glm::vec3 max{1.0f}; };
+        static const BlockShape& GetBlockShape(BlockID id);
+
+        // Convenience wrapper around Block::hasCollision so call sites in
+        // physics / world helpers don't have to fetch the whole Block.
+        static bool HasCollision(BlockID id);
+
+        // Slab orientation helpers. MC stores slab `type` (BOTTOM/TOP/DOUBLE)
+        // as a blockstate; we promote each top-half variant to its own
+        // BlockID. SlabTopVariant(bottom) returns the matching `*SlabTop`
+        // BlockID, SlabBottomVariant(top) returns the canonical bottom form
+        // (the one items resolve to). Both return BlockID::Air for non-slabs.
+        static BlockID SlabTopVariant(BlockID bottom);
+        static BlockID SlabBottomVariant(BlockID top);
+        static bool    IsSlabTop(BlockID id);
 
         // Backing storage for all blocks
         static std::array<Block, Size> blockDefinitions;

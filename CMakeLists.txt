@@ -307,6 +307,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/crosshair_vk.frag
             ${VK_SHADER_DIR}/highlight_vk.vert
             ${VK_SHADER_DIR}/highlight_vk.frag
+            ${VK_SHADER_DIR}/block_break_overlay_vk.vert
+            ${VK_SHADER_DIR}/block_break_overlay_vk.frag
             ${VK_SHADER_DIR}/gui_textured_vk.vert
             ${VK_SHADER_DIR}/gui_textured_vk.frag
             ${VK_SHADER_DIR}/gui_color_vk.vert
@@ -368,11 +370,11 @@ if(APPLE)
             src/client/renderer/portal/PortalRenderer.cpp           # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/renderer/portal/PortalCameraTransform.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/renderer/portal/PortalParticleSystem.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/HDRPipeline.cpp              # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/BloomPipeline.cpp            # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/renderer/portal/PortalCrosshair.cpp          # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/renderer/viewmodel/GltfLoader.cpp            # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/renderer/viewmodel/PortalGunViewmodel.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
+            src/client/renderer/viewmodel/HeldItemRenderer.cpp
+            src/client/renderer/viewmodel/HeldItemSpriteMesh.cpp
             src/common/entity/ItemModelLoader.cpp
             src/common/entity/ClientItemLoader.cpp
             src/common/entity/GeneratedItemList.cpp
@@ -388,6 +390,10 @@ if(APPLE)
             src/client/renderer/entity/PlayerRenderer.cpp
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
+            src/client/renderer/mesh/BlockBreakOverlay.cpp
+            src/client/renderer/blockentity/BlockEntityRenderDispatcher.cpp
+            src/client/renderer/blockentity/BlockEntityRenderers.cpp
+            src/client/renderer/blockentity/ChestRenderer.cpp
             src/client/renderer/mesh/ChunkMegaBuffer.cpp
             src/client/renderer/mesh/ChunkRenderer.cpp
             src/client/renderer/mesh/ChunkMeshData.cpp
@@ -416,6 +422,8 @@ if(APPLE)
             src/client/renderer/texture/AtlasBuilder.cpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/common/world/block/BlockRegistry.cpp
+            src/common/world/block/MiningSpeed.cpp
+            src/common/world/block/entity/BlockEntityTypes.cpp
             src/server/player/ServerPlayer.cpp
             src/server/world/storage/SectionDataUnpacker.cpp
             src/server/world/storage/MinecraftChunkLoader.cpp
@@ -436,6 +444,7 @@ if(APPLE)
             src/server/IntegratedServer.cpp
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.cpp
+            src/server/commands/KickCommand.cpp
             src/server/inventory/InventoryClickHandler.cpp
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientBlockAccess.cpp
@@ -532,6 +541,8 @@ else()
             # Client rendering - Mesh
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/BlockHighlight.hpp
+            src/client/renderer/mesh/BlockBreakOverlay.cpp
+            src/client/renderer/mesh/BlockBreakOverlay.hpp
             src/client/renderer/mesh/ChunkMegaBuffer.cpp
             src/client/renderer/mesh/ChunkMegaBuffer.hpp
             src/client/renderer/mesh/ChunkMeshData.cpp
@@ -551,6 +562,15 @@ else()
             src/client/renderer/mesh/SectionMesh.hpp
             src/client/renderer/mesh/MeshJobData.hpp
             src/client/renderer/mesh/SnapshotBuilder.hpp
+
+            # Client rendering - BlockEntity (BER)
+            src/client/renderer/blockentity/BlockEntityRenderer.hpp
+            src/client/renderer/blockentity/BlockEntityRenderDispatcher.hpp
+            src/client/renderer/blockentity/BlockEntityRenderDispatcher.cpp
+            src/client/renderer/blockentity/BlockEntityRenderers.hpp
+            src/client/renderer/blockentity/BlockEntityRenderers.cpp
+            src/client/renderer/blockentity/ChestRenderer.hpp
+            src/client/renderer/blockentity/ChestRenderer.cpp
 
             # Client rendering - Culling
             src/client/renderer/culling/VisibilitySet.hpp
@@ -642,6 +662,15 @@ else()
             src/common/world/block/BlockRegistry.cpp
             src/common/world/block/BlockRegistry.hpp
             src/common/world/block/Blocks.hpp
+            src/common/world/block/MiningSpeed.cpp
+            src/common/world/block/MiningSpeed.hpp
+
+            # Common world - Block entities
+            src/common/world/block/entity/BlockEntity.hpp
+            src/common/world/block/entity/BlockEntityType.hpp
+            src/common/world/block/entity/BlockEntityTypes.hpp
+            src/common/world/block/entity/BlockEntityTypes.cpp
+            src/common/world/block/entity/ChestBlockEntity.hpp
 
             # Common world - Chunk
             src/common/world/chunk/Chunk.cpp
@@ -694,6 +723,8 @@ else()
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.hpp
             src/server/commands/TeleportCommand.cpp
+            src/server/commands/KickCommand.hpp
+            src/server/commands/KickCommand.cpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp
@@ -801,6 +832,7 @@ else()
             src/common/entity/ItemModelLoader.hpp
             src/common/entity/ClientItemLoader.cpp
             src/common/entity/ClientItemLoader.hpp
+            src/common/entity/MiningTier.hpp
             src/common/data/DataComponentMap.cpp
             src/common/data/DataComponentMap.hpp
             src/common/data/DataComponents.cpp
@@ -815,7 +847,7 @@ else()
             # Portal Gun feature — Features.hpp ENABLE_PORTAL_GUN strips
             # bodies when off (so safe to always list). Missing from this
             # block was causing LNK2019 for every Render::g_portal*,
-            # ClientPortalManager, PortalRegistry, HDRPipeline, etc.
+            # ClientPortalManager, PortalRegistry, etc.
             src/common/entity/PortalGunBehavior.cpp
             src/server/portal/PortalRegistry.cpp
             src/server/portal/PortalRegistry.hpp
@@ -827,16 +859,16 @@ else()
             src/client/renderer/portal/PortalCameraTransform.hpp
             src/client/renderer/portal/PortalParticleSystem.cpp
             src/client/renderer/portal/PortalParticleSystem.hpp
-            src/client/renderer/portal/HDRPipeline.cpp
-            src/client/renderer/portal/HDRPipeline.hpp
-            src/client/renderer/portal/BloomPipeline.cpp
-            src/client/renderer/portal/BloomPipeline.hpp
             src/client/renderer/portal/PortalCrosshair.cpp
             src/client/renderer/portal/PortalCrosshair.hpp
             src/client/renderer/viewmodel/GltfLoader.cpp
             src/client/renderer/viewmodel/GltfLoader.hpp
             src/client/renderer/viewmodel/PortalGunViewmodel.cpp
             src/client/renderer/viewmodel/PortalGunViewmodel.hpp
+            src/client/renderer/viewmodel/HeldItemRenderer.cpp
+            src/client/renderer/viewmodel/HeldItemRenderer.hpp
+            src/client/renderer/viewmodel/HeldItemSpriteMesh.cpp
+            src/client/renderer/viewmodel/HeldItemSpriteMesh.hpp
     )
     # Add Vulkan backend source if available (non-Apple builds)
     if(HAS_VULKAN)

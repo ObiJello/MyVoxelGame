@@ -1,6 +1,7 @@
 // File: src/client/renderer/gui/HudRenderer.cpp
 #include "HudRenderer.hpp"
 #include "common/entity/Inventory.hpp"
+#include "common/entity/Item.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
@@ -27,9 +28,35 @@ namespace Render {
     static const char* XP_BAR_PROGRESS_SPRITE = "hud/experience_bar_progress";
 
     void HudRenderer::Render(GuiGraphics& graphics, const Game::Inventory& inventory, float deltaTime) {
-        // Update tooltip timer
-        if (m_toolHighlightTimer > 0) {
-            m_toolHighlightTimer--;
+        // ── Detect selected-item changes — mirrors MC's tickSelectedItemName:
+        //    • currently-held stack empty (air) → timer = 0 immediately
+        //      (text vanishes the moment you switch to an empty slot, no
+        //      lingering fade).
+        //    • currently-held same as the displayed one → just count down.
+        //    • currently-held differs (and is non-air) → restart timer at
+        //      40 ticks × notificationDisplayTime (default 2) = 80 ticks
+        //      → 4.0 s at 20 TPS.
+        //    Suppress the very first observation so the overlay doesn't
+        //    flash on first-spawn.
+        const Game::ItemID currentSelected = inventory.GetSelectedItem();
+        if (m_firstObserve) {
+            m_lastSelected = currentSelected;
+            m_displayedItem = currentSelected;
+            m_firstObserve = false;
+        } else if (currentSelected == Game::Items::Air) {
+            // Empty hand → hide immediately, like MC.
+            m_toolHighlightTimer = 0.0f;
+            m_lastSelected       = currentSelected;
+        } else if (currentSelected != m_lastSelected) {
+            m_lastSelected       = currentSelected;
+            m_displayedItem      = currentSelected;
+            m_toolHighlightTimer = 4.0f;
+        }
+
+        // Update tooltip timer (only counts down when something IS held).
+        if (m_toolHighlightTimer > 0.0f) {
+            m_toolHighlightTimer -= deltaTime;
+            if (m_toolHighlightTimer < 0.0f) m_toolHighlightTimer = 0.0f;
         }
 
         // MC render order: crosshair (separate) → hotbar → health/food/armor → XP bar
@@ -54,9 +81,11 @@ namespace Render {
     }
 
     void HudRenderer::OnSelectedSlotChanged(Game::BlockID blockId) {
+        // Legacy entrypoint — Render() already auto-detects ItemID changes.
+        // Kept compiling for any caller that still passes a BlockID.
         if (blockId != Game::BlockID::Air) {
-            m_toolHighlightTimer = 40 * 2; // 40 ticks * notificationDisplayTime (2 default)
-            m_lastHighlightedBlock = blockId;
+            m_displayedItem      = Game::ItemRegistry::FromBlock(blockId);
+            m_toolHighlightTimer = 4.0f;
         }
     }
 
@@ -101,24 +130,39 @@ namespace Render {
     // ========================================================================
 
     void HudRenderer::RenderSelectedItemName(GuiGraphics& graphics, const Game::Inventory& inventory) {
-        if (m_toolHighlightTimer <= 0) return;
-        if (m_lastHighlightedBlock == Game::BlockID::Air) return;
+        (void)inventory;
+        if (m_toolHighlightTimer <= 0.0f) return;
+        if (m_displayedItem == Game::Items::Air) return;
 
-        // Get block display name from registry (e.g., "Stone", "Grass Block")
-        const auto& block = Game::BlockRegistry::Get(m_lastHighlightedBlock);
-        std::string name = block.name;
+        // Pull the item's display name from the registry. Works for both
+        // block items (where Item.name was copied from BlockRegistry at
+        // init) and pure items (Item.name set from the slug in
+        // GeneratedItemList).
+        const auto& item = Game::ItemRegistry::Get(m_displayedItem);
+        const std::string& name = item.name;
         if (name.empty()) return;
 
-        int strWidth = graphics.GetStringWidth(name);
-        int x = (graphics.GuiWidth() - strWidth) / 2;
-        int y = graphics.GuiHeight() - 59;
+        // MC's Gui.renderSelectedItemName layout exactly:
+        //   x = (guiWidth - font.width(component)) / 2
+        //   y = guiHeight - 59         (+14 if !canHurtPlayer; we always
+        //                               can hurt, so no shift)
+        const int strWidth = graphics.GetStringWidth(name);
+        const int x = (graphics.GuiWidth() - strWidth) / 2;
+        const int y = graphics.GuiHeight() - 59;
 
-        // Fade out (MC: alpha = timer * 256 / 10, capped at 255)
-        int alpha = std::min(255, m_toolHighlightTimer * 256 / 10);
+        // Fade — MC: `int l = (int)(toolHighlightTimer * 256.0F / 10.0F);
+        //              if (l > 255) l = 255;`
+        // We tick in seconds at render rate; convert back to ticks (×20).
+        const float ticks = m_toolHighlightTimer * 20.0f;
+        int alpha = static_cast<int>(ticks * 256.0f / 10.0f);
+        if (alpha > 255) alpha = 255;
         if (alpha <= 0) return;
 
-        uint32_t color = (static_cast<uint32_t>(alpha) << 24) | 0x00FFFFFF;
-        graphics.DrawStringWithBackdrop(name, x, y, strWidth, color);
+        // MC: `guiGraphics.drawString(font, component, j, k, 16777215 + (l << 24));`
+        //   16777215 = 0x00FFFFFF (white RGB), alpha packed into top byte.
+        //   drawString defaults to dropShadow = true — same here. NO backdrop.
+        const uint32_t color = (static_cast<uint32_t>(alpha) << 24) | 0x00FFFFFFu;
+        graphics.DrawString(name, x, y, color, /*dropShadow=*/true);
     }
 
     // ========================================================================

@@ -40,6 +40,15 @@ namespace Server {
         static InventoryClickResult HandleCreativePickup   (ServerPlayer&, uint32_t itemId, uint8_t button);
         static InventoryClickResult HandleCreativeQuickMove(ServerPlayer&, uint32_t itemId);
 
+        // Pick-block (P key): set `slotIndex` to a full stack of `itemId`,
+        // server-authoritatively. Used by the client's pick-block hook so the
+        // resulting stack is reflected in the server's inventory (otherwise
+        // the slot stays empty on the server side and placements / clicks
+        // against it fail silently).
+        static InventoryClickResult HandleCreativeFillSlot(ServerPlayer&,
+                                                           int16_t slotIndex,
+                                                           uint32_t itemId);
+
         // Mark a unique slot as changed.
         static void MarkChanged(InventoryClickResult& r, uint8_t slot);
 

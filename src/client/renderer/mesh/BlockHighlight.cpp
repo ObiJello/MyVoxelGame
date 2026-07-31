@@ -182,7 +182,8 @@ void main() {
         return true;
     }
 
-    void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix) {
+    void BlockHighlight::Render(const glm::ivec3& blockPos, const glm::mat4& projectionMatrix, const glm::mat4& viewMatrix,
+                                const glm::vec3& shapeMin, const glm::vec3& shapeMax) {
         if (m_mesh == INVALID_MESH || m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         PipelineState state;
@@ -200,10 +201,15 @@ void main() {
         // Separate projection and modelview like Minecraft:
         // ProjMat * VIEW_SCALE * ModelViewMat (VIEW_SCALE applied in view space)
         const float VIEW_SHRINK = 1.0f - (1.0f / 256.0f);
+        // The pre-built mesh is a unit cube [0,1]³ with each edge tagged by axis
+        // for the wireframe shader. We position it at `blockPos + shapeMin` and
+        // scale it by (shapeMax - shapeMin) so it outlines the shape's actual
+        // bounds. Full-cube blocks (shapeMin=0, shapeMax=1) reduce to the old
+        // identity-scaled cube at integer position — no regression.
+        const glm::vec3 size = shapeMax - shapeMin;
         glm::mat4 model = glm::translate(glm::mat4(1.0f),
-            glm::vec3(static_cast<float>(blockPos.x),
-                      static_cast<float>(blockPos.y),
-                      static_cast<float>(blockPos.z)));
+            glm::vec3(blockPos) + shapeMin);
+        model = glm::scale(model, size);
         glm::mat4 modelView = viewMatrix * model;
         g_renderBackend->SetUniformMat4(m_shader, "uProjMat", projectionMatrix);
         g_renderBackend->SetUniformMat4(m_shader, "uModelViewMat", modelView);

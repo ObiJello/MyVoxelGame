@@ -5,6 +5,7 @@
 
 #include "GuiGraphics.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/entity/Item.hpp"
 #include "common/entity/Inventory.hpp"  // brings in InventorySlot alias + Inventory class
 #include <string>
 
@@ -21,7 +22,9 @@ namespace Render {
         // Called each frame
         void Render(GuiGraphics& graphics, const Game::Inventory& inventory, float deltaTime);
 
-        // Update selected item tooltip timer (call when selected slot changes)
+        // Legacy hook (kept for any caller that still passes a BlockID).
+        // The Render() path also auto-detects ItemID changes so no caller
+        // is required to invoke this — but it's harmless to call manually.
         void OnSelectedSlotChanged(Game::BlockID blockId);
 
     private:
@@ -37,9 +40,20 @@ namespace Render {
         void RenderExperienceBar(GuiGraphics& graphics);
         void RenderExperienceLevel(GuiGraphics& graphics);
 
-        // State
-        int m_toolHighlightTimer = 0;          // Ticks remaining for item name display
-        Game::BlockID m_lastHighlightedBlock = Game::BlockID::Air;
+        // State — MC's Gui.toolHighlightTimer + lastToolHighlight.
+        // Frames remaining for the item-name overlay (MC uses 40 ticks ×
+        // notificationDisplayTime, default 2 = 80 ticks; we count down at
+        // the render rate to keep things framerate-aware via deltaTime).
+        float m_toolHighlightTimer  = 0.0f;
+        // Item currently being displayed in the overlay (mirrors MC's
+        // `lastToolHighlight`). Set when the player's selected ItemID
+        // changes to a non-air item; cleared when the timer expires.
+        Game::ItemID m_displayedItem = 0;
+        // The selected ItemID we observed last frame. Used to detect
+        // "what's in my hand changed" without needing the rest of the
+        // game to notify us explicitly.
+        Game::ItemID m_lastSelected  = 0;
+        bool         m_firstObserve  = true;
 
         // Placeholder gameplay values (until real systems exist)
         int m_health = 20;        // Half-hearts (20 = full)

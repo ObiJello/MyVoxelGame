@@ -1,6 +1,7 @@
 // File: src/client/input/PlayerController.cpp
 #include "PlayerController.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/MiningSpeed.hpp"
 #include "common/world/level/World.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "../network/NetworkClient.hpp"
@@ -24,16 +25,37 @@ namespace Game {
         : player(nullptr)
         , world(nullptr)
         , networkClient(nullptr)
-        , isBreaking(false)
-        , breakButtonHeld(false)
-        , breakProgress(0.0f)
-        , breakingBlockPos(0)
-        , placeButtonHeld(false)
-        , placeCooldownTimer(0.0f)
-        , rightClickDelayTimer(0.0f)
         , lastMoveSend(std::chrono::steady_clock::now())
     {
         Log::Info("ClientPlayerController initialized");
+    }
+
+    int ClientPlayerController::GetDestroyStage() const {
+        if (!digState.isDestroying) return -1;
+        return Game::GetDestroyStage(digState.destroyProgress);
+    }
+
+    bool ClientPlayerController::ConsumeMiningSwingTrigger() {
+        if (armSwingPending) { armSwingPending = false; return true; }
+        return false;
+    }
+
+    void ClientPlayerController::SendDigPacket(Network::BlockActionType action,
+                                               const glm::ivec3& pos, BlockID blockId) {
+        if (!networkClient || !networkClient->IsConnected()) return;
+        Network::BlockActionC2SPacket packet;
+        packet.worldX = pos.x;
+        packet.worldY = pos.y;
+        packet.worldZ = pos.z;
+        packet.action = action;
+        packet.blockId = blockId;
+        packet.face = 0;
+        packet.sequenceNumber = ++interactSeq;
+        auto data = Network::Serialization::Serialize(packet);
+        auto connection = networkClient->GetConnection();
+        if (connection) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
+        }
     }
 
     void ClientPlayerController::SetPlayer(ClientPlayer* playerPtr) {
@@ -57,21 +79,18 @@ namespace Game {
             return;
         }
 
-        // Update breaking progress
-        UpdateBreaking(deltaTime);
-
-        // Update place cooldown
-        if (placeCooldownTimer > 0.0f) {
-            placeCooldownTimer -= deltaTime;
+        // Fixed-step 20 TPS state machine. Accumulate wall-clock time and
+        // step UpdateBreakingTick / UpdatePlacingTick one tick at a time so
+        // mining speed is framerate-independent (matches MC).
+        tickAccum += deltaTime;
+        // Guard against huge dt (window-drag, breakpoint) — clamp to 1s of
+        // ticks so we don't run hundreds of catch-up iterations.
+        if (tickAccum > 1.0f) tickAccum = 1.0f;
+        while (tickAccum >= TICK_DT) {
+            tickAccum -= TICK_DT;
+            UpdateBreakingTick();
+            UpdatePlacingTick();
         }
-        
-        // Update right click delay timer (Minecraft-style rate limiting)
-        if (rightClickDelayTimer > 0.0f) {
-            rightClickDelayTimer -= deltaTime;
-        }
-
-        // NOTE: Block placement now only happens via network packets
-        // The server will send back block changes that update the world
 
 #if ENABLE_PORTAL_GUN
         // Tick any in-flight portal-gun projectiles; on impact each one
@@ -99,67 +118,56 @@ namespace Game {
         // }
     }
 
-    void ClientPlayerController::StartDig(const glm::ivec3& pos, int face) {
-        // TODO: Send start dig packet to server
-        // For now, just start the local breaking animation
-        isBreaking = true;
-        breakProgress = 0.0f;
-        breakingBlockPos = pos;
+    void ClientPlayerController::StartDig(const glm::ivec3& pos, int /*face*/) {
+        // MC's MultiPlayerGameMode.startDestroyBlock:
+        //   if (block is breakable && ...) {
+        //       progress = 0;
+        //       destroyBlockPos = pos;
+        //       isDestroying = true;
+        //       send START_DESTROY_BLOCK packet;
+        //   }
+        digState.isDestroying    = true;
+        digState.destroyProgress = 0.0f;
+        digState.destroyTicks    = 0;
+        digState.destroyBlockPos = pos;
+        digState.lastSwingTick   = -1000;
 
-        // Cache block ID now — by the time FinishBreaking runs, the server
-        // may have already set this position to Air via BlockChangeS2C.
-        breakingBlockId = BlockID::Air;
+        // Cache block ID at start — the world may already be Air by the time
+        // we want to finalise (integrated server shares the world).
+        digState.destroyingBlockId = BlockID::Air;
         if (world) {
-            try {
-                breakingBlockId = world->GetBlock(pos.x, pos.y, pos.z);
-            } catch (...) {}
+            try { digState.destroyingBlockId = world->GetBlock(pos.x, pos.y, pos.z); }
+            catch (...) {}
         }
 
-        Log::Debug("Started breaking block at (%d, %d, %d) type=%d",
-                  breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z,
-                  static_cast<int>(breakingBlockId));
-        
-        // TODO: Send packet
-        // net->SendBlockDig(START_DESTROY_BLOCK, pos, face, ++interactSeq);
+        SendDigPacket(Network::BlockActionType::START_DESTROY, pos, digState.destroyingBlockId);
+        // First swing fires immediately on press.
+        armSwingPending = true;
     }
 
     void ClientPlayerController::AbortDig() {
-        if (isBreaking) {
-            // TODO: Send abort dig packet to server
-            // net->SendBlockDig(ABORT_DESTROY_BLOCK, breakingBlockPos, 0, ++interactSeq);
-            
-            isBreaking = false;
-            breakProgress = 0.0f;
-            Log::Debug("Breaking cancelled");
-        }
+        if (!digState.isDestroying) return;
+        SendDigPacket(Network::BlockActionType::ABORT_DESTROY,
+                      digState.destroyBlockPos, digState.destroyingBlockId);
+        digState.isDestroying    = false;
+        digState.destroyProgress = 0.0f;
+        digState.destroyTicks    = 0;
     }
 
     void ClientPlayerController::FinishDig() {
-        // Send block break to server (server-authoritative)
-        if (networkClient && networkClient->IsConnected()) {
-            Network::BlockActionC2SPacket packet;
-            packet.worldX = breakingBlockPos.x;
-            packet.worldY = breakingBlockPos.y;
-            packet.worldZ = breakingBlockPos.z;
-            packet.action = Network::BlockActionType::BREAK;
-            // Carry the block ID we're breaking. In integrated-server mode the client
-            // applies SetBlock(Air) locally for immediate visual feedback BEFORE this
-            // packet reaches the server, and since both share the same World object the
-            // server's world->GetBlock(pos) returns Air by the time HandleBlockAction
-            // runs — making the server unable to add the broken block to inventory.
-            packet.blockId = breakingBlockId;
-            packet.face = 0;
-            packet.sequenceNumber = ++interactSeq;
+        // STOP_DESTROY is the MC finish action. The server clears the block
+        // and credits the player's inventory.
+        SendDigPacket(Network::BlockActionType::STOP_DESTROY,
+                      digState.destroyBlockPos, digState.destroyingBlockId);
 
-            auto data = Network::Serialization::Serialize(packet);
-            auto connection = networkClient->GetConnection();
-            if (connection) {
-                connection->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
-            }
-        }
-
-        // Also handle locally for immediate feedback
+        // Local prediction (integrated server convenience — gives instant
+        // visual feedback before the BlockChangeS2C echo).
         FinishBreaking();
+
+        digState.isDestroying    = false;
+        digState.destroyProgress = 0.0f;
+        digState.destroyTicks    = 0;
+        digState.destroyDelay    = POST_BREAK_DELAY_TICKS;
     }
 
     void ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract) {
@@ -235,25 +243,109 @@ namespace Game {
         Log::Debug("TODO: SendUseItem not yet implemented (hand=%d)", hand);
     }
 
-    void ClientPlayerController::UpdateBreaking(float deltaTime) {
-        if (!isBreaking || !breakButtonHeld || !player) {
+    void ClientPlayerController::UpdateBreakingTick() {
+        if (!player) return;
+
+        // Post-break delay (MC: 5 ticks after a successful break before the
+        // next click can re-arm a dig).
+        if (digState.destroyDelay > 0) {
+            --digState.destroyDelay;
             return;
         }
 
-        // Check if we still have sight of the breaking block
+        if (!breakButtonHeld) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
+
         const auto& currentHit = player->lastBlockHit;
-        if (!currentHit.has_value() || currentHit->blockPos != breakingBlockPos) {
-            AbortDig();
+        const bool haveTarget = currentHit.has_value();
+        const glm::ivec3 hitPos = haveTarget ? currentHit->blockPos : glm::ivec3(0, -1024, 0);
+
+        // No target while held — nothing to do this tick.
+        if (!haveTarget) {
+            if (digState.isDestroying) AbortDig();
             return;
         }
 
-        // Increase break progress
-        breakProgress += deltaTime / BREAK_TIME;
+        // Target changed mid-mine: abort and restart on the new block.
+        if (digState.isDestroying && hitPos != digState.destroyBlockPos) {
+            AbortDig();
+        }
 
-        // Check if block is broken
-        if (breakProgress >= 1.0f) {
+        // (Re-)start dig if not currently mining.
+        if (!digState.isDestroying) {
+            StartDig(hitPos, currentHit->hitFace);
+            // Fall through so we ALSO get one tick of progress this frame.
+        }
+
+        // Look up the block; refresh the cached ID if it changed (rare —
+        // server might have set a different block during the mine).
+        BlockID currentBlock = digState.destroyingBlockId;
+        if (world) {
+            try {
+                BlockID worldBlock = world->GetBlock(hitPos.x, hitPos.y, hitPos.z);
+                if (worldBlock != BlockID::Air) {
+                    currentBlock = worldBlock;
+                    digState.destroyingBlockId = worldBlock;
+                }
+            } catch (...) {}
+        }
+        const Block& block = BlockRegistry::Get(currentBlock);
+
+        // Per-tick progress increment (MC's BlockBehaviour.getDestroyProgress).
+        const Game::ItemID held = player->inventory.GetSelectedItem();
+        const bool onGround = player->physics.isOnGround;
+        const float inc = GetDestroyProgressPerTick(held, block, onGround);
+
+        digState.destroyProgress += inc;
+        digState.destroyTicks    += 1;
+
+        // Continuous-mine arm swing (MC: every 4 ticks while mining).
+        if (digState.destroyTicks - digState.lastSwingTick >= MINE_SWING_TICKS) {
+            armSwingPending = true;
+            digState.lastSwingTick = digState.destroyTicks;
+        }
+
+        if (digState.destroyProgress >= 1.0f) {
             FinishDig();
         }
+    }
+
+    void ClientPlayerController::UpdatePlacingTick() {
+        if (!player) return;
+        if (ticksSincePlace < 1000) ++ticksSincePlace;
+
+        if (!placeButtonHeld) return;
+        // First-click placement already happens on the RMB edge in OnRMB.
+        // Continuous-RMB re-fires every PLACE_REFIRE_TICKS while held.
+        if (ticksSincePlace < PLACE_REFIRE_TICKS) return;
+
+        const auto& currentHit = player->lastBlockHit;
+        if (!currentHit.has_value()) return;
+
+        // Only re-fire for items that actually place blocks; for tools we
+        // already fired on the edge and shouldn't keep spamming.
+        const Game::ItemID held = player->inventory.GetSelectedItem();
+        if (held == Game::Items::Air) return;
+        if (!ItemRegistry::IsBlockItem(held)) return;
+
+#if ENABLE_PORTAL_GUN
+        // PortalGun: continuous-RMB does NOT spam projectiles (its OnRMB edge
+        // already started the projectile + viewmodel anim). Skip.
+        if (held == Game::Items::PortalGun) return;
+#endif
+
+        OnHotbarChanged(player->inventory.GetSelectedSlot());
+        SendUseItemOn(*currentHit, 0);
+        if (player->GetSelectedBlock() != BlockID::Air) {
+            player->inventory.ConsumeSelectedBlock();
+        }
+        ticksSincePlace = 0;
+        // Each repeat-place during held-RMB plays the arm swing, matching
+        // MC. The first place is handled by OnRMB's edge-trigger feeding
+        // placeEdge in PlatformMain; this covers every subsequent one.
+        armSwingPending = true;
     }
 
     void ClientPlayerController::OnHotbarChanged(int slot) {
@@ -275,6 +367,46 @@ namespace Game {
         }
     }
 
+    void ClientPlayerController::OnPickBlock(BlockID picked) {
+        if (!player) return;
+        if (picked == BlockID::Air) return;
+
+        // MC normalises blockstate-only variants back to the canonical block
+        // before giving the player an item — picking a TOP slab yields the
+        // base slab item (placement-time logic re-derives the orientation
+        // from the click). Without this, pick-block on a top slab would put
+        // a "top" item in the inventory which renders weird in the HUD and
+        // bypasses the normal SlabBlock.getStateForPlacement decision.
+        if (Game::BlockRegistry::IsSlabTop(picked)) {
+            picked = Game::BlockRegistry::SlabBottomVariant(picked);
+        }
+
+        const int slot = player->inventory.GetSelectedSlot();
+        const int unifiedSlot = Game::Inventory::HotbarToIndex(slot);
+        const Game::ItemID itemId = Game::ItemRegistry::FromBlock(picked);
+
+        // Predictive client-side fill so the HUD updates instantly. The server
+        // will echo back an InventorySetSlotS2C that either confirms or
+        // corrects this. (Without the predictive update the HUD would lag a
+        // round-trip behind every pick-block.)
+        const int maxStack = Game::ItemRegistry::Get(itemId).maxStackSize;
+        player->inventory.SetSlot(unifiedSlot, itemId, maxStack);
+
+        // Authoritative request — server will mutate its own inventory state.
+        if (networkClient && networkClient->IsConnected()) {
+            Network::InventoryClickC2SPacket pkt;
+            pkt.slotIndex      = static_cast<int16_t>(unifiedSlot);
+            pkt.button         = 0;
+            pkt.action         = static_cast<uint8_t>(Network::ContainerInput::CREATIVE_FILL_SLOT);
+            pkt.flags          = 0;
+            pkt.creativeItemId = static_cast<uint32_t>(itemId);
+            auto data = Network::Serialization::Serialize(pkt);
+            if (auto conn = networkClient->GetConnection()) {
+                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryClickC2S), data);
+            }
+        }
+    }
+
     void ClientPlayerController::OnRespawnRequest() {
         // TODO: Implement respawn request for multiplayer
         // This would send a client command packet to respawn
@@ -291,10 +423,6 @@ namespace Game {
 
 #if ENABLE_PORTAL_GUN
             // PortalGun hijacks left-click for blue-portal placement.
-            // Fire a true projectile — it sweeps through the world each
-            // tick and, on first solid hit, sends UseItemOnC2S so the
-            // server places the portal at the impact face. No look-raycast
-            // dependency: the player can fire across long sight-lines.
             const Game::ItemID held = player->inventory.GetSelectedItem();
             if (held != Game::ItemID(0) && held == Game::Items::PortalGun) {
                 SpawnPortalProjectile(/*isOrange=*/false);
@@ -302,27 +430,65 @@ namespace Game {
             }
 #endif
 
+            // MC parity: startDestroyBlock runs SYNCHRONOUSLY on the click —
+            // it doesn't wait for the next continueDestroyBlock tick AND it
+            // doesn't check destroyDelay. So a fresh click right after a
+            // break starts the new dig instantly. (destroyDelay only blocks
+            // held-mining continuation; releasing LMB ends the sequence it
+            // belongs to — see OnLMB(false) below.)
+            digState.destroyDelay = 0;
             const auto& currentHit = player->lastBlockHit;
-            if (currentHit.has_value() && !isBreaking) {
+            if (currentHit.has_value()) {
+                // Instant-break check (MC's `if (f >= 1.0F) destroyBlock(pos)`):
+                // grass/flowers/torches break inside startDestroyBlock without
+                // entering the held-mining state. Mirror that.
+                BlockID hereBlock = BlockID::Air;
+                if (world) {
+                    try { hereBlock = world->GetBlock(currentHit->blockPos.x,
+                                                       currentHit->blockPos.y,
+                                                       currentHit->blockPos.z); }
+                    catch (...) {}
+                }
+                if (hereBlock != BlockID::Air) {
+                    const Block& block = BlockRegistry::Get(hereBlock);
+                    const float inc = GetDestroyProgressPerTick(
+                        player->inventory.GetSelectedItem(), block,
+                        player->physics.isOnGround);
+                    if (inc >= 1.0f) {
+                        // Instant break — set up minimal state so FinishDig's
+                        // packet/inventory path runs, then fire it.
+                        digState.destroyBlockPos    = currentHit->blockPos;
+                        digState.destroyingBlockId  = hereBlock;
+                        digState.destroyProgress   = 1.0f;
+                        digState.isDestroying      = true;
+                        armSwingPending            = true;
+                        FinishDig();
+                        return;
+                    }
+                }
                 StartDig(currentHit->blockPos, currentHit->hitFace);
             }
+            // No target yet (player aiming at sky / past raycast range) —
+            // UpdateBreakingTick will start the dig as soon as a target
+            // appears under the crosshair.
         } else {
             breakButtonHeld = false;
-
-            if (isBreaking) {
-                AbortDig();
-            }
+            // Releasing LMB ends the held-mining sequence the destroyDelay
+            // belongs to. Without this, the player gets a 5-tick "first
+            // click after a break" lag every time they tap LMB.
+            digState.destroyDelay = 0;
+            if (digState.isDestroying) AbortDig();
         }
     }
 
     void ClientPlayerController::OnRMB(bool pressed) {
         if (!player) return;
-        
+
         if (pressed) {
-            Log::Debug("OnRMB pressed, rightClickDelayTimer=%.3f", rightClickDelayTimer);
-            
-            // Check if we should process this click (rate limiting)
-            if (rightClickDelayTimer <= 0.0f) {
+            // RMB EDGE — fire one placement / use immediately. While-held
+            // re-fires are handled by UpdatePlacingTick at MC's 4-tick cadence
+            // (no wall-clock throttle).
+            {
                 const auto& currentHit = player->lastBlockHit;
 
 #if ENABLE_PORTAL_GUN
@@ -371,7 +537,7 @@ namespace Game {
                         } else {
                             SpawnPortalProjectile(/*isOrange=*/true);
                         }
-                        rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                        ticksSincePlace = 0;
                         placeButtonHeld = true;
                         return;
                     }
@@ -381,7 +547,7 @@ namespace Game {
                 // TODO: Check for entity hit first when entity system exists
                 // if (player->lastEntityHit.has_value()) {
                 //     SendUseEntity(*player->lastEntityHit, 0);  // Interact with entity
-                //     rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                //     ticksSincePlace = 0;
                 // } else
                 if (currentHit.has_value()) {
                     // Targeting a block — send UseItemOn regardless of what we
@@ -406,12 +572,12 @@ namespace Game {
                     if (player->GetSelectedBlock() != BlockID::Air) {
                         player->inventory.ConsumeSelectedBlock();
                     }
-                    rightClickDelayTimer = RIGHT_CLICK_DELAY;  // rate limiting
+                    ticksSincePlace = 0;
                 } else {
                     // No block target — use item in air (Bow draw, EnderPearl
                     // throw, food eat, etc.). Server-side `Item.use` handles it.
                     SendUseItem(0);  // 0 = main hand
-                    rightClickDelayTimer = RIGHT_CLICK_DELAY;
+                    ticksSincePlace = 0;
                 }
             }
             placeButtonHeld = true;
@@ -468,7 +634,7 @@ namespace Game {
         if (placementSuccessful) {
             player->stats.blocksPlaced++;
             player->stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
-            placeCooldownTimer = PLACE_COOLDOWN;
+            ticksSincePlace = 0;
 
             // Remeshing triggered by server's BlockChangeS2C → ProcessBlockChange
             // (handles neighbor boundaries correctly, avoids race conditions).
@@ -489,32 +655,18 @@ namespace Game {
             return;
         }
 
-        const auto& currentHit = player->lastBlockHit;
-        if (!currentHit.has_value()) {
-            return;
-        }
-
         // Use the cached block ID from StartDig — the world position may already
         // be Air if the server processed BlockActionC2S before we got here.
-        BlockID brokenBlock = breakingBlockId;
+        BlockID brokenBlock = digState.destroyingBlockId;
+        const glm::ivec3 pos = digState.destroyBlockPos;
 
-        if (brokenBlock == BlockID::Bedrock) {
-            Log::Debug("Cannot break bedrock");
-            isBreaking = false;
-            breakProgress = 0.0f;
-            return;
-        }
-
-        if (brokenBlock == BlockID::Air) {
-            Log::Debug("Cannot break air");
-            isBreaking = false;
-            breakProgress = 0.0f;
+        if (brokenBlock == BlockID::Bedrock || brokenBlock == BlockID::Air) {
             return;
         }
 
         bool breakingSuccessful = false;
         try {
-            breakingSuccessful = world->SetBlock(breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z, BlockID::Air);
+            breakingSuccessful = world->SetBlock(pos.x, pos.y, pos.z, BlockID::Air);
         } catch (const std::exception& e) {
             Log::Error("Exception during block breaking: %s", e.what());
             breakingSuccessful = false;
@@ -541,15 +693,11 @@ namespace Game {
 
             const Block& block = BlockRegistry::Get(brokenBlock);
             Log::Info("Broke %s at (%d, %d, %d)",
-                     block.name.c_str(), breakingBlockPos.x,
-                     breakingBlockPos.y, breakingBlockPos.z);
+                     block.name.c_str(), pos.x, pos.y, pos.z);
         } else {
             Log::Warning("Failed to break block at (%d, %d, %d)",
-                        breakingBlockPos.x, breakingBlockPos.y, breakingBlockPos.z);
+                        pos.x, pos.y, pos.z);
         }
-
-        isBreaking = false;
-        breakProgress = 0.0f;
     }
 
     bool ClientPlayerController::CanPlaceBlockAt(const glm::ivec3& pos) {

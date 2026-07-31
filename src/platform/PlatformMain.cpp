@@ -29,13 +29,15 @@
 #include "client/renderer/core/Frustum.hpp"
 #include "client/renderer/shader/Shader.hpp"
 #include "client/renderer/mesh/BlockHighlight.hpp"
+#include "client/renderer/mesh/BlockBreakOverlay.hpp"
+#include "client/renderer/blockentity/BlockEntityRenderDispatcher.hpp"
+#include "client/renderer/blockentity/BlockEntityRenderers.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
 #if ENABLE_PORTAL_GUN
 #include "client/renderer/portal/PortalRenderer.hpp"
 #include "client/renderer/portal/PortalParticleSystem.hpp"
-#include "client/renderer/portal/HDRPipeline.hpp"
-#include "client/renderer/portal/BloomPipeline.hpp"
 #include "client/renderer/viewmodel/PortalGunViewmodel.hpp"
+#include "client/renderer/viewmodel/HeldItemRenderer.hpp"
 #include "client/renderer/portal/PortalCrosshair.hpp"
 #include "common/entity/Item.hpp"
 #include "client/portal/ClientPortalManager.hpp"
@@ -163,8 +165,28 @@ bool s_eKeyHeld = false;
     void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj, const glm::mat4& view) {
         const auto& hit = player.lastBlockHit;
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
-            Render::g_blockHighlight.Render(hit->blockPos, proj, view);
+            // Use the block's actual model-shape bounds so partial blocks (leaf
+            // litter, slabs, fences, …) outline their real geometry instead of
+            // the enclosing full cube.
+            const auto& shape = Game::BlockRegistry::GetBlockShape(hit->blockId);
+            Render::g_blockHighlight.Render(hit->blockPos, proj, view, shape.min, shape.max);
         }
+    }
+
+    void RenderBlockBreakOverlay(const Game::ClientPlayerController& pc,
+                                  const glm::mat4& proj, const glm::mat4& view) {
+        const int stage = pc.GetDestroyStage();
+        if (stage < 0) {
+            Render::g_blockBreakOverlay.Clear();
+            return;
+        }
+        const glm::ivec3 bp = pc.GetBreakingPos();
+        // Size the crack overlay to the block's actual shape so partial
+        // blocks (leaf litter, slabs, …) don't get a full-cube crack
+        // floating above / around their geometry.
+        const auto& shape = Game::BlockRegistry::GetBlockShape(pc.GetBreakingBlockId());
+        Render::g_blockBreakOverlay.SetTarget(bp, stage, shape.min, shape.max);
+        Render::g_blockBreakOverlay.Render(proj, view);
     }
 
     void RenderCrosshair(GLFWwindow* window) {
@@ -421,16 +443,15 @@ bool s_eKeyHeld = false;
         if (Input::IsKeyPressed(Input::Key::Alpha8)) controller.OnHotbarChanged(7);
         if (Input::IsKeyPressed(Input::Key::Alpha9)) controller.OnHotbarChanged(8);
 
-        // Pick block (P key) — set selected slot to the block being looked at
+        // Pick block (P key) — server-authoritative. The previous flow only
+        // mutated the client's local inventory, so the server's view stayed
+        // empty and every subsequent placement / inventory-click silently
+        // failed (with the predictive HUD count drifting down to 0). The
+        // controller now both predicts the local change AND sends an
+        // InventoryClickC2S {CREATIVE_FILL_SLOT} so the server matches.
         if (Input::IsKeyPressed(Input::Key::P)) {
             if (player.lastBlockHit.has_value()) {
-                Game::BlockID pickedBlock = player.lastBlockHit->blockId;
-                if (pickedBlock != Game::BlockID::Air) {
-                    int slot = player.inventory.GetSelectedSlot();
-                    player.inventory.SetSlot(Game::Inventory::HotbarToIndex(slot), pickedBlock, 64);
-                    // Sync with server (sends slot + block type)
-                    controller.OnHotbarChanged(slot);
-                }
+                controller.OnPickBlock(player.lastBlockHit->blockId);
             }
         }
 
@@ -589,6 +610,25 @@ bool s_eKeyHeld = false;
             return false;
         }
 
+        // Crumbling overlay (the 10-stage crack texture drawn while mining).
+        // Non-fatal: a missing shader just hides the overlay — mining still works.
+        if (!Render::g_blockBreakOverlay.Initialize()) {
+            Log::Warning("Failed to initialize block break overlay (crack textures will not render)");
+        }
+
+        // Block-entity dispatcher + per-type renderers (chest, sign, banner,
+        // bed, shulker, …). Must run after backend init so renderers can
+        // create shaders and textures. Non-fatal: missing renderer → BE is
+        // simply not drawn in-world.
+        Render::RegisterAllBlockEntityRenderers();
+
+        // Vanilla first-person held-item renderer. Always enabled —
+        // independent of the portal feature flag. Non-fatal failure:
+        // if shaders don't load, nothing renders in the hand slot.
+        if (!Render::g_heldItemRenderer.Initialize()) {
+            Log::Warning("Held item renderer init failed — hotbar items will not appear in hand");
+        }
+
 #if ENABLE_PORTAL_GUN
         // Phase 4 placeholder portal renderer. Failure is non-fatal — log and
         // continue (the rest of the game should still work; portals just
@@ -599,21 +639,6 @@ bool s_eKeyHeld = false;
         // Particle system for the rim sparks. Same non-fatal contract.
         if (!Render::g_portalParticleSystem.Initialize()) {
             Log::Warning("Portal particle system init failed — sparks will not draw");
-        }
-        // HDR pipeline — wraps the main scene render in an offscreen
-        // RGBA16F target and tone-maps to the LDR backbuffer. Required
-        // for the bright rim crest to drive the bloom pass (Phase C).
-        // Non-fatal: if the backend lacks RT support (early Vulkan),
-        // BeginHDRPass / EndHDRPassAndComposite become no-ops and
-        // rendering proceeds to the LDR backbuffer like pre-portal-feature.
-        if (!Render::g_hdrPipeline.Initialize()) {
-            Log::Warning("HDR pipeline init failed — portal will render LDR (no bloom)");
-        }
-        // Bloom pipeline — runs on the HDR RT before tone map. Non-fatal:
-        // if shaders fail to compile, bloom is skipped (HDR + tone map
-        // still works).
-        if (!Render::g_bloomPipeline.Initialize()) {
-            Log::Warning("Bloom pipeline init failed — portals will render without bloom");
         }
         // First-person portal-gun viewmodel — loads the real Portal v_portalgun
         // mesh (extracted via SourceIO from Portal-Root/) + its VTF→PNG
@@ -1217,6 +1242,8 @@ bool s_eKeyHeld = false;
                 bool homeDown  = glfwGetKey(window, GLFW_KEY_HOME)  == GLFW_PRESS;
                 bool endDown   = glfwGetKey(window, GLFW_KEY_END)   == GLFW_PRESS;
                 bool deleteDown = glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS;
+                bool tabDown    = glfwGetKey(window, GLFW_KEY_TAB)    == GLFW_PRESS;
+                static bool tabHeld = false;
                 if (upDown    && !upHeld)    g_chatScreen.OnKeyDown(GLFW_KEY_UP);
                 if (downDown  && !downHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
                 if (leftDown  && !leftHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_LEFT);
@@ -1224,9 +1251,11 @@ bool s_eKeyHeld = false;
                 if (homeDown  && !homeHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_HOME);
                 if (endDown   && !endHeld)   g_chatScreen.OnKeyDown(GLFW_KEY_END);
                 if (deleteDown && !deleteHeld) g_chatScreen.OnKeyDown(GLFW_KEY_DELETE);
+                if (tabDown && !tabHeld)     g_chatScreen.OnKeyDown(GLFW_KEY_TAB);
                 upHeld = upDown; downHeld = downDown;
                 leftHeld = leftDown; rightHeld = rightDown;
                 homeHeld = homeDown; endHeld = endDown; deleteHeld = deleteDown;
+                tabHeld = tabDown;
 
                 g_chatScreen.Update(1.0f / 60.0f); // Approximate frame dt for cursor blink
 
@@ -1426,6 +1455,62 @@ bool s_eKeyHeld = false;
                     networkClient->GetConnection()->SendPlayerMove(movePacket);
                 }
 
+                // 5. Held-item viewmodel: per-tick state advance (equip
+                //    swap detection, swing timer, etc). Rising-edge of
+                //    the attack button drives the swing animation; we
+                //    track previous state across ticks here.
+                {
+                    static bool s_prevLmbHeld = false;
+                    static bool s_prevRmbHeld = false;
+                    // Vanilla triggers the swing on:
+                    //   • LMB rising edge — every attack swings
+                    //   • RMB rising edge ONLY when the click would
+                    //     actually place a block (held item is a block
+                    //     item AND we're aimed at a placeable surface).
+                    //     Right-clicking with a tool / food / empty
+                    //     hand etc. doesn't swing.
+                    //
+                    // The inventory / chat / pause screen open check
+                    // suppresses both and resets the rising-edge latches
+                    // so closing the screen while still holding a button
+                    // doesn't fire a phantom swing on the first post-
+                    // close tick.
+                    const bool screenOpen =
+                        Render::GetInventoryScreen().IsOpen();
+                    const bool lmbHeld = !screenOpen &&
+                        Input::IsMouseButtonDown(Input::Key::LeftMouse);
+                    const bool rmbHeld = !screenOpen &&
+                        Input::IsMouseButtonDown(Input::Key::RightMouse);
+                    const bool lmbEdge = lmbHeld && !s_prevLmbHeld;
+                    const bool rmbEdge = rmbHeld && !s_prevRmbHeld;
+                    s_prevLmbHeld = lmbHeld;
+                    s_prevRmbHeld = rmbHeld;
+
+                    // RMB → swing only if the click will place a block.
+                    bool placeEdge = false;
+                    if (rmbEdge) {
+                        const Game::ItemID held = player.inventory.GetSelectedItem();
+                        if (held != Game::ItemID(0) &&
+                            player.lastBlockHit.has_value() &&
+                            Game::ItemRegistry::Get(held).renderType
+                                == Game::ItemRenderType::Block) {
+                            placeEdge = true;
+                        }
+                    }
+
+                    // Held-action swing pump: PlayerController flags a swing
+                    // each time continuous mining ticks (MC's continueDestroyBlock
+                    // cadence) AND each time held-RMB re-fires a placement
+                    // (every PLACE_REFIRE_TICKS). Without the place-side flag
+                    // the arm only swung on the initial RMB edge, not on
+                    // subsequent placements in a contiguous strip.
+                    const bool armSwing = playerController.ConsumeMiningSwingTrigger();
+
+                    Render::g_heldItemRenderer.Tick(
+                        player.inventory.GetSelectedItem(),
+                        lmbEdge || placeEdge || armSwing);
+                }
+
                 nextClientTick += CLIENT_TICK_INTERVAL;
                 ticksThisFrame++;
             }
@@ -1560,16 +1645,8 @@ bool s_eKeyHeld = false;
             // Reset per-frame render stats
             metrics.ResetFrameMetrics();
 
-            // Get framebuffer size — needed by HDR pass setup AND viewport.
+            // Get framebuffer size — needed for viewport.
             glfwGetFramebufferSize(window, &width, &height);
-
-#if ENABLE_PORTAL_GUN
-            // Redirect main scene + portal rendering into the HDR
-            // offscreen RT. Binds the RT, clears it. If HDR pipeline
-            // is inactive (backend lacks RT support), this is a no-op
-            // and rendering continues to the backbuffer like below.
-            Render::g_hdrPipeline.BeginHDRPass(width, height);
-#endif
 
             // Clear framebuffer via render backend.
             // Stencil is cleared too — the portal renderer (Phase 6+) reads
@@ -1577,11 +1654,6 @@ bool s_eKeyHeld = false;
             // leftover bits from the previous frame would silently mask the
             // wrong region. The stencil clear is a no-op cost when no
             // portals are visible.
-            //
-            // When HDR pipeline is active, BeginHDRPass above already
-            // cleared the bound HDR RT. Re-clearing here is harmless
-            // (idempotent) but wastes a tiny bit of fill rate; left for
-            // simplicity since when HDR is OFF this is the primary clear.
             if (Render::g_renderBackend) {
                 // Sky color RGB(120, 167, 255)
                 Render::g_renderBackend->SetClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
@@ -1591,10 +1663,7 @@ bool s_eKeyHeld = false;
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             }
 
-            // Set viewport (must come after BindRenderTarget — BindRenderTarget
-            // already sets viewport to RT size, which equals framebuffer
-            // size for the HDR pass; this call is redundant in that case
-            // but required when HDR is inactive).
+            // Set viewport.
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->SetViewport(0, 0, width, height);
             }
@@ -1810,6 +1879,19 @@ bool s_eKeyHeld = false;
 
             // Render UI overlay elements
             RenderBlockHighlight(player, proj, view);
+            RenderBlockBreakOverlay(playerController, proj, view);
+
+            // BlockEntity per-frame render pass. Iterates every loaded
+            // client chunk's BE map, frustum/distance-culls each BE, and
+            // dispatches to its registered renderer. Runs after the chunk
+            // solid + cutout passes (so BEs sit on top of the cube voxels)
+            // but before portals (so they're masked correctly when seen
+            // through a portal).
+            if (Render::g_blockEntityRenderDispatcher && Client::g_clientChunkManager) {
+                Render::g_blockEntityRenderDispatcher->RenderAll(
+                    Client::g_clientChunkManager.get(),
+                    proj, view, camera.position, /*partialTick=*/0.0f);
+            }
 #if ENABLE_PORTAL_GUN
             // Phase 7 portal pass: recursive see-through rendering. The
             // lambda is invoked once per recursion level by the portal
@@ -1988,34 +2070,50 @@ bool s_eKeyHeld = false;
 
             // First-person portal-gun viewmodel — drawn AFTER the
             // particle system so the rim sparks composite behind the
-            // gun, but BEFORE bloom + tone-map so the gun shading
-            // rolls into the HDR pipeline like every other 3D pass.
-            // Hidden unless the player is actually holding the gun.
+            // gun. Hidden unless the player is actually holding the gun.
             if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
                 Render::g_portalGunViewmodel.Render(fbAspect, dt);
             }
-
-            // Portal bloom — toggled from the Render Controls debug
-            // panel (Debug::DebugSystem::IsBloomEnabled). Off by
-            // default; user can enable to see the HDR rim glow.
-            // INVALID_TEXTURE means "no bloom add" to the HDR composite.
-            Render::TextureHandle bloomTex = Render::INVALID_TEXTURE;
-            if (Debug::DebugSystem::IsBloomEnabled()) {
-                bloomTex = Render::g_bloomPipeline.Apply(
-                    Render::g_hdrPipeline.GetHDRColorTexture(),
-                    width, height);
-            }
-
-            // End the HDR pass: tone-maps the HDR RT to the LDR
-            // backbuffer, additively combining with the bloom texture
-            // if provided. HUD/crosshair/debug UI below render directly
-            // to the LDR backbuffer at full sRGB. No-op when HDR
-            // pipeline is inactive (early Vulkan or RT support missing).
-            Render::g_hdrPipeline.EndHDRPassAndComposite(bloomTex);
 #endif
+
+            // Vanilla held-item viewmodel — any hotbar item other than
+            // the portal gun (so we draw nothing when the portal gun
+            // path above already rendered the gun). Computes a fresh
+            // partialTick for animation interp (the one above is scoped
+            // inside the remote-player block) and accumulates walk
+            // distance from horizontal velocity for the bob phase.
+            bool drawHeldItem =
+                !player.inventory.GetSlot(Game::Inventory::HotbarToIndex(
+                    player.inventory.GetSelectedSlot())).IsEmpty();
+#if ENABLE_PORTAL_GUN
+            if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
+                drawHeldItem = false;
+            }
+#endif
+            if (drawHeldItem) {
+                const float fbAspect = (height > 0)
+                    ? static_cast<float>(width) / static_cast<float>(height)
+                    : 16.0f / 9.0f;
+                const auto  nowForPT = std::chrono::steady_clock::now();
+                const float ptRemain =
+                    std::chrono::duration<float>(nextClientTick - nowForPT).count();
+                const float ptTick =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float partialTickHeld =
+                    std::clamp(1.0f - ptRemain / ptTick, 0.0f, 1.0f);
+                // Accumulate walk distance from horizontal velocity. MC
+                // does this once per tick; per-frame approximation is
+                // close enough for the bob amplitude.
+                static float s_walkDist = 0.0f;
+                const float vx = player.physics.velocity.x;
+                const float vz = player.physics.velocity.z;
+                const float speed = std::sqrt(vx * vx + vz * vz);
+                s_walkDist += speed * dt * 0.6f;
+                Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld, s_walkDist);
+            }
             RenderHUD(window, player.inventory, dt, proj, view);
             // Hide crosshair when inventory is open (MC: no crosshair while a Screen is shown).
             if (!Render::GetInventoryScreen().IsOpen()) {
@@ -2364,6 +2462,7 @@ bool s_eKeyHeld = false;
         g_guiAtlas.Shutdown();
         Render::g_crosshair.Shutdown();
         Render::g_blockHighlight.Shutdown();
+        Render::g_blockBreakOverlay.Shutdown();
         if (Render::g_atlasBuilder) {
             Render::g_atlasBuilder.reset();
         }

@@ -2,6 +2,7 @@
 #include "PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
+#include "../network/NetworkServer.hpp"
 #include "../network/SendScheduler.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
@@ -10,6 +11,10 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/ChestBlockEntity.hpp"
+#include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
 #include "../IntegratedServer.hpp"
 #include "../inventory/InventoryClickHandler.hpp"
@@ -615,6 +620,16 @@ namespace Server {
     // === PACKET HANDLING ===
 
     void PlayerSession::HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet) {
+        // Drop stale client-predicted moves that were in flight when we issued a
+        // teleport (the client may have sent 1–2 MovePlayer packets at the old
+        // position before processing our ClientboundPlayerPosition). Applying them
+        // would revert the server-side position to the pre-teleport spot and other
+        // clients would see this player flicker / stay behind. Matches MC's
+        // ServerGamePacketListenerImpl.handleMovePlayer awaitingPositionFromClient
+        // null-check.
+        if (m_connection && m_connection->IsAwaitingTeleportAck()) {
+            return;
+        }
         UpdatePosition(packet.position, packet.rotation);
         if (m_player) {
             m_player->setSneaking(packet.isCrouching);
@@ -625,6 +640,16 @@ namespace Server {
         if (!m_player) return;
 
         switch (packet.action) {
+            // MC's START_DESTROY / ABORT_DESTROY are purely informational
+            // (the server doesn't track per-player mining progress for
+            // single-player; the client is authoritative on timing).
+            // Treat them as no-ops for now — could be wired into anti-cheat /
+            // per-player "currently mining" state later.
+            case Network::BlockActionType::START_DESTROY:
+            case Network::BlockActionType::ABORT_DESTROY:
+                break;
+            // Both BREAK (legacy) and STOP_DESTROY (new) finalize the dig.
+            case Network::BlockActionType::STOP_DESTROY:
             case Network::BlockActionType::BREAK: {
                 glm::ivec3 pos(packet.worldX, packet.worldY, packet.worldZ);
 
@@ -1036,30 +1061,77 @@ namespace Server {
             return;
         }
         
-        // Calculate target position (where to place the block)
+        // Calculate target position (where to place the block).
+        // MC's BlockItem.useOn (BlockItem.java:62 → getPlaceContext → getClickedPos)
+        // also probes a "relative" cell when the clicked one isn't replaceable.
         glm::ivec3 targetPos = clicked;
-        
-        // Check if clicked block is replaceable
+
+        // Check if clicked block is replaceable.
+        // TODO: proper canBeReplaced(blockstate) when block behaviours grow;
+        // for now treat only Air as replaceable. (Snow / tall grass / water
+        // should be added here when those become placement-replaceable.)
         Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
-        // TODO: Check if block is replaceable when BlockRegistry is fully implemented
-        // For now, only air is replaceable
         bool isReplaceable = (clickedBlockId == Game::BlockID::Air);
-        
+
         if (!isReplaceable) {
             // Place at offset position
             targetPos = context.getPlacementPos();
         }
         // If replaceable (snow, tall grass, etc.), place at clicked position
-        
+
         // Validate target position
         if (!world->IsValidPosition(targetPos.x, targetPos.y, targetPos.z)) {
             Log::Warning("HandleUseItemOn: Target position invalid (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
             ResyncAndAck(clicked, targetPos, packet.sequence);
             return;
         }
+
+        // The cell we resolved to has to be replaceable too — otherwise we'd
+        // silently overwrite the block already sitting there (e.g. clicking a
+        // wall whose +X neighbour already holds a slab would replace that slab
+        // with the new one, consuming an inventory item but appearing to do
+        // nothing). Mirrors MC's BlockItem.useOn second `canBeReplaced` check
+        // on the resolved placement state.
+        Game::BlockID targetBlockId = world->GetBlock(targetPos.x, targetPos.y, targetPos.z);
+        if (targetBlockId != Game::BlockID::Air) {
+            Log::Debug("HandleUseItemOn: Target cell already occupied at (%d,%d,%d) by block %u",
+                       targetPos.x, targetPos.y, targetPos.z, static_cast<unsigned>(targetBlockId));
+            ResyncAndAck(clicked, targetPos, packet.sequence);
+            return;
+        }
         
+        // === 6b. Slab orientation (top vs bottom half) ===
+        // Mirrors MC's SlabBlock.getStateForPlacement (SlabBlock.java:66-90):
+        // the slab is placed in the TOP half when the player clicked on the
+        // bottom face of a block (face == DOWN), or when they clicked the
+        // side of a block above its vertical midpoint (cursor.y > 0.5). The
+        // BOTTOM half is the default — picked when clicking on a TOP face or
+        // the lower portion of a side. We promote each "*SlabTop" variant to
+        // its own BlockID, so the rule is a simple BlockID swap here.
+        {
+            const Game::BlockID topVariant =
+                Game::BlockRegistry::SlabTopVariant(blockToPlace);
+            if (topVariant != Game::BlockID::Air) {
+                bool placeAsTop = false;
+                switch (packet.direction) {
+                    case 0:                                 // -Y (bottom face)
+                        placeAsTop = true;
+                        break;
+                    case 1:                                 // +Y (top face)
+                        placeAsTop = false;
+                        break;
+                    default:                                // side faces
+                        placeAsTop = (packet.cursorY > 0.5f);
+                        break;
+                }
+                if (placeAsTop) {
+                    blockToPlace = topVariant;
+                }
+            }
+        }
+
         // === 7. Validate placement ===
-        
+
         // TODO: Check if block can survive at target position when BlockRegistry is fully implemented
         // For now, assume all blocks can be placed anywhere
         // Game::Block* blockToPl = Game::BlockRegistry::getInstance().getBlock(blockToPlace);
@@ -1109,15 +1181,90 @@ namespace Server {
         }
         
         // === 10. Run block hooks ===
-        
+
+        // BlockEntity item-data merge. World::SetBlock already created the
+        // BE (via its lifecycle hook); we just need to apply any relevant
+        // components from the held stack onto it — sign text, banner
+        // patterns, custom name, dye colour, …. Mirrors MC's
+        // BlockItem.updateCustomBlockEntityTag + BlockEntity.applyImplicitComponents
+        // (BlockItem.java:118-160).
+        if (Game::BlockEntityTypes::HasBlockEntity(blockToPlace)) {
+            const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(
+                targetPos.x, targetPos.z);
+            if (auto chunk = world->GetChunk(chunkPos.x, chunkPos.z)) {
+                const int lx = targetPos.x - chunkPos.x * 16;
+                const int lz = targetPos.z - chunkPos.z * 16;
+                if (auto* be = chunk->GetBlockEntity(lx, targetPos.y, lz)) {
+                    be->ApplyItemComponents(heldStack.components);
+
+                    // Mirrors MC ChestBlock.getStateForPlacement
+                    // (ChestBlock.java:182):
+                    //   FACING = context.getHorizontalDirection().opposite()
+                    // — the chest's front (lock side) faces back AT the
+                    // player. Player yaw is measured CW from south, range
+                    // [-180, 180]; we bucket it into 4 cardinal directions
+                    // and store on the BE so the renderer can rotate. Same
+                    // pattern will work for furnace/dispenser/etc. once
+                    // they get their own BE types.
+                    if (auto* chestBE = dynamic_cast<Game::ChestBlockEntity*>(be)) {
+                        // OUR yaw convention (see ClientPlayer::UpdateRaycast,
+                        // Player.cpp:69-71):
+                        //   front.x = cos(yaw), front.z = sin(yaw)
+                        // → yaw=0   → +X (east)
+                        // → yaw=90  → +Z (south)
+                        // → yaw=180 → -X (west)
+                        // → yaw=270 → -Z (north)
+                        // We want the chest's FRONT to face the OPPOSITE of
+                        // where the player is looking, so the player ends up
+                        // looking at the lock side.
+                        float y = std::fmod(m_player->getYaw(), 360.0f);
+                        if (y < 0.0f) y += 360.0f;
+                        const int oct = static_cast<int>((y + 45.0f) / 90.0f) & 3;
+                        static const Game::HorizontalDirection kOppositeOfLook[4] = {
+                            Game::HorizontalDirection::West,   // looking east  → face west
+                            Game::HorizontalDirection::North,  // looking south → face north
+                            Game::HorizontalDirection::East,   // looking west  → face east
+                            Game::HorizontalDirection::South,  // looking north → face south
+                        };
+                        chestBE->facing = kOppositeOfLook[oct];
+                    }
+
+                    // The BE was just CREATED with default state and the
+                    // initial BlockEntityDataS2C went out alongside the
+                    // block change. ApplyItemComponents / facing assignment
+                    // may have mutated state — mark dirty + re-broadcast so
+                    // clients see the updated facing.
+                    be->MarkDirty();
+
+                    // Re-broadcast NOW (the initial BlockEntityDataS2C
+                    // already went out with the default North facing; we
+                    // need a follow-up with the placement-derived facing).
+                    if (m_connection) {
+                        Network::BlockEntityDataS2CPacket pkt(
+                            targetPos.x, targetPos.y, targetPos.z,
+                            be->GetType()->TypeId());
+                        Network::PacketBuffer scratch;
+                        be->Save(scratch);
+                        pkt.dataBlob = scratch.GetData();
+                        auto data = Network::Serialization::Serialize(pkt);
+                        // Broadcast via the integrated server (every watcher
+                        // gets the updated facing, not just the placer).
+                        if (Server::g_integratedServer && Server::g_integratedServer->GetNetworkServer()) {
+                            Server::g_integratedServer->GetNetworkServer()->BroadcastPacket(
+                                static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
+                                data);
+                        }
+                    }
+                }
+            }
+        }
+
         // TODO: Run block hooks when BlockRegistry is fully implemented
         // if (blockToPl) {
         //     // Call onPlace hook
         //     blockToPl->onPlace(world, targetPos, m_player);
-        //     
+        //
         //     // TODO: Call setPlacedBy for orientation
-        //     // TODO: Create Block Entity if required
-        //     // TODO: Merge NBT from item (BlockEntityTag)
         // }
         
         // TODO: Schedule systems
@@ -1170,19 +1317,37 @@ namespace Server {
             Server::IntegratedServer* server = Server::g_integratedServer.get();
             if (server && server->GetWorld()) {
                 Game::World* world = server->GetWorld();
-                
+
                 // Send clicked block
                 Game::BlockID clickedBlock = world->GetBlock(clicked.x, clicked.y, clicked.z);
                 SendBlockUpdate(clicked, clickedBlock);
-                
+
                 // Send target block if different
                 if (clicked != target) {
                     Game::BlockID targetBlock = world->GetBlock(target.x, target.y, target.z);
                     SendBlockUpdate(target, targetBlock);
                 }
             }
+
+            // Also resync the held hotbar slot. The client predictively
+            // decrements its inventory the instant the player right-clicks
+            // (so the HUD count drops without a network round trip). When
+            // the server rejects the placement we need to push the true
+            // count back, otherwise the client's count keeps ticking down
+            // toward 0 even though nothing was consumed.
+            if (m_player) {
+                auto& inv = m_player->getInventory();
+                const int sel = Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot();
+                const auto& slot = inv.MutableSlot(sel);
+                Network::InventorySetSlotS2CPacket out;
+                out.slotIndex = static_cast<uint8_t>(sel);
+                out.itemId    = slot.itemId;
+                out.count     = static_cast<uint8_t>(std::max(0, slot.count));
+                auto data = Network::Serialization::Serialize(out);
+                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+            }
         }
-        
+
         // Send failure acknowledgment
         AckInteraction(sequence, false);
     }

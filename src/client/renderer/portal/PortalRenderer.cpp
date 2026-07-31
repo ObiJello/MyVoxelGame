@@ -1025,6 +1025,17 @@ void main() {
             s.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
             s.cullMode          = CullMode::None;
             s.primitiveType     = PrimitiveType::Triangles;
+            // Pull the portal mesh slightly forward in depth so it
+            // doesn't Z-fight with the wall behind it. Without this
+            // an inactive portal flickers from far away (depth
+            // precision degrades with distance — the 5 cm physical
+            // offset between portal mesh and wall collapses into one
+            // depth value), and at extreme range the wall wins the
+            // depth test and the portal goes invisible. The active
+            // portal's StencilMarkState above uses the same bias.
+            s.depthBiasEnabled   = true;
+            s.depthBiasSlope     = -2.0f;
+            s.depthBiasConstant  = -2.0f;
             return s;
         }
 

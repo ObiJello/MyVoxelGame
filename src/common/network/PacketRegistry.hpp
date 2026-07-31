@@ -57,6 +57,9 @@
             InventoryFullS2C       = 0x29, // Full 46-slot inventory + carried + selected hotbar slot
             InventorySetSlotS2C    = 0x2A, // Single-slot delta (slot, blockId, count)
             InventorySetCarriedS2C = 0x2B, // Cursor item update
+            BlockEntityDataS2C     = 0x30, // BE create / state update — mirrors MC ClientboundBlockEntityDataPacket
+            BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
+            BlockEntityActionS2C   = 0x32, // BE "block event" (chest lid open count, bell ring) — MC Level.blockEvent path
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -130,6 +133,9 @@
                 case PacketId::InventoryFullS2C: return "InventoryFullS2C";
                 case PacketId::InventorySetSlotS2C: return "InventorySetSlotS2C";
                 case PacketId::InventorySetCarriedS2C: return "InventorySetCarriedS2C";
+                case PacketId::BlockEntityDataS2C: return "BlockEntityDataS2C";
+                case PacketId::BlockEntityRemoveS2C: return "BlockEntityRemoveS2C";
+                case PacketId::BlockEntityActionS2C: return "BlockEntityActionS2C";
 #if ENABLE_PORTAL_GUN
                 case PacketId::PortalSetS2C:           return "PortalSetS2C";
                 case PacketId::PortalRemoveS2C:        return "PortalRemoveS2C";

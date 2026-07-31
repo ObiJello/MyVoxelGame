@@ -685,7 +685,14 @@ void main() {
         // Portal exact constants from weapon_portalgun.cpp.
         constexpr float kBlastSpeed_HU_per_s = 3000.0f;   // weapon_portalgun.cpp:28
         constexpr float kBlastSpeed_m_per_s  = kBlastSpeed_HU_per_s * 0.01905f; // 57.15 m/s
-        constexpr float kMaxProjectileDelay  = 0.5f;      // weapon_portalgun.cpp:82 sv_portal_projectile_delay
+        // NOTE: Source's `sv_portal_projectile_delay` (0.5s) is the
+        // max server-side delay before the placement packet fires —
+        // it does NOT cap the visible bolt's lifetime. Capping the
+        // visual at 0.5s makes the bolt vanish mid-flight for any
+        // shot beyond ~28m (speed × cap), with the portal opening
+        // later when the server-side timer eventually completes. The
+        // bolt should travel its full path so impact + placement
+        // line up visually.
 
         glm::vec3 dir = end - start;
         float dist = glm::length(dir);
@@ -704,9 +711,9 @@ void main() {
         dist -= kSpawnForwardOffset;
         if (dist < 1.0e-3f) return;   // impact within 0.5 m of camera — skip
 
-        // Travel time = remaining distance / speed, capped at the Portal max delay.
-        const float travelTime = std::min(dist / kBlastSpeed_m_per_s,
-                                          kMaxProjectileDelay);
+        // Travel time = remaining distance / speed. No cap — see the
+        // sv_portal_projectile_delay note above.
+        const float travelTime = dist / kBlastSpeed_m_per_s;
 
         Particle p;
         p.position    = spawnPos;

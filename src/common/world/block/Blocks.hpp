@@ -68,6 +68,79 @@ namespace Game {
         PinkPetals3,
         PinkPetals4,
 
+        // ── Slab top-half variants (SlabBlock `type=top`). MC's SlabBlock has
+        // a `type` property (BOTTOM/TOP/DOUBLE) controlling whether the slab
+        // fills the lower half, upper half, or the whole cube. The bare
+        // BlockID for each slab is type=BOTTOM; these entries are type=TOP.
+        // (DOUBLE isn't promoted to its own ID yet — mining a top + placing
+        // bottom in the same cell will overwrite, matching pre-1.13 behaviour
+        //  rather than merging into a double slab.)
+        //
+        // Order MUST match the slab order in BlockDefs.inc so the bottom→top
+        // mapping in BlockRegistry::SlabTopVariant() can index by offset.
+        AcaciaSlabTop,
+        AndesiteSlabTop,
+        BambooMosaicSlabTop,
+        BambooSlabTop,
+        BirchSlabTop,
+        BlackstoneSlabTop,
+        BrickSlabTop,
+        CherrySlabTop,
+        CobbledDeepslateSlabTop,
+        CobblestoneSlabTop,
+        CrimsonSlabTop,
+        CutCopperSlabTop,
+        CutRedSandstoneSlabTop,
+        CutSandstoneSlabTop,
+        DarkOakSlabTop,
+        DarkPrismarineSlabTop,
+        DeepslateBrickSlabTop,
+        DeepslateTileSlabTop,
+        DioriteSlabTop,
+        EndStoneBrickSlabTop,
+        ExposedCutCopperSlabTop,
+        GraniteSlabTop,
+        JungleSlabTop,
+        MangroveSlabTop,
+        MossyCobblestoneSlabTop,
+        MossyStoneBrickSlabTop,
+        MudBrickSlabTop,
+        NetherBrickSlabTop,
+        OakSlabTop,
+        OxidizedCutCopperSlabTop,
+        PaleOakSlabTop,
+        PetrifiedOakSlabTop,
+        PolishedAndesiteSlabTop,
+        PolishedBlackstoneBrickSlabTop,
+        PolishedBlackstoneSlabTop,
+        PolishedDeepslateSlabTop,
+        PolishedDioriteSlabTop,
+        PolishedGraniteSlabTop,
+        PolishedTuffSlabTop,
+        PrismarineBrickSlabTop,
+        PrismarineSlabTop,
+        PurpurSlabTop,
+        QuartzSlabTop,
+        RedNetherBrickSlabTop,
+        RedSandstoneSlabTop,
+        ResinBrickSlabTop,
+        SandstoneSlabTop,
+        SmoothQuartzSlabTop,
+        SmoothRedSandstoneSlabTop,
+        SmoothSandstoneSlabTop,
+        SmoothStoneSlabTop,
+        SpruceSlabTop,
+        StoneBrickSlabTop,
+        StoneSlabTop,
+        TuffBrickSlabTop,
+        TuffSlabTop,
+        WarpedSlabTop,
+        WaxedCutCopperSlabTop,
+        WaxedExposedCutCopperSlabTop,
+        WaxedOxidizedCutCopperSlabTop,
+        WaxedWeatheredCutCopperSlabTop,
+        WeatheredCutCopperSlabTop,
+
         Count // Always keep this as the last entry.
     };
 

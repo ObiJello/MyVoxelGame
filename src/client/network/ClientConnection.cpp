@@ -7,6 +7,12 @@
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/RemotePlayerManager.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/BlockEntityType.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/chunk/Chunk.hpp"
+#include "common/network/packets/game/BlockEntityDataS2CPacket.hpp"
+#include "common/world/math/WorldCoordinates.hpp"
 #include <functional>
 
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
@@ -66,6 +72,16 @@ namespace Client {
             [this](const std::vector<uint8_t>& p) { HandlePlayerInfo(p); });
         m_packetRegistry.RegisterHandler(PacketId::ClientboundPlayerPosition,
             [this](const std::vector<uint8_t>& p) { HandleClientboundPlayerPosition(p); });
+
+        m_packetRegistry.RegisterHandler(PacketId::BlockEntityDataS2C,
+            [this](const std::vector<uint8_t>& p) { HandleBlockEntityData(p); });
+        m_packetRegistry.RegisterHandler(PacketId::BlockEntityRemoveS2C,
+            [this](const std::vector<uint8_t>& p) { HandleBlockEntityRemove(p); });
+        // Stage 4: block-event packets. Stub for now (no animated BEs ship
+        // in this batch); the dispatcher's per-BE TriggerEvent hook lands
+        // alongside Stage 4's ChestLidController + ContainerOpenersCounter.
+        m_packetRegistry.RegisterHandler(PacketId::BlockEntityActionS2C,
+            [](const std::vector<uint8_t>& p) { (void)p; });
     }
 
     ClientConnection::~ClientConnection() {
@@ -215,6 +231,16 @@ namespace Client {
         m_playerId = std::stoul(uuid); // Simple conversion for now
         m_loggedIn = true;
         m_phase = ConnectionPhase::PLAY;
+
+        // Propagate the server-resolved username to the cached local name
+        // AND to the global NetworkClient. The server is authoritative on
+        // names (auto-assigns "PlayerN" when the client connected without
+        // one), so anything keyed by the local-player name — including
+        // tab-completion's "self" suggestion — needs the resolved value.
+        m_playerName = username;
+        if (m_client) {
+            m_client->SetPlayerName(username);
+        }
         
         // Send client settings with actual render distance from game settings
         SendClientSettings(
@@ -239,11 +265,50 @@ namespace Client {
 
     void ClientConnection::HandleBlockChange(const std::vector<uint8_t>& payload) {
         auto packet = Network::Serialization::DeserializeBlockChangeS2C(payload);
-        
+
         // Queue packet for main thread processing via IncomingPacket queue
         // The packet will be processed by ClientPacketHandler on the main thread
         Log::Debug("[ClientConnection] Received block change at (%d, %d, %d) -> block %d",
                    packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
+    }
+
+    void ClientConnection::HandleBlockEntityData(const std::vector<uint8_t>& payload) {
+        auto packet = Network::Serialization::DeserializeBlockEntityDataS2C(payload);
+        if (!g_clientChunkManager) return;
+        const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(packet.worldX, packet.worldZ);
+        auto* clientChunk = g_clientChunkManager->GetChunk(chunkPos);
+        if (!clientChunk || !clientChunk->chunkData) return;
+
+        const auto* type = Game::BlockEntityTypes::ForId(packet.typeId);
+        if (!type) {
+            Log::Warning("[ClientConnection] BE data for unknown type id %u", packet.typeId);
+            return;
+        }
+        const int lx = packet.worldX - chunkPos.x * 16;
+        const int lz = packet.worldZ - chunkPos.z * 16;
+        // Read the current block ID from the chunk. The BlockChange packet
+        // is sent right before BlockEntityData (same SetBlock call), so the
+        // expected block id should already be in the chunk. If it isn't (race
+        // with packet ordering), the BE still gets stored — the renderer
+        // re-reads the variant from the chunk each frame.
+        Game::BlockID blockId = clientChunk->chunkData->GetBlock(lx, packet.worldY, lz);
+        auto be = type->Create(glm::ivec3(packet.worldX, packet.worldY, packet.worldZ), blockId);
+        if (!packet.dataBlob.empty()) {
+            Network::PacketReader r(packet.dataBlob);
+            be->Load(r);
+        }
+        clientChunk->chunkData->SetBlockEntity(lx, packet.worldY, lz, std::move(be));
+    }
+
+    void ClientConnection::HandleBlockEntityRemove(const std::vector<uint8_t>& payload) {
+        auto packet = Network::Serialization::DeserializeBlockEntityRemoveS2C(payload);
+        if (!g_clientChunkManager) return;
+        const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(packet.worldX, packet.worldZ);
+        auto* clientChunk = g_clientChunkManager->GetChunk(chunkPos);
+        if (!clientChunk || !clientChunk->chunkData) return;
+        const int lx = packet.worldX - chunkPos.x * 16;
+        const int lz = packet.worldZ - chunkPos.z * 16;
+        clientChunk->chunkData->RemoveBlockEntity(lx, packet.worldY, lz);
     }
 
     void ClientConnection::HandleChatMessage(const std::vector<uint8_t>& payload) {
@@ -333,7 +398,20 @@ namespace Client {
         // (matching MC: the local player is in PlayerInfo for tab-list purposes, but we don't render
         // ourselves as a remote entity).
         if (packet.playerId == m_playerId) {
-            Log::Info("[ClientConnection] PlayerInfo: ignoring entry for self (ID: %u)", packet.playerId);
+            // LoginSuccess fires BEFORE the server resolves duplicate /
+            // empty names (the rename happens in OnPlayerJoined). So
+            // for the self entry, the PlayerInfoS2C ADD is the FIRST
+            // packet that carries the authoritative name. Sync it into
+            // the local name cache + the global NetworkClient so
+            // anything name-keyed (e.g. tab-completion's "self"
+            // suggestion) sees the resolved value.
+            if (packet.action == Network::PlayerInfoS2CPacket::Action::ADD
+                && !packet.playerName.empty()) {
+                m_playerName = packet.playerName;
+                if (m_client) m_client->SetPlayerName(packet.playerName);
+            }
+            Log::Info("[ClientConnection] PlayerInfo: self entry resolved to '%s' (ID: %u)",
+                      packet.playerName.c_str(), packet.playerId);
             return;
         }
 

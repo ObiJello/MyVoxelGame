@@ -40,6 +40,7 @@
 #include "packets/game/InventoryFullS2CPacket.hpp"
 #include "packets/game/InventorySetSlotS2CPacket.hpp"
 #include "packets/game/InventorySetCarriedS2CPacket.hpp"
+#include "packets/game/BlockEntityDataS2CPacket.hpp"
 #include "packets/game/PortalSetS2CPacket.hpp"            // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalRemoveS2CPacket.hpp"         // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalTeleportFlashS2CPacket.hpp"  // Features.hpp ENABLE_PORTAL_GUN strips body
