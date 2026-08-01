@@ -583,14 +583,14 @@ namespace Game {
     }
 
     void World::WorldTimeWeatherTick() {
-        // Update world time and weather
-        // This handles:
-        // - Day/night cycle
-        // - Weather transitions (clear/rain/thunder)
-        // - Moon phases
-        // - Light level updates based on time
-        
-        // TODO: Implement time and weather system
+        // Port of ServerLevel.tickTime: gameTime always advances, dayTime only
+        // while the doDaylightCycle gamerule is enabled.
+        m_gameTime++;
+        if (m_doDaylightCycle) {
+            m_dayTime++;
+        }
+
+        // TODO: Weather transitions (clear/rain/thunder)
     }
 
 } // namespace Game

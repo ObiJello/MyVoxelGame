@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include <glm/gtc/constants.hpp>
+#include <algorithm>
 
 namespace Game {
 
@@ -51,11 +52,32 @@ namespace Game {
         // Apply physics simulation with context
         UpdatePlayerPhysics(physics, movementInput, jumpInput, sneakPressed, deltaTime, context);
 
+        // Accumulate jump impulses for the next PlayerMoveC2S (server-side
+        // jump exhaustion — MC ServerPlayer.jumpFromGround). Cleared by the
+        // move-send in PlatformMain each client tick.
+        if (physics.didJumpThisStep) {
+            jumpedSinceMoveSend = true;
+        }
+
+        // Flush this step's fall landing (if any) toward the next move
+        // packet. Multiple landings inside one tick keep the largest.
+        if (physics.landedFallDistance > 0.0f) {
+            landedFallSinceMoveSend =
+                std::max(landedFallSinceMoveSend, physics.landedFallDistance);
+            physics.landedFallDistance = 0.0f;
+        }
+
         // Update predicted position from physics
         predictedPos = glm::dvec3(physics.position);
 
         // Reset single-frame inputs
         jumpPressed = false;
+
+        // Double-tap window countdown (MC decrements jumpTriggerTime per tick)
+        if (flyToggleTimer > 0.0f) {
+            flyToggleTimer -= deltaTime;
+            if (flyToggleTimer < 0.0f) flyToggleTimer = 0.0f;
+        }
 
         // Update mesh system with player position
         if (::Render::g_clientMeshManager) {
@@ -128,8 +150,31 @@ namespace Game {
     }
 
     void ClientPlayer::SetJumpPressed(bool pressed) {
+        // True key edge (jumpPressed below is consumed by physics each frame,
+        // so it can't be used for tap detection — holding space re-registers).
+        const bool risingEdge = pressed && !jumpKeyWasDown;
+        jumpKeyWasDown = pressed;
+
         if (pressed && !jumpPressed) {
             jumpPressed = true; // Only register the press edge
+        }
+
+        // Double-tap-space creative flight toggle — MC LocalPlayer.aiStep
+        // (LocalPlayer.java:760-782): first tap arms a 7-tick (0.35 s)
+        // window; a second tap inside it flips abilities.flying. Gated on
+        // mayFly; water bobbing and debug noclip keep their own controls.
+        if (risingEdge && physics.mayFly && !physics.noclip &&
+            (physics.isFlying || !physics.isInWater)) {
+            if (flyToggleTimer > 0.0f) {
+                physics.isFlying = !physics.isFlying;
+                if (physics.isFlying) {
+                    // Kill fall velocity so the toggle arrests the drop.
+                    physics.velocity.y = 0.0f;
+                }
+                flyToggleTimer = 0.0f;
+            } else {
+                flyToggleTimer = FLY_DOUBLE_TAP_WINDOW;
+            }
         }
     }
 

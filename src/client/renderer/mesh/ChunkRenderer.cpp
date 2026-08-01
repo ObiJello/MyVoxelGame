@@ -3,6 +3,10 @@
 #include "ChunkMegaBuffer.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
+#ifdef HAS_VULKAN
+#include "../backend/vulkan/VKBackend.hpp"
+#endif
+#include "../environment/EnvironmentState.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
@@ -78,17 +82,31 @@ namespace Render {
         // Create separate shader programs for opaque (no discard → early-z enabled)
         // and cutout/translucent (with discard for alpha testing).
         // Matches Minecraft's SOLID_TERRAIN vs CUTOUT_TERRAIN pipeline split.
-        m_opaqueShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block_opaque.frag");
+        // On Vulkan the block fragment shaders read the environment/fog fields
+        // from the Common UBO, which needs the UBO-aware (portal) pipeline
+        // layout — same backend-cast pattern as PortalRenderer/SkyRenderer.
+        auto createBlockShader = [](const char* vertPath, const char* fragPath) {
+            if (g_renderBackend->GetType() == BackendType::Vulkan) {
+#ifdef HAS_VULKAN
+                auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
+                return vk->CreateShaderFromFilesPortal(vertPath, fragPath);
+#else
+                return INVALID_SHADER;
+#endif
+            }
+            return g_renderBackend->CreateShaderFromFiles(vertPath, fragPath);
+        };
+        m_opaqueShader = createBlockShader("shaders/block.vert", "shaders/block_opaque.frag");
         if (m_opaqueShader == INVALID_SHADER) {
             Log::Error("Failed to create opaque block shader");
             return false;
         }
-        m_cutoutShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block.frag");
+        m_cutoutShader = createBlockShader("shaders/block.vert", "shaders/block.frag");
         if (m_cutoutShader == INVALID_SHADER) {
             Log::Error("Failed to create cutout block shader");
             return false;
         }
-        m_solidShader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block_solid.frag");
+        m_solidShader = createBlockShader("shaders/block.vert", "shaders/block_solid.frag");
         if (m_solidShader == INVALID_SHADER) {
             Log::Error("Failed to create solid block shader");
             return false;
@@ -233,6 +251,7 @@ namespace Render {
             g_renderBackend->BindShader(m_cutoutShader);
             g_renderBackend->SetUniformMat4(m_cutoutShader, "uMVP", m_cachedMVP);
             g_renderBackend->SetUniformVec4(m_cutoutShader, "uPortalClipPlane", s_portalClipPlane);
+            SetEnvironmentUniforms(m_cutoutShader, camera);
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
@@ -245,6 +264,7 @@ namespace Render {
             g_renderBackend->BindShader(m_solidShader);
             g_renderBackend->SetUniformMat4(m_solidShader, "uMVP", m_cachedMVP);
             g_renderBackend->SetUniformVec4(m_solidShader, "uPortalClipPlane", s_portalClipPlane);
+            SetEnvironmentUniforms(m_solidShader, camera);
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
@@ -343,6 +363,19 @@ namespace Render {
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
     }
 
+    void ChunkRenderer::SetEnvironmentUniforms(ShaderHandle shader, const Camera& camera) {
+        // Day/night terrain dim + MC-style distance fog, from the per-frame
+        // EnvironmentState. uCameraPos must be the CURRENT view's camera —
+        // portal views re-enter here with their own virtual camera, so fog
+        // stays consistent through portals.
+        const EnvironmentFrame& env = EnvironmentState::Get().Frame();
+        g_renderBackend->SetUniformVec3(shader, "uCameraPos", camera.position);
+        g_renderBackend->SetUniformFloat(shader, "uSkyBrightness", env.skyBrightness);
+        g_renderBackend->SetUniformVec4(shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
+        g_renderBackend->SetUniformVec4(shader, "uFogEnv",
+            glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
+    }
+
     void ChunkRenderer::BindSharedRenderState(const Camera& camera) {
         PROFILE_ZONE;
         if (m_visibleSections.empty() || !g_renderBackend || m_opaqueShader == INVALID_SHADER) {
@@ -385,6 +418,7 @@ namespace Render {
         m_cachedMVP = proj * view;
         g_renderBackend->SetUniformMat4(m_opaqueShader, "uMVP", m_cachedMVP);
         g_renderBackend->SetUniformVec4(m_opaqueShader, "uPortalClipPlane", s_portalClipPlane);
+        SetEnvironmentUniforms(m_opaqueShader, camera);
 
         // Fetch and bind atlas texture once (fresh handle in case atlas was rebuilt)
         if (g_atlasBuilder) {

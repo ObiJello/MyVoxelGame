@@ -37,17 +37,21 @@ namespace Server {
         static InventoryClickResult HandleCreativeDestroyAll(ServerPlayer&);
 
         // Creative search-grid clicks (slotIndex == InventorySlotSentinel::CREATIVE_GRID).
-        static InventoryClickResult HandleCreativePickup   (ServerPlayer&, uint32_t itemId, uint8_t button);
-        static InventoryClickResult HandleCreativeQuickMove(ServerPlayer&, uint32_t itemId);
+        // `source` is the creative-source stack IDENTITY (itemId + per-stack
+        // components, e.g. an enchanted-book variant); count semantics are
+        // decided per-handler (full stack / single). Built by Handle() from
+        // click.creativeStack, falling back to click.creativeItemId.
+        static InventoryClickResult HandleCreativePickup   (ServerPlayer&, const Game::ItemStack& source, uint8_t button);
+        static InventoryClickResult HandleCreativeQuickMove(ServerPlayer&, const Game::ItemStack& source);
 
-        // Pick-block (P key): set `slotIndex` to a full stack of `itemId`,
+        // Pick-block (P key): set `slotIndex` to a full stack of `source`,
         // server-authoritatively. Used by the client's pick-block hook so the
         // resulting stack is reflected in the server's inventory (otherwise
         // the slot stays empty on the server side and placements / clicks
         // against it fail silently).
         static InventoryClickResult HandleCreativeFillSlot(ServerPlayer&,
                                                            int16_t slotIndex,
-                                                           uint32_t itemId);
+                                                           const Game::ItemStack& source);
 
         // Mark a unique slot as changed.
         static void MarkChanged(InventoryClickResult& r, uint8_t slot);
@@ -63,8 +67,11 @@ namespace Server {
                                       int rangeBegin, int rangeEnd,
                                       InventoryClickResult& result);
 
-        // Visual-only slots: armor + crafting. Never accept inserts from user clicks.
-        static bool IsRestrictedInsertSlot(int16_t slotIndex);
+        // Mirrors Slot.mayPlace: craft slots refuse every insert (no crafting
+        // system); armor slots 5-8 accept exactly the stack whose EQUIPPABLE
+        // component maps to that slot (MC ArmorSlot.mayPlace); the offhand and
+        // all player slots accept anything.
+        static bool MayPlaceInSlot(int16_t slotIndex, const Game::InventorySlot& stack);
     };
 
 } // namespace Server

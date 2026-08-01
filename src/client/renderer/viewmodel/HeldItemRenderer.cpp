@@ -3,6 +3,10 @@
 #include "HeldItemSpriteMesh.hpp"
 
 #include "../backend/RenderBackend.hpp"
+#ifdef HAS_VULKAN
+#include "../backend/vulkan/VKBackend.hpp"
+#endif
+#include "../environment/EnvironmentState.hpp"
 #include "../core/Vertex.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -80,50 +84,99 @@ namespace Render {
         // vertex P yields:
         //     T_trans(Rx(Ry(Rz(S(P - 0.5)))))
         // — exactly vanilla's chain.
-        glm::mat4 buildDisplayMatrix(const DisplayXf& xf) {
+        //
+        // leftHand mirrors like MC ItemTransform.apply(true): negate
+        // translation.x and the Y/Z rotations (FIRST_PERSON_LEFT_HAND).
+        glm::mat4 buildDisplayMatrix(const DisplayXf& xf, bool leftHand) {
+            const float mirror = leftHand ? -1.0f : 1.0f;
             glm::mat4 m(1.0f);
-            m = glm::translate(m, xf.translation);
-            m = glm::rotate(m, glm::radians(xf.rotationDeg.x), {1,0,0});
-            m = glm::rotate(m, glm::radians(xf.rotationDeg.y), {0,1,0});
-            m = glm::rotate(m, glm::radians(xf.rotationDeg.z), {0,0,1});
+            m = glm::translate(m, glm::vec3(xf.translation.x * mirror,
+                                            xf.translation.y,
+                                            xf.translation.z));
+            m = glm::rotate(m, glm::radians(xf.rotationDeg.x),          {1,0,0});
+            m = glm::rotate(m, glm::radians(xf.rotationDeg.y * mirror), {0,1,0});
+            m = glm::rotate(m, glm::radians(xf.rotationDeg.z * mirror), {0,0,1});
             m = glm::scale(m, glm::vec3(xf.scale));
             return m;
         }
 
-        // Apply the equip-swap drift: as the item leaves/re-enters the
-        // hand the whole rig slides down out of frame.
-        void applyEquipTransform(glm::mat4& m, float equipProgress) {
-            m = glm::translate(m, glm::vec3(0.0f, -0.6f * equipProgress, 0.0f));
+        // Base arm position + equip slide — MC applyItemArmTransform
+        // (ItemInHandRenderer.java:313):
+        //   translate(invert * 0.56, -0.52 + equippedProgress * -0.6, -0.72)
+        // `invert` is +1 for the right (main) hand, -1 for the left
+        // (offhand) — the offhand is a pure X mirror.
+        void applyItemArmTransform(glm::mat4& m, float invert, float equipProgress) {
+            m = glm::translate(m, glm::vec3(invert * 0.56f,
+                                            -0.52f + equipProgress * -0.6f,
+                                            -0.72f));
         }
 
-        // Vanilla first-person swing. Decomposes into a per-axis
-        // position offset plus the four-rotation arm-attack transform.
-        // `attack` is the 0..1 swing progress.
-        //
-        //   xPos = -0.4 * sin(sqrt(p) * pi)
+        // Vanilla first-person swing POSITION offsets — applied BEFORE the
+        // arm transform (renderArmWithItem's default branch):
+        //   xPos = -0.4 * sin(sqrt(p) * pi)      (× invert)
         //   yPos =  0.2 * sin(sqrt(p) * 2pi)
         //   zPos = -0.2 * sin(p * pi)
-        //
-        // followed by an extrinsic Y → Z → X → Y rotation chain that
-        // sweeps the arm through the strike arc. The Y±45° brackets
-        // re-orient the item between the world-up and arm-relative
-        // frames so the X/Z rotations operate on the arm's local axes.
-        // Right hand → invert = +1. We don't render a left hand.
-        void applySwingTransform(glm::mat4& m, float attack) {
-            const float pi  = 3.14159265358979323846f;
-            const float sp  = std::sqrt(attack);
-            // Translation
+        void applySwingOffsets(glm::mat4& m, float invert, float attack) {
+            const float pi = 3.14159265358979323846f;
+            const float sp = std::sqrt(attack);
             const float dx = -0.4f * std::sin(sp * pi);
             const float dy =  0.2f * std::sin(sp * 2.0f * pi);
             const float dz = -0.2f * std::sin(attack * pi);
-            m = glm::translate(m, glm::vec3(dx, dy, dz));
-            // Rotation chain
+            m = glm::translate(m, glm::vec3(invert * dx, dy, dz));
+        }
+
+        // The four-rotation arm-attack chain — MC applyItemArmAttackTransform
+        // (ItemInHandRenderer.java:303), applied AFTER the arm transform.
+        // The Y±45° brackets re-orient the item between the world-up and
+        // arm-relative frames so the X/Z rotations operate on the arm's
+        // local axes.
+        void applySwingRotations(glm::mat4& m, float invert, float attack) {
+            const float pi = 3.14159265358979323846f;
             const float ySwingRot  = std::sin(attack * attack * pi);
-            const float xzSwingRot = std::sin(sp * pi);
-            m = glm::rotate(m, glm::radians(45.0f + ySwingRot * -20.0f), {0,1,0});
-            m = glm::rotate(m, glm::radians(xzSwingRot * -20.0f),         {0,0,1});
-            m = glm::rotate(m, glm::radians(xzSwingRot * -80.0f),         {1,0,0});
-            m = glm::rotate(m, glm::radians(-45.0f),                       {0,1,0});
+            const float xzSwingRot = std::sin(std::sqrt(attack) * pi);
+            m = glm::rotate(m, glm::radians(invert * (45.0f + ySwingRot * -20.0f)), {0,1,0});
+            m = glm::rotate(m, glm::radians(invert * xzSwingRot * -20.0f),          {0,0,1});
+            m = glm::rotate(m, glm::radians(xzSwingRot * -80.0f),                   {1,0,0});
+            m = glm::rotate(m, glm::radians(invert * -45.0f),                       {0,1,0});
+        }
+
+        // Eat/drink pull-to-mouth — MC applyEatTransform
+        // (ItemInHandRenderer.java:261-275). CRITICAL ordering note: MC
+        // applies this BEFORE applyItemArmTransform, so the ±90° Y swing
+        // and the 0.6/-0.5 translate happen in VIEW space, pivoting the
+        // whole hand toward the mouth. Composing it after the arm
+        // transform (the old code) pivots around the item's own anchor
+        // instead — that's what shoved the food off screen.
+        void applyEatTransform(glm::mat4& m, float invert,
+                               float remaining, float duration, float partialTick) {
+            const float pi = 3.14159265358979323846f;
+            const float currUsageTime = remaining - partialTick + 1.0f;         // :262
+            const float scaledUsage   = duration > 0.0f
+                ? currUsageTime / duration : 0.0f;                              // :263
+            if (scaledUsage < 0.8f) {                                           // :264
+                // Chew bob — |cos(t/4·π)|·0.1 on Y for the last 80% of the use
+                const float extraHeight =
+                    std::abs(std::cos(currUsageTime / 4.0f * pi) * 0.1f);       // :265
+                m = glm::translate(m, glm::vec3(0.0f, extraHeight, 0.0f));      // :266
+            }
+            const float eatJiggle = 1.0f - std::pow(scaledUsage, 27.0f);        // :269
+            m = glm::translate(m, glm::vec3(invert * eatJiggle * 0.6f,
+                                            eatJiggle * -0.5f, 0.0f));          // :271
+            m = glm::rotate(m, glm::radians(invert * eatJiggle * 90.0f), {0,1,0}); // :272
+            m = glm::rotate(m, glm::radians(eatJiggle * 10.0f),          {1,0,0}); // :273
+            m = glm::rotate(m, glm::radians(invert * eatJiggle * 30.0f), {0,0,1}); // :274
+        }
+
+        // BLOCK guard raise — renderArmWithItem's BLOCK case, applied AFTER
+        // the arm transform (MC: applyItemArmTransform then this). MC skips
+        // it for ShieldItem because the shield's arm model + "blocking"
+        // predicate carry the raise there — we have no arm model, so the
+        // pose applies to the shield too.
+        void applyBlockPose(glm::mat4& m, float invert) {
+            m = glm::translate(m, glm::vec3(invert * -0.14142136f, 0.08f, 0.14142136f));
+            m = glm::rotate(m, glm::radians(-102.25f),         {1,0,0});
+            m = glm::rotate(m, glm::radians(invert * 13.365f), {0,1,0});
+            m = glm::rotate(m, glm::radians(invert * 78.05f),  {0,0,1});
         }
 
         // Walk-bob: small periodic offsets driven by the player's
@@ -363,8 +416,22 @@ namespace Render {
         // 2D texture with vertex-colour multiply and supports alpha
         // testing, which is exactly the requirements for both the
         // voxelised sprite and the textured cube paths.
-        m_shader = g_renderBackend->CreateShaderFromFiles(
-            "shaders/block.vert", "shaders/block.frag");
+        // On Vulkan the block shaders now declare the Common UBO (set=1,
+        // fog + sky-brightness fields), which requires the UBO-aware
+        // (portal) pipeline layout — plain CreateShaderFromFiles bakes the
+        // texture-only layout and vkCreateGraphicsPipelines fails with
+        // VK_ERROR_INITIALIZATION_FAILED. Same cast pattern as
+        // ChunkRenderer/SkyRenderer.
+        if (g_renderBackend->GetType() == BackendType::Vulkan) {
+#ifdef HAS_VULKAN
+            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
+            m_shader = vk->CreateShaderFromFilesPortal(
+                "shaders/block.vert", "shaders/block.frag");
+#endif
+        } else {
+            m_shader = g_renderBackend->CreateShaderFromFiles(
+                "shaders/block.vert", "shaders/block.frag");
+        }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[HeldItemRenderer] failed to load block shader — "
                          "held items will not render");
@@ -409,26 +476,29 @@ namespace Render {
         m_initialized = false;
     }
 
-    void HeldItemRenderer::Tick(Game::ItemID selectedItem,
+    void HeldItemRenderer::Tick(Game::ItemID mainItem, Game::ItemID offhandItem,
                                 bool attackPressedThisTick) {
         // First tick of the game: skip the equip slide-in. Otherwise
         // the player sees the very first item they spawn holding slide
         // up into the hand position, which looks like a bug.
-        static bool s_firstTick = true;
-        if (s_firstTick) {
-            m_displayedItem = selectedItem;
-            m_pendingItem   = selectedItem;
-            m_equipProgress = m_equipProgressPrev = 0.0f;
+        if (m_firstTick) {
+            for (int h = 0; h < 2; ++h) {
+                const Game::ItemID it = (h == 0) ? mainItem : offhandItem;
+                m_hands[h].displayed = it;
+                m_hands[h].pending   = it;
+                m_hands[h].equipProgress = m_hands[h].equipProgressPrev = 0.0f;
+            }
             m_swingProgress = m_swingProgressPrev = 0.0f;
-            s_firstTick = false;
+            m_firstTick = false;
             return;
         }
 
-        m_pendingItem = selectedItem;
-        m_equipProgressPrev = m_equipProgress;
+        m_hands[0].pending = mainItem;
+        m_hands[1].pending = offhandItem;
         m_swingProgressPrev = m_swingProgress;
 
-        // Equip animation state machine. Vanilla pattern:
+        // Per-hand equip animation state machine (MC keeps mainHandHeight
+        // and offHandHeight separately). Vanilla pattern:
         //   • equipProgress lerps toward a target by up to kEquipStep
         //     per tick (target = 1 when items differ → item hides;
         //     target = 0 when same → item slides back up).
@@ -436,12 +506,15 @@ namespace Render {
         //     equivalent of vanilla's mainHandHeight < 0.1) snap the
         //     displayed item to the pending one. This is the point
         //     where the swap is visually invisible.
-        const float target = (m_displayedItem != m_pendingItem) ? 1.0f : 0.0f;
-        const float delta  = std::clamp(target - m_equipProgress,
-                                        -kEquipStep, kEquipStep);
-        m_equipProgress = std::clamp(m_equipProgress + delta, 0.0f, 1.0f);
-        if (m_equipProgress > 0.9f) {
-            m_displayedItem = m_pendingItem;
+        for (HandState& hand : m_hands) {
+            hand.equipProgressPrev = hand.equipProgress;
+            const float target = (hand.displayed != hand.pending) ? 1.0f : 0.0f;
+            const float delta  = std::clamp(target - hand.equipProgress,
+                                            -kEquipStep, kEquipStep);
+            hand.equipProgress = std::clamp(hand.equipProgress + delta, 0.0f, 1.0f);
+            if (hand.equipProgress > 0.9f) {
+                hand.displayed = hand.pending;
+            }
         }
 
         // Swing animation. Mirrors MC's LivingEntity.swing() retrigger
@@ -469,9 +542,11 @@ namespace Render {
     }
 
     void HeldItemRenderer::Render(float aspect, float partialTick,
-                                  float walkDistance) {
+                                  float walkDistance, bool renderMainHand) {
         if (!m_initialized || !g_renderBackend) return;
-        if (m_displayedItem == 0) return;          // air → render nothing
+        const bool drawMain = renderMainHand && m_hands[0].displayed != 0;
+        const bool drawOff  = m_hands[1].displayed != 0;
+        if (!drawMain && !drawOff) return;         // both hands empty
 
         // MC parity: clear the depth buffer before rendering the viewmodel
         // so it never gets occluded by world geometry pressed up against
@@ -481,8 +556,24 @@ namespace Render {
         // then z-sorts only against itself.
         g_renderBackend->Clear(/*color=*/false, /*depth=*/true, /*stencil=*/false);
 
+        // MC renderHandsWithItems: off hand first, then main hand on top.
+        if (drawOff)  RenderHand(1, aspect, partialTick, walkDistance);
+        if (drawMain) RenderHand(0, aspect, partialTick, walkDistance);
+    }
+
+    void HeldItemRenderer::RenderHand(int hand, float aspect, float partialTick,
+                                      float walkDistance) {
+        const HandState& hs = m_hands[hand];
+        const float invert = (hand == 0) ? 1.0f : -1.0f;   // right / left arm
+        const bool leftHand = (hand == 1);
+        // Whether THIS hand carries the hold-to-use pose (MC keys the
+        // useAnimation switch on player.getUsedItemHand()).
+        const bool usingThisHand =
+            m_useActive && m_useRemaining > 0 &&
+            m_useHand == static_cast<uint32_t>(hand);
+
         // Look up the item once; bail if it doesn't exist.
-        const auto& item = Game::ItemRegistry::Get(m_displayedItem);
+        const auto& item = Game::ItemRegistry::Get(hs.displayed);
 
         // ── Pick the mesh + texture for this item type ──────────────
         DisplayXf       xf       = kSpriteXf;
@@ -505,20 +596,34 @@ namespace Render {
                 ? Render::g_blockEntityRenderDispatcher->GetRenderer(beType->TypeId())
                 : nullptr;
         if (beRenderer) {
-            // Build the same hand transform chain as the cube path, then
-            // hand to the BE renderer with the MC-pixel-space mesh
-            // recentred to the cell midpoint.
-            const float equipBE = m_equipProgressPrev +
-                (m_equipProgress - m_equipProgressPrev) * partialTick;
-            const float swingBE = m_swingActive
+            // Build the same hand transform chain as the cube path (see the
+            // main chain below for the MC ordering notes), then hand to the
+            // BE renderer with the MC-pixel-space mesh recentred to the
+            // cell midpoint.
+            const float equipBE = hs.equipProgressPrev +
+                (hs.equipProgress - hs.equipProgressPrev) * partialTick;
+            const float swingBE = (hand == 0 && m_swingActive)
                 ? m_swingProgressPrev + (m_swingProgress - m_swingProgressPrev) * partialTick
                 : 0.0f;
             glm::mat4 modelBE(1.0f);
-            modelBE = glm::translate(modelBE, glm::vec3(0.56f, -0.52f, -0.72f));
-            applyEquipTransform(modelBE, equipBE);
-            applyBobTransform  (modelBE, walkDistance);
-            if (m_swingActive || swingBE > 0.0f) applySwingTransform(modelBE, swingBE);
-            modelBE *= buildDisplayMatrix(kBlockXf);
+            applyBobTransform(modelBE, walkDistance);
+            if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
+                                  m_useAnim == Game::ItemUseAnimation::DRINK)) {
+                applyEatTransform(modelBE, invert,
+                                  (float)m_useRemaining, (float)m_useDuration,
+                                  partialTick);
+                applyItemArmTransform(modelBE, invert, equipBE);
+            } else if (usingThisHand && m_useAnim == Game::ItemUseAnimation::BLOCK) {
+                applyItemArmTransform(modelBE, invert, equipBE);
+                applyBlockPose(modelBE, invert);
+            } else if (swingBE > 0.0f) {
+                applySwingOffsets(modelBE, invert, swingBE);
+                applyItemArmTransform(modelBE, invert, equipBE);
+                applySwingRotations(modelBE, invert, swingBE);
+            } else {
+                applyItemArmTransform(modelBE, invert, equipBE);
+            }
+            modelBE *= buildDisplayMatrix(kBlockXf, leftHand);
             // Chest mesh lives in MC pixel-space [0,16]³. Scale to [0,1]
             // block space, then translate to centre the mesh on origin so
             // the display transform's rotation pivots around the chest's
@@ -577,37 +682,48 @@ namespace Render {
         if (mesh == INVALID_MESH) return;
 
         // ── Build the model matrix ─────────────────────────────────
-        // Step order (extrinsic — read bottom-up):
-        //   1. Base hand position (lower-right of the view)
-        //   2. Equip slide (off-screen by equip progress)
-        //   3. View bob (walk-driven drift)
-        //   4. Swing animation
-        //   5. Display transform (per-item)
-        //   6. Sprite/Block local-space normalisation
+        // Chain mirrors MC ItemInHandRenderer.renderArmWithItem exactly
+        // (pose-stack order — first listed = outermost):
+        //   1. View bob (renderHandsWithItems applies it to the whole
+        //      stack before either hand; NOT mirrored)
+        //   2. One of (mutually exclusive, like MC's branches):
+        //        EAT/DRINK → applyEatTransform THEN applyItemArmTransform
+        //                    (eat runs in VIEW space — the ordering fix)
+        //        BLOCK     → applyItemArmTransform THEN the guard pose
+        //        swinging  → swing offsets → arm transform → attack rotations
+        //        idle      → applyItemArmTransform
+        //      (applyItemArmTransform carries base position + equip slide)
+        //   3. Display transform (per-item, X-mirrored for the left hand)
+        //   4. Sprite/Block local-space normalisation
         //
         // partialTick blends the previous and current tick samples so
         // animation is smooth at any framerate.
-        const float equip = m_equipProgressPrev +
-            (m_equipProgress - m_equipProgressPrev) * partialTick;
-        const float swingP = m_swingActive
+        const float equip = hs.equipProgressPrev +
+            (hs.equipProgress - hs.equipProgressPrev) * partialTick;
+        const float swingP = (hand == 0 && m_swingActive)
             ? m_swingProgressPrev + (m_swingProgress - m_swingProgressPrev) * partialTick
             : 0.0f;
 
         glm::mat4 model(1.0f);
-        // 1) Base hand position. Lower-right of the view, slightly
-        //    forward of the camera. Y is negative (below eye), X
-        //    positive (to right), Z negative (in front).
-        model = glm::translate(model, glm::vec3(0.56f, -0.52f, -0.72f));
-        // 2) Equip slide
-        applyEquipTransform(model, equip);
-        // 3) Walk bob
         applyBobTransform(model, walkDistance);
-        // 4) Swing arc
-        if (m_swingActive || swingP > 0.0f) {
-            applySwingTransform(model, swingP);
+        if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
+                              m_useAnim == Game::ItemUseAnimation::DRINK)) {
+            applyEatTransform(model, invert,
+                              (float)m_useRemaining, (float)m_useDuration,
+                              partialTick);
+            applyItemArmTransform(model, invert, equip);
+        } else if (usingThisHand && m_useAnim == Game::ItemUseAnimation::BLOCK) {
+            applyItemArmTransform(model, invert, equip);
+            applyBlockPose(model, invert);
+        } else if (swingP > 0.0f) {
+            applySwingOffsets(model, invert, swingP);
+            applyItemArmTransform(model, invert, equip);
+            applySwingRotations(model, invert, swingP);
+        } else {
+            applyItemArmTransform(model, invert, equip);
         }
-        // 5) Display transform
-        model *= buildDisplayMatrix(xf);
+        // Display transform
+        model *= buildDisplayMatrix(xf, leftHand);
         // 6) Convert mesh-local space into the same coordinate frame
         //    vanilla's display transform expects, and apply vanilla's
         //    pre-display recentre.
@@ -698,6 +814,19 @@ namespace Render {
         // pass — held items render after world, never inside a portal.
         g_renderBackend->SetUniformVec4 (m_shader, "uPortalClipPlane",
             glm::vec4(0.0f));
+        // Environment uniforms the block shader now reads. The viewmodel is
+        // drawn in view space, so world-space fog math is meaningless here:
+        // uFogColor alpha 0 makes the fog mix a no-op (fogValue is
+        // multiplied by it), and the distances are pushed out of reach.
+        // Sky brightness IS applied so the held item dims at night with the
+        // terrain, like MC's lightmap-lit viewmodel. Without these the GL
+        // uniforms default to 0 → the item would render black.
+        g_renderBackend->SetUniformFloat(m_shader, "uSkyBrightness",
+            EnvironmentState::Get().Frame().skyBrightness);
+        g_renderBackend->SetUniformVec4 (m_shader, "uFogColor", glm::vec4(0.0f));
+        g_renderBackend->SetUniformVec4 (m_shader, "uFogEnv",
+            glm::vec4(1e9f, 1e9f, 1e9f, 1e9f));
+        g_renderBackend->SetUniformVec3 (m_shader, "uCameraPos", glm::vec3(0.0f));
 
         g_renderBackend->DrawIndexed(mesh, indexCount);
         g_renderBackend->UnbindMesh();

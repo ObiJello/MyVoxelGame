@@ -186,6 +186,21 @@ class DB:
                           (name, account_id))
         self.conn.commit()
 
+    def set_password(self, account_id: int, password: str):
+        salt = secrets.token_bytes(16)
+        self.conn.execute(
+            "UPDATE accounts SET salt=?, hash=?, algo=? WHERE id=?",
+            (salt, self._hash(password, salt, PREFERRED_KDF), PREFERRED_KDF,
+             account_id))
+        self.conn.commit()
+
+    def delete_other_sessions(self, account_id: int, keep_token: str):
+        """Revoke every session for the account except `keep_token`."""
+        self.conn.execute(
+            "DELETE FROM sessions WHERE account=? AND token<>?",
+            (account_id, keep_token))
+        self.conn.commit()
+
     # ── sessions ────────────────────────────────────────────────────────
 
     def create_session(self, account_id: int) -> str:
@@ -572,7 +587,7 @@ class Service:
         token = self.db.create_session(account_id)
         log.info("signup: %s (id %d) from %s", name, account_id, peer_ip)
         return {"ok": True, "account_id": account_id, "token": token,
-                "name": name}
+                "name": name, "created": int(time.time())}
 
     def op_login(self, body, peer_ip, conn):
         row = self.db.find_account(str(body.get("name", "")))
@@ -582,7 +597,7 @@ class Service:
         token = self.db.create_session(row["id"])
         log.info("login: %s (id %d) from %s", row["name"], row["id"], peer_ip)
         return {"ok": True, "account_id": row["id"], "token": token,
-                "name": row["name"]}
+                "name": row["name"], "created": row["created"]}
 
     def op_logout(self, body, peer_ip, conn):
         self.db.delete_session(str(body.get("token", "")))
@@ -599,6 +614,22 @@ class Service:
         if me is not None and me["id"] == row["id"]:
             return {"ok": True, "status": "yours"}
         return {"ok": True, "status": "taken"}
+
+    def op_change_password(self, body, peer_ip, conn):
+        me = self._auth(body, conn)
+        if me is None:
+            return {"ok": False, "error": "bad_token"}
+        if not self.db.verify_password(me, str(body.get("current", ""))):
+            return {"ok": False, "error": "bad_credentials"}
+        password = str(body.get("password", ""))
+        if len(password) < MIN_PASSWORD_LEN:
+            return {"ok": False, "error": "password_too_short"}
+        self.db.set_password(me["id"], password)
+        # Kick every other device off the account; the requesting session stays.
+        self.db.delete_other_sessions(me["id"], str(body.get("token", "")))
+        log.info("change_password: %s (id %d) from %s",
+                 me["name"], me["id"], peer_ip)
+        return {"ok": True}
 
     def op_rename(self, body, peer_ip, conn):
         me = self._auth(body, conn)

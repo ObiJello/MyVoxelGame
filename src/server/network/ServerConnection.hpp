@@ -13,7 +13,8 @@
 namespace Server {
 
     class NetworkServer;
-    
+    class ServerPlayer;
+
     // Server-side connection handler for a single client
     // Mirrors Minecraft's ServerPlayNetworkHandler
     class ServerConnection : public Network::NetworkConnection {
@@ -93,10 +94,14 @@ namespace Server {
         void SendDisconnect(const std::string& reason);
         
         // Send time update
-        void SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay);
+        void SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay, bool doDaylightCycle);
+        void SendCurrentTimeUpdate(); // reads live values from the server world
         
-        // Send player abilities
-        void SendPlayerAbilities(uint8_t flags, float flySpeed, float walkSpeed);
+        // Send player abilities + game mode built from the live ServerPlayer
+        // (MC ClientboundPlayerAbilitiesPacket + CHANGE_GAME_MODE folded).
+        void SendPlayerAbilities(const ServerPlayer& player);
+        // Survival-default placeholder for login (ServerPlayer not built yet).
+        void SendPlayerAbilitiesDefault();
 
         // Authoritative teleport (matches MC's ServerGamePacketListenerImpl.teleport overload).
         // Increments awaiting-teleport id, snaps the player's ServerPlayer position, and sends

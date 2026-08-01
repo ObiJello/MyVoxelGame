@@ -16,6 +16,7 @@ namespace Client {
 }
 namespace Network {
     enum class BlockActionType : uint8_t;
+    enum class PlayerAction : uint8_t;
 }
 
 namespace Game {
@@ -67,6 +68,11 @@ namespace Game {
         
         // Hotbar selection
         void OnHotbarChanged(int slot);
+
+        // Send a PlayerActionC2S (RELEASE_USE_ITEM / DROP_ITEM /
+        // SWAP_ITEM_WITH_OFFHAND / …). Public so PlatformMain's keybinds
+        // (Q = drop, F = swap offhand) can fire actions directly.
+        void SendPlayerAction(Network::PlayerAction action);
 
         // Pick-block (P key) — server-authoritative. Predictively fills the
         // selected hotbar slot with a full stack of `picked` and sends
@@ -134,6 +140,7 @@ namespace Game {
         int moveSeq = 0;         // Movement sequence number
         int interactSeq = 0;     // Interaction sequence number
         bool sentPlayerLoaded = false;  // Track if we've sent initial spawn
+        bool lastSentFlying = false;    // Fly state last shipped via PlayerAbilitiesC2S
 
         // Internal methods
         void SendMovementIfDue();  // TODO: Implement for networking
@@ -141,7 +148,19 @@ namespace Game {
         void AbortDig();
         void FinishDig();
         void SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
-        void SendUseItem(int hand);  // TODO: Implement for networking
+        // Use item in air — sends UseItemC2S (MC ServerboundUseItemPacket).
+        void SendUseItem(int hand);
+        // Which hand a right-click "use" should act on — MC's
+        // MAIN_HAND → OFF_HAND loop (offhand shield with a tool in main hand).
+        uint32_t PickUseHand() const;
+        // Start/stop the client-side predicted hold-to-use (mirrors MC's
+        // client running startUsingItem locally). Start is a no-op when the
+        // held stack has no use duration.
+        void StartPredictedUse(uint32_t hand);
+        void StopPredictedUse();
+        // Per-tick countdown for the predicted use (called from Tick's 20 TPS
+        // stepper, alongside UpdateBreakingTick/UpdatePlacingTick).
+        void UpdateUsingTick();
 
 #if ENABLE_PORTAL_GUN
         // True portal-gun projectile. Spawned at the eye, flies forward at

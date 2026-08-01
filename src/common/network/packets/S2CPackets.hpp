@@ -372,6 +372,38 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // ========================================================================
+    // PLAYER STATS
+    // ========================================================================
+
+    class SetHealthS2CPacketImpl : public IS2CPacket {
+    private:
+        SetHealthS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SetHealthS2CPacketImpl(SetHealthS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSetHealthS2C(m_data); }
+        const SetHealthS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SetHealthS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PlayerAbilitiesS2CPacketImpl : public IS2CPacket {
+    private:
+        PlayerAbilitiesS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PlayerAbilitiesS2CPacketImpl(PlayerAbilitiesS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPlayerAbilitiesS2C(m_data); }
+        const PlayerAbilitiesS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PlayerAbilities; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 #if ENABLE_PORTAL_GUN
     class PortalSetS2CPacketImpl : public IS2CPacket {
     private:

@@ -47,6 +47,8 @@ namespace Client {
         void onInventoryFullS2C(const Network::InventoryFullS2CPacket& packet) override { handleInventoryFull(packet); }
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
         void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
+        void onSetHealthS2C(const Network::SetHealthS2CPacket& packet) override { handleSetHealth(packet); }
+        void onPlayerAbilitiesS2C(const Network::PlayerAbilitiesS2CPacket& packet) override { handlePlayerAbilities(packet); }
 #if ENABLE_PORTAL_GUN
         void onPortalSetS2C(const Network::PortalSetS2CPacket& packet) override    { handlePortalSet(packet); }
         void onPortalRemoveS2C(const Network::PortalRemoveS2CPacket& packet) override { handlePortalRemove(packet); }
@@ -83,8 +85,8 @@ namespace Client {
         void handleDisconnect(const std::string& reason);
         void handleKeepAlive(uint64_t id);
         
-        // Player abilities
-        void handlePlayerAbilities(uint8_t flags, float flySpeed, float walkSpeed);
+        // Player abilities + game mode
+        void handlePlayerAbilities(const Network::PlayerAbilitiesS2CPacket& packet);
         void handleWorldSpawn(int32_t x, int32_t y, int32_t z);
         
         // Chat
@@ -99,6 +101,7 @@ namespace Client {
         void handleInventoryFull(const Network::InventoryFullS2CPacket& packet);
         void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
         void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
+        void handleSetHealth(const Network::SetHealthS2CPacket& packet);
 
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-broadcast pair state). Forwards into

@@ -4,6 +4,8 @@
 #include "../player/ServerPlayer.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Item.hpp"
+#include "common/entity/EquipmentSlot.hpp"
+#include "common/data/DataComponents.hpp"
 #include <algorithm>
 
 namespace Server {
@@ -23,10 +25,11 @@ namespace Server {
         }
     }
 
-    bool InventoryClickHandler::IsRestrictedInsertSlot(int16_t slotIndex) {
-        // Armor + crafting are visual-only in our scope. Block placement into them.
-        return Inventory::IsArmorSlot(slotIndex) || Inventory::IsCraftGridSlot(slotIndex)
-            || Inventory::IsCraftResultSlot(slotIndex);
+    bool InventoryClickHandler::MayPlaceInSlot(int16_t slotIndex,
+                                               const Game::InventorySlot& stack) {
+        // Shared filter in common/ — the client's InventoryScreen prediction
+        // uses the same function so refused clicks never leave ghost items.
+        return Game::MayPlaceInSlot(slotIndex, stack);
     }
 
     int InventoryClickHandler::MergeInto(InventorySlot& dst, InventorySlot& src) {
@@ -76,6 +79,39 @@ namespace Server {
         return moved;
     }
 
+    // ─── Item click-behaviour overrides (bundle) ──────────────────────────
+    // Mirrors AbstractContainerMenu.tryItemClickBehaviourOverride: the
+    // carried stack's overrideStackedOnOther gets first refusal, then the
+    // slot stack's overrideOtherStackedOnMe. Returning true consumes the
+    // click before the normal pickup logic.
+    static bool TryItemClickBehaviourOverride(ServerPlayer& player, int16_t slotIndex,
+                                              uint8_t button, InventoryClickResult& result) {
+        if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return false;
+        const Game::ClickAction action = (button == 0) ? Game::ClickAction::PRIMARY
+                                                       : Game::ClickAction::SECONDARY;
+        Inventory& inv = player.getInventory();
+        InventorySlot& carried = player.getCarried();
+        InventorySlot& slot    = inv.MutableSlot(slotIndex);
+
+        if (!carried.IsEmpty()) {
+            const Game::Item& carriedItem = ItemRegistry::Get(carried.itemId);
+            if (carriedItem.overrideStackedOnOther
+                && carriedItem.overrideStackedOnOther(carried, inv, slotIndex,
+                                                      action, player, result)) {
+                return true;
+            }
+        }
+        if (!slot.IsEmpty()) {
+            const Game::Item& slotItem = ItemRegistry::Get(slot.itemId);
+            if (slotItem.overrideOtherStackedOnMe
+                && slotItem.overrideOtherStackedOnMe(slot, carried, inv, slotIndex,
+                                                     action, player, result)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ─── PICKUP ────────────────────────────────────────────────────────────
     // MC: AbstractContainerMenu.java lines 417-482
     InventoryClickResult InventoryClickHandler::HandlePickup(ServerPlayer& player,
@@ -92,8 +128,9 @@ namespace Server {
                     result.droppedItem = carried;
                     carried.Clear();
                 } else {
-                    // Right-click outside drops 1
-                    result.droppedItem = {carried.itemId, 1};
+                    // Right-click outside drops 1 (component-preserving copy)
+                    result.droppedItem = carried;
+                    result.droppedItem.count = 1;
                     carried.count--;
                     if (carried.count <= 0) carried.Clear();
                 }
@@ -104,19 +141,26 @@ namespace Server {
 
         if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return result;
 
-        InventorySlot& slot = inv.MutableSlot(slotIndex);
+        // Bundle click-to-insert/extract — consumes the click before the
+        // normal pickup/merge/swap (AbstractContainerMenu.doClick's
+        // tryItemClickBehaviourOverride call).
+        if (TryItemClickBehaviourOverride(player, slotIndex, button, result)) {
+            return result;
+        }
 
-        // Visual-only slots (armor/craft) — let cursor pick up if non-empty, refuse insert.
-        const bool restricted = IsRestrictedInsertSlot(slotIndex);
+        InventorySlot& slot = inv.MutableSlot(slotIndex);
 
         if (slot.IsEmpty()) {
             if (carried.IsEmpty()) return result;
-            if (restricted) return result;
-            // Insert from cursor
+            // Per-slot insert filter (Slot.mayPlace): craft slots refuse,
+            // armor slots accept only their matching EQUIPPABLE.
+            if (!MayPlaceInSlot(slotIndex, carried)) return result;
+            // Insert from cursor (component-preserving copy)
             const int maxStack = ItemRegistry::Get(carried.itemId).maxStackSize;
             int amount = (button == 0) ? carried.count : 1;
             amount = std::min(amount, maxStack);
-            slot = {carried.itemId, amount};
+            slot = carried;
+            slot.count = amount;
             carried.count -= amount;
             if (carried.count <= 0) carried.Clear();
             result.carriedChanged = true;
@@ -127,8 +171,10 @@ namespace Server {
         // Slot is non-empty
         if (carried.IsEmpty()) {
             // Pick up: left = full stack, right = ceil(count/2)
+            // (component-preserving copy)
             int amount = (button == 0) ? slot.count : (slot.count + 1) / 2;
-            carried = {slot.itemId, amount};
+            carried = slot;
+            carried.count = amount;
             slot.count -= amount;
             if (slot.count <= 0) slot.Clear();
             result.carriedChanged = true;
@@ -139,7 +185,7 @@ namespace Server {
         // Both non-empty
         if (slot.itemId == carried.itemId) {
             // Same item: merge cursor → slot
-            if (restricted) return result;
+            if (!MayPlaceInSlot(slotIndex, carried)) return result;
             const int maxStack = ItemRegistry::Get(slot.itemId).maxStackSize;
             int amount = (button == 0) ? carried.count : 1;
             int free = maxStack - slot.count;
@@ -150,8 +196,8 @@ namespace Server {
             result.carriedChanged = true;
             MarkChanged(result, (uint8_t)slotIndex);
         } else {
-            // Different blocks: swap (only if mayPlace; restricted slots refuse swap)
-            if (restricted) return result;
+            // Different items: swap (only when the slot accepts the cursor stack)
+            if (!MayPlaceInSlot(slotIndex, carried)) return result;
             std::swap(slot, carried);
             result.carriedChanged = true;
             MarkChanged(result, (uint8_t)slotIndex);
@@ -168,6 +214,30 @@ namespace Server {
         if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return result;
         Inventory& inv = player.getInventory();
 
+        // Equip priority — mirrors InventoryMenu.quickMoveStack: shift-click
+        // on an EQUIPPABLE in main/hotbar tries its armor/offhand slot FIRST
+        // when that slot is empty.
+        if (Inventory::IsHotbarSlot(slotIndex) || Inventory::IsMainSlot(slotIndex)) {
+            InventorySlot& source = inv.MutableSlot(slotIndex);
+            if (!source.IsEmpty()) {
+                if (auto equippable = source.get(Game::DataComponents::EQUIPPABLE)) {
+                    const int target = Game::InventoryIndexFor(equippable->slot);
+                    if (target >= 0 && inv.GetSlot(target).IsEmpty()) {
+                        // Armor/offhand slots hold one item (armor stacksTo(1)
+                        // anyway; the offhand target here mirrors the shield).
+                        InventorySlot equipped = source;
+                        equipped.count = 1;
+                        inv.SetSlotFull(target, equipped);
+                        source.count -= 1;
+                        if (source.count <= 0) source.Clear();
+                        MarkChanged(result, (uint8_t)target);
+                        MarkChanged(result, (uint8_t)slotIndex);
+                        return result;
+                    }
+                }
+            }
+        }
+
         if (Inventory::IsHotbarSlot(slotIndex)) {
             // Hotbar → main
             MoveStackToRegion(inv, slotIndex, Inventory::MAIN_BEGIN,
@@ -177,9 +247,13 @@ namespace Server {
             MoveStackToRegion(inv, slotIndex, Inventory::HOTBAR_BEGIN,
                               Inventory::HOTBAR_BEGIN + Inventory::HOTBAR_SIZE, result);
         } else if (Inventory::IsArmorSlot(slotIndex) ||
+                   Inventory::IsOffhandSlot(slotIndex) ||
                    Inventory::IsCraftGridSlot(slotIndex) ||
                    Inventory::IsCraftResultSlot(slotIndex)) {
-            // Restricted source → try main first, then hotbar
+            // Restricted source (armor/offhand/craft) → try main first, then
+            // hotbar. MC's InventoryMenu.quickMoveStack routes these the same
+            // way; the offhand case was previously missing so shift-clicking
+            // slot 45 did nothing.
             if (!MoveStackToRegion(inv, slotIndex, Inventory::MAIN_BEGIN,
                                    Inventory::MAIN_BEGIN + Inventory::MAIN_SIZE, result)) {
                 MoveStackToRegion(inv, slotIndex, Inventory::HOTBAR_BEGIN,
@@ -204,8 +278,9 @@ namespace Server {
         InventorySlot& a = inv.MutableSlot(slotIndex);
         InventorySlot& b = inv.MutableSlot(hotbarIdx);
 
-        // Restricted slot can only be picked up (placed *into* hotbar). Don't insert from hotbar.
-        if (IsRestrictedInsertSlot(slotIndex) && !b.IsEmpty()) return result;
+        // Per-slot insert filter — the hotbar stack must be placeable into the
+        // target slot (armor accepts only its matching EQUIPPABLE; craft refuses).
+        if (!b.IsEmpty() && !MayPlaceInSlot(slotIndex, b)) return result;
 
         std::swap(a, b);
         MarkChanged(result, (uint8_t)slotIndex);
@@ -224,7 +299,10 @@ namespace Server {
         const InventorySlot& src = player.getInventory().GetSlot(slotIndex);
         if (src.IsEmpty()) return result;
 
-        carried = {src.itemId, ItemRegistry::Get(src.itemId).maxStackSize};
+        // Component-preserving copy (a cloned enchanted book keeps its
+        // enchantments — MC clones the full stack).
+        carried = src;
+        carried.count = ItemRegistry::Get(src.itemId).maxStackSize;
         result.carriedChanged = true;
         return result;
     }
@@ -240,7 +318,8 @@ namespace Server {
             InventorySlot& carried = player.getCarried();
             if (!carried.IsEmpty()) {
                 if (button == 0) {
-                    result.droppedItem = {carried.itemId, 1};
+                    result.droppedItem = carried;   // component-preserving copy
+                    result.droppedItem.count = 1;
                     carried.count--;
                     if (carried.count <= 0) carried.Clear();
                 } else {
@@ -259,7 +338,8 @@ namespace Server {
 
         int amount = (button == 0) ? 1 : slot.count;
         amount = std::min(amount, slot.count);
-        result.droppedItem = {slot.itemId, amount};
+        result.droppedItem = slot;   // component-preserving copy
+        result.droppedItem.count = amount;
         slot.count -= amount;
         if (slot.count <= 0) slot.Clear();
         MarkChanged(result, (uint8_t)slotIndex);
@@ -300,7 +380,7 @@ namespace Server {
         if (header == 1) {
             // Add slot to drag set
             if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return result;
-            if (IsRestrictedInsertSlot(slotIndex)) return result;
+            if (!MayPlaceInSlot(slotIndex, carried)) return result;
             // Slot must be empty or same block as carried
             const InventorySlot& s = player.getInventory().GetSlot(slotIndex);
             if (!s.IsEmpty() && s.itemId != carried.itemId) return result;
@@ -351,7 +431,9 @@ namespace Server {
                 int toPlace = std::min(perSlot + existing, maxStack);
                 int delta = toPlace - existing;
                 if (delta <= 0) continue;
-                target.itemId = carried.itemId;
+                // Component-preserving: an empty target takes a full copy of
+                // the carried stack (id + components), not just the id.
+                target = carried;
                 target.count = toPlace;
                 if (dragType != 2) remaining -= delta;
                 MarkChanged(result, s);
@@ -434,8 +516,10 @@ namespace Server {
     // The search grid is an infinite source. Left-click fills cursor with full stack
     // of `itemId`. Right-click adds 1 if cursor is same item (or sets count=1 if empty).
     InventoryClickResult InventoryClickHandler::HandleCreativePickup(ServerPlayer& player,
-                                                                      uint32_t itemId, uint8_t button) {
+                                                                      const Game::ItemStack& source,
+                                                                      uint8_t button) {
         InventoryClickResult result;
+        const uint32_t itemId = source.itemId;
         if (itemId == Game::Items::Air) return result;
         const int maxStack = Game::ItemRegistry::Get(itemId).maxStackSize;
         InventorySlot& carried = player.getCarried();
@@ -454,11 +538,13 @@ namespace Server {
 
         if (button == 0) {
             // Full-stack pickup (only reached when cursor is empty or same item).
-            carried = {itemId, maxStack};
+            carried = source;           // identity copy — components ride along
+            carried.count = maxStack;
         } else {
             // Single-item pickup (button==1).
             if (carried.IsEmpty()) {
-                carried = {itemId, 1};
+                carried = source;
+                carried.count = 1;
             } else if (carried.count < maxStack) {
                 // Same item already held → increment by 1.
                 carried.count++;
@@ -470,8 +556,10 @@ namespace Server {
 
     // ─── CREATIVE QUICK_MOVE ────────────────────────────────────────────────
     // Shift-click on the search grid: drop a full stack into hotbar (then main).
-    InventoryClickResult InventoryClickHandler::HandleCreativeQuickMove(ServerPlayer& player, uint32_t itemId) {
+    InventoryClickResult InventoryClickHandler::HandleCreativeQuickMove(ServerPlayer& player,
+                                                                        const Game::ItemStack& source) {
         InventoryClickResult result;
+        const uint32_t itemId = source.itemId;
         if (itemId == Game::Items::Air) return result;
         const int maxStack = Game::ItemRegistry::Get(itemId).maxStackSize;
 
@@ -486,7 +574,8 @@ namespace Server {
             for (int i = r[0]; i < r[1]; ++i) {
                 InventorySlot& s = inv.MutableSlot(i);
                 if (s.IsEmpty()) {
-                    s = {itemId, maxStack};
+                    s = source;          // identity copy — components ride along
+                    s.count = maxStack;
                     MarkChanged(result, (uint8_t)i);
                     return result;
                 }
@@ -507,10 +596,10 @@ namespace Server {
     }
 
     InventoryClickResult InventoryClickHandler::HandleCreativeFillSlot(
-            ServerPlayer& player, int16_t slotIndex, uint32_t itemId) {
+            ServerPlayer& player, int16_t slotIndex, const Game::ItemStack& source) {
         InventoryClickResult result;
         if (slotIndex < 0 || slotIndex >= Inventory::TOTAL_SIZE) return result;
-        if (itemId == Game::Items::Air) {
+        if (source.itemId == Game::Items::Air) {
             // Treat Air as "clear the slot" — matches MC pick-block on an air block.
             InventorySlot& s = player.getInventory().MutableSlot(slotIndex);
             if (!s.IsEmpty()) {
@@ -519,9 +608,13 @@ namespace Server {
             }
             return result;
         }
-        const int maxStack = ItemRegistry::Get(itemId).maxStackSize;
+        // Same placement filter as regular clicks — pick-block onto an armor
+        // slot must not bypass the EQUIPPABLE check.
+        if (!MayPlaceInSlot(slotIndex, source)) return result;
+        const int maxStack = ItemRegistry::Get(source.itemId).maxStackSize;
         InventorySlot& s = player.getInventory().MutableSlot(slotIndex);
-        s = {itemId, maxStack};
+        s = source;          // identity copy — components ride along
+        s.count = maxStack;
         MarkChanged(result, (uint8_t)slotIndex);
         return result;
     }
@@ -539,16 +632,23 @@ namespace Server {
             player.m_quickcraftSlots.clear();
         }
 
-        // Search-tab creative-grid clicks
+        // Search-tab creative-grid clicks. Prefer the full creativeStack
+        // (carries per-stack components, e.g. enchanted-book variants); fall
+        // back to the bare creativeItemId for old-format packets — item-level
+        // defaults still apply via ItemStack::get's fallback.
+        const Game::ItemStack creativeSource =
+            !click.creativeStack.IsEmpty()
+                ? click.creativeStack
+                : Game::ItemStack{static_cast<Game::ItemID>(click.creativeItemId), 1};
         if (slot == Network::InventorySlotSentinel::CREATIVE_GRID) {
             switch (action) {
                 case Network::ContainerInput::PICKUP:
-                    return HandleCreativePickup(player, click.creativeItemId, click.button);
+                    return HandleCreativePickup(player, creativeSource, click.button);
                 case Network::ContainerInput::QUICK_MOVE:
-                    return HandleCreativeQuickMove(player, click.creativeItemId);
+                    return HandleCreativeQuickMove(player, creativeSource);
                 case Network::ContainerInput::CLONE: {
                     // Middle click on creative source: same as left-click pickup
-                    return HandleCreativePickup(player, click.creativeItemId, 0);
+                    return HandleCreativePickup(player, creativeSource, 0);
                 }
                 default:
                     return {};
@@ -565,7 +665,7 @@ namespace Server {
             case Network::ContainerInput::PICKUP_ALL:  return HandlePickupAll  (player, slot);
             case Network::ContainerInput::CREATIVE_DESTROY_ALL: return HandleCreativeDestroyAll(player);
             case Network::ContainerInput::CREATIVE_FILL_SLOT:
-                return HandleCreativeFillSlot(player, slot, click.creativeItemId);
+                return HandleCreativeFillSlot(player, slot, creativeSource);
             default:
                 Log::Warning("[InventoryClickHandler] Unknown action %u", (unsigned)click.action);
                 return {};

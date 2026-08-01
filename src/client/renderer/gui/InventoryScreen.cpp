@@ -94,8 +94,8 @@ namespace Render {
     }
 
     // Exposed via extern declaration in ClientPacketHandler.cpp.
-    void SetInventoryScreenCarriedItem(Game::ItemID id, int count) {
-        GetInventoryScreen().SetCarriedItem(id, count);
+    void SetInventoryScreenCarriedItem(const Game::ItemStack& stack) {
+        GetInventoryScreen().SetCarriedItem(stack);
     }
 
     void InventoryScreen::Open() {
@@ -132,10 +132,9 @@ namespace Render {
         m_pendingClicks.push_back(close);
     }
 
-    void InventoryScreen::SetCarriedItem(Game::ItemID id, int count) {
-        m_carriedItem.itemId = id;
-        m_carriedItem.count  = count;
-        if (id == Game::Items::Air || count <= 0) m_carriedItem.Clear();
+    void InventoryScreen::SetCarriedItem(const Game::ItemStack& stack) {
+        m_carriedItem = stack;
+        if (m_carriedItem.IsEmpty()) m_carriedItem.Clear();
     }
 
     bool InventoryScreen::ConsumePendingClick(Network::InventoryClickC2SPacket& out) {
@@ -146,13 +145,15 @@ namespace Render {
     }
 
     void InventoryScreen::QueueClick(Network::ContainerInput action, int16_t slotIndex,
-                                     uint8_t button, Game::ItemID creativeItem) {
+                                     uint8_t button, Game::ItemID creativeItem,
+                                     const Game::ItemStack* creativeStack) {
         Network::InventoryClickC2SPacket p{};
         p.slotIndex      = slotIndex;
         p.button         = button;
         p.action         = (uint8_t)action;
         p.flags          = 0;
         p.creativeItemId = creativeItem;
+        if (creativeStack) p.creativeStack = *creativeStack;
         m_pendingClicks.push_back(p);
     }
 
@@ -498,6 +499,10 @@ namespace Render {
                     const int maxStack = Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
                     int distributed = 0;
                     for (uint8_t s : m_dragSlots) {
+                        // Defense in depth — drag entries are pre-filtered by
+                        // MayPlaceInSlot, but never locally commit into a slot
+                        // the server would refuse.
+                        if (!Game::MayPlaceInSlot(s, m_carriedItem)) continue;
                         const auto& base = m_player->inventory.GetSlot(s);
                         if (base.IsEmpty()) {
                             int give = std::min(per, maxStack);
@@ -572,7 +577,8 @@ namespace Render {
             uint8_t btn = shift ? 0 : 1;
             QueueClick(Network::ContainerInput::PICKUP,
                        Network::InventorySlotSentinel::CREATIVE_GRID, btn,
-                       m_hoveredCreativeStack.itemId);
+                       m_hoveredCreativeStack.itemId,
+                       &m_hoveredCreativeStack);
             return;
         }
 
@@ -639,6 +645,13 @@ namespace Render {
             // the SAME item as the cursor — otherwise the user expects the
             // cursor and the slot to swap contents (MC's standard behaviour).
             if (!m_carriedItem.IsEmpty()) {
+                // Slot placement filter (armor slots only accept their armor
+                // piece, craft slots refuse inserts). Same Game::MayPlaceInSlot
+                // the server enforces — refusing locally means no drag starts
+                // and no ghost item can appear.
+                if (!Game::MayPlaceInSlot(hit, m_carriedItem)) {
+                    return;
+                }
                 const bool slotCompatible = slot.IsEmpty()
                                          || slot.itemId == m_carriedItem.itemId;
                 if (!slotCompatible) {
@@ -698,7 +711,8 @@ namespace Render {
         // Drag (QUICK_CRAFT) accumulator
         if (m_isDragging && m_hoveredSlot >= 0) {
             const uint8_t s = (uint8_t)m_hoveredSlot;
-            if (std::find(m_dragSlots.begin(), m_dragSlots.end(), s) == m_dragSlots.end()) {
+            if (Game::MayPlaceInSlot(m_hoveredSlot, m_carriedItem) &&
+                std::find(m_dragSlots.begin(), m_dragSlots.end(), s) == m_dragSlots.end()) {
                 m_dragSlots.push_back(s);
                 QueueClick(Network::ContainerInput::QUICK_CRAFT, (int16_t)s, QuickcraftMask(1, m_dragType));
             }
@@ -1094,22 +1108,56 @@ namespace Render {
 
     void InventoryScreen::RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack, int mx, int my) {
         if (stack.IsEmpty()) return;
-        const std::string name = Game::ItemRegistry::Get(stack.itemId).name;
-        if (name.empty()) return;
 
-        // Build the line list: name first (white), then any per-stack annotations.
-        // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips chain —
-        // each component's TooltipProvider implementation appends its lines to
-        // the consumer. Today only STORED_ENCHANTMENTS contributes; future
-        // components (CUSTOM_NAME, LORE, durability bar, etc.) plug in here.
+        // Name line — mirrors ItemStack.getStyledHoverName:
+        //   CUSTOM_NAME (anvil rename; MC renders italic — our font can't)
+        //   → ITEM_NAME (data-driven base name)
+        //   → registry display name,
+        // colored by the RARITY component (Rarity.color(), WHITE default).
+        std::string name;
+        if (auto custom = stack.get(Game::DataComponents::CUSTOM_NAME)) {
+            name = *custom;
+        } else if (auto itemName = stack.get(Game::DataComponents::ITEM_NAME)) {
+            name = *itemName;
+        } else {
+            name = Game::ItemRegistry::Get(stack.itemId).name;
+        }
+        if (name.empty()) return;
+        const uint32_t nameColor = Game::RarityColorARGB(
+            stack.get(Game::DataComponents::RARITY).value_or(Game::Rarity::COMMON));
+
+        // Build the line list: name first, then per-component annotations.
+        // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips
+        // chain — each component's TooltipProvider appends its lines. Order:
+        // name → enchantments → lore (matching MC's addDetailsToTooltip).
         struct Line { std::string text; uint32_t color; };
         std::vector<Line> lines;
-        lines.push_back({name, 0xFFFFFFFFu});
+        lines.push_back({name, nameColor});
 
         if (auto stored = stack.get(Game::DataComponents::STORED_ENCHANTMENTS)) {
             std::vector<Game::Enchantment::FormattedLine> ench;
             stored->AddToTooltip(ench);
             for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
+        }
+
+        // LORE lines — MC ItemLore.LORE_STYLE = DARK_PURPLE + italic (no
+        // italics in our font; color carries the style).
+        if (auto lore = stack.get(Game::DataComponents::LORE)) {
+            for (const auto& loreLine : lore->lines) {
+                lines.push_back({loreLine, 0xFFAA00AAu});   // DARK_PURPLE
+            }
+        }
+
+        // Bundle contents — MC renders a slot grid (BundleTooltip); listed
+        // as "Name xN" lines here until a grid tooltip exists. Gray, newest
+        // first (matching the stored order).
+        if (auto bundle = stack.get(Game::DataComponents::BUNDLE_CONTENTS)) {
+            for (const auto& inner : bundle->items) {
+                if (inner.IsEmpty()) continue;
+                lines.push_back({Game::ItemRegistry::Get(inner.itemId).name
+                                     + " x" + std::to_string(inner.count),
+                                 0xFFAAAAAAu});   // GRAY
+            }
         }
 
         // Layout: 10-px line spacing matches MC's GuiGraphics tooltip spacing.

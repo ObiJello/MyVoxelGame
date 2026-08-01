@@ -234,6 +234,7 @@ namespace Platform {
         SetBool("allowServerListing", true);
         SetBool("onlyShowSecureChat", false);
         SetFloat("panoramaScrollSpeed", 1.0f);
+        SetString("panoramaSet", "26.1");
         SetBool("telemetryOptInExtra", false);
         SetBool("onboardAccessibility", false);
         SetInt("menuBackgroundBlurriness", 5);

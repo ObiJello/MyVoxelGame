@@ -44,6 +44,19 @@ namespace Render {
                                          // 3 AMPLIFIED, 4 Single Biome
         bool generateStructures = true;
         bool bonusChest         = false;
+
+        // Day/night cycle state, persisted across sessions and written back
+        // on world exit. 6000 = noon; doDaylightCycle defaults OFF (frozen).
+        long long dayTime         = 6000;
+        bool      doDaylightCycle = false;
+
+        // Per-world sky. "vanilla" = procedural MC sky; "end" = End skybox;
+        // anything else = a cubemap set name (title panorama slug or a folder
+        // under assets/textures/environment/skyboxes/). skyboxMode: 0 =
+        // static (End-style), 1 = darkens at night, 2 = darkens + sun/moon/
+        // stars drawn on top. Editable in-game via Options → World Settings.
+        std::string skybox     = "vanilla";
+        int         skyboxMode = 2;
     };
 
     namespace WorldList {

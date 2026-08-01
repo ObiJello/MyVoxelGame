@@ -303,6 +303,8 @@ if(HAS_VULKAN)
         set(VK_SHADERS
             ${VK_SHADER_DIR}/block_vk.vert
             ${VK_SHADER_DIR}/block_vk.frag
+            ${VK_SHADER_DIR}/block_opaque_vk.frag
+            ${VK_SHADER_DIR}/block_solid_vk.frag
             ${VK_SHADER_DIR}/crosshair_vk.vert
             ${VK_SHADER_DIR}/crosshair_vk.frag
             ${VK_SHADER_DIR}/highlight_vk.vert
@@ -323,6 +325,12 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/portal_particle_vk.frag
             ${VK_SHADER_DIR}/viewmodel_skinned_vk.vert
             ${VK_SHADER_DIR}/viewmodel_skinned_vk.frag
+            ${VK_SHADER_DIR}/panorama_vk.vert
+            ${VK_SHADER_DIR}/panorama_vk.frag
+            ${VK_SHADER_DIR}/sky_vk.vert
+            ${VK_SHADER_DIR}/sky_vk.frag
+            ${VK_SHADER_DIR}/clouds_vk.vert
+            ${VK_SHADER_DIR}/clouds_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -364,6 +372,11 @@ if(APPLE)
             src/common/entity/Inventory.cpp
             src/common/entity/Item.cpp
             src/common/entity/ItemBehaviors.cpp
+            src/common/entity/ConsumableBehavior.cpp
+            src/common/entity/EquipmentBehavior.cpp
+            src/common/entity/BundleBehavior.cpp
+            src/common/entity/FoodDefs.cpp
+            src/server/player/FoodData.cpp
             src/common/entity/PortalGunBehavior.cpp  # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/server/portal/PortalRegistry.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
             src/client/portal/ClientPortalManager.cpp        # Features.hpp ENABLE_PORTAL_GUN strips body when off
@@ -391,6 +404,9 @@ if(APPLE)
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/BlockBreakOverlay.cpp
+            src/client/renderer/environment/EnvironmentState.cpp
+            src/client/renderer/environment/SkyRenderer.cpp
+            src/client/renderer/environment/CloudRenderer.cpp
             src/client/renderer/blockentity/BlockEntityRenderDispatcher.cpp
             src/client/renderer/blockentity/BlockEntityRenderers.cpp
             src/client/renderer/blockentity/ChestRenderer.cpp
@@ -418,6 +434,7 @@ if(APPLE)
             src/client/renderer/gui/screens/TitleScreen.cpp
             src/client/renderer/gui/screens/OptionsScreens.cpp
             src/client/renderer/gui/screens/PauseScreen.cpp
+            src/client/renderer/gui/screens/DeathScreen.cpp
             src/client/renderer/gui/screens/WorldSelectScreens.cpp
             src/client/renderer/gui/screens/FriendsScreen.cpp
             src/client/network/FriendsClient.cpp
@@ -455,6 +472,10 @@ if(APPLE)
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.cpp
             src/server/commands/KickCommand.cpp
+            src/server/commands/GameModeCommand.cpp
+            src/server/commands/KillCommand.cpp
+            src/server/commands/TimeCommand.cpp
+            src/server/commands/GameRuleCommand.cpp
             src/server/inventory/InventoryClickHandler.cpp
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientBlockAccess.cpp
@@ -548,6 +569,15 @@ else()
             src/client/renderer/shader/Shader.cpp
             src/client/renderer/shader/Shader.hpp
 
+            # Client rendering - Environment (sky, clouds, day/night)
+            src/client/renderer/environment/EnvironmentState.cpp
+            src/client/renderer/environment/EnvironmentState.hpp
+            src/client/renderer/environment/SkyRenderer.cpp
+            src/client/renderer/environment/SkyRenderer.hpp
+            src/client/renderer/environment/CloudRenderer.cpp
+            src/client/renderer/environment/CloudRenderer.hpp
+            src/client/renderer/environment/JavaRandom.hpp
+
             # Client rendering - Mesh
             src/client/renderer/mesh/BlockHighlight.cpp
             src/client/renderer/mesh/BlockHighlight.hpp
@@ -628,6 +658,8 @@ else()
             src/client/renderer/gui/screens/OptionsScreens.cpp
             src/client/renderer/gui/screens/PauseScreen.hpp
             src/client/renderer/gui/screens/PauseScreen.cpp
+            src/client/renderer/gui/screens/DeathScreen.hpp
+            src/client/renderer/gui/screens/DeathScreen.cpp
             src/client/renderer/gui/screens/WorldSelectScreens.hpp
             src/client/renderer/gui/screens/WorldSelectScreens.cpp
             src/client/renderer/gui/screens/FriendsScreen.hpp
@@ -757,6 +789,14 @@ else()
             src/server/commands/TeleportCommand.cpp
             src/server/commands/KickCommand.hpp
             src/server/commands/KickCommand.cpp
+            src/server/commands/GameModeCommand.hpp
+            src/server/commands/GameModeCommand.cpp
+            src/server/commands/KillCommand.hpp
+            src/server/commands/KillCommand.cpp
+            src/server/commands/TimeCommand.hpp
+            src/server/commands/TimeCommand.cpp
+            src/server/commands/GameRuleCommand.hpp
+            src/server/commands/GameRuleCommand.cpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp
@@ -860,6 +900,14 @@ else()
             src/common/entity/Item.cpp
             src/common/entity/Item.hpp
             src/common/entity/ItemBehaviors.cpp
+            src/common/entity/ConsumableBehavior.cpp
+            src/common/entity/ConsumableBehavior.hpp
+            src/common/entity/EquipmentBehavior.cpp
+            src/common/entity/EquipmentBehavior.hpp
+            src/common/entity/BundleBehavior.cpp
+            src/common/entity/FoodDefs.cpp
+            src/server/player/FoodData.cpp
+            src/server/player/FoodData.hpp
             src/common/entity/ItemModelLoader.cpp
             src/common/entity/ItemModelLoader.hpp
             src/common/entity/ClientItemLoader.cpp
@@ -1522,9 +1570,11 @@ if(CURL_FOUND)
             ${COCOA_FRAMEWORK} ${IOKIT_FRAMEWORK} ${COREVIDEO_FRAMEWORK} ${OpenGL_FRAMEWORK}
             ${CF_FRAMEWORK}
         )
-        # Copy font into bundle Resources
+        # Copy fonts into bundle Resources (Archivo + JetBrains Mono + OFL
+        # notices from ext/fonts, Roboto as a last-resort fallback)
         add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${PROJECT_SOURCE_DIR}/ext/fonts"
                 "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/fonts"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${PROJECT_SOURCE_DIR}/ext/imgui/misc/fonts/Roboto-Medium.ttf"
@@ -1572,9 +1622,11 @@ if(CURL_FOUND)
         target_link_libraries(ObeyCraftLauncher PRIVATE ws2_32 crypt32)
         find_package(OpenGL REQUIRED)
         target_link_libraries(ObeyCraftLauncher PRIVATE OpenGL::GL)
-        # Copy font next to executable on Windows
+        # Copy fonts next to executable on Windows (Archivo + JetBrains Mono
+        # + OFL notices from ext/fonts, Roboto as a last-resort fallback)
         add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${PROJECT_SOURCE_DIR}/ext/fonts"
                 "$<TARGET_FILE_DIR:ObeyCraftLauncher>/fonts"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${PROJECT_SOURCE_DIR}/ext/imgui/misc/fonts/Roboto-Medium.ttf"

@@ -27,9 +27,12 @@ namespace Input {
         N,
         P,
         T,
+        F,   // swap main/off hand (MC default)
+        Q,   // drop held item (MC default)
         Slash,
         Alpha1, Alpha2, Alpha3, Alpha4, Alpha5, Alpha6, Alpha7, Alpha8, Alpha9,
         F3,
+        F5,  // cycle camera perspective (MC default)
         F11,
         Tilde,
     };

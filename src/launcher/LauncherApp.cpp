@@ -24,12 +24,31 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <vector>
 
 #ifdef __APPLE__
 #include <CoreFoundation/CoreFoundation.h>
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
+
+// Sockets for the saved-server TCP ping probe
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
 #endif
 
 namespace Launcher {
@@ -42,14 +61,16 @@ namespace Launcher {
         bool useVulkan = false;
         std::string playerName;             // Empty → server auto-assigns "PlayerN"
         std::string playerColor;            // "" or "default" → neon green; otherwise palette slug ("pink", "blue"...)
-        std::string lastJoinIP;             // Pre-fill the Join Server dialog
-        std::string lastJoinPort = "25565"; // Pre-fill the Join Server dialog
+        std::string lastJoinIP;             // Pre-fill the quick-connect fields
+        std::string lastJoinPort = "25565"; // Pre-fill the quick-connect fields
+        std::vector<SavedServer> servers;   // Saved-servers list (Servers view)
 
         // ── ObeyCraft account (friends service) ──
         // Empty sessionToken → guest (no account, friends features off).
         std::string sessionToken;
         int64_t     accountId = 0;
         std::string accountName;
+        int64_t     accountCreated = 0;     // epoch seconds, for "member since"
         // Friends-service override "host" or "host:port"; empty → defaults
         // from FriendsServiceConfig.hpp. The HOSTING machine should set
         // "127.0.0.1" (routers rarely hairpin their own public IP).
@@ -71,7 +92,22 @@ namespace Launcher {
                 sessionToken = json.value("session_token", "");
                 accountId = json.value("account_id", static_cast<int64_t>(0));
                 accountName = json.value("account_name", "");
+                accountCreated = json.value("account_created", static_cast<int64_t>(0));
                 friendsService = json.value("friends_service", "");
+                if (json.contains("servers") && json["servers"].is_array()) {
+                    for (const auto& entry : json["servers"]) {
+                        SavedServer sv;
+                        sv.name = entry.value("name", "");
+                        sv.host = entry.value("host", "");
+                        int port = entry.value("port", 25565);
+                        if (port < 1 || port > 65535) port = 25565;
+                        sv.port = static_cast<uint16_t>(port);
+                        if (!sv.host.empty()) {
+                            if (sv.name.empty()) sv.name = sv.host;
+                            servers.push_back(std::move(sv));
+                        }
+                    }
+                }
             } catch (...) {
                 Log::Warning("Failed to load launcher config");
             }
@@ -91,7 +127,15 @@ namespace Launcher {
                 json["session_token"] = sessionToken;
                 json["account_id"] = accountId;
                 json["account_name"] = accountName;
+                json["account_created"] = accountCreated;
                 json["friends_service"] = friendsService;
+                nlohmann::json arr = nlohmann::json::array();
+                for (const SavedServer& sv : servers) {
+                    arr.push_back({{"name", sv.name},
+                                   {"host", sv.host},
+                                   {"port", static_cast<int>(sv.port)}});
+                }
+                json["servers"] = arr;
                 std::ofstream file(path);
                 file << json.dump(2);
             } catch (...) {
@@ -99,6 +143,72 @@ namespace Launcher {
             }
         }
     };
+
+    // ── Saved-server reachability probe ──
+    // Blocking TCP connect with a timeout, measured in milliseconds. Called
+    // ONLY from detached worker threads. Returns latency in ms, or -1 when
+    // unreachable within `timeoutMs`.
+    static int TcpPingMs(const std::string& host, uint16_t port, int timeoutMs) {
+        addrinfo hints{};
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo* res = nullptr;
+        const std::string portStr = std::to_string(port);
+        if (getaddrinfo(host.c_str(), portStr.c_str(), &hints, &res) != 0 || !res) {
+            return -1;
+        }
+
+        int resultMs = -1;
+        for (addrinfo* ai = res; ai != nullptr && resultMs < 0; ai = ai->ai_next) {
+#ifdef _WIN32
+            SOCKET fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd == INVALID_SOCKET) continue;
+            u_long nonBlocking = 1;
+            ioctlsocket(fd, FIONBIO, &nonBlocking);
+#else
+            int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+            fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+#endif
+            const auto start = std::chrono::steady_clock::now();
+            int rc = connect(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+            bool inProgress;
+#ifdef _WIN32
+            inProgress = (rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+            inProgress = (rc != 0 && errno == EINPROGRESS);
+#endif
+            if (rc == 0 || inProgress) {
+                fd_set wfds;
+                FD_ZERO(&wfds);
+                FD_SET(fd, &wfds);
+                timeval tv{};
+                tv.tv_sec = timeoutMs / 1000;
+                tv.tv_usec = (timeoutMs % 1000) * 1000;
+                if (rc == 0 || select(static_cast<int>(fd) + 1, nullptr, &wfds, nullptr, &tv) > 0) {
+                    int soErr = 0;
+#ifdef _WIN32
+                    int len = sizeof(soErr);
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &len);
+#else
+                    socklen_t len = sizeof(soErr);
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soErr, &len);
+#endif
+                    if (soErr == 0) {
+                        const auto elapsed = std::chrono::steady_clock::now() - start;
+                        resultMs = static_cast<int>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+                    }
+                }
+            }
+#ifdef _WIN32
+            closesocket(fd);
+#else
+            close(fd);
+#endif
+        }
+        freeaddrinfo(res);
+        return resultMs;
+    }
 
     // Parse a "host" / "host:port" friends-service override, falling back to
     // the shared defaults.
@@ -150,6 +260,12 @@ namespace Launcher {
         Log::Init();
         Log::Info("ObeyCraft Launcher v%s starting", LauncherVersion);
 
+#ifdef _WIN32
+        // The ping probe may run before libcurl's lazy WSAStartup — init explicitly.
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+
         // Initialize game directory system (creates obeycraft/ dir)
         if (!Platform::InitializeGameDirectorySystem()) {
             Log::Error("Failed to initialize game directory");
@@ -188,6 +304,22 @@ namespace Launcher {
             return -1;
         }
 
+#ifdef __APPLE__
+        // Tag the window's backing store as sRGB. Browsers color-manage their
+        // output (sRGB → display profile), but an unmanaged GL window is
+        // interpreted in the display's native gamut — on P3 Macs that shifts
+        // every launcher color subtly more saturated than the design doc.
+        {
+            id nsWindow = glfwGetCocoaWindow(window);
+            if (nsWindow) {
+                id srgbSpace = ((id(*)(Class, SEL))objc_msgSend)(
+                    objc_getClass("NSColorSpace"), sel_registerName("sRGBColorSpace"));
+                ((void (*)(id, SEL, id))objc_msgSend)(
+                    nsWindow, sel_registerName("setColorSpace:"), srgbSpace);
+            }
+        }
+#endif
+
         // Set window icon (taskbar + title bar)
         {
             std::string iconPath = GetAssetPath("launcher/logo.png");
@@ -221,12 +353,11 @@ namespace Launcher {
 
         ApplyLauncherTheme();
 
-        // Load fonts
+        // Load fonts (bundled Resources/fonts; dev runs fall back to the repo's
+        // vendored ext/fonts, then to ImGui's bundled Roboto)
         std::string fontDir = GetAssetPath("fonts");
-        if (!std::filesystem::exists(fontDir)) {
-            // Fallback: try relative to executable
-            fontDir = "ext/imgui/misc/fonts";
-        }
+        if (!std::filesystem::exists(fontDir)) fontDir = "ext/fonts";
+        if (!std::filesystem::exists(fontDir)) fontDir = "ext/imgui/misc/fonts";
         LoadLauncherFonts(window, fontDir);
 
         // Load logo texture (if available)
@@ -240,9 +371,12 @@ namespace Launcher {
                 if (data) {
                     glGenTextures(1, &logoTexture);
                     glBindTexture(GL_TEXTURE_2D, logoTexture);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                    // The 1024px logo draws at ~52 device px — without mipmaps,
+                    // bilinear sampling skips most source pixels and aliases.
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, logoW, logoH, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+                    glGenerateMipmap(GL_TEXTURE_2D);
                     stbi_image_free(data);
                     Log::Info("Loaded logo texture: %dx%d", logoW, logoH);
                 }
@@ -267,9 +401,22 @@ namespace Launcher {
         uiState.playerColor = config.playerColor;
         uiState.lastJoinIP = config.lastJoinIP;
         uiState.lastJoinPort = config.lastJoinPort;
+        uiState.servers = config.servers;
         uiState.sessionToken = config.sessionToken;
         uiState.accountId = config.accountId;
         uiState.accountName = config.accountName;
+        uiState.accountCreated = config.accountCreated;
+        // Migration: configs from before the Servers view had only the last
+        // joined address — seed the saved list with it once.
+        if (uiState.servers.empty() && !config.lastJoinIP.empty()) {
+            SavedServer sv;
+            sv.name = config.lastJoinIP;
+            sv.host = config.lastJoinIP;
+            int port = std::atoi(config.lastJoinPort.c_str());
+            sv.port = (port > 0 && port <= 65535) ? static_cast<uint16_t>(port) : 25565;
+            uiState.servers.push_back(std::move(sv));
+            config.servers = uiState.servers;
+        }
         // Logged in → the account name IS the username (server-canonical).
         if (!config.sessionToken.empty() && !config.accountName.empty()) {
             uiState.playerName = config.accountName;
@@ -314,8 +461,10 @@ namespace Launcher {
             std::string error;          // service error code or "network"
             std::string token, name;    // login/signup/rename results
             int64_t     accountId = 0;
+            int64_t     createdAt = 0;  // account creation epoch (login/signup)
             bool        clearedSession = false;   // logout
             bool        renamed = false;
+            bool        passwordChanged = false;  // change_password succeeded
         };
         std::atomic<bool> authBusy{false};
         std::atomic<bool> authComplete{false};
@@ -332,6 +481,37 @@ namespace Launcher {
         std::string friendsHost;
         uint16_t friendsPort = 0;
         ResolveFriendsService(config.friendsService, friendsHost, friendsPort);
+
+        // ── Saved-server ping worker state ──
+        // One detached probe thread per server per refresh; results keyed by a
+        // generation counter so probes started before a list mutation are
+        // discarded on arrival (same pattern as the name-availability checks).
+        std::mutex pingMutex;
+        std::vector<std::pair<size_t, int>> pingResults;   // (server index, ms or -1)
+        std::atomic<uint64_t> pingGeneration{0};
+        std::atomic<bool> pingResultsReady{false};
+
+        auto refreshPings = [&]() {
+            const uint64_t generation = ++pingGeneration;
+            {
+                std::lock_guard<std::mutex> lock(pingMutex);
+                pingResults.clear();
+            }
+            for (size_t i = 0; i < uiState.servers.size(); ++i) {
+                uiState.servers[i].pingMs = PingPending;
+                std::thread t([&, generation, i,
+                               host = uiState.servers[i].host,
+                               port = uiState.servers[i].port]() {
+                    const int ms = TcpPingMs(host, port, 2000);
+                    std::lock_guard<std::mutex> lock(pingMutex);
+                    if (generation == pingGeneration.load()) {
+                        pingResults.emplace_back(i, ms);
+                        pingResultsReady = true;
+                    }
+                });
+                t.detach();
+            }
+        };
 
         std::atomic<bool> installComplete{false};
         std::atomic<bool> installSuccess{false};
@@ -388,6 +568,18 @@ namespace Launcher {
                                 updaterScriptPath = launcherInstaller.GetUpdaterScriptPath();
                                 config.launcherVersion = latestLauncher.ToString();
                                 config.Save(configPath);
+                                // Publish the restart-banner metadata BEFORE the
+                                // flag — the UI only reads these once the atomic
+                                // flag is observed true.
+                                uiState.launcherNewVersion = latestLauncher.ToString();
+                                uiState.launcherChangelog = launcherRelease.body;
+                                {
+                                    char meta[64];
+                                    std::snprintf(meta, sizeof(meta), "SELF-UPDATED - %.0f MB",
+                                                  static_cast<double>(launcherRelease.platformAsset.size) /
+                                                      (1024.0 * 1024.0));
+                                    uiState.launcherAssetMeta = meta;
+                                }
                                 launcherUpdateReady = true;
                                 Log::Info("Launcher update ready - restart to apply");
                             }
@@ -471,6 +663,8 @@ namespace Launcher {
             }
         });
 
+        ui.SetOnPingServers(refreshPings);
+
         ui.SetOnJoinClicked([&](const std::string& host, uint16_t port) {
             uiState.state = LauncherState::LaunchingGame;
             uiState.statusText = "Joining server...";
@@ -479,6 +673,7 @@ namespace Launcher {
             config.playerColor = uiState.playerColor;
             config.lastJoinIP = uiState.lastJoinIP;
             config.lastJoinPort = uiState.lastJoinPort;
+            config.servers = uiState.servers;
             config.Save(configPath);
             std::string serverArg = "--server " + host + ":" + std::to_string(port)
                                   + buildNameArg() + buildColorArg() + buildSessionArgs();
@@ -519,6 +714,7 @@ namespace Launcher {
                     o.token = r.body.value("token", "");
                     o.name = r.body.value("name", "");
                     o.accountId = r.body.value("account_id", static_cast<int64_t>(0));
+                    o.createdAt = r.body.value("created", static_cast<int64_t>(0));
                 }
                 return o;
             });
@@ -534,7 +730,20 @@ namespace Launcher {
                     o.token = r.body.value("token", "");
                     o.name = r.body.value("name", "");
                     o.accountId = r.body.value("account_id", static_cast<int64_t>(0));
+                    o.createdAt = r.body.value("created", static_cast<int64_t>(0));
                 }
+                return o;
+            });
+        });
+
+        ui.SetOnChangePassword([&](const std::string& current, const std::string& newPassword) {
+            const std::string token = uiState.sessionToken;
+            runAuthOp([token, current, newPassword](FriendsServiceClient& client) {
+                auto r = client.ChangePassword(token, current, newPassword);
+                AuthOutcome o;
+                o.success = r.ok;
+                o.error = r.error;
+                o.passwordChanged = r.ok;
                 return o;
             });
         });
@@ -657,6 +866,9 @@ namespace Launcher {
             retryThread.detach();
         });
 
+        // Kick off an initial reachability probe for the saved-server list.
+        refreshPings();
+
         // ── Main Loop ──
         while (!glfwWindowShouldClose(window)) {
             glfwPollEvents();
@@ -677,17 +889,21 @@ namespace Launcher {
                     config.sessionToken.clear();
                     config.accountId = 0;
                     config.accountName.clear();
+                    config.accountCreated = 0;
                     uiState.sessionToken.clear();
                     uiState.accountId = 0;
                     uiState.accountName.clear();
+                    uiState.accountCreated = 0;
                     uiState.authStatusText = "Logged out.";
                     config.Save(configPath);
                 } else if (outcome.success) {
                     if (!outcome.token.empty()) {   // login / signup
                         config.sessionToken = outcome.token;
                         config.accountId = outcome.accountId;
+                        config.accountCreated = outcome.createdAt;
                         uiState.sessionToken = outcome.token;
                         uiState.accountId = outcome.accountId;
+                        uiState.accountCreated = outcome.createdAt;
                     }
                     if (!outcome.name.empty()) {    // login / signup / rename
                         config.accountName = outcome.name;
@@ -696,22 +912,46 @@ namespace Launcher {
                         config.playerName = outcome.name;
                         uiState.playerName = outcome.name;
                     }
-                    uiState.authStatusText = outcome.renamed
-                        ? "Renamed to " + outcome.name
-                        : "Logged in as " + uiState.accountName;
+                    if (outcome.passwordChanged) {
+                        uiState.pwChangeDone = true;
+                        uiState.authStatusText = "Password updated.";
+                    } else {
+                        uiState.authStatusText = outcome.renamed
+                            ? "Renamed to " + outcome.name
+                            : "Logged in as " + uiState.accountName;
+                    }
                     uiState.nameCheckState = LauncherUIState::NameCheck::Idle;
                     config.Save(configPath);
                 } else {
-                    // Human-readable error mapping for the settings popup.
+                    // Human-readable error mapping for the settings view.
                     const std::string& e = outcome.error;
                     uiState.authStatusText =
                         e == "bad_credentials"    ? "Wrong username or password." :
                         e == "name_taken"         ? "That username is taken." :
                         e == "name_invalid"       ? "Names are 3-16 letters, numbers, _." :
                         e == "password_too_short" ? "Password must be at least 4 characters." :
+                        e == "bad_token"          ? "Session expired - sign in again." :
                         e == "network"            ? "Can't reach the friends server." :
                                                     "Error: " + e;
                 }
+            }
+
+            // ── Persist saved-server edits + drain ping results ──
+            if (uiState.serversDirty) {
+                uiState.serversDirty = false;
+                config.servers = uiState.servers;
+                config.Save(configPath);
+                refreshPings();   // list changed → indices reset, re-probe everything
+            }
+            if (pingResultsReady.load()) {
+                pingResultsReady = false;
+                std::lock_guard<std::mutex> lock(pingMutex);
+                for (const auto& [index, ms] : pingResults) {
+                    if (index < uiState.servers.size()) {
+                        uiState.servers[index].pingMs = (ms >= 0) ? ms : PingOffline;
+                    }
+                }
+                pingResults.clear();
             }
 
             // ── Drain username availability results ──
@@ -745,6 +985,17 @@ namespace Launcher {
 
                     uiState.latestVersion = latest.ToString();
                     uiState.changelog = latestRelease.body;
+                    uiState.publishedAt = latestRelease.publishedAt;
+                    if (latestRelease.hasPlatformAsset) {
+                        char meta[96];
+                        std::snprintf(meta, sizeof(meta), "%s - %.0f MB",
+                                      GetPlatformAssetTag().c_str(),
+                                      static_cast<double>(latestRelease.platformAsset.size) /
+                                          (1024.0 * 1024.0));
+                        uiState.gameAssetMeta = meta;
+                    } else {
+                        uiState.gameAssetMeta = GetPlatformAssetTag();
+                    }
 
                     if (!config.installedVersion.empty() && !(latest > installed) && uiState.gameInstalled) {
                         uiState.state = LauncherState::ReadyToPlay;
@@ -798,7 +1049,7 @@ namespace Launcher {
             int fbWidth, fbHeight;
             glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
             glViewport(0, 0, fbWidth, fbHeight);
-            glClearColor(0.071f, 0.071f, 0.094f, 1.0f);
+            glClearColor(0x0f / 255.0f, 0x10 / 255.0f, 0x14 / 255.0f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
 
             // Update launcher update flag for UI
@@ -817,14 +1068,20 @@ namespace Launcher {
         }
 
         // ── Cleanup ──
+        // Invalidate in-flight ping probes; their lambdas capture locals by
+        // reference and must not publish results after this scope unwinds.
+        ++pingGeneration;
+
         config.useVulkan = uiState.useVulkan;
         config.playerName = uiState.playerName;
         config.playerColor = uiState.playerColor;
         config.lastJoinIP = uiState.lastJoinIP;
         config.lastJoinPort = uiState.lastJoinPort;
+        config.servers = uiState.servers;
         config.sessionToken = uiState.sessionToken;
         config.accountId = uiState.accountId;
         config.accountName = uiState.accountName;
+        config.accountCreated = uiState.accountCreated;
         config.Save(configPath);
 
         if (logoTexture != 0) {

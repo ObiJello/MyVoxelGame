@@ -11,6 +11,7 @@
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Item.hpp"
+#include "common/data/DataComponents.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../renderer/portal/PortalParticleSystem.hpp"
 #include "../renderer/viewmodel/PortalGunViewmodel.hpp"
@@ -90,6 +91,7 @@ namespace Game {
             tickAccum -= TICK_DT;
             UpdateBreakingTick();
             UpdatePlacingTick();
+            UpdateUsingTick();
         }
 
 #if ENABLE_PORTAL_GUN
@@ -100,6 +102,23 @@ namespace Game {
 
         // Send movement packets if due (TODO: Implement for networking)
         SendMovementIfDue();
+
+        // Fly-state sync — MC LocalPlayer.sendIsSprintingIfNeeded-style
+        // dirty check: whenever the local fly flag changes (double-tap
+        // toggle, landing auto-cancel, server revoke), ship the new state
+        // via PlayerAbilitiesC2S (MC ServerboundPlayerAbilitiesPacket).
+        if (player->physics.isFlying != lastSentFlying) {
+            lastSentFlying = player->physics.isFlying;
+            if (networkClient && networkClient->IsConnected()) {
+                Network::PlayerAbilitiesC2SPacket packet;
+                if (lastSentFlying) packet.flags |= Network::PlayerAbilitiesC2SPacket::FLAG_FLYING;
+                auto data = Network::Serialization::Serialize(packet);
+                if (auto connection = networkClient->GetConnection()) {
+                    connection->SendPacket(
+                        static_cast<uint8_t>(Network::PacketId::PlayerAbilitiesC2S), data);
+                }
+            }
+        }
     }
 
     void ClientPlayerController::SendMovementIfDue() {
@@ -227,20 +246,127 @@ namespace Game {
     }
 
     void ClientPlayerController::SendUseItem(int hand) {
-        // TODO: Implement UseItem packet for using items in air
-        // This would send a packet for eating food, using bow, shield, etc.
-        // When entity system exists, also check for entity interactions
-        
+        // Mirrors MC MultiPlayerGameMode.useItem's packet send
+        // (ServerboundUseItemPacket: hand, sequence, yRot, xRot).
         if (!networkClient || !networkClient->IsConnected()) {
             return;
         }
-        
-        // Future implementation:
-        // Network::UseItemC2SPacket packet(hand, ++interactSeq);
-        // auto data = Network::Serialization::Serialize(packet);
-        // networkClient->GetConnection()->SendPacket(PacketId::UseItemC2S, data);
-        
-        Log::Debug("TODO: SendUseItem not yet implemented (hand=%d)", hand);
+
+        // Derive fresh yaw/pitch from the live look vector (the player's
+        // yaw/pitch members are stale — mouse-look writes the camera
+        // directly; see the lookDir comment in Player.hpp). Convention
+        // matches Player.cpp's front-vector build: yaw=0 → +X,
+        // front.y = sin(pitch).
+        float yRot = 0.0f, xRot = 0.0f;
+        if (player) {
+            const glm::vec3& d = player->lookDir;
+            constexpr float kRadToDeg = 57.29577951308232f;
+            yRot = std::atan2(d.z, d.x) * kRadToDeg;
+            xRot = std::asin(glm::clamp(d.y, -1.0f, 1.0f)) * kRadToDeg;
+        }
+
+        Network::UseItemC2SPacket packet;
+        packet.hand     = static_cast<uint32_t>(hand);
+        packet.sequence = static_cast<uint32_t>(++interactSeq);
+        packet.yRot     = yRot;
+        packet.xRot     = xRot;
+
+        auto data = Network::Serialization::Serialize(packet);
+        if (auto connection = networkClient->GetConnection()) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UseItem), data);
+            Log::Debug("Sent UseItemC2S: hand=%d seq=%d yRot=%.1f xRot=%.1f",
+                       hand, interactSeq, yRot, xRot);
+        }
+    }
+
+    void ClientPlayerController::SendPlayerAction(Network::PlayerAction action) {
+        // Mirrors MC's ServerboundPlayerActionPacket sends (BlockPos.ZERO +
+        // Direction.DOWN for the non-block actions — MultiPlayerGameMode.java:485).
+        if (!networkClient || !networkClient->IsConnected()) {
+            return;
+        }
+        Network::PlayerActionC2SPacket packet;
+        packet.action   = action;
+        packet.sequence = static_cast<uint32_t>(++interactSeq);
+        auto data = Network::Serialization::Serialize(packet);
+        if (auto connection = networkClient->GetConnection()) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAction), data);
+            Log::Debug("Sent PlayerActionC2S: action=%u seq=%d",
+                       static_cast<unsigned>(action), interactSeq);
+        }
+    }
+
+    uint32_t ClientPlayerController::PickUseHand() const {
+        // Mirrors MC Minecraft.startUseItem's MAIN_HAND → OFF_HAND loop:
+        // prefer the main hand when it has anything usable; otherwise fall
+        // back to the offhand when THAT holds a hold-to-use item (shield).
+        if (!player) return 0;
+        const ItemStack& main = player->inventory.GetSlot(
+            Inventory::HotbarToIndex(player->inventory.GetSelectedSlot()));
+        if (!main.IsEmpty()
+            && (GetUseDuration(main) > 0
+                || ItemRegistry::Get(main.itemId).use != nullptr)) {
+            return 0;
+        }
+        const ItemStack& off = player->inventory.GetSlot(Inventory::OFFHAND_BEGIN);
+        if (!off.IsEmpty() && GetUseDuration(off) > 0) {
+            return 1;
+        }
+        return 0;
+    }
+
+    void ClientPlayerController::StartPredictedUse(uint32_t hand) {
+        // Client-side mirror of LivingEntity.startUsingItem — only fires when
+        // the held stack actually has a use duration (food, shield, …).
+        // Components are known client-side (item defaults + synced per-stack
+        // patches), so GetUseDuration gives the same answer as the server.
+        if (!player) return;
+        const int slot = (hand == 0)
+            ? Inventory::HotbarToIndex(player->inventory.GetSelectedSlot())
+            : Inventory::OFFHAND_BEGIN;
+        const ItemStack& stack = player->inventory.GetSlot(slot);
+        if (stack.IsEmpty()) return;
+        const int duration = GetUseDuration(stack);
+        if (duration <= 0) return;
+
+        // Food gate — MC's client runs the same Consumable.startConsuming
+        // canEat check (Player.canEat = canAlwaysEat || foodData.needsFood),
+        // so at FULL hunger the eat animation never starts. Without this
+        // mirror the client played the whole 1.6 s animation while the
+        // server correctly refused — "eating looks broken". The food level
+        // is server-synced (SetHealthS2C), so the answer matches.
+        if (stack.get(DataComponents::CONSUMABLE)) {
+            if (auto food = stack.get(DataComponents::FOOD)) {
+                if (!food->canAlwaysEat && player->food >= 20) {
+                    return;
+                }
+            }
+        }
+
+        player->usingItem        = true;
+        player->usingHand        = hand;
+        player->useItemRemaining = duration;
+        player->useItemDuration  = duration;
+        player->useAnim          = GetUseAnimation(stack);
+    }
+
+    void ClientPlayerController::StopPredictedUse() {
+        if (!player) return;
+        player->usingItem        = false;
+        player->useItemRemaining = 0;
+        player->useItemDuration  = 0;
+        player->useAnim          = ItemUseAnimation::NONE;
+    }
+
+    void ClientPlayerController::UpdateUsingTick() {
+        // Predicted-use countdown at 20 TPS — the client-side shadow of
+        // ServerPlayer::updateUsingItem. On zero the server's
+        // completeUsingItem fires (its slot broadcast updates our stack);
+        // locally we just clear the pose state.
+        if (!player || !player->usingItem) return;
+        if (--player->useItemRemaining <= 0) {
+            StopPredictedUse();
+        }
     }
 
     void ClientPlayerController::UpdateBreakingTick() {
@@ -317,6 +443,10 @@ namespace Game {
         if (ticksSincePlace < 1000) ++ticksSincePlace;
 
         if (!placeButtonHeld) return;
+        // Mid-use suppression — MC's Minecraft.startUseItem is a no-op while
+        // player.isUsingItem() (Minecraft.java:1656), so held-RMB during an
+        // eat/block must not spam placements.
+        if (player->usingItem) return;
         // First-click placement already happens on the RMB edge in OnRMB.
         // Continuous-RMB re-fires every PLACE_REFIRE_TICKS while held.
         if (ticksSincePlace < PLACE_REFIRE_TICKS) return;
@@ -352,6 +482,13 @@ namespace Game {
         if (!player) return;
 
         player->SelectSlot(slot);
+
+        // Switching slots cancels a predicted use — the server's
+        // updatingUsingItem sees the hand-item mismatch and stops on its own
+        // (LivingEntity.java:3256-3261), so no release packet is needed.
+        if (player->usingItem && player->usingHand == 0) {
+            StopPredictedUse();
+        }
 
         // Send slot change + block type to server (MC: ServerboundSetCarriedItemPacket)
         if (networkClient && networkClient->IsConnected()) {
@@ -568,21 +705,46 @@ namespace Game {
                     // from the stack; for non-block items (tools, food, etc.)
                     // it doesn't, so we mustn't predict consumption either.
                     // Server is authoritative — it'll re-sync our inventory
-                    // either way.
+                    // either way. Creative never consumes (MC
+                    // ItemStack.consume no-ops with infinite materials).
                     if (player->GetSelectedBlock() != BlockID::Air) {
-                        player->inventory.ConsumeSelectedBlock();
+                        if (!player->IsCreative()) {
+                            player->inventory.ConsumeSelectedBlock();
+                        }
+                    } else {
+                        // Non-block item aimed at a block: the server's
+                        // HandleUseItemOn tail step falls through to the
+                        // use-item path — main hand first, then offhand
+                        // (mirroring MC's hand loop in Minecraft.startUseItem).
+                        // Mirror the condition by predicting the same hand.
+                        StartPredictedUse(PickUseHand());
                     }
                     ticksSincePlace = 0;
                 } else {
-                    // No block target — use item in air (Bow draw, EnderPearl
-                    // throw, food eat, etc.). Server-side `Item.use` handles it.
-                    SendUseItem(0);  // 0 = main hand
+                    // No block target — use item in air (food eat, shield
+                    // raise, later Bow draw / EnderPearl throw). Server-side
+                    // `Item.use` handles it; we start the matching predicted
+                    // use for the viewmodel pose. Hand picked like MC's
+                    // MAIN_HAND→OFF_HAND loop (offhand shield raises even
+                    // with a pickaxe in the main hand).
+                    const uint32_t useHand = PickUseHand();
+                    SendUseItem(static_cast<int>(useHand));
+                    StartPredictedUse(useHand);
                     ticksSincePlace = 0;
                 }
             }
             placeButtonHeld = true;
         } else {
             placeButtonHeld = false;
+            // RELEASE_USE_ITEM — mirrors MC MultiPlayerGameMode.releaseUsingItem
+            // (BlockPos.ZERO / Direction.DOWN, MultiPlayerGameMode.java:485).
+            // The ONLY place the release packet is sent — the cursor-visible
+            // synthetic release in PlatformMain funnels through OnRMB(false)
+            // too, so both edge trackers share this path.
+            if (player->usingItem) {
+                SendPlayerAction(Network::PlayerAction::RELEASE_USE_ITEM);
+                StopPredictedUse();
+            }
         }
     }
 
@@ -618,7 +780,8 @@ namespace Game {
             return;
         }
 
-        if (!player->inventory.ConsumeSelectedBlock()) {
+        // Creative keeps infinite stacks — only survival consumes.
+        if (!player->IsCreative() && !player->inventory.ConsumeSelectedBlock()) {
             Log::Debug("Cannot place block - none left in inventory");
             return;
         }

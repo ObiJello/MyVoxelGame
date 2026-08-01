@@ -336,7 +336,14 @@ namespace Render {
             glm::vec4 uScalarsD    = {0, 0, 0, 0};      // 272 — (uHasSprite, uUseSkin, uUseTextures, _pad)
             glm::vec2 uScreenSize  = {0, 0};            // 288
             glm::vec2 _pad         = {0, 0};            // 296 — pad to vec4 alignment
-        };                                              // 304 bytes
+            // Environment / fog block (sky, clouds, chunk fog + night dim).
+            // APPENDED so older _vk shaders that declare the 304-byte layout
+            // stay valid (a shader may declare a smaller UBO block than the
+            // bound buffer). New shaders declare the full 352-byte layout.
+            glm::vec4 uFogColor    = {1, 1, 1, 1};      // 304 — rgb=fog color, w=1
+            glm::vec4 uFogEnv      = {1e9f, 1e9f, 1e9f, 1e9f}; // 320 — (envStart, envEnd, rdStart, rdEnd)
+            glm::vec4 uCamPosBright= {0, 0, 0, 1};      // 336 — xyz=uCameraPos, w=uSkyBrightness
+        };                                              // 352 bytes
         // 96-mat4 bone palette UBO for the viewmodel skinning shader.
         // 6144 bytes — well within the typical UBO size limit (16 KB).
         static constexpr int kMaxBones = 96;

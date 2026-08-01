@@ -18,6 +18,8 @@
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
 static std::function<void(const std::string&)> s_chatCallback;
 static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
+// (gameTime, dayTime, doDaylightCycle) — fires on the network I/O thread.
+static std::function<void(uint64_t, uint64_t, bool)> s_timeUpdateCallback;
 // Teleport callback — set by PlatformMain to snap the local Player on /tp.
 // Signature: (x, y, z, yaw, pitch, dx, dy, dz). dx/dy/dz are the
 // authoritative post-teleport velocity in blocks/sec, matching the
@@ -26,6 +28,10 @@ static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
 // rotated source velocity (carries momentum through the portal pair).
 static std::function<void(double, double, double, float, float,
                           double, double, double)> s_teleportCallback;
+
+void SetTimeUpdateCallback(std::function<void(uint64_t, uint64_t, bool)> callback) {
+    s_timeUpdateCallback = std::move(callback);
+}
 
 void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
     s_chatCallback = std::move(callback);
@@ -64,8 +70,8 @@ namespace Client {
         // KeepAliveS2C is now handled through typed packet system (KeepAliveS2CPacketImpl)
         // m_packetRegistry.RegisterHandler(PacketId::KeepAliveS2C,
         //     [this](const std::vector<uint8_t>& p) { HandleKeepAlive(p); });
-        m_packetRegistry.RegisterHandler(PacketId::PlayerAbilities,
-            [this](const std::vector<uint8_t>& p) { HandlePlayerAbilities(p); });
+        // PlayerAbilities is handled through the typed packet system
+        // (PlayerAbilitiesS2CPacketImpl) so it applies on the main thread.
         m_packetRegistry.RegisterHandler(PacketId::WorldSpawn,
             [this](const std::vector<uint8_t>& p) { HandleWorldSpawn(p); });
         m_packetRegistry.RegisterHandler(PacketId::PlayerInfoS2C,
@@ -341,19 +347,14 @@ namespace Client {
         Network::PacketReader reader(payload);
         m_worldAge = reader.ReadLong();
         m_timeOfDay = reader.ReadLong();
-        
-        Log::Debug("[ClientConnection] Time update: age=%lu, time=%lu", 
-            m_worldAge, m_timeOfDay);
-    }
+        m_doDaylightCycle = reader.ReadByte() != 0;
 
-    void ClientConnection::HandlePlayerAbilities(const std::vector<uint8_t>& payload) {
-        Network::PacketReader reader(payload);
-        m_playerAbilities = reader.ReadByte();
-        m_flySpeed = reader.ReadFloat();
-        m_walkSpeed = reader.ReadFloat();
-        
-        Log::Debug("[ClientConnection] Player abilities: flags=0x%02X, fly=%.2f, walk=%.2f",
-            m_playerAbilities, m_flySpeed, m_walkSpeed);
+        if (s_timeUpdateCallback) {
+            s_timeUpdateCallback(m_worldAge, m_timeOfDay, m_doDaylightCycle);
+        }
+
+        Log::Debug("[ClientConnection] Time update: age=%lu, time=%lu, cycle=%d",
+            m_worldAge, m_timeOfDay, m_doDaylightCycle ? 1 : 0);
     }
 
     void ClientConnection::HandleWorldSpawn(const std::vector<uint8_t>& payload) {
@@ -515,6 +516,16 @@ namespace Client {
             case PacketId::InventorySetCarriedS2C: {
                 auto data = Serialization::DeserializeInventorySetCarriedS2C(payload);
                 return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
+            }
+
+            case PacketId::SetHealthS2C: {
+                auto data = Serialization::DeserializeSetHealthS2C(payload);
+                return std::make_unique<SetHealthS2CPacketImpl>(data);
+            }
+
+            case PacketId::PlayerAbilities: {
+                auto data = Serialization::DeserializePlayerAbilitiesS2C(payload);
+                return std::make_unique<PlayerAbilitiesS2CPacketImpl>(data);
             }
 
 #if ENABLE_PORTAL_GUN

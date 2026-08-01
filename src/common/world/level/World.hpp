@@ -8,6 +8,7 @@
 #include "server/world/tracking/DirtyTracker.hpp"
 #include <memory>
 #include <atomic>
+#include <cstdint>
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -126,6 +127,18 @@ namespace Game {
         // Update world time and weather
         void WorldTimeWeatherTick();
 
+        // ========================================================================
+        // WORLD TIME (day/night cycle)
+        // ========================================================================
+        // Mirrors ServerLevel.tickTime: gameTime always advances; dayTime only
+        // advances when the doDaylightCycle gamerule is on (default OFF here,
+        // unlike vanilla — worlds are frozen at noon unless enabled).
+        int64_t GetGameTime() const { return m_gameTime; }
+        int64_t GetDayTime() const { return m_dayTime; }
+        void SetDayTime(int64_t dayTime) { m_dayTime = dayTime; }
+        bool GetDoDaylightCycle() const { return m_doDaylightCycle; }
+        void SetDoDaylightCycle(bool enabled) { m_doDaylightCycle = enabled; }
+
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;
@@ -141,6 +154,13 @@ namespace Game {
 
         // Stop flag for early termination of long-running loops
         std::atomic<bool> m_stopRequested{false};
+
+        // World time. dayTime defaults to 6000 (noon) so frozen worlds match
+        // the pre-time-system look (MC new worlds start at 0/sunrise, but our
+        // doDaylightCycle default is false so noon is the better freeze point).
+        int64_t m_gameTime = 0;
+        int64_t m_dayTime = 6000;
+        bool m_doDaylightCycle = false;
     };
 
 } // namespace Game

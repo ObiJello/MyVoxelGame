@@ -1,5 +1,7 @@
 // File: src/common/entity/Inventory.cpp
 #include "Inventory.hpp"
+#include "EquipmentSlot.hpp"
+#include "../data/DataComponents.hpp"
 #include "../core/Log.hpp"
 #include <algorithm>
 
@@ -166,6 +168,22 @@ namespace Game {
             return toAdd;
         }
         return 0;
+    }
+
+    bool MayPlaceInSlot(int slotIndex, const ItemStack& stack) {
+        // Crafting stays refuse-insert (no crafting system).
+        if (Inventory::IsCraftGridSlot(slotIndex) || Inventory::IsCraftResultSlot(slotIndex)) {
+            return false;
+        }
+        // Armor slot i accepts exactly the stack whose EQUIPPABLE maps there
+        // (mirrors ArmorSlot.mayPlace → equippable.slot check).
+        if (Inventory::IsArmorSlot(slotIndex)) {
+            auto equippable = stack.get(DataComponents::EQUIPPABLE);
+            return equippable
+                && InventoryIndexFor(equippable->slot) == slotIndex;
+        }
+        // Offhand + main/hotbar accept anything (MC's offhand slot is unfiltered).
+        return true;
     }
 
 } // namespace Game

@@ -2,6 +2,10 @@
 #include "IntegratedServer.hpp"
 #include "commands/TeleportCommand.hpp"
 #include "commands/KickCommand.hpp"
+#include "commands/GameModeCommand.hpp"
+#include "commands/KillCommand.hpp"
+#include "commands/TimeCommand.hpp"
+#include "commands/GameRuleCommand.hpp"
 #include "network/NetworkServer.hpp"
 #include "network/ServerConnection.hpp"
 #include "network/SendScheduler.hpp"
@@ -70,6 +74,10 @@ namespace Server {
             Log::Info("Server world configured with Minecraft world: %s", m_config.minecraftWorldPath.c_str());
         }
         
+        // Restore world time + gamerule from world metadata (worlds.json)
+        m_world->SetDayTime(m_config.initialDayTime);
+        m_world->SetDoDaylightCycle(m_config.doDaylightCycle);
+
         // Initialize the world
         m_world->Initialize();
         Log::Info("Server world initialized successfully");
@@ -120,6 +128,10 @@ namespace Server {
         // Register server commands (MC: Commands.java constructor)
         TeleportCommand::Register(m_commandDispatcher);
         KickCommand::Register(m_commandDispatcher);
+        GameModeCommand::Register(m_commandDispatcher);
+        KillCommand::Register(m_commandDispatcher);
+        TimeCommand::Register(m_commandDispatcher);
+        GameRuleCommand::Register(m_commandDispatcher);
         Log::Info("Server commands registered");
 
         // Wire disconnect callback so we broadcast entity removal to other clients
@@ -454,13 +466,9 @@ namespace Server {
             m_deltaBroadcaster->flush();
         }
         
-        // Tick the server player entity (authoritative gameplay)
-        if (m_serverPlayer) {
-            m_serverPlayer->tick(m_world.get(), static_cast<int>(serverTick));
-        }
-
-        // NOTE: PlayerSession is now ticked via m_sessionManager->Tick() at line 384
-        // No need to tick it directly here anymore
+        // NOTE: Player entities (host AND remote) are ticked from
+        // PlayerSession::Tick via m_sessionManager->Tick() above — the old
+        // direct m_serverPlayer->tick() here would double-tick the host.
 
 #if ENABLE_PORTAL_GUN
         // Portal gun: per-tick crossing detection. Runs AFTER player tick so
@@ -492,6 +500,11 @@ namespace Server {
         // === 5. BROADCAST PLAYER POSITIONS to other players (~10 Hz) ===
         if (m_sessionManager && (serverTick % 2 == 0)) {
             m_sessionManager->BroadcastPlayerPositions();
+        }
+
+        // === 5b. TIME SYNC every 20 ticks (MC MinecraftServer.tickChildren) ===
+        if (serverTick % 20 == 0) {
+            ForceTimeSync();
         }
 
         // === 6. PERIODIC CLEANUP: unload chunks with no watchers ===
@@ -649,6 +662,15 @@ namespace Server {
 
             for (const auto& pos : nowLoaded) {
                 session->MarkChunkReadyToSend(pos);
+            }
+        }
+    }
+
+    void IntegratedServer::ForceTimeSync() {
+        if (!m_sessionManager) return;
+        for (const auto& session : m_sessionManager->GetAllSessions()) {
+            if (session && session->GetConnection()) {
+                session->GetConnection()->SendCurrentTimeUpdate();
             }
         }
     }
@@ -873,6 +895,13 @@ namespace Server {
             session->SetConnection(connection.get());
             Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
                       playerName.c_str(), playerId, connection->GetConnectionId());
+
+            // Apply the world's game mode and sync abilities (replaces the
+            // survival placeholder sent during login). Mirrors MC
+            // PlayerList.placeNewPlayer applying the level's default game
+            // type to every joiner.
+            playerPtr->setGameMode(static_cast<GameMode>(m_config.defaultGameMode));
+            connection->SendPlayerAbilities(*playerPtr);
 
             // Send full 46-slot inventory snapshot. Replaces the old HotbarSyncS2C path —
             // InventoryFullS2C carries real per-slot counts so the client doesn't have to

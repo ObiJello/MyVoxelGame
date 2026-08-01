@@ -46,6 +46,9 @@ namespace Server {
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
         bool useLocalSaveDirectory = true;     // Automatically use local save directory if available (temporary feature)
+        int defaultGameMode = 0;               // World game mode applied to joining players (GameMode raw: 0 survival, 1 creative)
+        int64_t initialDayTime = 6000;         // World time restored from world metadata (6000 = noon)
+        bool doDaylightCycle = false;          // doDaylightCycle gamerule restored from world metadata
     };
 
 
@@ -87,6 +90,11 @@ namespace Server {
         
         // Get the change accumulator for block updates
         SectionChangeAccumulator* GetChangeAccumulator() const { return m_changeAccumulator.get(); }
+
+        // Broadcast the current world time to every connected player.
+        // MC forceTimeSynchronization: called every 20 ticks and immediately
+        // after /time or /gamerule doDaylightCycle changes.
+        void ForceTimeSync();
 
         // ========================================================================
         // PLAYER MANAGEMENT

@@ -9,6 +9,7 @@
 #include "../session/PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../IntegratedServer.hpp"
+#include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include <limits>
 #include "common/network/packets/HandshakeC2S.hpp"
@@ -314,11 +315,11 @@ namespace Server {
         Log::Debug("[ServerConnection %u] Sending initial game data", GetConnectionId());
         
         // Send time update
-        SendTimeUpdate(0, 6000); // Noon
-        
-        // Send player abilities
-        SendPlayerAbilities(0x0F, 0.05f, 0.1f); // All abilities, default speeds
-        
+        SendCurrentTimeUpdate();
+
+        // Send player abilities (survival placeholder — real ones follow at join)
+        SendPlayerAbilitiesDefault();
+
         // Send spawn position
         Network::PacketBuffer spawnBuffer;
         spawnBuffer.WriteInt(0); // X
@@ -381,19 +382,51 @@ namespace Server {
         Disconnect();
     }
 
-    void ServerConnection::SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay) {
+    void ServerConnection::SendTimeUpdate(uint64_t worldAge, uint64_t timeOfDay, bool doDaylightCycle) {
         Network::PacketBuffer buffer;
         buffer.WriteLong(worldAge);
         buffer.WriteLong(timeOfDay);
+        buffer.WriteByte(doDaylightCycle ? 1 : 0);
         SendPacket(static_cast<uint8_t>(Network::PacketId::TimeUpdate), buffer.GetData());
     }
 
-    void ServerConnection::SendPlayerAbilities(uint8_t flags, float flySpeed, float walkSpeed) {
-        Network::PacketBuffer buffer;
-        buffer.WriteByte(flags);
-        buffer.WriteFloat(flySpeed);
-        buffer.WriteFloat(walkSpeed);
-        SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), buffer.GetData());
+    void ServerConnection::SendCurrentTimeUpdate() {
+        uint64_t gameTime = 0;
+        uint64_t dayTime = 6000;
+        bool doDaylightCycle = false;
+        if (Server::g_integratedServer && Server::g_integratedServer->GetWorld()) {
+            const auto* world = Server::g_integratedServer->GetWorld();
+            gameTime = static_cast<uint64_t>(world->GetGameTime());
+            dayTime = static_cast<uint64_t>(world->GetDayTime());
+            doDaylightCycle = world->GetDoDaylightCycle();
+        }
+        SendTimeUpdate(gameTime, dayTime, doDaylightCycle);
+    }
+
+    void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
+        // MC ClientboundPlayerAbilitiesPacket built from the live Abilities
+        // (+ our extra gameMode byte, replacing CHANGE_GAME_MODE).
+        Network::PlayerAbilitiesS2CPacket packet;
+        if (player.getGameMode() == GameMode::CREATIVE ||
+            player.getGameMode() == GameMode::SPECTATOR) {
+            packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
+        }
+        if (player.isFlying())  packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_FLYING;
+        if (player.canFly())    packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_MAY_FLY;
+        if (player.getGameMode() == GameMode::CREATIVE) {
+            packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INSTABUILD;
+        }
+        packet.gameMode = static_cast<uint8_t>(player.getGameMode());
+        auto data = Network::Serialization::Serialize(packet);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
+    }
+
+    void ServerConnection::SendPlayerAbilitiesDefault() {
+        // Login-time placeholder — the ServerPlayer doesn't exist yet at
+        // sendInitialGameData. Survival defaults; the real abilities follow
+        // from OnPlayerJoined once the world's game mode is applied.
+        auto data = Network::Serialization::Serialize(Network::PlayerAbilitiesS2CPacket{});
+        SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
     // ========================================================================
@@ -461,8 +494,8 @@ namespace Server {
         
         // Send initial game data
         Log::Debug("[ServerConnection %u] Sending initial game data", GetConnectionId());
-        SendTimeUpdate(0, 6000); // Noon
-        SendPlayerAbilities(0x0F, 0.05f, 0.1f); // All abilities, default speeds
+        SendCurrentTimeUpdate();
+        SendPlayerAbilitiesDefault(); // Survival placeholder — real ones follow at join
         
         // Send spawn position
         Network::PacketBuffer spawnBuffer;
@@ -778,11 +811,32 @@ namespace Server {
                     return std::make_unique<Network::Packets::UseItemOnC2SPacketImpl>(std::move(data));
                 }
                 break;
+
+            case PacketId::UseItem:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeUseItemC2S(payload);
+                    return std::make_unique<Network::Packets::UseItemC2SPacketImpl>(data);
+                }
+                break;
+
+            case PacketId::PlayerAction:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePlayerActionC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerActionC2SPacketImpl>(data);
+                }
+                break;
             
             case PacketId::ChunkBatchAckC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializeChunkBatchAckC2S(payload);
                     return std::make_unique<Network::Packets::ChunkBatchAckC2SPacketImpl>(data.desiredChunksPerTick);
+                }
+                break;
+
+            case PacketId::PlayerAbilitiesC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePlayerAbilitiesC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerAbilitiesC2SPacketImpl>(data);
                 }
                 break;
 

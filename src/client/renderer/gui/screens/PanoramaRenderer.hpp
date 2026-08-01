@@ -6,14 +6,16 @@
 // projection, fixed 10° downward pitch, and a yaw that advances at
 // 2°/sec × the accessibility "Panorama Scroll Speed" option.
 //
-// NOTE: the current asset dump ships 1×1 placeholder PNGs for the six
-// panorama images (they aren't part of the standard MC jar item/block
-// dump). The renderer detects that and falls back to a static gradient
-// so the title screen is still presentable; dropping real panorama_N.png
-// files into assets/textures/gui/title/background/ lights it up.
+// Every panorama Minecraft has ever shipped lives in a versioned
+// subfolder: assets/textures/gui/title/background/<slug>/panorama_0..5.png
+// (slugs in kSets, chronological). The active set is the "panoramaSet"
+// settings key; the Accessibility screen cycles it live via LoadSet().
 #pragma once
 
 #include "../../backend/RenderTypes.hpp"
+
+#include <string>
+#include <vector>
 
 namespace Render {
 
@@ -21,8 +23,28 @@ namespace Render {
 
     class PanoramaRenderer {
     public:
-        bool Initialize();
+        struct SetInfo {
+            const char* slug;    // asset subfolder name
+            const char* label;   // display name for the options cycle button
+        };
+
+        // Settings default — the newest panorama we ship.
+        static constexpr const char* kDefaultSet = "26.1";
+        // Sentinel settings value: LoadSet resolves it to a random available
+        // set, so a fresh one is rolled every time the title screen comes up.
+        static constexpr const char* kRandomSet = "random";
+
+        // The known sets (chronological) filtered down to the ones whose
+        // asset folders actually exist on disk.
+        static std::vector<SetInfo> AvailableSets();
+
+        bool Initialize(const std::string& setSlug = kDefaultSet);
         void Shutdown();
+
+        // Swap the skybox to another set at runtime (options screen).
+        // Falls back through kDefaultSet to a gradient if files are missing.
+        void LoadSet(const std::string& slug);
+        const std::string& CurrentSet() const { return m_currentSet; }
 
         // Advance the spin and draw the skybox to the current framebuffer.
         // Call before the GUI pass. `speed` is the panorama scroll-speed
@@ -43,9 +65,13 @@ namespace Render {
         TextureHandle m_faces[6] = {INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
                                     INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE};
         TextureHandle m_overlay = INVALID_TEXTURE;
+        std::string m_currentSet;
         bool  m_texturesValid = false;
         bool  m_initialized   = false;
         float m_spin          = 0.0f;   // degrees
+
+        void DestroyFaceTextures();
+        bool TryLoadSet(const std::string& slug);
 
         static const char* vertexShaderSource;
         static const char* fragmentShaderSource;

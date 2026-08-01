@@ -32,6 +32,21 @@ namespace Server {
             handleUseItemOn(packet);
         }
         void onBlockActionC2S(const Network::BlockActionC2SPacket& packet) override;
+
+        // Item use in air (MC handleUseItem — ServerGamePacketListenerImpl.java:1329)
+        void handleUseItem(const Network::UseItemC2SPacket& packet);
+        void onUseItemC2S(const Network::UseItemC2SPacket& packet) override {
+            handleUseItem(packet);
+        }
+
+        // Player actions (MC handlePlayerAction — ServerGamePacketListenerImpl.java:1191)
+        void handlePlayerAction(const Network::PlayerActionC2SPacket& packet);
+        void onPlayerActionC2S(const Network::PlayerActionC2SPacket& packet) override {
+            handlePlayerAction(packet);
+        }
+
+        // Fly-state toggle (MC handlePlayerAbilities — only the FLYING bit is client-writable)
+        void onPlayerAbilitiesC2S(const Network::PlayerAbilitiesC2SPacket& packet) override;
         
         // Player updates
         void onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) override;

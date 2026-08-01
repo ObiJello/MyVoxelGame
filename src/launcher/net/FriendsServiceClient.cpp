@@ -96,4 +96,11 @@ namespace Launcher {
         return Call({{"op", "rename"}, {"token", token}, {"name", newName}});
     }
 
+    FriendsServiceClient::Result FriendsServiceClient::ChangePassword(
+            const std::string& token, const std::string& current,
+            const std::string& newPassword) {
+        return Call({{"op", "change_password"}, {"token", token},
+                     {"current", current}, {"password", newPassword}});
+    }
+
 } // namespace Launcher

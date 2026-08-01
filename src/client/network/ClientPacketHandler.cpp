@@ -6,6 +6,7 @@
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
+#include <cmath>
 #if ENABLE_PORTAL_GUN
 #include "../portal/ClientPortalManager.hpp"
 #endif
@@ -13,7 +14,11 @@
 // Forward declaration: defined in src/client/renderer/gui/InventoryScreen.cpp.
 // Lets the inventory carried-item update flow without pulling the GUI header here.
 namespace Render {
-    void SetInventoryScreenCarriedItem(Game::ItemID id, int count);
+    void SetInventoryScreenCarriedItem(const Game::ItemStack& stack);
+    // Defined in screens/DeathScreen.cpp — death flow hooks (health<=0 opens,
+    // health>0 closes). Same no-GUI-header convention as above.
+    void ShowDeathScreen();
+    void DismissDeathScreen();
 }
 
 namespace Client {
@@ -238,11 +243,29 @@ namespace Client {
     // PLAYER ABILITIES
     // ========================================================================
 
-    void ClientPacketHandler::handlePlayerAbilities(uint8_t flags, float flySpeed, float walkSpeed) {
-        // TODO: Update player controller with abilities
+    void ClientPacketHandler::handlePlayerAbilities(const Network::PlayerAbilitiesS2CPacket& packet) {
+        // Mirrors ClientPacketListener.handlePlayerAbilities — copy the
+        // authoritative abilities onto the local player. The extra gameMode
+        // byte replaces MC's separate CHANGE_GAME_MODE game event.
         m_stats.packetsProcessed++;
-        Log::Debug("[ClientPacketHandler] Player abilities: flags=0x%02X, fly=%.2f, walk=%.2f", 
-                  flags, flySpeed, walkSpeed);
+        if (!m_player) return;
+
+        m_player->gameMode     = packet.gameMode;
+        m_player->invulnerable = packet.invulnerable();
+        m_player->instabuild   = packet.instabuild();
+        m_player->flyingSpeed  = packet.flyingSpeed;
+        m_player->physics.mayFly = packet.mayFly();
+
+        // Flight permission revoked (creative → survival): force-land.
+        // While permitted, the local double-tap toggle stays authoritative
+        // for responsiveness (MC's client also owns abilities.flying).
+        if (!packet.mayFly()) {
+            m_player->physics.isFlying = false;
+        }
+
+        Log::Info("[ClientPacketHandler] Abilities: gameMode=%u mayFly=%d instabuild=%d invulnerable=%d",
+                  packet.gameMode, packet.mayFly() ? 1 : 0,
+                  packet.instabuild() ? 1 : 0, packet.invulnerable() ? 1 : 0);
     }
 
     void ClientPacketHandler::handleWorldSpawn(int32_t x, int32_t y, int32_t z) {
@@ -316,32 +339,61 @@ namespace Client {
     void ClientPacketHandler::handleInventoryFull(const Network::InventoryFullS2CPacket& packet) {
         if (!m_player) return;
         for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            m_player->inventory.SetSlot(i,
-                                        static_cast<Game::ItemID>(packet.itemIds[i]),
-                                        static_cast<int>(packet.counts[i]));
+            // SetSlotFull, NOT SetSlot — SetSlot rebuilds the stack from
+            // (id, count) and silently drops per-stack DataComponents.
+            m_player->inventory.SetSlotFull(i, packet.slots[i]);
         }
         m_player->inventory.SetSelectedSlot(packet.selectedHotbarSlot);
-        Log::Debug("[ClientPacketHandler] Inventory full sync: selected=%d carried=%u(%u)",
-                   packet.selectedHotbarSlot, packet.carriedItemId, packet.carriedCount);
+        Log::Debug("[ClientPacketHandler] Inventory full sync: selected=%d carried=%u(%d)",
+                   packet.selectedHotbarSlot, packet.carried.itemId, packet.carried.count);
         // Push the carried portion through the same path so it lands on the screen.
-        Network::InventorySetCarriedS2CPacket carried{packet.carriedItemId, packet.carriedCount};
+        Network::InventorySetCarriedS2CPacket carried{packet.carried};
         handleInventorySetCarried(carried);
         m_stats.packetsProcessed++;
     }
 
     void ClientPacketHandler::handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet) {
         if (!m_player) return;
-        m_player->inventory.SetSlot(packet.slotIndex,
-                                    static_cast<Game::ItemID>(packet.itemId),
-                                    static_cast<int>(packet.count));
+        // SetSlotFull preserves per-stack DataComponents (see handleInventoryFull).
+        m_player->inventory.SetSlotFull(packet.slotIndex, packet.stack);
         m_stats.packetsProcessed++;
     }
 
     void ClientPacketHandler::handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet) {
         // Defined in InventoryScreen.cpp; forward-declared at file scope at the top of this file
         // (avoids pulling in the GUI header from the network handler).
-        ::Render::SetInventoryScreenCarriedItem(static_cast<Game::ItemID>(packet.itemId),
-                                                static_cast<int>(packet.count));
+        ::Render::SetInventoryScreenCarriedItem(packet.stack);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleSetHealth(const Network::SetHealthS2CPacket& packet) {
+        // Mirrors ClientPacketListener.handleSetHealth — write the
+        // authoritative stat triple onto the local player; the HUD reads it
+        // each frame (PlatformMain's RenderHUD hookup).
+        if (!m_player) return;
+        // ceil, not floor — MC's Gui renders Mth.ceil(health). Regen heals in
+        // fractional steps (saturated regen heals saturation/6 per burst), so
+        // health is often non-integer; flooring made 0.8 health display as
+        // ZERO hearts while the server still (correctly) considered the
+        // player alive — "empty hearts but no death screen".
+        m_player->health     = static_cast<int>(std::ceil(packet.health));
+        m_player->food       = static_cast<int>(packet.food);
+        m_player->saturation = packet.saturation;
+
+        // Health hitting 0 IS the death signal (MC LocalPlayer.hurtTo →
+        // Minecraft.setScreen(new DeathScreen(...)) when health <= 0); a
+        // respawn's health refresh closes it again. Runs on the main thread
+        // (typed packets apply during DrainIncomingPackets in the client tick).
+        if (packet.health <= 0.0f) {
+            // Kill any predicted item use — the dead hand drops its food.
+            m_player->usingItem        = false;
+            m_player->useItemRemaining = 0;
+            m_player->useItemDuration  = 0;
+            m_player->useAnim          = Game::ItemUseAnimation::NONE;
+            ::Render::ShowDeathScreen();
+        } else {
+            ::Render::DismissDeathScreen();
+        }
         m_stats.packetsProcessed++;
     }
 

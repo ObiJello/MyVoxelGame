@@ -64,8 +64,15 @@ namespace Game {
             }
         }
 
-        // Update sneaking state
-        physics.isSneaking = sneakPressed;
+        // Update sneaking state. Not while flying — MC's isCrouching requires
+        // !abilities.flying (shift descends instead of crouching mid-flight).
+        physics.isSneaking = sneakPressed && !physics.isFlying;
+
+        // Per-step jump flag (consumed by ClientPlayer for move-packet stats)
+        physics.didJumpThisStep = false;
+
+        // Fall tracking: remember the pre-step height (delta taken below).
+        const float fallPrevY = physics.position.y;
 
         // Update base speed based on current state
         UpdateBaseSpeed(physics);
@@ -82,7 +89,7 @@ namespace Game {
             physics.waterVelocity = glm::vec3(0.0f);
         }
 
-        if (!physics.isInWater) {
+        if (!physics.isInWater && !physics.isFlying) {
             // Land/air physics
             HandleJump(physics, jumpPressed, deltaTime, context);
 
@@ -101,6 +108,29 @@ namespace Game {
 
         // Handle movement (water uses per-frame friction model, land unchanged)
         HandleMovement(physics, movementInput, jumpPressed, deltaTime, context);
+
+        // Landing cancels creative flight — MC LocalPlayer.aiStep:845
+        // (onGround && abilities.flying && !isSpectator → flying = false).
+        if (physics.isFlying && physics.isOnGround) {
+            physics.isFlying = false;
+        }
+
+        // Fall tracking (see the field comment in Physics.hpp). Order
+        // matters: the water/flight/noclip reset wins over a same-step
+        // landing so falling into a pool never flushes damage.
+        {
+            const float fallDy = physics.position.y - fallPrevY;
+            if (physics.isInWater || physics.isFlying || physics.noclip) {
+                physics.fallDistance = 0.0f;      // MC resetFallDistance
+            } else if (!physics.isOnGround && fallDy < 0.0f) {
+                physics.fallDistance += -fallDy;
+            }
+            if (physics.isOnGround && physics.fallDistance > 0.0f) {
+                physics.landedFallDistance =
+                    std::max(physics.landedFallDistance, physics.fallDistance);
+                physics.fallDistance = 0.0f;
+            }
+        }
     }
 
     void ApplyGravity(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context) {
@@ -136,6 +166,7 @@ namespace Game {
             physics.velocity.y = PlayerPhysics::JUMP_VELOCITY;
             physics.isOnGround = false;
             physics.lastJumpTime = physics.totalTime;
+            physics.didJumpThisStep = true;
 
             // Handle momentum system for sprinting
             if (physics.isSprinting) {
@@ -203,7 +234,7 @@ namespace Game {
             return;
         }
 
-        if (physics.isInWater) {
+        if (physics.isInWater && !physics.isFlying) {
             // ============================================================
             // Water movement — per-frame continuous model
             // Uses exponential decay: dv/dt = accel - decay * v
@@ -323,6 +354,21 @@ namespace Game {
             // ============================================================
 
             float speed = physics.currentSpeed;
+
+            if (physics.isFlying) {
+                // Creative flight: MC speeds, full collision, no gravity
+                // (ApplyGravity/HandleJump are skipped upstream).
+                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED *
+                        (physics.isSprinting ? PlayerPhysics::FLY_SPRINT_MULTIPLIER : 1.0f);
+                // Direct vertical control: Space up / Shift down. Use the
+                // input's sign — CalculateMovementInput normalizes the whole
+                // vector, so the raw y magnitude shrinks when combined with
+                // WASD. Instant stop on release matches this codebase's
+                // no-friction land model.
+                const float vert = movementInput.y > 0.01f ? 1.0f
+                                 : movementInput.y < -0.01f ? -1.0f : 0.0f;
+                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED;
+            }
 
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
             if (glm::length(horizontalMovement) > 0.0f) {

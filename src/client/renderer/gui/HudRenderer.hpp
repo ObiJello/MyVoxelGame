@@ -27,6 +27,16 @@ namespace Render {
         // is required to invoke this — but it's harmless to call manually.
         void OnSelectedSlotChanged(Game::BlockID blockId);
 
+        // Server-synced stats — fed each frame from ClientPlayer (which is
+        // written by SetHealthS2C). Replaces the old fixed placeholders.
+        void SetHealth(int health)         { m_health = health; }
+        void SetFood(int food)             { m_food = food; }
+        void SetSaturation(float sat)      { m_saturation = sat; }
+        void SetArmor(int armorPoints)     { m_armor = armorPoints; }
+        // Creative/spectator hide the survival stat block (hearts, food,
+        // armor, air, XP) — MC Gui gates those on gameMode.canHurtPlayer().
+        void SetStatsHidden(bool hidden)   { m_statsHidden = hidden; }
+
     private:
         // MC's Gui.java HUD element methods
         void RenderItemHotbar(GuiGraphics& graphics, const Game::Inventory& inventory);
@@ -55,13 +65,17 @@ namespace Render {
         Game::ItemID m_lastSelected  = 0;
         bool         m_firstObserve  = true;
 
-        // Placeholder gameplay values (until real systems exist)
+        // Gameplay values. health/food/saturation/armor are server-synced via
+        // the setters above; the rest stay placeholders until their systems
+        // exist (air, XP).
         int m_health = 20;        // Half-hearts (20 = full)
         int m_maxHealth = 20;
         int m_food = 20;          // Half-shanks (20 = full)
+        float m_saturation = 5.0f;// Drives MC's saturation heart-jitter (unused yet)
         int m_armor = 0;          // Armor points (0-20)
         int m_air = 300;          // Air supply (300 = full, ticks)
         int m_maxAir = 300;
+        bool m_statsHidden = false; // True in creative/spectator (SetStatsHidden)
         float m_experience = 0.0f; // XP bar progress (0.0-1.0)
         int m_experienceLevel = 0;
         bool m_isUnderWater = false;

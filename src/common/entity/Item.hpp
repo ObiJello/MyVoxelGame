@@ -19,6 +19,7 @@
 #include "../world/block/BlockInteraction.hpp"
 #include "../data/DataComponentMap.hpp"
 #include "../core/Features.hpp"
+#include "ItemUseAnimation.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -27,9 +28,11 @@
 
 namespace Game {
     class World;
+    class Inventory;
 }
 namespace Server {
     class ServerPlayer;
+    struct InventoryClickResult;
 }
 
 namespace Game {
@@ -74,6 +77,13 @@ namespace Game {
         // Wall-clock time in seconds since session start — used for animation that ticks
         // on its own (the compass needle has overshoot/wobble behavior in MC).
         float timeSeconds = 0.0f;
+        // True while the local player's predicted use is a BLOCK animation
+        // (shield raised). Feeds MC's `blocking`/`using_item` model
+        // predicates. NOTE: the shield's raised VISUAL currently comes from
+        // the viewmodel BLOCK pose (HeldItemRenderer); the frame-selector
+        // side stays on frame 0 until the shield's condition-dispatch model
+        // is modelled — this flag is the data feed for that.
+        bool usingItemBlock = false;
     };
 
     // Per-item frame selector. Returns the index into `spriteFrames` to draw THIS frame.
@@ -93,37 +103,57 @@ namespace Game {
     using ItemUseOnFn = UseResult (*)(const UseOnContext& ctx, ItemStack& stack);
 
     // Right-click in AIR. Mirrors MC's `Item.use(Level, Player, Hand)`
-    // (Item.java:196-219). Default → Pass. Override for ranged items (Bow,
-    // Snowball, EnderPearl, Egg) and self-targeting items.
-    //
-    // MC's BASE `Item.use` is itself non-trivial — it reads several
-    // DataComponents and dispatches on them BEFORE returning Pass:
-    //   1. CONSUMABLE      → consumable.startConsuming(player, stack, hand)
-    //                        (food, potions; starts the eating/drinking timer)
-    //   2. EQUIPPABLE     → if swappable, equippable.swapWithEquipmentSlot
-    //                        (clicking a chestplate auto-equips it)
-    //   3. BLOCKS_ATTACKS  → player.startUsingItem(hand) → CONSUME
-    //                        (shield: start blocking)
-    //   4. KINETIC_WEAPON  → player.startUsingItem(hand) + makeSound → CONSUME
-    //                        (mace: start the wind-up swing)
-    //   5. else            → PASS
-    //
-    // We don't yet have:
-    //   • The UseItemC2SPacket that triggers this server-side (only
-    //     UseItemOnC2SPacket exists today, which targets a block).
-    //   • The CONSUMABLE/EQUIPPABLE/BLOCKS_ATTACKS/KINETIC_WEAPON DataComponent
-    //     types registered (we only have STORED_ENCHANTMENTS and
-    //     ENCHANTMENT_GLINT_OVERRIDE so far).
-    //   • Player.startUsingItem (use-duration tick + finishUsingItem callback
-    //     after N ticks, e.g. 32 for normal food).
-    //
-    // When those land, the default `Item.use` should be implemented in
-    // Item.cpp (NOT as a per-item callback) and dispatch on the components
-    // above. Per-item `use` callbacks override the default for items with
-    // unique behaviour (BowItem.releaseUsing, EnderpearlItem.use to throw a
-    // pearl entity, etc.).
+    // (Item.java:196-219). Triggered server-side by UseItemC2SPacket →
+    // PlayerSession::HandleUseItem. When an item's `use` is nullptr, the
+    // dispatch falls to `Item_DefaultUse` below (MC's base Item.use — the
+    // component-driven CONSUMABLE/EQUIPPABLE/BLOCKS_ATTACKS chain). Per-item
+    // `use` callbacks override the default for items with unique behaviour
+    // (bucket POV-raycast fill/empty; later Bow/EnderPearl once projectile
+    // entities exist).
     using ItemUseFn = UseResult (*)(World* world, Server::ServerPlayer* player,
                                     uint32_t hand, ItemStack& stack);
+
+    // Base `Item.use` — mirrors Item.java:196-219. Dispatches on the held
+    // stack's DataComponents:
+    //   1. CONSUMABLE      → Consumable::StartConsuming     (Item.java:198-200)
+    //   2. EQUIPPABLE      → if swappable, SwapWithEquipmentSlot (:202-204)
+    //   3. BLOCKS_ATTACKS  → player.startUsingItem(hand) → Consume (:205-207)
+    //   4. else            → Pass                            (:215)
+    // (MC's KINETIC_WEAPON step (:209-214) is omitted — no combat system.)
+    // Implemented in Item.cpp. Server dispatch rule:
+    //   item.use ? item.use(...) : Item_DefaultUse(...)
+    UseResult Item_DefaultUse(World* world, Server::ServerPlayer* player,
+                              uint32_t hand, ItemStack& stack);
+
+    // Mirrors Item.getUseAnimation (Item.java:304-313): CONSUMABLE → its
+    // animation; BLOCKS_ATTACKS → BLOCK; else NONE.
+    ItemUseAnimation GetUseAnimation(const ItemStack& stack);
+
+    // Mirrors Item.getUseDuration (Item.java:315-322): CONSUMABLE →
+    // consumeTicks(); BLOCKS_ATTACKS → 72000 (≈ infinite); else 0.
+    // (KINETIC_WEAPON branch omitted — no combat.) A result > 0 is what makes
+    // right-click enter the hold-to-use lifecycle instead of a one-shot use.
+    int GetUseDuration(const ItemStack& stack);
+
+    // Mirrors world/inventory/ClickAction.java — which mouse button drove an
+    // inventory click (PRIMARY = left, SECONDARY = right).
+    enum class ClickAction : uint8_t { PRIMARY = 0, SECONDARY = 1 };
+
+    // Inventory click-behaviour overrides — mirror Item.overrideStackedOnOther
+    // (Item.java:240-242, the CARRIED stack was clicked onto a slot) and
+    // Item.overrideOtherStackedOnMe (:244-246, another stack was clicked onto
+    // THIS stack sitting in a slot). Returning true consumes the click before
+    // the normal pickup/merge/swap logic runs (the bundle's click-to-insert).
+    // Slot mutations must be recorded on `result` (MarkChanged-style) so
+    // PlayerSession re-broadcasts them.
+    using ItemStackedOnOtherFn =
+        bool (*)(ItemStack& carried, Inventory& inv, int slotIndex,
+                 ClickAction action, Server::ServerPlayer& player,
+                 Server::InventoryClickResult& result);
+    using ItemOtherStackedOnMeFn =
+        bool (*)(ItemStack& slotStack, ItemStack& carried, Inventory& inv,
+                 int slotIndex, ClickAction action, Server::ServerPlayer& player,
+                 Server::InventoryClickResult& result);
 
     struct Item {
         std::string                   name;            // human-readable display name
@@ -169,6 +199,19 @@ namespace Game {
         // items that need behaviour (FlintAndSteel, BoneMeal, Hoe, Bucket, etc).
         ItemUseOnFn                   useOn = nullptr;
         ItemUseFn                     use   = nullptr;
+        // Inventory click-behaviour overrides (bundle). See the fn typedefs
+        // above; consulted by InventoryClickHandler::TryItemClickBehaviourOverride
+        // (mirrors AbstractContainerMenu.tryItemClickBehaviourOverride).
+        ItemStackedOnOtherFn          overrideStackedOnOther   = nullptr;
+        ItemOtherStackedOnMeFn        overrideOtherStackedOnMe = nullptr;
+        // Mirrors Item.canFitInsideContainerItems (Item.java:368-370) — false
+        // for shulker boxes so they can't nest inside bundles.
+        bool                          canFitInsideContainerItems = true;
+        // Mirrors Item.craftingRemainingItem / getCraftingRemainder
+        // (Item.java:290-292): what stays in the crafting grid when this item
+        // is consumed by a recipe (milk bucket → bucket). Data-ready — no
+        // crafting system consumes it yet.
+        ItemID                        craftingRemainder = Items::Air;
     };
 
     // Generated registration table — one entry per pure item, in MC's

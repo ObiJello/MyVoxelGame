@@ -6,12 +6,32 @@
 //
 // Source line numbers cited per declaration so the C++ side can be diffed
 // against MC's source.
+// ── Network id table ────────────────────────────────────────────────────────
+// Every component that crosses the wire gets a stable id here, passed as the
+// second constructor argument in DataComponents.cpp. These are OUR bespoke
+// protocol ids — deliberately NOT MC's registry ordinals (both endpoints ship
+// in one binary, so the only requirement is stability within a build).
+// 0 is reserved for "never serialized".
+//
+//    1  ENCHANTMENT_GLINT_OVERRIDE     8  CONSUMABLE
+//    2  STORED_ENCHANTMENTS            9  FOOD
+//    3  TOOL                          10  USE_REMAINDER
+//    4  CUSTOM_NAME                   11  EQUIPPABLE
+//    5  ITEM_NAME                     12  BLOCKS_ATTACKS
+//    6  LORE                          13  BUNDLE_CONTENTS
+//    7  RARITY
+//  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
 #pragma once
 
 #include "DataComponentType.hpp"
 #include "../world/enchantment/ItemEnchantments.hpp"
 #include "../entity/MiningTier.hpp"
+#include "../entity/Item.hpp"              // ItemStack (UseRemainder), ItemUseAnimation
+#include "../entity/EquipmentSlot.hpp"
 #include "../core/Features.hpp"
+#include <cmath>
+#include <string>
+#include <vector>
 
 namespace Game {
 
@@ -24,6 +44,135 @@ namespace Game {
         ToolType   type        = ToolType::None;
         MiningTier tier        = MiningTier::Wood;
         float      miningSpeed = 1.0f;
+    };
+
+    // Mirrors world/item/consume_effects/ConsumeEffect.java — a sealed
+    // interface with 5 record implementations. Data-only here: the appliers
+    // are log-stubbed until the status-effect / teleport systems exist, but
+    // the effect LIST is carried faithfully so food definitions are complete.
+    struct ConsumeEffect {
+        enum class Type : uint8_t {
+            ApplyStatusEffects   = 0,  // ApplyStatusEffectsConsumeEffect.java
+            RemoveStatusEffects  = 1,  // RemoveStatusEffectsConsumeEffect.java
+            ClearAllStatusEffects= 2,  // ClearAllStatusEffectsConsumeEffect.java
+            TeleportRandomly     = 3,  // TeleportRandomlyConsumeEffect.java
+            PlaySound            = 4,  // PlaySoundConsumeEffect.java
+        };
+        Type        type = Type::PlaySound;
+        // Freeform payload until the target systems exist: effect slugs +
+        // durations for the status types, sound event name for PlaySound,
+        // diameter for TeleportRandomly. Logged on consume.
+        std::string payload;
+    };
+
+    // Mirrors the Consumable record — Consumable.java:32:
+    //   (consumeSeconds, animation, sound, hasConsumeParticles, onConsumeEffects)
+    struct Consumable {
+        float                      consumeSeconds      = 1.6f;  // DEFAULT_CONSUME_SECONDS (:33)
+        ItemUseAnimation           animation           = ItemUseAnimation::EAT;
+        std::string                sound               = "entity.generic.eat"; // Holder<SoundEvent> → name (log-stub)
+        bool                       hasConsumeParticles = true;
+        std::vector<ConsumeEffect> onConsumeEffects;
+
+        // Mirrors Consumable.consumeTicks (:81-83).
+        int consumeTicks() const { return static_cast<int>(consumeSeconds * 20.0f); }
+    };
+
+    // Mirrors the FoodProperties record — FoodProperties.java:22:
+    //   (nutrition, saturation, canAlwaysEat)
+    // NOTE: `saturation` is the FINAL saturation value (MC's Builder converts
+    // saturationModifier via FoodConstants.saturationByModifier at build time
+    // — FoodProperties.java:60-62); our FoodDefs table does the same.
+    struct FoodProperties {
+        int   nutrition    = 0;
+        float saturation   = 0.0f;
+        bool  canAlwaysEat = false;
+    };
+
+    // Mirrors the UseRemainder record — UseRemainder.java:8. What the stack
+    // converts into when fully used up (stew → bowl, honey bottle → glass
+    // bottle, milk bucket → bucket).
+    struct UseRemainder {
+        ItemStack convertInto{};
+    };
+
+    // Mirrors the Rarity enum — Rarity.java:13-16 (id, name, ChatFormatting
+    // color). Ids are wire-stable (Rarity.STREAM_CODEC id-mapper).
+    enum class Rarity : uint8_t {
+        COMMON   = 0,   // WHITE
+        UNCOMMON = 1,   // YELLOW
+        RARE     = 2,   // AQUA
+        EPIC     = 3,   // LIGHT_PURPLE
+    };
+
+    // The tooltip name-line color per rarity — MC ChatFormatting ARGB values.
+    inline uint32_t RarityColorARGB(Rarity rarity) {
+        switch (rarity) {
+            case Rarity::UNCOMMON: return 0xFFFFFF55;  // YELLOW
+            case Rarity::RARE:     return 0xFF55FFFF;  // AQUA
+            case Rarity::EPIC:     return 0xFFFF55FF;  // LIGHT_PURPLE
+            case Rarity::COMMON:
+            default:               return 0xFFFFFFFF;  // WHITE
+        }
+    }
+
+    // Mirrors the ItemLore record — ItemLore.java (list of Components; plain
+    // strings here — no rich-text). MAX_LINES = 256 (ItemLore.java:22),
+    // enforced at the wire decode.
+    struct ItemLore {
+        std::vector<std::string> lines;
+    };
+
+    // Mirrors the BundleContents record — BundleContents.java:21-29. `items`
+    // is newest-first (Mutable.tryInsert adds at index 0). `selectedItem` is
+    // the client-side scroll selection and is NOT serialized (matches MC's
+    // STREAM_CODEC, which carries only the item list). Weight math lives in
+    // BundleBehavior.cpp (needs ItemRegistry + recursion for nested bundles).
+    struct BundleContents {
+        std::vector<ItemStack> items;
+        int                    selectedItem = -1;
+    };
+
+    // Mirrors the Equippable record — Equippable.java:32. Omitted fields
+    // (assetId, cameraOverlay, allowedEntities, dispensable, damageOnHurt,
+    // equipOnInteract, canBeSheared, shearingSound) have no consumers here —
+    // no entity rendering / dispensers / mob equip; add when those exist.
+    struct Equippable {
+        EquipmentSlot slot       = EquipmentSlot::HEAD;
+        std::string   equipSound = "item.armor.equip_generic"; // Holder<SoundEvent> → name (log-stub)
+        bool          swappable  = true;   // right-click auto-equip allowed
+    };
+
+    // Mirrors the BlocksAttacks record — BlocksAttacks.java:30. The full data
+    // shape is carried (so shield definitions match Items.java verbatim) but
+    // the damage math is unused — no combat system. What IS consumed:
+    // blockDelayTicks() gates ServerPlayer::isBlocking(), and the sound names
+    // are log-stub fodder.
+    struct BlocksAttacks {
+        float blockDelaySeconds    = 0.0f;
+        float disableCooldownScale = 1.0f;
+        // DamageReduction record — BlocksAttacks.java:89 (type filter omitted
+        // — no damage-type registry).
+        struct DamageReduction {
+            float horizontalBlockingAngle = 90.0f;
+            float base   = 0.0f;
+            float factor = 1.0f;
+        };
+        std::vector<DamageReduction> damageReductions{DamageReduction{}};
+        // ItemDamageFunction record — BlocksAttacks.java:106; DEFAULT {1,0,1} (:117).
+        struct ItemDamageFunction {
+            float threshold = 1.0f;
+            float base      = 0.0f;
+            float factor    = 1.0f;
+        };
+        ItemDamageFunction itemDamage{};
+        std::string blockSound;     // Optional<Holder<SoundEvent>> → name ("" = none)
+        std::string disableSound;
+
+        // BlocksAttacks.blockDelayTicks — :71-73.
+        int blockDelayTicks() const {
+            return static_cast<int>(std::round(blockDelaySeconds * 20.0f));
+        }
     };
 
 }
@@ -47,6 +196,52 @@ namespace Game::DataComponents {
     // Present on every tool item (pickaxe/axe/shovel/hoe/sword/shears); absent
     // on non-tool items (Item.getDestroySpeed returns 1.0 in that case).
     extern const DataComponentType<Tool> TOOL;
+
+    // Everything edible/drinkable — the eat-timer + animation + sound +
+    // on-consume effects. Mirrors DataComponents.CONSUMABLE (the modern
+    // eating system; drives the base Item.use dispatch step 1).
+    extern const DataComponentType<Consumable> CONSUMABLE;
+
+    // Nutrition/saturation restored when a CONSUMABLE with this component
+    // finishes. Mirrors DataComponents.FOOD. Applied by the FoodProperties
+    // ConsumableListener (FoodProperties.java:26-34) → ServerPlayer's FoodData.
+    extern const DataComponentType<FoodProperties> FOOD;
+
+    // What the stack converts into when used up. Mirrors
+    // DataComponents.USE_REMAINDER (applied in
+    // ItemStack.applyAfterUseComponentSideEffects, ItemStack.java:332-348).
+    extern const DataComponentType<UseRemainder> USE_REMAINDER;
+
+    // Anvil-renamed display name. Mirrors DataComponents.CUSTOM_NAME (a
+    // Component in MC; plain string here — MC renders it italic, our font
+    // has no italics). Wins over ITEM_NAME in the tooltip name line.
+    extern const DataComponentType<std::string> CUSTOM_NAME;
+
+    // Data-driven base name override (potion variants etc.). Mirrors
+    // DataComponents.ITEM_NAME. Falls between CUSTOM_NAME and the registry
+    // display name.
+    extern const DataComponentType<std::string> ITEM_NAME;
+
+    // Tooltip lore lines (dark purple). Mirrors DataComponents.LORE.
+    extern const DataComponentType<ItemLore> LORE;
+
+    // Name-line color tier. Mirrors DataComponents.RARITY.
+    extern const DataComponentType<Rarity> RARITY;
+
+    // Which slot the item is worn in + right-click auto-equip. Mirrors
+    // DataComponents.EQUIPPABLE (base Item.use dispatch step 2, Equippable
+    // swap logic Equippable.java:54-83). Also drives the click-handler's
+    // per-armor-slot mayPlace.
+    extern const DataComponentType<Equippable> EQUIPPABLE;
+
+    // Shield blocking config. Mirrors DataComponents.BLOCKS_ATTACKS (base
+    // Item.use dispatch step 3 → startUsingItem; BLOCK use animation; the
+    // 72000-tick "infinite" use duration).
+    extern const DataComponentType<BlocksAttacks> BLOCKS_ATTACKS;
+
+    // Bundle contents (nested stacks + client-side selection). Mirrors
+    // DataComponents.BUNDLE_CONTENTS; behaviour in BundleBehavior.cpp.
+    extern const DataComponentType<BundleContents> BUNDLE_CONTENTS;
 
     // ── TODO: future component types to register, in MC parity order ────────
     // Each one unlocks a chunk of behaviour by populating Item.use() base

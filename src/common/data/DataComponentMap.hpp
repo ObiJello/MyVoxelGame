@@ -38,6 +38,17 @@ namespace Game {
         bool empty() const { return entries.empty(); }
         size_t size() const { return entries.size(); }
 
+        // ── Network codec — mirrors MC DataComponentPatch.STREAM_CODEC
+        // (DataComponentPatch.java:31-106): VarInt addedCount, VarInt
+        // removedCount, then per added entry (VarInt networkId, payload).
+        // Our flat map has no removals, so removedCount is always written 0 —
+        // the field is kept to preserve MC's wire layout. Only entries whose
+        // type has a network codec (networkId != 0) are written.
+        void Serialize(Network::PacketBuffer& buffer) const;
+        // Throws std::runtime_error on unknown networkId / non-zero
+        // removedCount (protocol error — both endpoints run the same binary).
+        static DataComponentMap Deserialize(Network::PacketReader& reader);
+
     private:
         struct Entry {
             const DataComponentTypeBase* type;

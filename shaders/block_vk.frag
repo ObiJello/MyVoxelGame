@@ -18,8 +18,37 @@ layout (push_constant) uniform PushConstants {
     float uAlphaTest;   // 4 bytes
 } pc;
 
+// Common UBO (portal pipeline layout, set=1) — the chunk shaders are created
+// via CreateShaderFromFilesPortal so the environment/fog fields appended at
+// offset 304 are available. Prefix fields must be declared for std140 offsets.
+layout (std140, set = 1, binding = 0) uniform Common {
+    mat4  uMVP_;
+    mat4  uModel_;
+    vec4  uPortalColor_;
+    vec4  uColorDark_;
+    vec4  uColorHot_;
+    vec4  uKeyDir_;
+    vec4  uTint_;
+    vec4  uUVRange_;
+    vec4  uScalarsA_;
+    vec4  uScalarsB_;
+    vec4  uScalarsC_;
+    vec4  uScalarsD_;
+    vec2  uScreenSize_;
+    vec2  _pad_;
+    vec4  uFogColor_;      // rgb = fog color, a = fog strength
+    vec4  uFogEnv_;        // (envStart, envEnd, rdStart, rdEnd)
+    vec4  uCamPosBright_;  // xyz = camera pos, w = sky brightness
+} U;
+
 // Output
 layout (location = 0) out vec4 FragColor;
+
+float linearFog(float d, float s, float e) {
+    if (d <= s) return 0.0;
+    if (d >= e) return 1.0;
+    return (d - s) / (e - s);
+}
 
 void main() {
     vec4 textureColor = texture(uTextureAtlas, fragTexCoord);
@@ -31,5 +60,15 @@ void main() {
 
     // Vertex color contains: biome tint * AO * directional face shade (gamma space)
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
+
+    // Day/night sky-light dim + MC-style distance fog
+    finalColor *= U.uCamPosBright_.w;
+    vec3 fogDelta = fragWorldPos - U.uCamPosBright_.xyz;
+    float sph = length(fogDelta);
+    float cyl = max(length(fogDelta.xz), abs(fogDelta.y));
+    float fogValue = max(linearFog(sph, U.uFogEnv_.x, U.uFogEnv_.y),
+                         linearFog(cyl, U.uFogEnv_.z, U.uFogEnv_.w));
+    finalColor = mix(finalColor, U.uFogColor_.rgb, fogValue * U.uFogColor_.a);
+
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
 }

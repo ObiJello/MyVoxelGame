@@ -7,6 +7,14 @@
 
 namespace Render {
 
+    // Camera perspective — MC CameraType. F5 cycles FIRST_PERSON →
+    // THIRD_PERSON_BACK → THIRD_PERSON_FRONT → back to first person.
+    enum class Perspective {
+        FirstPerson,
+        ThirdBack,
+        ThirdFront,
+    };
+
     class Camera {
     public:
         // Camera parameters
@@ -42,6 +50,16 @@ namespace Render {
         // Control flags
         bool enableMouseLook = true;  // Whether mouse movement affects camera
         bool physicsControlled = false; // Whether position is controlled by physics
+
+        // F5 camera perspective. `position`/yaw/pitch stay the LOGICAL eye
+        // (raycast, interaction, audio); the render pass derives a pulled-
+        // back view for the third-person modes (MC Camera.setup detached).
+        Perspective perspective = Perspective::FirstPerson;
+        void CyclePerspective() {
+            perspective = static_cast<Perspective>(
+                (static_cast<int>(perspective) + 1) % 3);
+        }
+        bool IsFirstPerson() const { return perspective == Perspective::FirstPerson; }
 
         Camera() = default;
 

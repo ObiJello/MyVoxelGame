@@ -64,8 +64,9 @@ namespace Render {
         // Player pointer (provides access to local inventory mirror).
         void SetPlayer(Game::ClientPlayer* p) { m_player = p; }
 
-        // Carried item state (cursor) — driven by server packets.
-        void SetCarriedItem(Game::ItemID id, int count);
+        // Carried item state (cursor) — driven by server packets. Takes the
+        // full stack so per-stack DataComponents survive on the cursor.
+        void SetCarriedItem(const Game::ItemStack& stack);
 
         // Per-frame input
         void OnCharInput(unsigned int codepoint);
@@ -176,9 +177,12 @@ namespace Render {
         void DrawBackground   (GuiGraphics&, int leftPos, int topPos, TextureHandle bg);
         TextureHandle EnsureBackground(bool survival);
 
-        // Click queue helper
+        // Click queue helper. `creativeStack` (when non-null) rides along as
+        // the full creative-source stack so per-stack components reach the
+        // server (enchanted-book variants from the search grid).
         void QueueClick(Network::ContainerInput action, int16_t slotIndex,
-                        uint8_t button, Game::ItemID creativeItem = Game::Items::Air);
+                        uint8_t button, Game::ItemID creativeItem = Game::Items::Air,
+                        const Game::ItemStack* creativeStack = nullptr);
 
         void SwitchTab(Tab t);
     };

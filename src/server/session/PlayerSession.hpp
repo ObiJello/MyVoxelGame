@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/world/math/WorldMath.hpp"
+#include "common/world/block/BlockInteraction.hpp"  // Game::UseResult
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include <glm/glm.hpp>
@@ -185,15 +186,39 @@ namespace Server {
 
         // Handle incoming packets (delegates gameplay to ServerPlayer)
         void HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet);
+        // Fall-distance + exhaustion accounting off the move packet (called
+        // by HandlePlayerMove before the position write).
+        void UpdateMovementStats(const Network::PlayerMoveC2SPacket& packet);
         void HandleBlockAction(const Network::BlockActionC2SPacket& packet);
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
+        // Use item in air — mirrors ServerGamePacketListenerImpl.handleUseItem
+        // (ServerGamePacketListenerImpl.java:1329-1354) + the useItem game-mode
+        // logic (ServerPlayerGameMode.java:290-327).
+        void HandleUseItem(const Network::UseItemC2SPacket& packet);
+        // Release-use / drop / swap-offhand — mirrors handlePlayerAction
+        // (ServerGamePacketListenerImpl.java:1191-1248).
+        void HandlePlayerAction(const Network::PlayerActionC2SPacket& packet);
         void HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet);
         void HandleKeepAlive(const Network::KeepAliveC2SPacket& packet);
         void HandleInventoryClick(const Network::InventoryClickC2SPacket& packet);
         void HandleInventoryClose(const Network::InventoryCloseC2SPacket& packet);
+        // Fly-state toggle — mirrors handlePlayerAbilities
+        // (ServerGamePacketListenerImpl.java: only the FLYING bit is honored,
+        // and only when mayFly; otherwise a corrective abilities resend).
+        void HandlePlayerAbilities(const Network::PlayerAbilitiesC2SPacket& packet);
 
         // Send full 46-slot inventory snapshot to this player's client.
         void SendInventoryFull();
+
+        // The `Item.use` dispatch for one hand — mirrors
+        // ServerPlayerGameMode.useItem (ServerPlayerGameMode.java:290-327):
+        // runs the per-item `use` callback (or the component-driven
+        // Item_DefaultUse), then applies MC's result-stack rules. Called from
+        // HandleUseItem (air use) and from HandleUseItemOn's tail step (MC's
+        // client falls through useItemOn → useItem locally, Minecraft.java:1656;
+        // we run the fallthrough server-side instead). Returns the item's
+        // UseResult so HandleUseItemOn's fallthrough can ack correctly.
+        Game::UseResult DispatchUseItem(uint32_t hand);
         
         // Helper for resyncing on placement failure
         void ResyncAndAck(const glm::ivec3& clicked, const glm::ivec3& target, uint32_t sequence);
@@ -330,6 +355,13 @@ namespace Server {
         
         // === INTERACTION TRACKING ===
         uint32_t m_lastInteractionSequence = 0;  // For acknowledging client predictions
+
+        // Last-sent stat triple for the SetHealthS2C dirty-check — mirrors
+        // ServerPlayer.lastSentHealth / lastSentFood / lastSaturationLevel.
+        // Health init -1e8 forces a send on the first PLAYING tick.
+        float m_lastSentHealth     = -1.0e8f;
+        int   m_lastSentFood       = -1;
+        float m_lastSentSaturation = -1.0f;
         
         // === FLAGS ===
         bool m_isChangingDimension = false;

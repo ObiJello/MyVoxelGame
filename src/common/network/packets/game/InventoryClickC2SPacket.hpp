@@ -8,6 +8,7 @@
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
+#include "common/network/ItemStackSerialization.hpp"
 #include "../common/PacketCommon.hpp"  // ContainerInput, InventorySlotSentinel
 #include <cstdint>
 #include <vector>
@@ -20,6 +21,12 @@ namespace Network {
         uint8_t  action         = 0;  // ContainerInput as uint8_t
         uint8_t  flags          = 0;  // reserved (e.g. shift redundancy bits)
         uint32_t creativeItemId = 0;  // only meaningful when slotIndex == CREATIVE_GRID
+        // Full stack for creative-source clicks, INCLUDING per-stack components
+        // (an enchanted-book variant from the search grid carries its
+        // STORED_ENCHANTMENTS here). Mirrors MC's
+        // ServerboundSetCreativeModeSlotPacket carrying a real ItemStack. When
+        // empty, the server falls back to creativeItemId + item defaults.
+        Game::ItemStack creativeStack{};
     };
 
     namespace Serialization {
@@ -31,6 +38,7 @@ namespace Network {
             buffer.WriteByte(packet.action);
             buffer.WriteByte(packet.flags);
             buffer.WriteInt(packet.creativeItemId);
+            WriteItemStack(buffer, packet.creativeStack);
             return buffer.GetData();
         }
 
@@ -42,6 +50,11 @@ namespace Network {
             packet.action         = reader.ReadByte();
             packet.flags          = reader.ReadByte();
             packet.creativeItemId = reader.ReadInt();
+            // creativeStack — appended at end so older serialized packets
+            // (without it) cleanly default to empty (same back-compat trick as
+            // UseItemOnC2SPacket.altInteract).
+            packet.creativeStack  = reader.HasMore() ? ReadItemStack(reader)
+                                                     : Game::ItemStack{};
             return packet;
         }
 

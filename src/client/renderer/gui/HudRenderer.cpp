@@ -2,6 +2,7 @@
 #include "HudRenderer.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/entity/Item.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
@@ -64,17 +65,21 @@ namespace Render {
 
         graphics.NextStratum();
 
-        // Status bars (MC: renderHotbarAndDecorations calls these)
-        RenderPlayerHealth(graphics);
-        RenderFood(graphics);
-        RenderArmor(graphics);
+        // Status bars (MC: renderHotbarAndDecorations calls these).
+        // Creative/spectator skip the whole survival stat block — MC's Gui
+        // gates on gameMode.canHurtPlayer() / isSurvival().
+        if (!m_statsHidden) {
+            RenderPlayerHealth(graphics);
+            RenderFood(graphics);
+            RenderArmor(graphics);
 
-        if (m_isUnderWater || m_air < m_maxAir) {
-            RenderAir(graphics);
+            if (m_isUnderWater || m_air < m_maxAir) {
+                RenderAir(graphics);
+            }
+
+            RenderExperienceBar(graphics);
+            RenderExperienceLevel(graphics);
         }
-
-        RenderExperienceBar(graphics);
-        RenderExperienceLevel(graphics);
 
         // Selected item name tooltip
         RenderSelectedItemName(graphics, inventory);
@@ -112,6 +117,17 @@ namespace Render {
             int y = bottomY - 16 - 3;
             RenderSlot(graphics, x, y, inventory.GetSlot(Game::Inventory::HotbarToIndex(i)));
         }
+
+        // Offhand slot box — MC Gui.renderItemHotbar draws it only when the
+        // offhand holds something, attached to the hotbar's left edge for
+        // right-handed players: sprite hud/hotbar_offhand_left 29×24 at
+        // (cx - 91 - 29, h - 23), item at (cx - 91 - 26, h - 16 - 3).
+        const auto& offhand = inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN);
+        if (!offhand.IsEmpty()) {
+            graphics.BlitSprite("hud/hotbar_offhand_left",
+                                screenCenter - 91 - 29, bottomY - 23, 29, 24);
+            RenderSlot(graphics, screenCenter - 91 - 26, bottomY - 16 - 3, offhand);
+        }
     }
 
     void HudRenderer::RenderSlot(GuiGraphics& graphics, int x, int y,
@@ -130,16 +146,33 @@ namespace Render {
     // ========================================================================
 
     void HudRenderer::RenderSelectedItemName(GuiGraphics& graphics, const Game::Inventory& inventory) {
-        (void)inventory;
         if (m_toolHighlightTimer <= 0.0f) return;
         if (m_displayedItem == Game::Items::Air) return;
 
-        // Pull the item's display name from the registry. Works for both
-        // block items (where Item.name was copied from BlockRegistry at
-        // init) and pure items (Item.name set from the slug in
-        // GeneratedItemList).
-        const auto& item = Game::ItemRegistry::Get(m_displayedItem);
-        const std::string& name = item.name;
+        // Name resolution mirrors ItemStack.getStyledHoverName (same chain as
+        // the inventory tooltip): CUSTOM_NAME → ITEM_NAME → registry name,
+        // colored by RARITY. Read from the LIVE selected stack so per-stack
+        // renames show here too.
+        const auto& stack = inventory.GetSlot(
+            Game::Inventory::HotbarToIndex(inventory.GetSelectedSlot()));
+        std::string name;
+        uint32_t nameRGB = 0x00FFFFFFu;   // WHITE (rarity COMMON)
+        if (!stack.IsEmpty() && stack.itemId == m_displayedItem) {
+            if (auto custom = stack.get(Game::DataComponents::CUSTOM_NAME)) {
+                name = *custom;
+            } else if (auto itemName = stack.get(Game::DataComponents::ITEM_NAME)) {
+                name = *itemName;
+            }
+            nameRGB = Game::RarityColorARGB(
+                          stack.get(Game::DataComponents::RARITY)
+                              .value_or(Game::Rarity::COMMON))
+                      & 0x00FFFFFFu;
+        }
+        if (name.empty()) {
+            // Registry display name — works for both block items (copied
+            // from BlockRegistry at init) and pure items (GeneratedItemList).
+            name = Game::ItemRegistry::Get(m_displayedItem).name;
+        }
         if (name.empty()) return;
 
         // MC's Gui.renderSelectedItemName layout exactly:
@@ -159,9 +192,10 @@ namespace Render {
         if (alpha <= 0) return;
 
         // MC: `guiGraphics.drawString(font, component, j, k, 16777215 + (l << 24));`
-        //   16777215 = 0x00FFFFFF (white RGB), alpha packed into top byte.
+        //   White in MC because the name Component carries its own rarity
+        //   style; we bake the rarity RGB directly. Alpha packs the fade.
         //   drawString defaults to dropShadow = true — same here. NO backdrop.
-        const uint32_t color = (static_cast<uint32_t>(alpha) << 24) | 0x00FFFFFFu;
+        const uint32_t color = (static_cast<uint32_t>(alpha) << 24) | nameRGB;
         graphics.DrawString(name, x, y, color, /*dropShadow=*/true);
     }
 

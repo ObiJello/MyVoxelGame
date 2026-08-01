@@ -54,12 +54,41 @@ namespace Game {
         Game::PlayerColorId color = Game::PlayerColorId::Default;
         
         // === Player Attributes ===
-        
-        // Status (placeholders for future server sync)
-        int health = 20;           // TODO: Sync from server
-        int food = 20;             // TODO: Sync from server
-        int air = 300;             // TODO: Sync from server (ticks of air remaining)
+
+        // Status — synced from the server via SetHealthS2C
+        // (ClientPacketHandler::handleSetHealth); read by the HUD.
+        int   health     = 20;
+        int   food       = 20;
+        float saturation = 5.0f;
+        int   air = 300;           // TODO: Sync from server (ticks of air remaining)
         float stepHeight = 0.6f;   // How high the player can step up
+
+        // Game mode + abilities — synced from the server via
+        // PlayerAbilitiesS2C (handlePlayerAbilities). gameMode holds the
+        // Server::GameMode raw value (0 survival, 1 creative, 2 adventure,
+        // 3 spectator). physics.mayFly / physics.isFlying carry the flight
+        // half so the physics step can read them without reaching back here.
+        uint8_t gameMode     = 0;
+        bool    invulnerable = false;
+        bool    instabuild   = false;
+        float   flyingSpeed  = 0.05f;  // MC Abilities.flyingSpeed (per-tick)
+
+        bool IsCreative()  const { return gameMode == 1; }
+        bool IsSpectator() const { return gameMode == 3; }
+
+        // === Predicted item-use state ===
+        // Client-side mirror of the server's hold-to-use lifecycle
+        // (LivingEntity.useItem / useItemRemaining) — MC's client runs
+        // startUsingItem locally when MultiPlayerGameMode.useItem succeeds,
+        // and we do the same when the RMB press starts a use (held stack has
+        // GetUseDuration() > 0). Drives the viewmodel eat/drink/block pose;
+        // the server remains authoritative for the actual consume (its
+        // InventorySetSlotS2C corrects any mispredict).
+        bool             usingItem         = false;
+        int              useItemRemaining  = 0;   // ticks left (counts down at 20 TPS)
+        int              useItemDuration   = 0;   // total ticks (for pose progress)
+        uint32_t         usingHand         = 0;   // 0 = main, 1 = off
+        ItemUseAnimation useAnim           = ItemUseAnimation::NONE;
         
         // === Inventory ===
         Inventory inventory;
@@ -81,6 +110,21 @@ namespace Game {
         bool jumpHeld = false;         // True while space is held (for water bobbing)
         bool sprintPressed = false;
         bool sneakPressed = false;
+
+        // Double-tap-space flight toggle state (MC jumpTriggerTime = 7 ticks).
+        static constexpr float FLY_DOUBLE_TAP_WINDOW = 0.35f;
+        bool  jumpKeyWasDown = false;  // Raw held state last frame (true edge detect)
+        float flyToggleTimer = 0.0f;   // Seconds left in the double-tap window
+
+        // Jump happened since the last PlayerMoveC2S send (jump exhaustion).
+        // Set in UpdatePhysics, consumed by the move-send in PlatformMain.
+        bool jumpedSinceMoveSend = false;
+
+        // Largest fall-landing distance since the last PlayerMoveC2S send
+        // (client physics tracks exact ground contact — see
+        // PlayerPhysics::fallDistance). Consumed by the move-send; the
+        // server turns it into fall damage.
+        float landedFallSinceMoveSend = 0.0f;
         
         // === Statistics ===
         PlayerStats stats;

@@ -50,6 +50,10 @@ namespace Render {
                 e.worldType          = w.value("worldType", 0);
                 e.generateStructures = w.value("generateStructures", true);
                 e.bonusChest         = w.value("bonusChest", false);
+                e.dayTime            = w.value("dayTime", 6000LL);
+                e.doDaylightCycle    = w.value("doDaylightCycle", false);
+                e.skybox             = w.value("skybox", std::string("vanilla"));
+                e.skyboxMode         = w.value("skyboxMode", 2);
                 out.push_back(std::move(e));
             }
             // MC sorts by last-played, newest first.
@@ -76,6 +80,10 @@ namespace Render {
                     {"worldType", e.worldType},
                     {"generateStructures", e.generateStructures},
                     {"bonusChest", e.bonusChest},
+                    {"dayTime", e.dayTime},
+                    {"doDaylightCycle", e.doDaylightCycle},
+                    {"skybox", e.skybox},
+                    {"skyboxMode", e.skyboxMode},
                 });
             }
             std::ofstream f(FilePath());
@@ -150,6 +158,10 @@ namespace Render {
             a.worldName = e.name;
             a.seed      = e.seed;
             a.gameMode  = e.gameMode;
+            a.dayTime         = e.dayTime;
+            a.doDaylightCycle = e.doDaylightCycle;
+            a.skybox          = e.skybox;
+            a.skyboxMode      = e.skyboxMode;
             SetTitleAction(std::move(a));
         }
     } // namespace

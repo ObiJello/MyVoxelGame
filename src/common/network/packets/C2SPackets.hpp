@@ -39,6 +39,78 @@ namespace Packets {
     };
 
     // ========================================================================
+    // USE ITEM PACKET (use in air — no block target)
+    // ========================================================================
+
+    class UseItemC2SPacketImpl : public IC2SPacket {
+    private:
+        UseItemC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit UseItemC2SPacketImpl(UseItemC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onUseItemC2S(m_data);
+        }
+
+        const UseItemC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::UseItem; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
+    // PLAYER ACTION PACKET (release use / drop / swap offhand / dig stages)
+    // ========================================================================
+
+    class PlayerActionC2SPacketImpl : public IC2SPacket {
+    private:
+        PlayerActionC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PlayerActionC2SPacketImpl(PlayerActionC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerActionC2S(m_data);
+        }
+
+        const PlayerActionC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PlayerAction; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
+    // PLAYER ABILITIES PACKET (client fly-state toggle)
+    // ========================================================================
+
+    class PlayerAbilitiesC2SPacketImpl : public IC2SPacket {
+    private:
+        PlayerAbilitiesC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PlayerAbilitiesC2SPacketImpl(PlayerAbilitiesC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerAbilitiesC2S(m_data);
+        }
+
+        const PlayerAbilitiesC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PlayerAbilitiesC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // BLOCK ACTION PACKET (existing)
     // ========================================================================
     

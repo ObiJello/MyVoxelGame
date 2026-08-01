@@ -53,8 +53,13 @@
 #include "client/renderer/gui/screens/Screen.hpp"
 #include "client/renderer/gui/screens/TitleScreen.hpp"
 #include "client/renderer/gui/screens/PauseScreen.hpp"
+#include "client/renderer/gui/screens/DeathScreen.hpp"
 #include "client/renderer/gui/screens/PanoramaRenderer.hpp"
 #include "client/renderer/gui/screens/WorldSelectScreens.hpp"
+#include "client/renderer/environment/EnvironmentState.hpp"
+#include "client/renderer/environment/SkyRenderer.hpp"
+#include "client/renderer/environment/CloudRenderer.hpp"
+#include "client/renderer/gui/screens/OptionsScreens.hpp"
 #include "client/network/FriendsClient.hpp"
 #include "client/network/UPnPPortMapper.hpp"
 #include "common/core/FriendsServiceConfig.hpp"
@@ -66,6 +71,7 @@
 // Declared in ClientConnection.cpp
 extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
 extern void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback);
+extern void SetTimeUpdateCallback(std::function<void(uint64_t, uint64_t, bool)> callback);
 extern void SetTeleportCallback(std::function<void(double, double, double, float, float,
                                                     double, double, double)> callback);
 #include "client/renderer/texture/AtlasBuilder.hpp"
@@ -516,6 +522,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
         }
 
+        // Swap main/off hand (F) — MC's SWAP_ITEM_WITH_OFFHAND player action.
+        // Gated on !cursorVisible so typing "f"/"q" into chat or the
+        // inventory search box doesn't fire world actions.
+        if (!cursorVisible && Input::IsKeyPressed(Input::Key::F)) {
+            controller.SendPlayerAction(Network::PlayerAction::SWAP_ITEM_WITH_OFFHAND);
+        }
+
+        // Drop held item (Q) — MC's DROP_ITEM player action. No item-entity
+        // system yet, so the server just shrinks the stack.
+        if (!cursorVisible && Input::IsKeyPressed(Input::Key::Q)) {
+            controller.SendPlayerAction(Network::PlayerAction::DROP_ITEM);
+        }
+
         // Mouse wheel for inventory scrolling
         auto [scrollX, scrollY] = Input::GetScrollOffset();
         if (scrollY > 0) {
@@ -527,6 +546,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Debug noclip toggle
         if (Input::IsKeyPressed(Input::Key::N)) {
             player.ToggleNoclip();
+        }
+
+        // F5 — cycle camera perspective (MC: first person → third person
+        // back → third person front). Works with the cursor visible too,
+        // same as MC.
+        if (Input::IsKeyPressed(Input::Key::F5)) {
+            camera.CyclePerspective();
         }
     }
 
@@ -606,7 +632,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     Render::TitleAction RunTitleScreenPhase(GLFWwindow* window) {
         using Render::TitleAction;
 
-        if (!Render::g_panoramaRenderer.Initialize()) {
+        if (!Render::g_panoramaRenderer.Initialize(Platform::g_gameSettings.GetString(
+                "panoramaSet", Render::PanoramaRenderer::kDefaultSet))) {
             Log::Warning("Panorama init failed — title background will be a gradient");
         }
 
@@ -838,6 +865,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Log::Warning("Failed to initialize block break overlay (crack textures will not render)");
         }
 
+        // Sky (sun/moon/stars/day-night) + clouds. Non-fatal: failures fall
+        // back to the plain clear-color sky.
+        if (!Render::g_skyRenderer.Initialize()) {
+            Log::Warning("Sky renderer init failed — sky will be a flat color");
+        }
+        if (!Render::g_cloudRenderer.Initialize()) {
+            Log::Warning("Cloud renderer init failed — clouds will not render");
+        }
+
         // Block-entity dispatcher + per-type renderers (chest, sign, banner,
         // bed, shulker, …). Must run after backend init so renderers can
         // create shaders and textures. Non-fatal: missing renderer → BE is
@@ -913,6 +949,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             if (Client::g_remotePlayerManager) {
                 Client::g_remotePlayerManager->SetChatBubble(senderId, msg);
             }
+        });
+        // World time sync (TimeUpdate 0x19). Fires on the network I/O thread;
+        // EnvironmentState stages the values in atomics.
+        SetTimeUpdateCallback([](uint64_t gameTime, uint64_t dayTime, bool doDaylightCycle) {
+            Render::EnvironmentState::Get().OnTimeSync(gameTime, dayTime, doDaylightCycle);
         });
 
         // Compile shaders
@@ -1224,6 +1265,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         isRemoteClient = cliRemoteClient && firstSession;
         firstSession = false;
 
+        // No world session yet — the options menu's World Settings entry
+        // stays greyed out during the title phase.
+        Render::WorldSettingsContext::Clear();
+
         Render::TitleAction titleAction;   // world choice consumed by server init below
         if (pendingSessionAction) {
             // In-game friend join: skip the title phase, go straight into
@@ -1254,6 +1299,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::g_crosshair.Shutdown();
                 Render::g_blockHighlight.Shutdown();
                 Render::g_blockBreakOverlay.Shutdown();
+                Render::g_skyRenderer.Shutdown();
+                Render::g_cloudRenderer.Shutdown();
                 if (Render::g_atlasBuilder)    Render::g_atlasBuilder.reset();
                 if (Render::g_textureAnimator) Render::g_textureAnimator.reset();
                 if (Client::g_friendsClient) {
@@ -1320,6 +1367,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         std::unique_ptr<Client::ClientBlockAccess> clientBlockAccess;
         Game::World* world = nullptr;
 
+        // Fresh session: drop any stale time from a previous world so the sky
+        // doesn't flash the old time before the first TimeUpdate arrives, and
+        // apply this world's skybox (multiplayer joins default to vanilla).
+        Render::EnvironmentState::Get().ResetSession();
+        Render::g_skyRenderer.SetSkybox(titleAction.skybox, titleAction.skyboxMode);
+        // Enable the in-game World Settings screen. Sky choices persist to
+        // worlds.json only for locally-hosted created worlds; multiplayer
+        // and Minecraft-save sessions get session-only changes.
+        Render::WorldSettingsContext::Set(
+            titleAction.worldName,
+            !isRemoteClient && !titleAction.useMinecraftSave);
+
         if (!isRemoteClient) {
             // 1. Initialize server-side systems (server creates and owns the world)
             Server::IntegratedServerConfig serverConfig;
@@ -1332,6 +1391,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             if (!titleAction.useMinecraftSave) {
                 serverConfig.useLocalSaveDirectory = false;
             }
+
+            // World game mode from the create/select screen. World JSON ids:
+            // 0 Survival, 1 Creative, 2 Hardcore — hardcore plays as survival
+            // (server GameMode has no hardcore variant).
+            serverConfig.defaultGameMode = (titleAction.gameMode == 1) ? 1 : 0;
+
+            // Day/night cycle state restored from worlds.json metadata.
+            serverConfig.initialDayTime  = titleAction.dayTime;
+            serverConfig.doDaylightCycle = titleAction.doDaylightCycle;
 
             // Automatically use local save directory if available (temporary feature)
             if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
@@ -1624,6 +1692,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             player.pitch = xRot;
             camera.yaw   = yRot;
             camera.pitch = xRot;
+            // Teleports break falls (MC resetFallDistance on teleport) —
+            // without this a /tp or respawn mid-fall would carry the
+            // accumulated distance into the next landing.
+            player.physics.fallDistance = 0.0f;
+            player.landedFallSinceMoveSend = 0.0f;
         });
 
         // Network tracking
@@ -1683,6 +1756,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // pause menu can open, so they're never open simultaneously).
             if (!Render::GetScreenManager().Empty()) {
                 auto& screens = Render::GetScreenManager();
+
+                // Screens swallow gameplay input — but HandlePlayerInput
+                // doesn't run in this branch, so whatever movement was held
+                // when the screen opened (W while dying → death screen)
+                // stays LATCHED and physics keeps walking the body forever.
+                // Clear it here every frame the screen is up.
+                player.SetMovementInput(glm::vec3(0.0f));
+                player.SetJumpPressed(false);
+                player.SetJumpHeld(false);
+                player.SetSprintPressed(false);
+                player.SetSneakPressed(false);
 
                 // Mouse position in GUI coords (same mapping as the render
                 // pass in RenderHUD).
@@ -1772,6 +1856,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // action (Friends → Join while in-game) rides the same
                 // teardown, then the outer loop consumes it as a pending
                 // auto-join instead of showing the title.
+                // Death screen "Respawn" → PERFORM_RESPAWN player action.
+                // The server revives + teleports; its SetHealthS2C (health
+                // back to 20) then closes the screen.
+                if (Render::ConsumeDeathRespawnRequest()) {
+                    playerController.SendPlayerAction(Network::PlayerAction::PERFORM_RESPAWN);
+                }
+
                 Render::TitleAction pauseAction = Render::ConsumeTitleAction();
                 if (pauseAction.kind == Render::TitleAction::Kind::QuitToTitle) {
                     Log::Info("Save and Quit to Title from pause menu");
@@ -2033,6 +2124,15 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Client::g_remotePlayerManager->Tick();
                 }
 
+                // 3b. Advance local world time (ClientLevel.tickTime mirror —
+                //     smooth day/night between the server's 20-tick syncs).
+                Render::EnvironmentState::Get().TickClient();
+
+                // Screen 20Hz tick (death-screen button delay, caret blink).
+                // The title phase has its own pump; in-game screens only got
+                // Update/Render before this.
+                Render::GetScreenManager().Tick();
+
                 // 4. Send player position to server (one packet per tick = 20 Hz)
                 if (networkClient->IsConnected()) {
                     glm::vec3 playerPos = player.physics.position;
@@ -2041,6 +2141,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
                     movePacket.onGround = player.physics.isOnGround;
                     movePacket.isCrouching = Input::IsKeyDown(Input::Key::LeftShift);
+                    movePacket.isSprinting = player.physics.isSprinting;
+                    movePacket.jumpedThisTick = player.jumpedSinceMoveSend;
+                    player.jumpedSinceMoveSend = false;
+                    movePacket.fallDistance = player.landedFallSinceMoveSend;
+                    player.landedFallSinceMoveSend = 0.0f;
                     movePacket.sequenceNumber = ++playerMoveSequence;
                     movePacket.timestamp = std::chrono::steady_clock::now();
                     networkClient->GetConnection()->SendPlayerMove(movePacket);
@@ -2099,6 +2204,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                     Render::g_heldItemRenderer.Tick(
                         player.inventory.GetSelectedItem(),
+                        player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).itemId,
                         lmbEdge || placeEdge || armSwing);
                 }
 
@@ -2145,7 +2251,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             const glm::vec3 prevVel = player.physics.velocity;
 #endif
 
-            player.UpdatePhysics(dt, blockAccessForPhysics);
+            // Dead players are frozen — MC's corpse is immobile and the
+            // server drops our move packets anyway, so keep the body exactly
+            // where it died until PERFORM_RESPAWN teleports it. (health is
+            // the server-synced value; respawn restores it to 20 and physics
+            // resumes.)
+            if (player.health <= 0) {
+                player.physics.velocity = glm::vec3(0.0f);
+            } else {
+                player.UpdatePhysics(dt, blockAccessForPhysics);
+            }
 
 #if ENABLE_PORTAL_GUN
             // Client-side teleport prediction. Server still detects
@@ -2185,6 +2300,39 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             player.UpdateVisual(dt);
             player.UpdateStatistics(dt);
             PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
+            }
+
+            // === F5 third-person render camera ==============================
+            // The LOGICAL camera (raycast, interaction, move packets) stays
+            // at the eye — everything above already consumed it. For the
+            // render phase we now derive the detached camera: ThirdFront
+            // flips the view (yaw+180, pitch negated), then the camera pulls
+            // back up to 4 blocks along -forward with MC Camera.getMaxZoom's
+            // 8-corner jittered raycast so it never clips into walls. The
+            // original eye state is restored at the end of the frame (mouse
+            // look accumulates on yaw/pitch, so ThirdFront's flip must not
+            // leak into the next frame).
+            const bool tpActive = !camera.IsFirstPerson();
+            const glm::vec3 tpSavedPos  = camera.position;
+            const float     tpSavedYaw  = camera.yaw;
+            const float     tpSavedPitch = camera.pitch;
+            if (tpActive) {
+                if (camera.perspective == Render::Perspective::ThirdFront) {
+                    camera.yaw   = tpSavedYaw + 180.0f;
+                    camera.pitch = -tpSavedPitch;
+                }
+                const glm::vec3 back = -camera.GetForward();
+                float maxZoom = 4.0f;                     // MC DEFAULT_CAMERA_DISTANCE
+                for (int i = 0; i < 8; ++i) {             // MC Camera.getMaxZoom
+                    const glm::vec3 off(((i & 1) * 2 - 1) * 0.1f,
+                                        ((i >> 1 & 1) * 2 - 1) * 0.1f,
+                                        ((i >> 2 & 1) * 2 - 1) * 0.1f);
+                    if (auto hit = Game::Raycast::CastRay(tpSavedPos + off, back, maxZoom)) {
+                        const float d = glm::length(hit->hitPoint - tpSavedPos);
+                        if (d < maxZoom) maxZoom = d;
+                    }
+                }
+                camera.position = tpSavedPos + back * maxZoom;
             }
 
             // === PER-FRAME: Set player position for mesh prioritization ===
@@ -2239,6 +2387,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Get framebuffer size — needed for viewport.
             glfwGetFramebufferSize(window, &width, &height);
 
+            // Update the environment state (time-of-day colors, fog, sun/moon
+            // angles) BEFORE clearing — the clear color is the fog color.
+            int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();
+            if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+                effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
+            }
+            {
+                const auto nowForPartial = std::chrono::steady_clock::now();
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float envPartialTick =
+                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                Render::EnvironmentState::Get().UpdateFrame(
+                    envPartialTick, camera.GetForward(), camera.position.y,
+                    effectiveRenderDist, Platform::g_gameSettings.GetFogEnabled());
+            }
+            const glm::vec3 clearColor = Render::EnvironmentState::Get().Frame().fogColor;
+
             // Clear framebuffer via render backend.
             // Stencil is cleared too — the portal renderer (Phase 6+) reads
             // stencil values to gate per-portal scene re-renders, and any
@@ -2246,11 +2414,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // wrong region. The stencil clear is a no-op cost when no
             // portals are visible.
             if (Render::g_renderBackend) {
-                // Sky color RGB(120, 167, 255)
-                Render::g_renderBackend->SetClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
+                Render::g_renderBackend->SetClearColor(clearColor.r, clearColor.g, clearColor.b, 1.0f);
                 Render::g_renderBackend->Clear(true, true, true);
             } else {
-                glClearColor(120.0f/255.0f, 167.0f/255.0f, 1.0f, 1.0f);
+                glClearColor(clearColor.r, clearColor.g, clearColor.b, 1.0f);
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
             }
 
@@ -2260,15 +2427,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
             float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
 
-            int effectiveRenderDist = Platform::g_gameSettings.GetRenderDistance();
-            if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
-                effectiveRenderDist = std::min(effectiveRenderDist, Client::g_networkClient->GetServerViewDistance());
-            }
             float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
             glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             frustum = Frustum::FromMatrix(viewProj);
+
+            // Sky pass (MC addSkyPass): camera-centered, before terrain.
+            // Own projection — the 512-radius sky disc would be clipped by
+            // the main far plane at low render distances.
+            {
+                glm::mat4 skyProj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, 2048.0f);
+                glm::mat4 viewRotation = glm::mat4(glm::mat3(view));
+                Render::g_skyRenderer.Render(skyProj, viewRotation);
+            }
 
             // Main chunk rendering (includes frustum culling and all render passes)
             Render::RenderChunksAll(camera, frustum);
@@ -2362,6 +2534,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                       *Client::g_remotePlayerManager, partialTick);
 #endif
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
+
+                // Third person: the local player becomes visible (MC renders
+                // the camera entity when the camera is detached). Uses the
+                // SAVED eye yaw/pitch — the ThirdFront flip is a camera-only
+                // transform; the body still faces where the player looks.
+                if (tpActive) {
+                    playerRenderer.RenderSingle(
+                        proj, view, glm::vec3(player.visualPos),
+                        tpSavedYaw, tpSavedYaw, tpSavedPitch,
+                        player.physics.isSneaking,
+                        static_cast<uint8_t>(player.color));
+                }
 
 #if ENABLE_PORTAL_GUN
                 // Ghost rendering — for each remote player straddling an
@@ -2463,6 +2647,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 ctx.compassTargetX = 0.0f;
                 ctx.compassTargetZ = 0.0f;
                 ctx.timeSeconds = static_cast<float>(glfwGetTime());
+                // Shield-raise predicate feed (BLOCK use animation running).
+                ctx.usingItemBlock = player.usingItem
+                    && player.useAnim == Game::ItemUseAnimation::BLOCK;
                 Game::ItemRegistry::SetRenderContext(ctx);
                 // Step the wobble simulation (MC: CompassAngleState ticks at 20 TPS).
                 Game::ItemRegistry::TickAnimated(dt);
@@ -2661,8 +2848,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // First-person portal-gun viewmodel — drawn AFTER the
             // particle system so the rim sparks composite behind the
-            // gun. Hidden unless the player is actually holding the gun.
-            if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
+            // gun. Hidden unless the player is actually holding the gun
+            // (and never in third person).
+            if (camera.IsFirstPerson() &&
+                player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
@@ -2670,20 +2859,38 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 #endif
 
-            // Vanilla held-item viewmodel — any hotbar item other than
-            // the portal gun (so we draw nothing when the portal gun
-            // path above already rendered the gun). Computes a fresh
-            // partialTick for animation interp (the one above is scoped
-            // inside the remote-player block) and accumulates walk
-            // distance from horizontal velocity for the bob phase.
-            bool drawHeldItem =
+            // Clouds — MC's cloud pass runs after terrain and particles
+            // (translucent, depth-tested against the world, no depth write).
+            {
+                const auto nowForPartial = std::chrono::steady_clock::now();
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float cloudPartialTick =
+                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                Render::g_cloudRenderer.Render(proj, view, camera.position,
+                                               effectiveRenderDist, cloudPartialTick);
+            }
+
+            // Vanilla held-item viewmodel — both hands (main = selected
+            // hotbar item, off = slot 45). The portal gun owns the main
+            // hand when selected (its own viewmodel rendered above), but
+            // the offhand still draws. Computes a fresh partialTick for
+            // animation interp (the one above is scoped inside the
+            // remote-player block) and accumulates walk distance from
+            // horizontal velocity for the bob phase.
+            bool renderMainHand =
                 !player.inventory.GetSlot(Game::Inventory::HotbarToIndex(
                     player.inventory.GetSelectedSlot())).IsEmpty();
 #if ENABLE_PORTAL_GUN
             if (player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
-                drawHeldItem = false;
+                renderMainHand = false;
             }
 #endif
+            const bool drawHeldItem = camera.IsFirstPerson() &&
+                (renderMainHand ||
+                 !player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).IsEmpty());
             if (drawHeldItem) {
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
@@ -2703,8 +2910,23 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 const float vz = player.physics.velocity.z;
                 const float speed = std::sqrt(vx * vx + vz * vz);
                 s_walkDist += speed * dt * 0.6f;
-                Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld, s_walkDist);
+                // Feed the predicted hold-to-use state (eat wiggle / shield
+                // block pose) — routed to whichever hand is using.
+                Render::g_heldItemRenderer.SetUseState(
+                    player.usingItem,
+                    player.usingHand,
+                    player.useAnim,
+                    player.useItemRemaining,
+                    player.useItemDuration);
+                Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld,
+                                                  s_walkDist, renderMainHand);
             }
+            // Push the server-synced stat triple into the HUD before drawing
+            // (health/hunger bars read these; SetHealthS2C writes the player).
+            g_hudRenderer.SetHealth(player.health);
+            g_hudRenderer.SetFood(player.food);
+            g_hudRenderer.SetSaturation(player.saturation);
+            g_hudRenderer.SetStatsHidden(player.IsCreative() || player.IsSpectator());
             RenderHUD(window, player.inventory, dt, proj, view);
             // Hide the crosshair while any Screen is shown (inventory, pause
             // menu, options). In MC the crosshair sits on an early HUD stratum
@@ -2712,7 +2934,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // the GUI, so "behind the screen" has to mean "not drawn at all" —
             // same visible result: no crosshair over the menu.
             if (!Render::GetInventoryScreen().IsOpen() &&
-                Render::GetScreenManager().Empty()) {
+                Render::GetScreenManager().Empty() &&
+                camera.IsFirstPerson()) {   // MC: crosshair only in first person
                 RenderCrosshair(window);
 #if ENABLE_PORTAL_GUN
                 // Portal quickinfo brackets layer on top of the base
@@ -2951,6 +3174,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 }
             }
 
+            // Restore the logical eye camera after the third-person render
+            // frame (see the F5 block above the render phase).
+            if (tpActive) {
+                camera.position = tpSavedPos;
+                camera.yaw      = tpSavedYaw;
+                camera.pitch    = tpSavedPitch;
+            }
+
             Input::ResetMouseDelta();
             Input::ResetScrollOffset();
 
@@ -3043,8 +3274,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Client::ShutdownNetworkIOService();
         Log::Info("✓ Network I/O Service stopped");
 
-        // 3. Stop IntegratedServer thread (host only)
+        // 3. Persist world time + gamerules back to worlds.json, then stop
+        //    the IntegratedServer thread (host only). Minecraft-save worlds
+        //    aren't tracked in worlds.json, so they're skipped.
         if (!isRemoteClient) {
+            if (!titleAction.useMinecraftSave && Server::g_integratedServer &&
+                Server::g_integratedServer->GetWorld()) {
+                const auto* serverWorld = Server::g_integratedServer->GetWorld();
+                auto worlds = Render::WorldList::Load();
+                for (auto& entry : worlds) {
+                    if (entry.name == titleAction.worldName) {
+                        entry.dayTime         = serverWorld->GetDayTime();
+                        entry.doDaylightCycle = serverWorld->GetDoDaylightCycle();
+                        break;
+                    }
+                }
+                Render::WorldList::Save(worlds);
+                Log::Info("✓ World time saved (dayTime=%lld)",
+                          static_cast<long long>(serverWorld->GetDayTime()));
+            }
+
             Log::Info("Stopping IntegratedServer thread...");
             Server::StopIntegratedServer();
             Log::Info("✓ IntegratedServer stopped");
@@ -3117,6 +3366,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::g_crosshair.Shutdown();
         Render::g_blockHighlight.Shutdown();
         Render::g_blockBreakOverlay.Shutdown();
+        Render::g_skyRenderer.Shutdown();
+        Render::g_cloudRenderer.Shutdown();
         if (Render::g_atlasBuilder) {
             Render::g_atlasBuilder.reset();
         }

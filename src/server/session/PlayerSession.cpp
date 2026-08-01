@@ -6,6 +6,7 @@
 #include "../network/SendScheduler.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "../world/watch/ChunkWatchIndex.hpp"
+#include "PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Assert.hpp"
 #include "common/network/PacketTypes.hpp"
@@ -113,10 +114,64 @@ namespace Server {
             UpdateWatchSet();
             m_needsWatchUpdate = false;
         }
-        
+
         // Transition to playing state after initial join
         if (m_state == State::JOINING && (!m_pendingChunkLoads.empty() || !m_pendingChunksToSend.empty())) {
             m_state = State::PLAYING;
+        }
+
+        // Tick the player entity (movement physics, mining, item-use
+        // countdown). Lives HERE — per-session — so REMOTE players tick too;
+        // the old host-only call in IntegratedServer::ServerTick was removed
+        // (it only ever ticked m_serverPlayer, so a LAN client's eat timer
+        // never advanced).
+        if (m_player) {
+            ASSERT_SERVER_THREAD();
+            Game::World* world = nullptr;
+            if (auto* server = Server::g_integratedServer.get()) {
+                world = server->GetWorld();
+            }
+            m_player->tick(world, static_cast<int>(serverTick));
+
+            // Stats sync — mirrors ServerPlayer.tick's dirty-check on
+            // lastSentHealth / lastSentFood / lastSaturationLevel: send
+            // SetHealthS2C only when the triple changed (first PLAYING tick
+            // always sends because the cached values start impossible).
+            if (m_connection) {
+                const float health     = m_player->getHealth();
+                const int   food       = m_player->getFoodData().getFoodLevel();
+                const float saturation = m_player->getFoodData().getSaturationLevel();
+                if (health != m_lastSentHealth || food != m_lastSentFood
+                    || saturation != m_lastSentSaturation) {
+                    Network::SetHealthS2CPacket out;
+                    out.health     = health;
+                    out.food       = static_cast<uint32_t>(food);
+                    out.saturation = saturation;
+                    auto data = Network::Serialization::Serialize(out);
+                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::SetHealthS2C), data);
+                    m_lastSentHealth     = health;
+                    m_lastSentFood       = food;
+                    m_lastSentSaturation = saturation;
+                }
+            }
+
+            // Broadcast any slots the player tick mutated (item-use hand
+            // writes, finishUsingItem replacements) — the standing per-slot
+            // delta channel, same as HandleInventoryClick's re-broadcast.
+            auto& dirty = m_player->dirtySlots();
+            if (!dirty.empty() && m_connection) {
+                // De-dupe (a slot can be written twice in one tick).
+                std::sort(dirty.begin(), dirty.end());
+                dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
+                for (int slotIdx : dirty) {
+                    Network::InventorySetSlotS2CPacket out;
+                    out.slotIndex = static_cast<int16_t>(slotIdx);
+                    out.stack     = m_player->getInventory().GetSlot(slotIdx);
+                    auto data = Network::Serialization::Serialize(out);
+                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+                }
+            }
+            dirty.clear();
         }
         
         // Store tick number
@@ -630,9 +685,90 @@ namespace Server {
         if (m_connection && m_connection->IsAwaitingTeleportAck()) {
             return;
         }
+
+        // Dead players don't move — MC freezes the body until the client
+        // sends PERFORM_RESPAWN (ServerGamePacketListenerImpl.handleMovePlayer
+        // returns early when player.isImmobile()/dead).
+        if (m_player && m_player->isDead()) {
+            return;
+        }
+
+        // Movement statistics BEFORE the position write (needs the old Y /
+        // horizontal delta) — fall-distance accumulation + exhaustion
+        // sources, mirroring ServerPlayer.checkMovementStatistics and
+        // LivingEntity.checkFallDamage.
+        if (m_player) {
+            UpdateMovementStats(packet);
+        }
+
         UpdatePosition(packet.position, packet.rotation);
         if (m_player) {
             m_player->setSneaking(packet.isCrouching);
+        }
+    }
+
+    void PlayerSession::UpdateMovementStats(const Network::PlayerMoveC2SPacket& packet) {
+        ServerPlayer& p = *m_player;
+        const glm::dvec3 oldPos = p.getPosition();
+        const glm::dvec3 newPos = glm::dvec3(packet.position);
+
+        // First move after join/teleport snaps can produce huge deltas —
+        // teleport() already resets fall distance; distance-based exhaustion
+        // is naturally capped by the anti-cheat in setPosition, good enough.
+        const double dy = newPos.y - oldPos.y;
+        const double dx = newPos.x - oldPos.x;
+        const double dz = newPos.z - oldPos.z;
+        const double horizontal = std::sqrt(dx * dx + dz * dz);
+
+        // Feet-in-water check (server-side; block at the foot position).
+        bool inWater = false;
+        if (auto* server = g_integratedServer.get()) {
+            if (Game::World* world = server->GetWorld()) {
+                const glm::ivec3 feet(static_cast<int>(std::floor(newPos.x)),
+                                      static_cast<int>(std::floor(newPos.y)),
+                                      static_cast<int>(std::floor(newPos.z)));
+                inWater = world->GetBlock(feet.x, feet.y, feet.z) == Game::BlockID::Water;
+            }
+        }
+
+        // ── Fall damage — client-reported landing distance. The CLIENT's
+        //    physics tracks the fall (PlayerPhysics::fallDistance) because
+        //    only it knows exact ground contact: reconstructing falls from
+        //    20 Hz position snapshots missed bunny-hop landings (land + jump
+        //    inside one tick never shows an onGround packet) and stacked hop
+        //    descents into phantom damage. Formula per MC
+        //    LivingEntity.calculateFallDamage: floor(fd + 1e-6 - 3.0)
+        //    (SAFE_FALL_DISTANCE = 3, FALL_DAMAGE_MULTIPLIER = 1).
+        //    Sanity clamp: terminal-velocity falls in a 384-block world
+        //    can't meaningfully exceed ~512 blocks.
+        (void)dy;
+        if (packet.fallDistance > 0.0f && !p.isFlying() && !inWater) {
+            const float fd = std::min(packet.fallDistance, 512.0f);
+            const int dmg = static_cast<int>(std::floor(fd + 1.0e-6f - 3.0f));
+            if (dmg > 0) {
+                p.damage(static_cast<float>(dmg), DamageSource::FALL);
+            }
+        }
+
+        // ── Exhaustion sources — FoodConstants: sprint 0.1/m, swim 0.01/m,
+        //    jump 0.05 (sprint-jump 0.2). Walking costs nothing in modern MC.
+        //    Survival/adventure only (Player.causeFoodExhaustion no-ops when
+        //    invulnerable, i.e. creative/spectator).
+        const GameMode mode = p.getGameMode();
+        if (mode == GameMode::SURVIVAL || mode == GameMode::ADVENTURE) {
+            // Ignore absurd per-packet deltas (teleport races) — MC's stat
+            // path rounds per-tick distances, which are small; 10 m per move
+            // packet (~200 m/s) is a safe outlier cutoff.
+            if (horizontal > 0.0 && horizontal < 10.0) {
+                if (inWater) {
+                    p.getFoodData().addExhaustion(static_cast<float>(0.01 * horizontal));
+                } else if (packet.isSprinting && packet.onGround) {
+                    p.getFoodData().addExhaustion(static_cast<float>(0.1 * horizontal));
+                }
+            }
+            if (packet.jumpedThisTick) {
+                p.getFoodData().addExhaustion(packet.isSprinting ? 0.2f : 0.05f);
+            }
         }
     }
 
@@ -690,6 +826,13 @@ namespace Server {
                 Log::Debug("HandleBlockAction: Player %u broke block at (%d,%d,%d)",
                           m_playerId, pos.x, pos.y, pos.z);
 
+                // Mining exhaustion — MC Player.causeFoodExhaustion on block
+                // destroy, EXHAUSTION_MINE = 0.005F (FoodConstants.java:23).
+                // Survival only (creative never accrues exhaustion).
+                if (m_player->getGameMode() == Server::GameMode::SURVIVAL) {
+                    m_player->getFoodData().addExhaustion(0.005f);
+                }
+
                 // Add the broken block to the player's inventory and broadcast slot
                 // deltas. Without this the server-side inventory stays empty even
                 // though the client predicts the pickup, causing inventory clicks to
@@ -706,9 +849,8 @@ namespace Server {
                         const auto& after = inv.GetSlot(i);
                         if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
                         Network::InventorySetSlotS2CPacket out;
-                        out.slotIndex = static_cast<uint8_t>(i);
-                        out.itemId    = after.itemId;
-                        out.count     = static_cast<uint8_t>(std::max(0, after.count));
+                        out.slotIndex = static_cast<int16_t>(i);
+                        out.stack     = after;  // full stack — components ride along
                         auto data = Network::Serialization::Serialize(out);
                         m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
                     }
@@ -746,19 +888,40 @@ namespace Server {
         for (uint8_t slotIdx : result.changedSlots) {
             const auto& s = m_player->getInventory().GetSlot(slotIdx);
             Network::InventorySetSlotS2CPacket out;
-            out.slotIndex = slotIdx;
-            out.itemId    = s.itemId;
-            out.count     = static_cast<uint8_t>(std::max(0, s.count));
+            out.slotIndex = static_cast<int16_t>(slotIdx);
+            out.stack     = s;  // full stack — components ride along
             auto data = Network::Serialization::Serialize(out);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
         }
         if (result.carriedChanged) {
-            const auto& c = m_player->getCarried();
             Network::InventorySetCarriedS2CPacket out;
-            out.itemId = c.itemId;
-            out.count  = static_cast<uint8_t>(std::max(0, c.count));
+            out.stack = m_player->getCarried();
             auto data = Network::Serialization::Serialize(out);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+        }
+
+        // Resync healing: always echo the clicked slot (and the cursor when
+        // the client was carrying something), even when the handler refused
+        // the click and changed nothing. A refused click used to produce
+        // ZERO packets, so any client-side mis-prediction (e.g. the old
+        // drag-preview committing into an armor slot) stuck around forever.
+        // MC has the same property via its per-click state-id resync.
+        if (packet.slotIndex >= 0 && packet.slotIndex < Game::Inventory::TOTAL_SIZE) {
+            const uint8_t clicked = static_cast<uint8_t>(packet.slotIndex);
+            if (std::find(result.changedSlots.begin(), result.changedSlots.end(), clicked)
+                    == result.changedSlots.end()) {
+                Network::InventorySetSlotS2CPacket out;
+                out.slotIndex = packet.slotIndex;
+                out.stack     = m_player->getInventory().GetSlot(clicked);
+                auto data = Network::Serialization::Serialize(out);
+                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+            }
+            if (!result.carriedChanged) {
+                Network::InventorySetCarriedS2CPacket out;
+                out.stack = m_player->getCarried();
+                auto data = Network::Serialization::Serialize(out);
+                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+            }
         }
         // TODO: spawn dropped item entity if !result.droppedItem.IsEmpty()
     }
@@ -787,15 +950,12 @@ namespace Server {
             const auto& after = inv.GetSlot(i);
             if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
             Network::InventorySetSlotS2CPacket s;
-            s.slotIndex = static_cast<uint8_t>(i);
-            s.itemId    = after.itemId;
-            s.count     = static_cast<uint8_t>(std::max(0, after.count));
+            s.slotIndex = static_cast<int16_t>(i);
+            s.stack     = after;
             auto data = Network::Serialization::Serialize(s);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
         }
-        Network::InventorySetCarriedS2CPacket out;
-        out.itemId = Game::Items::Air;
-        out.count  = 0;
+        Network::InventorySetCarriedS2CPacket out;  // default = empty stack
         auto data = Network::Serialization::Serialize(out);
         m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
 
@@ -805,18 +965,28 @@ namespace Server {
         }
     }
 
+    void PlayerSession::HandlePlayerAbilities(const Network::PlayerAbilitiesC2SPacket& packet) {
+        if (!m_player || !m_connection) return;
+        // MC ServerGamePacketListenerImpl.handlePlayerAbilities: only the
+        // FLYING bit is client-writable, and only while mayFly. A client
+        // claiming flight without permission gets a corrective resend.
+        if (m_player->canFly()) {
+            m_player->setFlying(packet.flying());
+        } else if (packet.flying()) {
+            Log::Warning("[PlayerSession %u] Client requested flight without mayFly — correcting",
+                         m_playerId);
+            m_connection->SendPlayerAbilities(*m_player);
+        }
+    }
+
     void PlayerSession::SendInventoryFull() {
         if (!m_player || !m_connection) return;
         const auto& inv = m_player->getInventory();
         Network::InventoryFullS2CPacket out;
         for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            const auto& s = inv.GetSlot(i);
-            out.itemIds[i] = s.itemId;
-            out.counts[i]  = static_cast<uint8_t>(std::max(0, std::min(255, s.count)));
+            out.slots[i] = inv.GetSlot(i);  // full stacks — components ride along
         }
-        const auto& c = m_player->getCarried();
-        out.carriedItemId      = c.itemId;
-        out.carriedCount       = static_cast<uint8_t>(std::max(0, c.count));
+        out.carried            = m_player->getCarried();
         out.selectedHotbarSlot = static_cast<uint8_t>(inv.GetSelectedSlot());
 
         auto data = Network::Serialization::Serialize(out);
@@ -1053,9 +1223,37 @@ namespace Server {
 
         // Get block to place from player's hand
         Game::BlockID blockToPlace = m_player->getHeldBlock();
-        
+
         // If holding air or no block, can't place
         if (blockToPlace == Game::BlockID::Air) {
+            // Use-item fallthrough — MC's CLIENT falls through useItemOn →
+            // useItem when the whole block chain didn't consume
+            // (Minecraft.startUseItem, Minecraft.java:1656, iterating
+            // MAIN_HAND then OFF_HAND). We have no client-side interaction
+            // prediction, so the fallthrough runs server-side here instead.
+            // ANY non-empty stack dispatches — Item_DefaultUse routes the
+            // component chain (CONSUMABLE → EQUIPPABLE swap → BLOCKS_ATTACKS)
+            // and returns Pass harmlessly for inert items. The old gate here
+            // (`use duration > 0 || item.use`) skipped armor entirely: its
+            // equip lives in the Item_DefaultUse fallback, so right-clicking
+            // with a helmet while aiming at the ground never equipped it.
+            if (!heldStack.IsEmpty()) {
+                const Game::UseResult used = DispatchUseItem(packet.hand);
+                if (Game::ConsumesAction(used)) {
+                    AckInteraction(packet.sequence, true);
+                    m_lastInteractionSequence = packet.sequence;
+                    return;
+                }
+            }
+            {
+                const Game::ItemStack& offhand = m_player->getItemInHand(1);
+                if (!offhand.IsEmpty() && Game::GetUseDuration(offhand) > 0) {
+                    DispatchUseItem(1);
+                    AckInteraction(packet.sequence, true);
+                    m_lastInteractionSequence = packet.sequence;
+                    return;
+                }
+            }
             AckInteraction(packet.sequence, false);
             m_lastInteractionSequence = packet.sequence;
             return;
@@ -1277,8 +1475,9 @@ namespace Server {
         // Without this the server's inventory keeps the original 64-stack while
         // the client's local prediction decrements toward 0; clicking the slot
         // in the inventory then "refills" it to whatever the server still has.
-        // (We always decrement — creative-mode infinite-stack support is a TODO.)
-        {
+        // Creative keeps infinite stacks — MC's ItemStack.consume no-ops when
+        // hasInfiniteMaterials() (the client mirrors this in its prediction).
+        if (m_player->getGameMode() != GameMode::CREATIVE) {
             auto& inv = m_player->getInventory();
             int selUnified = Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot();
             auto& slot = inv.MutableSlot(selUnified);
@@ -1287,9 +1486,8 @@ namespace Server {
                 if (slot.count <= 0) slot.Clear();
                 if (m_connection) {
                     Network::InventorySetSlotS2CPacket out;
-                    out.slotIndex = static_cast<uint8_t>(selUnified);
-                    out.itemId    = slot.itemId;
-                    out.count     = static_cast<uint8_t>(std::max(0, slot.count));
+                    out.slotIndex = static_cast<int16_t>(selUnified);
+                    out.stack     = slot;
                     auto data = Network::Serialization::Serialize(out);
                     m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
                 }
@@ -1310,6 +1508,201 @@ namespace Server {
                   static_cast<int>(blockToPlace), targetPos.x, targetPos.y, targetPos.z);
     }
     
+    void PlayerSession::HandleUseItem(const Network::UseItemC2SPacket& packet) {
+        // Mirrors ServerGamePacketListenerImpl.handleUseItem
+        // (ServerGamePacketListenerImpl.java:1329-1354).
+        ASSERT_SERVER_THREAD();
+
+        if (!m_player) {
+            Log::Warning("HandleUseItem: No player attached to session");
+            return;
+        }
+        if (m_state != State::PLAYING) {
+            Log::Warning("HandleUseItem: Not in PLAYING state");
+            AckInteraction(packet.sequence, false);
+            return;
+        }
+        // Stale-sequence guard — same shared counter as dig/useOn.
+        if (packet.sequence <= m_lastInteractionSequence) {
+            Log::Debug("HandleUseItem: Stale sequence %u <= %u",
+                       packet.sequence, m_lastInteractionSequence);
+            return;
+        }
+
+        // :1332 ackBlockChangesUpTo(sequence)
+        AckInteraction(packet.sequence, true);
+        m_lastInteractionSequence = packet.sequence;
+
+        // :1335 — the stack in the used hand. :1336 resetLastActionTime — no
+        // idle-kick system. :1337 isItemEnabled feature-flag check omitted.
+        const Game::ItemStack& stack = m_player->getItemInHand(packet.hand);
+        if (stack.IsEmpty()) return;
+
+        // :1338-1342 — wrap the client-reported rotation and snap the player
+        // to it, so the use action happens with the exact aim the client had.
+        auto wrapDegrees = [](float deg) {
+            float d = std::fmod(deg + 180.0f, 360.0f);
+            if (d < 0.0f) d += 360.0f;
+            return d - 180.0f;
+        };
+        const float yRot = wrapDegrees(packet.yRot);
+        const float xRot = wrapDegrees(packet.xRot);
+        if (xRot != m_player->getPitch() || yRot != m_player->getYaw()) {
+            m_player->setRotation(yRot, xRot);   // absSnapRotationTo
+        }
+
+        // :1344 — the game-mode useItem logic.
+        DispatchUseItem(packet.hand);
+
+        // :1345-1350 swing-on-SERVER-source — the local client swings
+        // predictively; remote-player swing broadcast is a viewmodel-only
+        // concern we don't replicate yet.
+    }
+
+    Game::UseResult PlayerSession::DispatchUseItem(uint32_t hand) {
+        // Mirrors ServerPlayerGameMode.useItem (ServerPlayerGameMode.java:290-327).
+        ASSERT_SERVER_THREAD();
+        if (!m_player) return Game::UseResult::Pass;
+
+        IntegratedServer* server = g_integratedServer.get();
+        Game::World* world = server ? server->GetWorld() : nullptr;
+
+        // :291-292 spectator → PASS. (No spectator interaction support — same
+        // fallthrough note as HandleUseItemOn's dispatch.)
+        // :293-294 cooldown check omitted — no cooldown system (excluded).
+
+        Game::ItemStack& stack = m_player->getItemInHand(hand);
+        const int oldCount = stack.count;                       // :296
+        // :297 oldDamage — durability excluded.
+
+        const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
+        const Game::UseResult result =
+            item.use ? item.use(world, m_player, hand, stack)
+                     : Game::Item_DefaultUse(world, m_player, hand, stack);
+
+        // :299-305 — resultStack. Our callbacks mutate the hand stack in
+        // place (BlockInteraction.hpp:44-51 documents the equivalence with
+        // MC's heldItemTransformedTo), so resultStack IS the hand slot.
+        Game::ItemStack& resultStack = m_player->getItemInHand(hand);
+
+        // :307 — nothing observable changed and the item has no use duration
+        // → done, no resync needed.
+        if (resultStack.count == oldCount
+            && Game::GetUseDuration(resultStack) <= 0) {
+            return result;
+        }
+        // :309-310 — an aborted consumable start (FAIL from e.g. "not hungry")
+        // must not trigger a resync either.
+        if (result == Game::UseResult::Fail
+            && Game::GetUseDuration(resultStack) > 0
+            && !m_player->isUsingItem()) {
+            return result;
+        }
+        // :316-318 — fully consumed → make sure the slot reads as empty.
+        if (resultStack.IsEmpty()) {
+            resultStack.Clear();
+            m_player->markSlotDirty(m_player->handSlotIndex(hand));
+        }
+        // :320-322 — if we are NOT in a hold-to-use (instant action: equip
+        // swap, instant consume), push the authoritative inventory now
+        // (MC: inventoryMenu.sendAllDataToRemote()).
+        if (!m_player->isUsingItem()) {
+            SendInventoryFull();
+        }
+        return result;
+    }
+
+    void PlayerSession::HandlePlayerAction(const Network::PlayerActionC2SPacket& packet) {
+        // Mirrors ServerGamePacketListenerImpl.handlePlayerAction
+        // (ServerGamePacketListenerImpl.java:1191-1248).
+        ASSERT_SERVER_THREAD();
+        if (!m_player) return;
+
+        switch (packet.action) {
+            case Network::PlayerAction::RELEASE_USE_ITEM:
+                // :1235-1237 — stop the hold-to-use early (bow fires here in
+                // MC via releaseUsing; food simply doesn't finish).
+                m_player->releaseUsingItem();
+                return;
+
+            case Network::PlayerAction::SWAP_ITEM_WITH_OFFHAND: {
+                // :1214-1220 — swap main-hand (selected hotbar) and offhand
+                // stacks, then stopUsingItem.
+                auto& inv = m_player->getInventory();
+                const int mainIdx = m_player->handSlotIndex(0);
+                const int offIdx  = m_player->handSlotIndex(1);
+                Game::ItemStack tmp = inv.GetSlot(offIdx);
+                inv.SetSlotFull(offIdx, inv.GetSlot(mainIdx));
+                inv.SetSlotFull(mainIdx, tmp);
+                m_player->stopUsingItem();          // :1218
+                m_player->markSlotDirty(mainIdx);
+                m_player->markSlotDirty(offIdx);
+                return;
+            }
+
+            case Network::PlayerAction::DROP_ITEM:
+            case Network::PlayerAction::DROP_ALL_ITEMS: {
+                // :1223-1233 — MC: player.drop(all) spawns an ItemEntity in
+                // the world. We have no item entities, so the stack shrinks /
+                // clears and the items are gone (documented gap).
+                Game::ItemStack& held = m_player->getItemInHand(0);
+                if (held.IsEmpty()) return;
+                if (packet.action == Network::PlayerAction::DROP_ALL_ITEMS) {
+                    held.Clear();
+                } else {
+                    held.count--;
+                    if (held.count <= 0) held.Clear();
+                }
+                m_player->markSlotDirty(m_player->handSlotIndex(0));
+                Log::Debug("[PlayerSession] Dropped item(s) — no item-entity "
+                           "system, stack shrunk only");
+                return;
+            }
+
+            case Network::PlayerAction::START_DESTROY_BLOCK:
+            case Network::PlayerAction::ABORT_DESTROY_BLOCK:
+            case Network::PlayerAction::STOP_DESTROY_BLOCK:
+                // Dig still rides BlockActionC2S (HandleBlockAction) —
+                // migrating it onto PlayerAction is a separate cleanup.
+                Log::Debug("[PlayerSession] PlayerAction dig stage %u ignored "
+                           "(dig uses BlockActionC2S)",
+                           static_cast<unsigned>(packet.action));
+                return;
+
+            case Network::PlayerAction::STAB:
+                // No combat system.
+                return;
+
+            case Network::PlayerAction::PERFORM_RESPAWN: {
+                // MC ServerGamePacketListenerImpl.handleClientCommand
+                // PERFORM_RESPAWN → PlayerList.respawn. Only honored while
+                // actually dead.
+                if (!m_player->isDead()) return;
+
+                if (auto* server = g_integratedServer.get()) {
+                    if (auto* sessions = server->GetSessionManager()) {
+                        // Resets health/food/position via ServerPlayer::respawn.
+                        sessions->OnPlayerRespawn(m_playerId);
+                    }
+                }
+
+                if (m_connection) {
+                    // Authoritative snap to the spawn point (same teleport-id
+                    // channel as /tp, so stale death-position moves get
+                    // dropped), then refresh inventory + abilities. The next
+                    // session tick's SetHealthS2C (health back to 20) closes
+                    // the client's death screen.
+                    const glm::dvec3 pos = m_player->getPosition();
+                    m_connection->Teleport(pos.x, pos.y, pos.z,
+                                           m_player->getYaw(), m_player->getPitch());
+                    SendInventoryFull();
+                    m_connection->SendPlayerAbilities(*m_player);
+                }
+                return;
+            }
+        }
+    }
+
     void PlayerSession::ResyncAndAck(const glm::ivec3& clicked, const glm::ivec3& target, uint32_t sequence) {
         // Send authoritative block states back to client to resync
         if (m_connection) {
@@ -1340,9 +1733,8 @@ namespace Server {
                 const int sel = Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot();
                 const auto& slot = inv.MutableSlot(sel);
                 Network::InventorySetSlotS2CPacket out;
-                out.slotIndex = static_cast<uint8_t>(sel);
-                out.itemId    = slot.itemId;
-                out.count     = static_cast<uint8_t>(std::max(0, slot.count));
+                out.slotIndex = static_cast<int16_t>(sel);
+                out.stack     = slot;
                 auto data = Network::Serialization::Serialize(out);
                 m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
             }

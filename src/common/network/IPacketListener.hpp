@@ -21,6 +21,8 @@ namespace Network {
     struct InventoryFullS2CPacket;
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
+    struct SetHealthS2CPacket;
+    struct PlayerAbilitiesS2CPacket;
 #if ENABLE_PORTAL_GUN
     struct PortalSetS2CPacket;
     struct PortalRemoveS2CPacket;
@@ -30,6 +32,9 @@ namespace Network {
 
     // C2S packet types
     struct UseItemOnC2SPacket;
+    struct UseItemC2SPacket;
+    struct PlayerActionC2SPacket;
+    struct PlayerAbilitiesC2SPacket;
     struct BlockActionC2SPacket;
     struct PlayerMoveC2SPacket;
     struct ChatMessageC2SPacket;
@@ -77,6 +82,12 @@ namespace Network {
         virtual void onInventorySetSlotS2C(const InventorySetSlotS2CPacket& packet) {}
         virtual void onInventorySetCarriedS2C(const InventorySetCarriedS2CPacket& packet) {}
 
+        // Player stats (MC ClientboundSetHealthPacket)
+        virtual void onSetHealthS2C(const SetHealthS2CPacket& packet) {}
+
+        // Abilities + game mode (MC ClientboundPlayerAbilitiesPacket + CHANGE_GAME_MODE)
+        virtual void onPlayerAbilitiesS2C(const PlayerAbilitiesS2CPacket& packet) {}
+
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-authoritative pair state). Default no-op handlers
         // — Phase 4 will override these on the client side to push portal
@@ -105,6 +116,14 @@ namespace Network {
         // Play phase - Block interactions
         virtual void onUseItemOnC2S(const UseItemOnC2SPacket& packet) {}
         virtual void onBlockActionC2S(const BlockActionC2SPacket& packet) {}
+
+        // Play phase - Item use in air (MC ServerboundUseItemPacket)
+        virtual void onUseItemC2S(const UseItemC2SPacket& packet) {}
+
+        // Play phase - Player actions (MC ServerboundPlayerActionPacket:
+        // release-use, drop, swap-offhand, dig stages)
+        virtual void onPlayerActionC2S(const PlayerActionC2SPacket& packet) {}
+        virtual void onPlayerAbilitiesC2S(const PlayerAbilitiesC2SPacket& packet) {}
         
         // Play phase - Player updates
         virtual void onPlayerMoveC2S(const PlayerMoveC2SPacket& packet) {}

@@ -38,6 +38,9 @@ namespace Launcher {
         // `token` optional — with it, your own name reports "yours".
         Result CheckName(const std::string& name, const std::string& token);
         Result Rename(const std::string& token, const std::string& newName);
+        // Verifies `current` server-side; other sessions are revoked on success.
+        Result ChangePassword(const std::string& token, const std::string& current,
+                              const std::string& newPassword);
 
     private:
         std::string m_url;   // http://host:port/api

@@ -253,6 +253,7 @@ namespace Render {
         
         // Bind shader, MVP, and atlas texture once per frame (shared across all 3 passes)
         void BindSharedRenderState(const Camera& camera);
+        void SetEnvironmentUniforms(ShaderHandle shader, const Camera& camera);
 
         // Render helpers
         void RenderLayerPass(RenderLayer layer, uint8_t layerBit, bool reverseOrder = false);

@@ -1,8 +1,13 @@
 // File: src/client/renderer/gui/screens/OptionsScreens.cpp
 #include "OptionsScreens.hpp"
+#include "PanoramaRenderer.hpp"
+#include "WorldSelectScreens.hpp"
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
+#include "../../environment/SkyRenderer.hpp"
 #include "platform/GameDirectory.hpp"
+#include "common/core/Log.hpp"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -61,6 +66,7 @@ namespace Render {
             std::function<std::unique_ptr<Screen>()> make;
             const char* disabledReason; // non-null → greyed out
         };
+        const bool worldActive = WorldSettingsContext::Active();
         const Entry entries[] = {
             {"Skin Customization...",     [] { return std::make_unique<SkinCustomizationScreen>(); },  nullptr},
             {"Music & Sounds...",         [] { return std::make_unique<SoundOptionsScreen>(); },       nullptr},
@@ -72,6 +78,11 @@ namespace Render {
             {"Accessibility Settings...", [] { return std::make_unique<AccessibilityOptionsScreen>(); }, nullptr},
             {"Telemetry Data...",         nullptr,                                                     "Telemetry is not collected."},
             {"Credits & Attribution...",  [] { return std::make_unique<CreditsScreen>(); },            nullptr},
+            {"World Settings...",
+             worldActive ? std::function<std::unique_ptr<Screen>()>(
+                               [] { return std::make_unique<WorldSettingsScreen>(); })
+                         : nullptr,
+             worldActive ? nullptr : "Join a world first."},
         };
 
         y = m_height / 6 + 18;
@@ -275,16 +286,24 @@ namespace Render {
             m_list->AddSmall(ao, clouds);
         }
 
+        {
+            auto* fog = OnOff("Fog", s.GetFogEnabled(),
+                              [](bool on) { Settings().SetFogEnabled(on); });
+            fog->SetTooltip({"Fades distant terrain into the sky", "like Minecraft. Applies instantly."});
+            m_list->AddSmall(fog,
+                Cycle("Particles", {"All", "Decreased", "Minimal"},
+                      [&s] { int p = s.GetParticles(); return (p >= 0 && p <= 2) ? p : 1; }(),
+                      [](int i) { Settings().SetParticles(i); }));
+        }
+
         m_list->AddSmall(
-            Cycle("Particles", {"All", "Decreased", "Minimal"},
-                  [&s] { int p = s.GetParticles(); return (p >= 0 && p <= 2) ? p : 1; }(),
-                  [](int i) { Settings().SetParticles(i); }),
             ValueSlider("Mipmap Levels", s.GetMipmapLevels(), 0, 4, 1,
                 [](double v) -> std::string {
                     int m = static_cast<int>(v);
                     return m == 0 ? "OFF" : std::to_string(m);
                 },
-                [](double v) { Settings().SetMipmapLevels(static_cast<int>(v)); }));
+                [](double v) { Settings().SetMipmapLevels(static_cast<int>(v)); }),
+            nullptr);
 
         m_list->AddSmall(
             OnOff("Entity Shadows", s.GetEntityShadows(),
@@ -319,6 +338,111 @@ namespace Render {
                     return b == 0 ? "OFF" : std::to_string(b);
                 },
                 [](double v) { Settings().SetInt("menuBackgroundBlurriness", static_cast<int>(v)); }));
+    }
+
+    // ═══════════════════════════ WorldSettingsScreen ════════════════════════
+
+    namespace WorldSettingsContext {
+        namespace {
+            std::string s_worldName;
+            bool s_active = false;
+            bool s_canPersist = false;
+        }
+        void Set(const std::string& worldName, bool canPersist) {
+            s_worldName = worldName;
+            s_active = true;
+            s_canPersist = canPersist && !worldName.empty();
+        }
+        void Clear() {
+            s_worldName.clear();
+            s_active = false;
+            s_canPersist = false;
+        }
+        bool Active() { return s_active; }
+        const std::string& WorldName() { return s_worldName; }
+        bool CanPersist() { return s_canPersist; }
+    }
+
+    namespace {
+        // Write the active world's sky choice back to worlds.json (no-op for
+        // multiplayer sessions / worlds not tracked there).
+        void PersistWorldSky(const std::string& skybox, int mode) {
+            if (!WorldSettingsContext::CanPersist()) return;
+            auto worlds = WorldList::Load();
+            bool found = false;
+            for (auto& entry : worlds) {
+                if (entry.name == WorldSettingsContext::WorldName()) {
+                    entry.skybox = skybox;
+                    entry.skyboxMode = mode;
+                    found = true;
+                    break;
+                }
+            }
+            if (found) WorldList::Save(worlds);
+        }
+
+        void ApplyWorldSky(const std::string& skybox, int mode) {
+            g_skyRenderer.SetSkybox(skybox, mode);
+            // SetSkybox falls back to vanilla when the set is missing —
+            // persist what actually stuck.
+            PersistWorldSky(g_skyRenderer.CurrentSkybox(), mode);
+        }
+    } // namespace
+
+    void WorldSettingsScreen::AddOptions() {
+        m_list->AddHeader("Sky");
+
+        // Current skybox's display label for the picker button.
+        std::string currentLabel = g_skyRenderer.CurrentSkybox();
+        for (const auto& info : DiscoverSkyboxes()) {
+            if (info.id == g_skyRenderer.CurrentSkybox()) {
+                currentLabel = info.label;
+                break;
+            }
+        }
+
+        auto* skyboxPick = new Button(0, 0, 150, 20, "Skybox: " + currentLabel,
+            [this] { m_manager->Push(std::make_unique<SkyboxSelectScreen>()); });
+        skyboxPick->SetTooltip({"Custom skyboxes: drop 6 faces named",
+                                "panorama_0..5.png into assets/textures/",
+                                "environment/skyboxes/<name>/"});
+
+        auto* modeCycle = Cycle("Sky Behavior",
+            {"Static", "Darken at Night", "Darken + Sun & Moon"},
+            std::clamp(g_skyRenderer.CurrentSkyboxMode(), 0, 2),
+            [](int i) {
+                ApplyWorldSky(g_skyRenderer.CurrentSkybox(), i);
+            });
+        modeCycle->SetTooltip({"How a skybox reacts to the day/night",
+                               "cycle. The Vanilla sky always uses the",
+                               "full cycle."});
+
+        m_list->AddSmall(skyboxPick, modeCycle);
+    }
+
+    void SkyboxSelectScreen::AddOptions() {
+        const auto skyboxes = DiscoverSkyboxes();
+        const std::string current = g_skyRenderer.CurrentSkybox();
+
+        std::vector<AbstractWidget*> row;
+        for (const auto& info : skyboxes) {
+            const bool selected = info.id == current;
+            const std::string label =
+                selected ? "> " + info.label + " <" : info.label;
+            const std::string id = info.id;
+            auto* button = new Button(0, 0, 150, 20, label, [this, id] {
+                ApplyWorldSky(id, g_skyRenderer.CurrentSkyboxMode());
+                m_manager->Pop();
+            });
+            row.push_back(button);
+            if (row.size() == 2) {
+                m_list->AddSmall(row[0], row[1]);
+                row.clear();
+            }
+        }
+        if (!row.empty()) {
+            m_list->AddSmall(row[0], nullptr);
+        }
     }
 
     // ═══════════════════════════ SoundOptionsScreen ═════════════════════════
@@ -639,6 +763,34 @@ namespace Render {
                     return std::string(buf);
                 },
                 [](double v) { Settings().SetNotificationDisplayTime(static_cast<float>(v)); }));
+
+        // Panorama version picker — every title-screen panorama MC has
+        // shipped, plus "Random" (re-rolled each time the title comes up).
+        // Applies live so the change is visible behind this screen.
+        {
+            auto sets = PanoramaRenderer::AvailableSets();
+            if (!sets.empty()) {
+                std::vector<std::string> labels;
+                labels.emplace_back("Random");
+                int current = 0;
+                const std::string cur = s.GetString(
+                    "panoramaSet", PanoramaRenderer::kDefaultSet);
+                for (size_t i = 0; i < sets.size(); ++i) {
+                    labels.push_back(sets[i].label);
+                    if (cur == sets[i].slug) current = static_cast<int>(i) + 1;
+                }
+                m_list->AddSmall(
+                    Cycle("Panorama", std::move(labels), current,
+                          [sets](int i) {
+                              const char* slug = (i == 0)
+                                  ? Render::PanoramaRenderer::kRandomSet
+                                  : sets[i - 1].slug;
+                              Settings().SetString("panoramaSet", slug);
+                              g_panoramaRenderer.LoadSet(slug);
+                          }),
+                    nullptr);
+            }
+        }
     }
 
     // ═══════════════════════════ LanguageSelectScreen ═══════════════════════

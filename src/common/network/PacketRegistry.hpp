@@ -60,6 +60,7 @@
             BlockEntityDataS2C     = 0x30, // BE create / state update — mirrors MC ClientboundBlockEntityDataPacket
             BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
             BlockEntityActionS2C   = 0x32, // BE "block event" (chest lid open count, bell ring) — MC Level.blockEvent path
+            SetHealthS2C           = 0x33, // health float + food VarInt + saturation float — mirrors MC ClientboundSetHealthPacket
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -91,6 +92,7 @@
             ServerboundAcceptTeleportation = 0x91, // Echo of teleport id (MC: ServerboundAcceptTeleportationPacket)
             InventoryClickC2S   = 0x92,  // One inventory action (mirrors MC ContainerInput dispatch)
             InventoryCloseC2S   = 0x93,  // Inventory screen closed (server drops carried item)
+            PlayerAbilitiesC2S  = 0x94,  // Client fly-state toggle (mirrors MC ServerboundPlayerAbilitiesPacket)
         };
 
         // Convert PacketId to string for logging
@@ -136,6 +138,7 @@
                 case PacketId::BlockEntityDataS2C: return "BlockEntityDataS2C";
                 case PacketId::BlockEntityRemoveS2C: return "BlockEntityRemoveS2C";
                 case PacketId::BlockEntityActionS2C: return "BlockEntityActionS2C";
+                case PacketId::SetHealthS2C: return "SetHealthS2C";
 #if ENABLE_PORTAL_GUN
                 case PacketId::PortalSetS2C:           return "PortalSetS2C";
                 case PacketId::PortalRemoveS2C:        return "PortalRemoveS2C";
@@ -165,6 +168,7 @@
                 case PacketId::ServerboundAcceptTeleportation: return "ServerboundAcceptTeleportation";
                 case PacketId::InventoryClickC2S: return "InventoryClickC2S";
                 case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
+                case PacketId::PlayerAbilitiesC2S: return "PlayerAbilitiesC2S";
 
                 default: return "Unknown";
             }

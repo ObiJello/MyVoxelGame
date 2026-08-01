@@ -11,6 +11,7 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
+#include "FoodData.hpp"
 
 namespace Game {
     class World;
@@ -117,6 +118,47 @@ namespace Server {
         const Game::InventorySlot& getCarried() const { return m_carriedItem; }
         void setCarried(const Game::InventorySlot& s) { m_carriedItem = s; }
 
+        // === HAND SLOTS ===
+        // hand 0 = main hand (hotbar 36 + selected), hand 1 = offhand (slot 45).
+        // Mirrors MC Player.getItemInHand / setItemInHand.
+        Game::ItemStack&       getItemInHand(uint32_t hand);
+        const Game::ItemStack& getItemInHand(uint32_t hand) const;
+        // Writes the stack AND records the slot in m_dirtySlots so
+        // PlayerSession broadcasts the delta after the tick.
+        void setItemInHand(uint32_t hand, const Game::ItemStack& stack);
+        // Unified inventory index for a hand (36+selected / 45).
+        int  handSlotIndex(uint32_t hand) const;
+
+        // === ITEM USE STATE — mirrors LivingEntity.java:3246-3449 ===
+        // The hold-to-use lifecycle: startUsingItem sets useItem + the
+        // remaining-tick countdown; tick() → updatingUsingItem() counts down
+        // and fires completeUsingItem (timer hit zero — eat finished) or the
+        // caller fires releaseUsingItem (player let go early — RELEASE_USE_ITEM).
+        bool     isUsingItem() const { return m_isUsingItem; }        // :3246-3248
+        uint32_t getUsedItemHand() const { return m_usedItemHand; }   // :3250-3252
+        int      getUseItemRemainingTicks() const { return m_useItemRemaining; } // :3414-3416
+        // Elapsed ticks since use started (:3418-3420).
+        int      getTicksUsingItem() const {
+            return m_isUsingItem ? Game::GetUseDuration(m_useItem) - m_useItemRemaining : 0;
+        }
+        const Game::ItemStack& getUseItem() const { return m_useItem; } // :3410-3412
+
+        void startUsingItem(uint32_t hand);   // LivingEntity.java:3325-3340
+        void releaseUsingItem();              // :3426-3437
+        void stopUsingItem();                 // :3439-3449
+        void completeUsingItem();             // :3388-3405
+
+        // Mirrors Player.isBlocking / getItemBlockingWith: using a
+        // BLOCKS_ATTACKS item AND past its blockDelayTicks (shield = 5 ticks).
+        // Flag only — no damage math (no combat system).
+        bool isBlocking() const;
+
+        // Slots mutated during this tick's item-use processing (hand writes,
+        // finishUsingItem replacements). Drained by PlayerSession::Tick into
+        // per-slot InventorySetSlotS2C broadcasts.
+        std::vector<int>& dirtySlots() { return m_dirtySlots; }
+        void markSlotDirty(int slotIndex) { m_dirtySlots.push_back(slotIndex); }
+
         // QUICK_CRAFT (drag-distribute) state — see InventoryClickHandler
         uint8_t  m_quickcraftStatus = 0;
         uint8_t  m_quickcraftType   = 0;
@@ -167,11 +209,30 @@ namespace Server {
         void setDimensionId(int id) { m_dimensionId = id; }
         
         float getHealth() const { return m_health; }
-        int getFood() const { return m_food; }
+        int getFood() const { return m_foodData.getFoodLevel(); }
+        // Dead until PERFORM_RESPAWN — set when damage() drops health to 0.
+        // While dead the session ignores move packets (the body is frozen)
+        // and further damage is a no-op.
+        bool isDead() const { return m_isDead; }
+
+        // Hunger / saturation / exhaustion — mirrors Player.getFoodData().
+        FoodData&       getFoodData()       { return m_foodData; }
+        const FoodData& getFoodData() const { return m_foodData; }
+
+        // Mirrors Player.canEat(canAlwaysEat) — canAlwaysEat || needsFood().
+        bool canEat(bool canAlwaysEat) const {
+            return canAlwaysEat || m_foodData.needsFood();
+        }
         
         GameMode getGameMode() const { return m_gameMode; }
         bool isFlying() const { return m_flying; }
         bool canFly() const { return m_canFly; }
+
+        // Fall-distance tracking (driven from PlayerSession::HandlePlayerMove
+        // off the client's move packets — the server doesn't simulate the fall).
+        float getFallDistance() const { return m_fallDistance; }
+        void  addFallDistance(float d) { m_fallDistance += d; }
+        void  resetFallDistance() { m_fallDistance = 0.0f; }
         
         bool isOnGround() const { return m_onGround; }
         void setOnGround(bool onGround) { m_onGround = onGround; }
@@ -212,8 +273,9 @@ namespace Server {
         
         // === ATTRIBUTES & STATUS ===
         float m_health = 20.0f;
-        int m_food = 20;
-        // TODO: float m_exhaustion = 0.0f;
+        bool  m_isDead = false;
+        // Hunger/saturation/exhaustion — MC FoodData port (FoodData.hpp).
+        FoodData m_foodData;
         // TODO: int m_experienceLevel = 0;
         // TODO: float m_experienceProgress = 0.0f;
         // TODO: std::vector<StatusEffect> m_effects;
@@ -250,8 +312,24 @@ namespace Server {
         int m_invulnerabilityTicks = 0;
         // TODO: int m_portalCooldown = 0;
         // TODO: int m_attackCooldown = 0;
-        // TODO: int m_useCooldown = 0;
         // TODO: bool m_sleeping = false;
+
+        // === ITEM USE STATE — mirrors LivingEntity's useItem fields ===
+        Game::ItemStack m_useItem{};              // LivingEntity.useItem
+        int             m_useItemRemaining = 0;   // LivingEntity.useItemRemaining
+        uint32_t        m_usedItemHand     = 0;   // flag bit 2 in MC (:3250-3252)
+        bool            m_isUsingItem      = false; // flag bit 1 in MC (:3246-3248)
+        // Slots mutated by item-use processing this tick (see dirtySlots()).
+        std::vector<int> m_dirtySlots;
+
+        // Per-tick countdown — called from tick(). LivingEntity.java:3254-3264.
+        void updatingUsingItem();
+        // One countdown step + onUseTick hook. LivingEntity.java:3296-3302.
+        void updateUsingItem();
+        // Consume-completion: run the item's finish behaviour and replace the
+        // hand stack with the result. ItemStack.finishUsingItem →
+        // Item.finishUsingItem (Item.java:221-224).
+        Game::ItemStack finishUsingItem(Game::ItemStack& stack);
         
         // === MINING STATE ===
         bool m_isBreaking = false;

@@ -57,6 +57,17 @@ namespace Game {
         static constexpr float NOCLIP_SPRINT_HORIZONTAL_SPEED = 50.0f; // Sprint (Ctrl) horizontal speed
         static constexpr float NOCLIP_SPRINT_VERTICAL_SPEED = 50.0f;   // Sprint (Ctrl) vertical speed
 
+        // Creative flight (MC-style: collision on, gravity off).
+        // MC's per-tick model: horizontal speed = abilities.flyingSpeed
+        // (0.05) fed through the same friction-0.91 air chain as walking,
+        // which steady-states at ~10.89 b/s; sprint doubles the input
+        // (Player.getFlyingSpeed) → ~21.78 b/s. Vertical is a direct
+        // velocity write of flyingSpeed*3 blocks/tick = 7.5 b/s
+        // (LocalPlayer.aiStep's deltaMovement.add(0, input*speed*3, 0)).
+        static constexpr float FLY_HORIZONTAL_SPEED = 10.89f;
+        static constexpr float FLY_SPRINT_MULTIPLIER = 2.0f;
+        static constexpr float FLY_VERTICAL_SPEED = 7.5f;
+
         // Player dimensions
         static constexpr float WIDTH = 0.6f;
         static constexpr float HEIGHT_STANDING = 1.8f;
@@ -80,6 +91,29 @@ namespace Game {
         bool isEyeInWater = false;     // True when eyes are submerged
         glm::vec3 waterVelocity{0.0f};     // Water velocity in blocks/sec
         bool noclip = false;
+
+        // Creative flight state — MC Abilities.flying / Abilities.mayfly.
+        // mayFly is server-granted (PlayerAbilitiesS2C, creative only);
+        // isFlying toggles via double-tap space and cancels on landing.
+        // Unlike noclip, flying keeps full collision resolution.
+        bool isFlying = false;
+        bool mayFly = false;
+
+        // True when THIS physics step fired a ground-jump impulse. Cleared at
+        // the top of UpdatePlayerPhysics; ClientPlayer accumulates it into the
+        // per-tick move packet for the server's jump-exhaustion accounting.
+        bool didJumpThisStep = false;
+
+        // Fall tracking — done HERE (per physics step) because the client is
+        // the only one that knows exact ground contact. The server's 20 Hz
+        // position snapshots miss bunny-hop landings entirely (land + jump
+        // inside one tick), which made server-side accumulation stack hop
+        // descents into phantom fall damage. `fallDistance` accumulates
+        // while airborne; on landing it's flushed into `landedFallDistance`
+        // for ClientPlayer to forward in the next move packet. Water, noclip
+        // and creative flight break falls (MC resetFallDistance sites).
+        float fallDistance       = 0.0f;
+        float landedFallDistance = 0.0f;   // consumed by ClientPlayer::UpdatePhysics
         
         // Mutable flight speeds for noclip mode
         float noclipHorizontalSpeed = NOCLIP_HORIZONTAL_SPEED;

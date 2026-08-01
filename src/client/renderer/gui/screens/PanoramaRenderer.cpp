@@ -8,6 +8,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstdio>
 #include <filesystem>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,32 @@ void main() {
 )";
 
     namespace {
+        // Every panorama Minecraft has shipped, oldest first. Folder must
+        // exist under assets/textures/gui/title/background/ to be offered.
+        const PanoramaRenderer::SetInfo kSets[] = {
+            {"classic", "Classic"},   // Beta 1.8 – 1.12
+            {"1.13",    "1.13"},      // Update Aquatic
+            {"1.14",    "1.14"},      // Village & Pillage
+            {"1.15",    "1.15"},      // Buzzy Bees
+            {"1.16",    "1.16"},      // Nether Update
+            {"1.17",    "1.17"},      // Caves & Cliffs I
+            {"1.18",    "1.18"},      // Caves & Cliffs II
+            {"1.19",    "1.19"},      // The Wild Update
+            {"1.20",    "1.20"},      // Trails & Tales
+            {"1.21",    "1.21"},      // Tricky Trials
+            {"1.21.4",  "1.21.4"},    // The Garden Awakens
+            {"1.21.5",  "1.21.5"},    // Spring to Life
+            {"1.21.6",  "1.21.6"},    // Chase the Skies
+            {"1.21.9",  "1.21.9"},    // Mounts of Mayhem
+            {"1.21.11", "1.21.11"},
+            {"26.1",    "26.1"},
+            {"26.2",    "26.2"},
+        };
+
+        std::string SetDir(const std::string& slug) {
+            return "assets/textures/gui/title/background/" + slug + "/";
+        }
+
         // Loads one face texture. Returns INVALID_TEXTURE when the file is
         // missing OR is one of the 1×1 placeholder stubs in the asset dump.
         TextureHandle LoadFaceTexture(const std::string& relPath, bool& wasStub) {
@@ -71,11 +98,27 @@ void main() {
         }
     } // namespace
 
-    bool PanoramaRenderer::Initialize() {
+    std::vector<PanoramaRenderer::SetInfo> PanoramaRenderer::AvailableSets() {
+        std::vector<SetInfo> out;
+        for (const auto& set : kSets) {
+            const std::string probe =
+                PlatformMain::GetAssetPath(SetDir(set.slug) + "panorama_0.png");
+            if (std::filesystem::exists(probe)) out.push_back(set);
+        }
+        return out;
+    }
+
+    bool PanoramaRenderer::Initialize(const std::string& setSlug) {
         if (m_initialized) return true;
         if (!g_renderBackend) return false;
 
-        m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
+        // Try SPIR-V (Vulkan rewrites to panorama_vk.*.spv), then fall back
+        // to GLSL source (OpenGL) — same pattern as BlockBreakOverlay.
+        m_shader = g_renderBackend->CreateShaderFromFiles(
+            "shaders/panorama.vert", "shaders/panorama.frag");
+        if (m_shader == INVALID_SHADER) {
+            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
+        }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("PanoramaRenderer: shader creation failed");
             return false;
@@ -128,41 +171,70 @@ void main() {
             idx.size() * sizeof(uint32_t), idx.data());
         m_mesh = g_renderBackend->CreateMesh(m_vb, m_ib, GetBlockVertexLayout());
 
-        // Face textures. All six must be present (and not 1×1 stubs) for the
-        // panorama to render; otherwise we keep the gradient fallback.
-        bool anyStub = false;
-        bool allValid = true;
-        for (int i = 0; i < 6; ++i) {
-            char rel[96];
-            std::snprintf(rel, sizeof(rel),
-                          "assets/textures/gui/title/background/panorama_%d.png", i);
-            bool stub = false;
-            m_faces[i] = LoadFaceTexture(rel, stub);
-            anyStub |= stub;
-            if (m_faces[i] == INVALID_TEXTURE) allValid = false;
-        }
-        m_texturesValid = allValid;
-        if (!allValid) {
-            Log::Info("PanoramaRenderer: panorama textures %s — using gradient fallback "
-                      "(drop real panorama_0..5.png into assets/textures/gui/title/background/)",
-                      anyStub ? "are 1x1 placeholders" : "missing");
-        }
-
-        {
-            bool stub = false;
-            m_overlay = LoadFaceTexture("assets/textures/gui/title/background/panorama_overlay.png", stub);
-        }
-
         m_initialized = true;
+        LoadSet(setSlug);
         return true;
     }
 
-    void PanoramaRenderer::Shutdown() {
-        if (!g_renderBackend) return;
+    void PanoramaRenderer::DestroyFaceTextures() {
         for (auto& f : m_faces) {
             if (f != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(f); f = INVALID_TEXTURE; }
         }
         if (m_overlay != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_overlay); m_overlay = INVALID_TEXTURE; }
+    }
+
+    // Loads the six faces (+ optional overlay) of one set. All six must be
+    // present and not 1×1 stubs; on failure the previous textures are gone
+    // and m_texturesValid is false (gradient fallback).
+    bool PanoramaRenderer::TryLoadSet(const std::string& slug) {
+        DestroyFaceTextures();
+        const std::string dir = SetDir(slug);
+        bool allValid = true;
+        for (int i = 0; i < 6; ++i) {
+            bool stub = false;
+            m_faces[i] = LoadFaceTexture(dir + "panorama_" + std::to_string(i) + ".png", stub);
+            if (m_faces[i] == INVALID_TEXTURE) allValid = false;
+        }
+        if (!allValid) {
+            DestroyFaceTextures();
+            m_texturesValid = false;
+            return false;
+        }
+        bool stub = false;
+        m_overlay = LoadFaceTexture(dir + "panorama_overlay.png", stub);
+        m_texturesValid = true;
+        m_currentSet = slug;
+        return true;
+    }
+
+    void PanoramaRenderer::LoadSet(const std::string& slug) {
+        if (!m_initialized || !g_renderBackend) return;
+        std::string want = slug.empty() ? kDefaultSet : slug;
+        if (want == kRandomSet) {
+            const auto sets = AvailableSets();
+            if (!sets.empty()) {
+                static std::mt19937 rng{std::random_device{}()};
+                std::uniform_int_distribution<size_t> pick(0, sets.size() - 1);
+                want = sets[pick(rng)].slug;
+                Log::Info("PanoramaRenderer: random panorama -> '%s'", want.c_str());
+            } else {
+                want = kDefaultSet;
+            }
+        }
+        if (TryLoadSet(want)) return;
+        if (want != kDefaultSet && TryLoadSet(kDefaultSet)) {
+            Log::Warning("PanoramaRenderer: set '%s' missing — fell back to '%s'",
+                         want.c_str(), kDefaultSet);
+            return;
+        }
+        Log::Info("PanoramaRenderer: panorama textures missing — using gradient fallback "
+                  "(expected assets/textures/gui/title/background/%s/panorama_0..5.png)",
+                  want.c_str());
+    }
+
+    void PanoramaRenderer::Shutdown() {
+        if (!g_renderBackend) return;
+        DestroyFaceTextures();
         if (m_mesh   != INVALID_MESH)   { g_renderBackend->DestroyMesh(m_mesh);     m_mesh = INVALID_MESH; }
         if (m_vb     != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_vb);     m_vb = INVALID_BUFFER; }
         if (m_ib     != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_ib);     m_ib = INVALID_BUFFER; }

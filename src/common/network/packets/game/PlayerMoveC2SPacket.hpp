@@ -19,6 +19,12 @@ namespace Network {
         glm::vec2 rotation;          // yaw, pitch
         bool      onGround    = false;
         bool      isCrouching = false;
+        bool      isSprinting = false;  // For sprint exhaustion (server-side FoodData)
+        bool      jumpedThisTick = false; // Jump impulse since last move send (jump exhaustion)
+        // Largest fall-landing distance since the last send (0 = no landing).
+        // Client-tracked: its physics knows exact ground contact, while the
+        // server's 20 Hz snapshots miss bunny-hop landings entirely.
+        float     fallDistance = 0.0f;
         uint32_t  sequenceNumber = 0;
         std::chrono::steady_clock::time_point timestamp;
 
@@ -37,9 +43,12 @@ namespace Network {
             buffer.WriteFloat(packet.rotation.x); // yaw
             buffer.WriteFloat(packet.rotation.y); // pitch
             uint8_t flags = 0;
-            if (packet.onGround)    flags |= 0x01;
-            if (packet.isCrouching) flags |= 0x02;
+            if (packet.onGround)       flags |= 0x01;
+            if (packet.isCrouching)    flags |= 0x02;
+            if (packet.isSprinting)    flags |= 0x04;
+            if (packet.jumpedThisTick) flags |= 0x08;
             buffer.WriteByte(flags);
+            buffer.WriteFloat(packet.fallDistance);
             buffer.WriteVarInt(packet.sequenceNumber);
             return buffer.GetData();
         }
@@ -53,8 +62,11 @@ namespace Network {
             packet.rotation.x = reader.ReadFloat();
             packet.rotation.y = reader.ReadFloat();
             uint8_t flags = reader.ReadByte();
-            packet.onGround    = (flags & 0x01) != 0;
-            packet.isCrouching = (flags & 0x02) != 0;
+            packet.onGround       = (flags & 0x01) != 0;
+            packet.isCrouching    = (flags & 0x02) != 0;
+            packet.isSprinting    = (flags & 0x04) != 0;
+            packet.jumpedThisTick = (flags & 0x08) != 0;
+            packet.fallDistance   = reader.ReadFloat();
             packet.sequenceNumber = reader.ReadVarInt();
             packet.timestamp = std::chrono::steady_clock::now();
             return packet;

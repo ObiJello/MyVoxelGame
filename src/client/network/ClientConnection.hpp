@@ -103,9 +103,6 @@ namespace Client {
         // Handle time update
         void HandleTimeUpdate(const std::vector<uint8_t>& payload);
         
-        // Handle player abilities
-        void HandlePlayerAbilities(const std::vector<uint8_t>& payload);
-        
         // Handle world spawn
         void HandleWorldSpawn(const std::vector<uint8_t>& payload);
 
@@ -141,11 +138,8 @@ namespace Client {
         glm::vec3 m_spawnPosition{0, 67, 0};
         uint64_t m_worldAge = 0;
         uint64_t m_timeOfDay = 6000; // Noon
-        
-        // Player state
-        uint8_t m_playerAbilities = 0;
-        float m_flySpeed = 0.05f;
-        float m_walkSpeed = 0.1f;
+        bool m_doDaylightCycle = false;
+
     };
     
     using ClientConnectionPtr = std::shared_ptr<ClientConnection>;

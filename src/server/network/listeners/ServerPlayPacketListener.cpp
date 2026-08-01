@@ -47,6 +47,37 @@ namespace Server {
         m_session.HandleUseItemOn(packet);
     }
     
+    void ServerPlayPacketListener::handleUseItem(const Network::UseItemC2SPacket& packet) {
+        // Mirrors ServerGamePacketListenerImpl.handleUseItem's thread + phase
+        // guards (ServerGamePacketListenerImpl.java:1329-1331).
+        ASSERT_SERVER_THREAD();
+
+        if (m_connection.getPhase() != ServerConnection::ConnectionPhase::PLAY) {
+            Log::Error("[ServerPlayPacketListener] UseItem received outside PLAY state");
+            m_connection.SendDisconnect("UseItem packet received outside PLAY state");
+            return;
+        }
+
+        Log::Debug("[ServerPlayPacketListener] UseItem: hand=%u, seq=%u, yRot=%.1f, xRot=%.1f",
+                   packet.hand, packet.sequence, packet.yRot, packet.xRot);
+
+        m_session.HandleUseItem(packet);
+    }
+
+    void ServerPlayPacketListener::handlePlayerAction(const Network::PlayerActionC2SPacket& packet) {
+        // Mirrors ServerGamePacketListenerImpl.handlePlayerAction's thread +
+        // phase guards (ServerGamePacketListenerImpl.java:1191-1193).
+        ASSERT_SERVER_THREAD();
+
+        if (m_connection.getPhase() != ServerConnection::ConnectionPhase::PLAY) {
+            Log::Error("[ServerPlayPacketListener] PlayerAction received outside PLAY state");
+            m_connection.SendDisconnect("PlayerAction packet received outside PLAY state");
+            return;
+        }
+
+        m_session.HandlePlayerAction(packet);
+    }
+
     void ServerPlayPacketListener::onBlockActionC2S(const Network::BlockActionC2SPacket& packet) {
         m_session.HandleBlockAction(packet);
     }
@@ -66,6 +97,10 @@ namespace Server {
 
     void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {
         m_session.HandleInventoryClick(packet);
+    }
+
+    void ServerPlayPacketListener::onPlayerAbilitiesC2S(const Network::PlayerAbilitiesC2SPacket& packet) {
+        m_session.HandlePlayerAbilities(packet);
     }
 
     void ServerPlayPacketListener::onInventoryCloseC2S(const Network::InventoryCloseC2SPacket& packet) {

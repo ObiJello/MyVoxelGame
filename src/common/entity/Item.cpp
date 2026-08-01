@@ -3,9 +3,13 @@
 #include "GeneratedItemList.hpp"
 #include "ItemModelLoader.hpp"
 #include "ClientItemLoader.hpp"
+#include "ConsumableBehavior.hpp"
+#include "EquipmentBehavior.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../data/DataComponents.hpp"
 #include "../core/Log.hpp"
+#include "server/player/ServerPlayer.hpp"  // startUsingItem in Item_DefaultUse
+                                           // (common→server precedent: PortalGunBehavior.cpp)
 #include <nlohmann/json.hpp>
 #include <unordered_map>
 #include <vector>
@@ -477,6 +481,58 @@ namespace Game {
         item.blockId      = BlockID::Air;
         // spriteName left empty — render path uses spriteFrames + selectFrame.
         g_pureItems[id]   = std::move(item);
+    }
+
+    // ── Base Item.use dispatch + use-duration helpers ───────────────────────
+    // Mirrors Item.java:196-219 / :304-313 / :315-322. The EQUIPPABLE /
+    // BLOCKS_ATTACKS branches light up with the equipment phase; the dispatch
+    // shape is final. (KINETIC_WEAPON is omitted throughout — no combat.)
+
+    UseResult Item_DefaultUse(World* world, Server::ServerPlayer* player,
+                              uint32_t hand, ItemStack& stack) {
+        if (!player) return UseResult::Pass;
+        // 1. CONSUMABLE → consumable.startConsuming (Item.java:198-200)
+        if (stack.get(DataComponents::CONSUMABLE)) {
+            return ConsumableBehavior::StartConsuming(world, *player, hand, stack);
+        }
+        // 2. EQUIPPABLE + swappable → equippable.swapWithEquipmentSlot
+        //    (Item.java:202-204)
+        if (auto equippable = stack.get(DataComponents::EQUIPPABLE)) {
+            if (equippable->swappable) {
+                return EquipmentBehavior::SwapWithEquipmentSlot(*player, hand,
+                                                                *equippable);
+            }
+        }
+        // 3. BLOCKS_ATTACKS → player.startUsingItem(hand) → CONSUME (:205-207)
+        if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
+            player->startUsingItem(hand);
+            return UseResult::Consume;
+        }
+        return UseResult::Pass;  // Item.java:215
+    }
+
+    ItemUseAnimation GetUseAnimation(const ItemStack& stack) {
+        // CONSUMABLE → consumable.animation() (Item.java:305-307)
+        if (auto consumable = stack.get(DataComponents::CONSUMABLE)) {
+            return consumable->animation;
+        }
+        // BLOCKS_ATTACKS → BLOCK (:308-309)
+        if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
+            return ItemUseAnimation::BLOCK;
+        }
+        return ItemUseAnimation::NONE;  // :311
+    }
+
+    int GetUseDuration(const ItemStack& stack) {
+        // CONSUMABLE → consumeTicks() (Item.java:316-318)
+        if (auto consumable = stack.get(DataComponents::CONSUMABLE)) {
+            return consumable->consumeTicks();
+        }
+        // BLOCKS_ATTACKS → 72000 (:320, APPROXIMATELY_INFINITE_USE_DURATION)
+        if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
+            return 72000;
+        }
+        return 0;  // :320 (neither component present)
     }
 
     bool ItemStack::HasFoil() const {

@@ -36,6 +36,10 @@ namespace Render {
         std::string worldName;
         int32_t     seed     = 0;
         int         gameMode = 1;   // 0 = Survival, 1 = Creative
+        long long   dayTime  = 6000;          // world time restored from worlds.json (6000 = noon)
+        bool        doDaylightCycle = false;  // gamerule restored from worlds.json
+        std::string skybox = "vanilla";       // per-world sky (see WorldEntry::skybox)
+        int         skyboxMode = 2;           // 0 static, 1 darken, 2 darken+celestials
 
         // Relayed join (friends service): host/port above point at the
         // friends service rather than the game host, and this ticket is

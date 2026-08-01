@@ -34,31 +34,33 @@ Note: Above IDs are our engine's fixed assignment. In true Minecraft protocol, t
 | 0x16 | S2C | PLAY | EntityMove | Client | TBD |
 | 0x17 | S2C | PLAY | EntityDestroy | Client | TBD |
 | 0x18 | S2C | PLAY | ChatMessageS2C | Client | String(message), Byte(position) |
-| 0x19 | S2C | PLAY | TimeUpdate | Client | Long(worldAge), Long(timeOfDay) |
+| 0x19 | S2C | PLAY | TimeUpdate | Client | Long(worldAge), Long(timeOfDay), Byte(doDaylightCycle) |
 | 0x1A | S2C | PLAY | WeatherChange | Client | TBD |
 | 0x1B | S2C | PLAY | KeepAliveS2C | Client | Long(keepAliveId) |
 | 0x1C | S2C | PLAY | PlayerListUpdate | Client | TBD |
-| 0x1D | S2C | PLAY | PlayerAbilities | Client | Byte(flags), Float(flySpeed), Float(walkSpeed) |
+| 0x1D | S2C | PLAY | PlayerAbilities | Client | Byte(flags: 0x01 invulnerable, 0x02 flying, 0x04 mayFly, 0x08 instabuild), Float(flySpeed), Float(walkSpeed), Byte(gameMode) |
 | 0x1E | S2C | PLAY | WorldSpawn | Client | BlockPos(x,y,z) |
 | 0x1F | S2C | PLAY | Reserved | Client | TBD |
 | 0x20-0x21 | - | - | (Duplicate entries removed) | - | - |
-| 0x22-0x7F | S2C | PLAY | Reserved | Client | TBD |
+| 0x33 | S2C | PLAY | SetHealthS2C | `ClientPacketHandler::handleSetHealth` | Float(health), VarInt(food), Float(saturation) — mirrors MC ClientboundSetHealthPacket |
+| 0x22-0x7F | S2C | PLAY | Reserved (except 0x29-0x33, see code) | Client | TBD |
 
 ### Client → Server Packets (0x80-0xFF)
 
 | ID | Direction | State | Name | Listener | Payload |
 |----|-----------|-------|------|----------|---------|
 | 0x80 | C2S | PLAY | BlockActionC2S | `IServerPlayPacketListener::onBlockAction` | BlockPos(x,y,z), VarInt(action), VarInt(blockId) |
-| 0x81 | C2S | PLAY | PlayerMoveC2S | `IServerPlayPacketListener::onPlayerMove` | Vec3(position), Vec2(rotation), Long(timestamp) |
+| 0x81 | C2S | PLAY | PlayerMoveC2S | `IServerPlayPacketListener::onPlayerMove` | Double×3(position), Float×2(rotation), Byte(flags: 0x01 onGround, 0x02 crouching, 0x04 sprinting, 0x08 jumped), Float(fallDistance — landing since last send, 0 = none), VarInt(sequence) |
 | 0x82 | C2S | PLAY | ChatMessageC2S | `IServerPlayPacketListener::onChatMessage` | String(message), Boolean(isCommand) |
 | 0x83 | C2S | PLAY | ClientConfigC2S | `IServerPlayPacketListener::onClientConfig` | TBD |
-| 0x84 | C2S | PLAY | UseItem | `IServerPlayPacketListener::onUseItem` | TBD |
-| 0x85 | C2S | PLAY | PlayerAction | `IServerPlayPacketListener::onPlayerAction` | TBD |
+| 0x84 | C2S | PLAY | UseItem | `ServerPlayPacketListener::handleUseItem` | VarInt(hand), VarInt(sequence), Float(yRot), Float(xRot) — mirrors MC ServerboundUseItemPacket |
+| 0x85 | C2S | PLAY | PlayerAction | `ServerPlayPacketListener::handlePlayerAction` | VarInt(action ordinal, MC ServerboundPlayerActionPacket.Action), Int×3(blockPos), Byte(direction), VarInt(sequence) |
 | 0x86 | C2S | PLAY | KeepAliveC2S | `IServerPlayPacketListener::onKeepAlive` | Long(keepAliveId) |
 | 0x87 | C2S | PLAY | PlayerRotation | `IServerPlayPacketListener::onPlayerRotation` | TBD |
 | 0x88 | C2S | PLAY | PlayerPosition | `IServerPlayPacketListener::onPlayerPosition` | TBD |
 | 0x89 | C2S | PLAY | PlayerPosRot | `IServerPlayPacketListener::onPlayerPosRot` | TBD |
-| 0x8A-0xFF | C2S | PLAY | Reserved | `IServerPlayPacketListener` | TBD |
+| 0x94 | C2S | PLAY | PlayerAbilitiesC2S | `ServerPlayPacketListener::onPlayerAbilitiesC2S` | Byte(flags: 0x02 flying) — mirrors MC ServerboundPlayerAbilitiesPacket (fly toggle only) |
+| 0x8A-0xFF | C2S | PLAY | Reserved (0x8A-0x93 in use — see PacketRegistry.hpp) | `IServerPlayPacketListener` | TBD |
 
 ## Protocol States and Packet Listeners
 

@@ -45,6 +45,9 @@ namespace Platform {
         bool GetAO() const { return GetBool("ao", true); }
         void SetAO(bool enabled) { SetBool("ao", enabled); }
 
+        bool GetFogEnabled() const { return GetBool("fogEnabled", true); }
+        void SetFogEnabled(bool enabled) { SetBool("fogEnabled", enabled); }
+
         int GetBiomeBlendRadius() const { return GetInt("biomeBlendRadius", 2); }
         void SetBiomeBlendRadius(int radius) { SetInt("biomeBlendRadius", radius); }
 

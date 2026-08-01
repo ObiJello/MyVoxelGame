@@ -138,7 +138,7 @@ namespace {
         if (argIndex == 0) {
             // BARE command names (no '/'), MC-style. The '/' is already
             // in the input field and stays put when applying.
-            candidates = {"tp", "teleport", "kick"};
+            candidates = {"tp", "teleport", "kick", "gamemode", "kill", "time", "gamerule"};
         } else {
             // Command name without the leading '/' for matching.
             std::string cmd = tokens.empty() ? "" : tokens[0];
@@ -158,6 +158,36 @@ namespace {
             } else if (cmd == "kick") {
                 if (argIndex == 1) {
                     candidates = CollectPlayerNames();
+                }
+            } else if (cmd == "gamemode") {
+                // /gamemode <mode> [player]
+                if (argIndex == 1) {
+                    candidates = {"survival", "creative", "adventure", "spectator"};
+                } else if (argIndex == 2) {
+                    candidates = CollectPlayerNames();
+                }
+            } else if (cmd == "kill") {
+                if (argIndex == 1) {
+                    candidates = CollectPlayerNames();
+                }
+            } else if (cmd == "time") {
+                // /time <set|add|query> <value>
+                if (argIndex == 1) {
+                    candidates = {"set", "add", "query"};
+                } else if (argIndex == 2) {
+                    const std::string sub = tokens.size() > 1 ? tokens[1] : "";
+                    if (sub == "query") {
+                        candidates = {"daytime", "gametime", "day"};
+                    } else if (sub == "set") {
+                        candidates = {"day", "noon", "night", "midnight"};
+                    }
+                }
+            } else if (cmd == "gamerule") {
+                // /gamerule <rule> [true|false]
+                if (argIndex == 1) {
+                    candidates = {"doDaylightCycle"};
+                } else if (argIndex == 2) {
+                    candidates = {"true", "false"};
                 }
             }
         }

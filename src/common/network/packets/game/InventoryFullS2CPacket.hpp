@@ -1,13 +1,22 @@
 // File: src/common/network/packets/game/InventoryFullS2CPacket.hpp
 //
 // Server → client: full 46-slot snapshot. Sent on join and after large
-// mutations. ItemID is uint32_t — block items use IDs 1..(BlockID::Count-1),
-// pure items >= 0x10000.
+// mutations. Each slot is a full ItemStack (id + count + component patch) —
+// see ItemStackSerialization.hpp for the per-stack wire format (mirrors
+// ItemStack.OPTIONAL_STREAM_CODEC).
 //
 // Mirrors MC ClientboundContainerSetContentPacket (the inventory variant).
+// MC writes containerId + stateId + a length-prefixed list + carried; we have
+// exactly one container (the player inventory) and a fixed 46-slot layout, so
+// containerId/stateId/list-length are omitted (documented deviation).
+//
+// WIRE CHANGE (components port): slots moved from (uint32 id + uint8 count)
+// arrays to full ItemStack codec. Both endpoints ship in one binary — no
+// cross-version compatibility shims.
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
+#include "common/network/ItemStackSerialization.hpp"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -15,23 +24,17 @@
 namespace Network {
 
     struct InventoryFullS2CPacket {
-        std::array<uint32_t, 46> itemIds;
-        std::array<uint8_t,  46> counts;
-        uint32_t carriedItemId      = 0;
-        uint8_t  carriedCount       = 0;
-        uint8_t  selectedHotbarSlot = 0;
-
-        InventoryFullS2CPacket() { itemIds.fill(0); counts.fill(0); }
+        std::array<Game::ItemStack, 46> slots{};
+        Game::ItemStack                 carried{};
+        uint8_t                         selectedHotbarSlot = 0;
     };
 
     namespace Serialization {
 
         inline std::vector<uint8_t> Serialize(const InventoryFullS2CPacket& packet) {
             PacketBuffer buffer;
-            for (int i = 0; i < 46; ++i) buffer.WriteInt(packet.itemIds[i]);
-            for (int i = 0; i < 46; ++i) buffer.WriteByte(packet.counts[i]);
-            buffer.WriteInt(packet.carriedItemId);
-            buffer.WriteByte(packet.carriedCount);
+            for (int i = 0; i < 46; ++i) WriteItemStack(buffer, packet.slots[i]);
+            WriteItemStack(buffer, packet.carried);
             buffer.WriteByte(packet.selectedHotbarSlot);
             return buffer.GetData();
         }
@@ -39,10 +42,8 @@ namespace Network {
         inline InventoryFullS2CPacket DeserializeInventoryFullS2C(const std::vector<uint8_t>& data) {
             PacketReader reader(data);
             InventoryFullS2CPacket packet;
-            for (int i = 0; i < 46; ++i) packet.itemIds[i] = reader.ReadInt();
-            for (int i = 0; i < 46; ++i) packet.counts[i]  = reader.ReadByte();
-            packet.carriedItemId      = reader.ReadInt();
-            packet.carriedCount       = reader.ReadByte();
+            for (int i = 0; i < 46; ++i) packet.slots[i] = ReadItemStack(reader);
+            packet.carried            = ReadItemStack(reader);
             packet.selectedHotbarSlot = reader.ReadByte();
             return packet;
         }

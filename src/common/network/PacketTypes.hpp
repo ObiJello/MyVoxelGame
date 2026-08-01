@@ -41,6 +41,8 @@
 #include "packets/game/InventorySetSlotS2CPacket.hpp"
 #include "packets/game/InventorySetCarriedS2CPacket.hpp"
 #include "packets/game/BlockEntityDataS2CPacket.hpp"
+#include "packets/game/SetHealthS2CPacket.hpp"
+#include "packets/game/PlayerAbilitiesS2CPacket.hpp"
 #include "packets/game/PortalSetS2CPacket.hpp"            // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalRemoveS2CPacket.hpp"         // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalTeleportFlashS2CPacket.hpp"  // Features.hpp ENABLE_PORTAL_GUN strips body
@@ -50,6 +52,8 @@
 #include "packets/game/ChunkBatchAckC2SPacket.hpp"
 #include "packets/game/BlockActionC2SPacket.hpp"
 #include "packets/game/UseItemOnC2SPacket.hpp"
+#include "packets/game/UseItemC2SPacket.hpp"
+#include "packets/game/PlayerActionC2SPacket.hpp"
 #include "packets/game/PlayerMoveC2SPacket.hpp"
 #include "packets/game/HeldItemChangeC2SPacket.hpp"
 #include "packets/game/ServerboundAcceptTeleportationPacket.hpp"
@@ -57,6 +61,7 @@
 #include "packets/game/InventoryCloseC2SPacket.hpp"
 #include "packets/game/ChatMessageC2SPacket.hpp"
 #include "packets/game/ClientConfigC2SPacket.hpp"
+#include "packets/game/PlayerAbilitiesC2SPacket.hpp"
 
 #include "PacketRegistry.hpp"
 

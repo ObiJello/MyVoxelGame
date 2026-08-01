@@ -971,6 +971,16 @@ namespace Render {
             m_pushConstants.uColor  = value;
             m_commonUBOData.uTint   = value;
             m_commonUBODirty = true;
+        } else if (name == "uFogColor") {
+            // Environment fog block (sky/clouds/chunk shaders) — dedicated
+            // CommonUBO fields, NOT aliased onto uTint: block shaders need
+            // uPortalClipPlane (which lives in the uColor/uTint slot) and
+            // fog uniforms simultaneously.
+            m_commonUBOData.uFogColor = value;
+            m_commonUBODirty = true;
+        } else if (name == "uFogEnv") {
+            m_commonUBOData.uFogEnv = value;
+            m_commonUBODirty = true;
         }
     }
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
@@ -990,6 +1000,12 @@ namespace Render {
         } else if (name == "uTint" || name == "uColor") {
             m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
             m_commonUBOData.uTint           = glm::vec4(value, m_commonUBOData.uTint.a);
+            m_commonUBODirty = true;
+        } else if (name == "uCameraPos") {
+            m_commonUBOData.uCamPosBright   = glm::vec4(value, m_commonUBOData.uCamPosBright.w);
+            m_commonUBODirty = true;
+        } else if (name == "uFogColor") {
+            m_commonUBOData.uFogColor       = glm::vec4(value, m_commonUBOData.uFogColor.a);
             m_commonUBODirty = true;
         }
     }
@@ -1030,6 +1046,7 @@ namespace Render {
         else if (name == "uHasSprite")      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
         else if (name == "uUseSkin")        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
         else if (name == "uUseTextures")    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
+        else if (name == "uSkyBrightness")  { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
     }
     void VKBackend::SetUniformInt(ShaderHandle, const std::string& name, int value) {
         // Texture-sampler bindings come through as integers (legacy
@@ -2518,42 +2535,57 @@ namespace Render {
     // ========================================================================
 
     size_t VKBackend::HashPipelineState(const PipelineState& state, ShaderHandle shader) const {
-        size_t hash = std::hash<uint32_t>{}(shader);
-        // Mix the shader's layout type into the cache key — pipelines
-        // baked against m_pipelineLayout vs m_portalPipelineLayout must
-        // never collide because vkCmdBindDescriptorSets uses a specific
-        // layout at draw time and a mismatch is a validation error.
+        // NOT a hash — a collision-free bit-packed key. Every field baked
+        // into the VkPipeline gets dedicated bits, so two different
+        // (shader, state) combinations can never map to the same cache
+        // entry, and the m_pipelines lookup needs no equality check.
+        //
+        // The previous XOR-shift hash DID collide in practice: std::hash on
+        // small ints is the identity, shader handles are small consecutive
+        // integers, and each state field only flipped one or two low bits —
+        // so e.g. (shaderA, depthTest off) could equal (shaderB, depthTest
+        // on). Visible symptom: the Vulkan cloud pass reused a pipeline
+        // baked with another draw's depth-test-off state and drew through
+        // terrain. Blend factors also weren't keyed at all, so the sky
+        // renderer's additive sun/moon draws (same shader, same flags, only
+        // dstBlendFactor differs) reused the translucent sunrise pipeline.
+        //
+        // Bit budget: 35 bits of state + 1 bit layout + 27 bits of shader
+        // handle = 63 of 64. Reference + masks stay out (dynamic state, set
+        // per-draw via vkCmdSetStencil*); depth-bias CONSTANTS are baked
+        // but keyed only by the enable bit — fine while every biased draw
+        // uses the same constants (block break overlay only today).
+        int layoutType = 0;
         {
             auto sit = m_shaders.find(shader);
-            int lt = (sit != m_shaders.end()) ? sit->second.layoutType : 0;
-            hash ^= std::hash<int>{}(lt) << 16;
+            layoutType = (sit != m_shaders.end()) ? sit->second.layoutType : 0;
         }
-        hash ^= std::hash<bool>{}(state.depthTestEnabled) << 1;
-        hash ^= std::hash<bool>{}(state.depthWriteEnabled) << 2;
-        hash ^= std::hash<bool>{}(state.blendEnabled) << 3;
-        hash ^= std::hash<int>{}(static_cast<int>(state.cullMode)) << 4;
-        hash ^= std::hash<int>{}(static_cast<int>(state.polygonMode)) << 5;
-        hash ^= std::hash<int>{}(static_cast<int>(state.depthCompareOp)) << 6;
-        hash ^= std::hash<int>{}(static_cast<int>(state.primitiveType)) << 7;
-        hash ^= std::hash<int>{}(static_cast<int>(state.frontFace)) << 8;
-        hash ^= std::hash<bool>{}(state.depthBiasEnabled) << 9;
-        // Stencil — must be in the cache key, otherwise two pipelines with
-        // identical depth/blend/cull but different stencil state would
-        // collide and we'd reuse the wrong one. Reference + masks are
-        // dynamic in Vulkan (set per-draw via vkCmdSetStencil*) so they
-        // don't need to be in the hash; only the bits that are baked into
-        // VkPipeline at creation do.
-        hash ^= std::hash<bool>{}(state.stencilTestEnabled)               << 10;
-        hash ^= std::hash<int>{}(static_cast<int>(state.stencilCompareOp)) << 11;
-        hash ^= std::hash<int>{}(static_cast<int>(state.stencilFailOp))    << 12;
-        hash ^= std::hash<int>{}(static_cast<int>(state.stencilDepthFailOp)) << 13;
-        hash ^= std::hash<int>{}(static_cast<int>(state.stencilPassOp))   << 14;
-        // Color write mask is baked into the pipeline (no Vulkan dynamic
-        // state for it before VK_EXT_extended_dynamic_state3) → fold into
-        // the cache key so depth/stencil-only pipelines don't collide with
-        // their color-writing counterparts.
-        hash ^= std::hash<bool>{}(state.colorWriteEnabled)                << 15;
-        return hash;
+        uint64_t key = 0;
+        int bit = 0;
+        auto pack = [&key, &bit](uint64_t value, int bits) {
+            key |= (value & ((1ull << bits) - 1)) << bit;
+            bit += bits;
+        };
+        pack(state.depthTestEnabled ? 1 : 0, 1);
+        pack(state.depthWriteEnabled ? 1 : 0, 1);
+        pack(static_cast<uint64_t>(state.depthCompareOp), 3);
+        pack(state.blendEnabled ? 1 : 0, 1);
+        pack(static_cast<uint64_t>(state.srcBlendFactor), 4);
+        pack(static_cast<uint64_t>(state.dstBlendFactor), 4);
+        pack(static_cast<uint64_t>(state.cullMode), 2);
+        pack(static_cast<uint64_t>(state.frontFace), 1);
+        pack(static_cast<uint64_t>(state.polygonMode), 1);
+        pack(state.depthBiasEnabled ? 1 : 0, 1);
+        pack(static_cast<uint64_t>(state.primitiveType), 2);
+        pack(state.colorWriteEnabled ? 1 : 0, 1);
+        pack(state.stencilTestEnabled ? 1 : 0, 1);
+        pack(static_cast<uint64_t>(state.stencilCompareOp), 3);
+        pack(static_cast<uint64_t>(state.stencilFailOp), 3);
+        pack(static_cast<uint64_t>(state.stencilDepthFailOp), 3);
+        pack(static_cast<uint64_t>(state.stencilPassOp), 3);
+        pack(static_cast<uint64_t>(layoutType), 1);
+        pack(shader, 27);
+        return static_cast<size_t>(key);
     }
 
     static VkStencilOp ToVkStencilOp(StencilOp op) {

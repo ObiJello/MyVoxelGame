@@ -117,4 +117,11 @@ namespace Game {
         int AddToSlot(int slotIndex, ItemID id, int count);
     };
 
+    // Slot placement filter — mirrors MC Slot.mayPlace per region
+    // (ArmorSlot checks the stack's EQUIPPABLE component; craft slots refuse
+    // inserts; offhand/main/hotbar accept anything). Shared by the server's
+    // authoritative InventoryClickHandler AND the client's InventoryScreen
+    // prediction so a refused click never leaves a ghost item.
+    bool MayPlaceInSlot(int slotIndex, const ItemStack& stack);
+
 } // namespace Game

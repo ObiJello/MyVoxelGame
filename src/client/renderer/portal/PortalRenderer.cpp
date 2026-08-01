@@ -11,6 +11,7 @@
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "../mesh/ChunkRenderer.hpp"     // RenderChunksAll for the see-through scene re-render
+#include "../environment/EnvironmentState.hpp"  // time-of-day sky/fog color
 #include "client/portal/ClientPortalManager.hpp"
 #include "common/core/Log.hpp"
 
@@ -937,12 +938,13 @@ void main() {
             return s;
         }
 
-        // Sky color, must match PlatformMain.cpp's glClearColor for the
-        // main framebuffer (currently RGB 120,167,255). Keep in sync — if
-        // the sky color ever moves to a uniform/global, hook this off it.
-        constexpr glm::vec3 kSkyColor(120.0f / 255.0f,
-                                      167.0f / 255.0f,
-                                      255.0f / 255.0f);
+        // Sky color for the portal depth-clear region. Sourced from the
+        // per-frame EnvironmentState fog color — the same value PlatformMain
+        // uses for the main framebuffer clear — so portal views match the
+        // time-of-day sky instead of a stale hardcoded blue.
+        glm::vec3 CurrentSkyColor() {
+            return EnvironmentState::Get().Frame().fogColor;
+        }
 
         // Pipeline preset: depth-refill the silhouette so the portal acts
         // as a real surface for any subsequent translucent draws. Color
@@ -1142,7 +1144,7 @@ void main() {
             g_renderBackend->BindShader(m_shader);
             g_renderBackend->BindTexture(m_dummyTexture, 0);
             g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
-            g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", kSkyColor);
+            g_renderBackend->SetUniformVec3(m_shader, "uPortalColor", CurrentSkyColor());
             g_renderBackend->SetUniformFloat(m_shader, "uPulse", pulse);
             g_renderBackend->SetUniformFloat(m_shader, "uForceFarDepth", 1.0f);
             g_renderBackend->SetUniformFloat(m_shader, "uOutlineMode", 0.0f);

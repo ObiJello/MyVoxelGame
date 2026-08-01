@@ -24,8 +24,26 @@
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/level/World.hpp"
 #include "../core/Log.hpp"
+#include "server/player/ServerPlayer.hpp"  // bucket POV raycast needs eye pos/rotation
+                                           // (common→server precedent: PortalGunBehavior.cpp)
+
+#include <cmath>
+#include <random>
+#include <unordered_map>
 
 namespace Game {
+
+    // Implemented in FoodDefs.cpp — FOOD/CONSUMABLE/USE_REMAINDER defaults
+    // for every vanilla food (Foods.java + Consumables.java values).
+    void ItemRegistry_RegisterFoods(std::unordered_map<ItemID, Item>& pureItems);
+
+    // Implemented in EquipmentBehavior.cpp — EQUIPPABLE on armor/elytra +
+    // shield BLOCKS_ATTACKS (Items.java + ArmorMaterials.java values).
+    void ItemRegistry_RegisterEquipment(std::unordered_map<ItemID, Item>& pureItems);
+
+    // Implemented in BundleBehavior.cpp — bundle click overrides +
+    // canFitInsideContainerItems + crafting remainders.
+    void ItemRegistry_RegisterBundles(std::unordered_map<ItemID, Item>& pureItems);
 
     namespace {
 
@@ -290,6 +308,377 @@ namespace Game {
             HurtAndBreak(stack, 1, ctx.hand);
             return UseResult::Success;
         }
+        // ── Axe — mirrors AxeItem.java:38-105 ───────────────────────────────
+        // Strip / de-oxidize / wax-off, resolved in that order
+        // (evaluateNewBlockState, :70-90).
+
+        // STRIPPABLES (AxeItem.java:107-108) — MC preserves the log's AXIS
+        // property; we have no block states, so orientation resets to the
+        // single stripped BlockID (documented deviation).
+        BlockID StrippedVariant(BlockID src) {
+            switch (src) {
+                case BlockID::OakWood:        return BlockID::StrippedOakWood;
+                case BlockID::OakLog:         return BlockID::StrippedOakLog;
+                case BlockID::DarkOakWood:    return BlockID::StrippedDarkOakWood;
+                case BlockID::DarkOakLog:     return BlockID::StrippedDarkOakLog;
+                case BlockID::PaleOakWood:    return BlockID::StrippedPaleOakWood;
+                case BlockID::PaleOakLog:     return BlockID::StrippedPaleOakLog;
+                case BlockID::AcaciaWood:     return BlockID::StrippedAcaciaWood;
+                case BlockID::AcaciaLog:      return BlockID::StrippedAcaciaLog;
+                case BlockID::CherryWood:     return BlockID::StrippedCherryWood;
+                case BlockID::CherryLog:      return BlockID::StrippedCherryLog;
+                case BlockID::BirchWood:      return BlockID::StrippedBirchWood;
+                case BlockID::BirchLog:       return BlockID::StrippedBirchLog;
+                case BlockID::JungleWood:     return BlockID::StrippedJungleWood;
+                case BlockID::JungleLog:      return BlockID::StrippedJungleLog;
+                case BlockID::SpruceWood:     return BlockID::StrippedSpruceWood;
+                case BlockID::SpruceLog:      return BlockID::StrippedSpruceLog;
+                case BlockID::WarpedStem:     return BlockID::StrippedWarpedStem;
+                case BlockID::WarpedHyphae:   return BlockID::StrippedWarpedHyphae;
+                case BlockID::CrimsonStem:    return BlockID::StrippedCrimsonStem;
+                case BlockID::CrimsonHyphae:  return BlockID::StrippedCrimsonHyphae;
+                case BlockID::MangroveWood:   return BlockID::StrippedMangroveWood;
+                case BlockID::MangroveLog:    return BlockID::StrippedMangroveLog;
+                case BlockID::BambooBlock:    return BlockID::StrippedBambooBlock;
+                default:                      return BlockID::Air;
+            }
+        }
+
+        // Copper weathering families — one row per shape, four oxidation
+        // stages + the matching waxed stages. Backs WeatheringCopper's
+        // NEXT/PREVIOUS_BY_BLOCK and HoneycombItem.WAXABLES/WAX_OFF_BY_BLOCK.
+        // (Slab-top promoted variants and stairs/slabs of the same families
+        // follow identically via their own rows.)
+        struct CopperFamily {
+            BlockID stage[4];   // base, exposed, weathered, oxidized
+            BlockID waxed[4];   // waxed counterparts, same order
+        };
+        const CopperFamily* CopperFamilies(size_t& count) {
+            static const CopperFamily families[] = {
+                {{BlockID::CopperBlock,     BlockID::ExposedCopper,           BlockID::WeatheredCopper,           BlockID::OxidizedCopper},
+                 {BlockID::WaxedCopperBlock,BlockID::WaxedExposedCopper,      BlockID::WaxedWeatheredCopper,      BlockID::WaxedOxidizedCopper}},
+                {{BlockID::ChiseledCopper,  BlockID::ExposedChiseledCopper,   BlockID::WeatheredChiseledCopper,   BlockID::OxidizedChiseledCopper},
+                 {BlockID::WaxedChiseledCopper, BlockID::WaxedExposedChiseledCopper, BlockID::WaxedWeatheredChiseledCopper, BlockID::WaxedOxidizedChiseledCopper}},
+                {{BlockID::CutCopper,       BlockID::ExposedCutCopper,        BlockID::WeatheredCutCopper,        BlockID::OxidizedCutCopper},
+                 {BlockID::WaxedCutCopper,  BlockID::WaxedExposedCutCopper,   BlockID::WaxedWeatheredCutCopper,   BlockID::WaxedOxidizedCutCopper}},
+                {{BlockID::CutCopperSlab,   BlockID::ExposedCutCopperSlab,    BlockID::WeatheredCutCopperSlab,    BlockID::OxidizedCutCopperSlab},
+                 {BlockID::WaxedCutCopperSlab, BlockID::WaxedExposedCutCopperSlab, BlockID::WaxedWeatheredCutCopperSlab, BlockID::WaxedOxidizedCutCopperSlab}},
+                {{BlockID::CutCopperStairs, BlockID::ExposedCutCopperStairs,  BlockID::WeatheredCutCopperStairs,  BlockID::OxidizedCutCopperStairs},
+                 {BlockID::WaxedCutCopperStairs, BlockID::WaxedExposedCutCopperStairs, BlockID::WaxedWeatheredCutCopperStairs, BlockID::WaxedOxidizedCutCopperStairs}},
+                {{BlockID::CopperGrate,     BlockID::ExposedCopperGrate,      BlockID::WeatheredCopperGrate,      BlockID::OxidizedCopperGrate},
+                 {BlockID::WaxedCopperGrate,BlockID::WaxedExposedCopperGrate, BlockID::WaxedWeatheredCopperGrate, BlockID::WaxedOxidizedCopperGrate}},
+                {{BlockID::CopperBulb,      BlockID::ExposedCopperBulb,       BlockID::WeatheredCopperBulb,       BlockID::OxidizedCopperBulb},
+                 {BlockID::WaxedCopperBulb, BlockID::WaxedExposedCopperBulb,  BlockID::WaxedWeatheredCopperBulb,  BlockID::WaxedOxidizedCopperBulb}},
+                {{BlockID::CopperDoor,      BlockID::ExposedCopperDoor,       BlockID::WeatheredCopperDoor,       BlockID::OxidizedCopperDoor},
+                 {BlockID::WaxedCopperDoor, BlockID::WaxedExposedCopperDoor,  BlockID::WaxedWeatheredCopperDoor,  BlockID::WaxedOxidizedCopperDoor}},
+                {{BlockID::CopperTrapdoor,  BlockID::ExposedCopperTrapdoor,   BlockID::WeatheredCopperTrapdoor,   BlockID::OxidizedCopperTrapdoor},
+                 {BlockID::WaxedCopperTrapdoor, BlockID::WaxedExposedCopperTrapdoor, BlockID::WaxedWeatheredCopperTrapdoor, BlockID::WaxedOxidizedCopperTrapdoor}},
+                {{BlockID::CopperBars,      BlockID::ExposedCopperBars,       BlockID::WeatheredCopperBars,       BlockID::OxidizedCopperBars},
+                 {BlockID::WaxedCopperBars, BlockID::WaxedExposedCopperBars,  BlockID::WaxedWeatheredCopperBars,  BlockID::WaxedOxidizedCopperBars}},
+                {{BlockID::CopperChain,     BlockID::ExposedCopperChain,      BlockID::WeatheredCopperChain,      BlockID::OxidizedCopperChain},
+                 {BlockID::WaxedCopperChain,BlockID::WaxedExposedCopperChain, BlockID::WaxedWeatheredCopperChain, BlockID::WaxedOxidizedCopperChain}},
+                {{BlockID::CopperLantern,   BlockID::ExposedCopperLantern,    BlockID::WeatheredCopperLantern,    BlockID::OxidizedCopperLantern},
+                 {BlockID::WaxedCopperLantern, BlockID::WaxedExposedCopperLantern, BlockID::WaxedWeatheredCopperLantern, BlockID::WaxedOxidizedCopperLantern}},
+                {{BlockID::LightningRod,    BlockID::ExposedLightningRod,     BlockID::WeatheredLightningRod,     BlockID::OxidizedLightningRod},
+                 {BlockID::WaxedLightningRod, BlockID::WaxedExposedLightningRod, BlockID::WaxedWeatheredLightningRod, BlockID::WaxedOxidizedLightningRod}},
+            };
+            count = sizeof(families) / sizeof(families[0]);
+            return families;
+        }
+
+        // WeatheringCopper.getPrevious — one oxidation stage back.
+        BlockID CopperScrapedVariant(BlockID src) {
+            size_t count = 0;
+            const CopperFamily* families = CopperFamilies(count);
+            for (size_t f = 0; f < count; ++f) {
+                for (int s = 1; s < 4; ++s) {
+                    if (families[f].stage[s] == src) return families[f].stage[s - 1];
+                }
+            }
+            return BlockID::Air;
+        }
+
+        // HoneycombItem.WAXABLES (HoneycombItem.java:29) — unwaxed → waxed.
+        BlockID WaxedVariant(BlockID src) {
+            size_t count = 0;
+            const CopperFamily* families = CopperFamilies(count);
+            for (size_t f = 0; f < count; ++f) {
+                for (int s = 0; s < 4; ++s) {
+                    if (families[f].stage[s] == src) return families[f].waxed[s];
+                }
+            }
+            return BlockID::Air;
+        }
+
+        // HoneycombItem.WAX_OFF_BY_BLOCK (:30) — waxed → unwaxed.
+        BlockID WaxOffVariant(BlockID src) {
+            size_t count = 0;
+            const CopperFamily* families = CopperFamilies(count);
+            for (size_t f = 0; f < count; ++f) {
+                for (int s = 0; s < 4; ++s) {
+                    if (families[f].waxed[s] == src) return families[f].stage[s];
+                }
+            }
+            return BlockID::Air;
+        }
+
+        UseResult UseOn_Axe(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+
+            // playerHasBlockingItemUseIntent (AxeItem.java:65-68): main-hand
+            // use + offhand holds a BLOCKS_ATTACKS item + not sneaking →
+            // PASS so the click raises the shield instead of stripping.
+            if (ctx.hand == 0 && ctx.player && !ctx.player->IsSneaking()) {
+                const Game::ItemStack& offhand = ctx.player->getItemInHand(1);
+                if (!offhand.IsEmpty()
+                    && offhand.get(DataComponents::BLOCKS_ATTACKS)) {
+                    return UseResult::Pass;
+                }
+            }
+
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockID    src = ctx.world->GetBlock(pos.x, pos.y, pos.z);
+
+            // evaluateNewBlockState (:70-90) — strip, then scrape, then wax-off.
+            BlockID newBlock = StrippedVariant(src);
+            if (newBlock != BlockID::Air) {
+                PlaySound("item.axe.strip", pos);                       // :73
+            } else {
+                newBlock = CopperScrapedVariant(src);
+                if (newBlock != BlockID::Air) {
+                    PlaySound("item.axe.scrape", pos);                  // :78
+                    // levelEvent 3005 (scrape particles) — particle system TODO.
+                } else {
+                    newBlock = WaxOffVariant(src);
+                    if (newBlock != BlockID::Air) {
+                        PlaySound("item.axe.wax_off", pos);             // :83
+                        // levelEvent 3004 (wax-off particles) — TODO.
+                    } else {
+                        return UseResult::Pass;                         // :86
+                    }
+                }
+            }
+
+            // :54 setBlock(flags 11) / :55 gameEvent / :57 hurtAndBreak.
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, newBlock,
+                                     World::UpdateFlags::All)) {
+                return UseResult::Fail;
+            }
+            GameEventEmit("block_change", pos);
+            HurtAndBreak(stack, 1, ctx.hand);
+            return UseResult::Success;                                  // :60
+        }
+
+        // ── Honeycomb — mirrors HoneycombItem.java:46-73 ────────────────────
+        UseResult UseOn_Honeycomb(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockID    src = ctx.world->GetBlock(pos.x, pos.y, pos.z);
+
+            const BlockID waxed = WaxedVariant(src);   // WAXABLES lookup (:50)
+            if (waxed == BlockID::Air) return UseResult::Pass;   // :72 PASS
+
+            // :57 itemInHand.shrink(1) — creative count restored by the
+            // dispatch's snapshot (ServerPlayerGameMode-style).
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            // :58 setBlock(11); :60 levelEvent 3003 (wax-on particles) TODO.
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, waxed,
+                                     World::UpdateFlags::All)) {
+                return UseResult::Fail;
+            }
+            PlaySound("item.honeycomb.wax_on", pos);
+            GameEventEmit("block_change", pos);
+            return UseResult::Success;
+        }
+
+        // ── Bone meal — mirrors BoneMealItem.java:35-61, grass branch only ──
+        // Crops/saplings need growth-stage block states (single BlockIDs
+        // here) — BLOCKED: no block growth stages. The grass-block branch
+        // ports GrassBlock.performBonemeal's 128-attempt random-walk scatter.
+        UseResult UseOn_BoneMeal(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+            const glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockID    src = ctx.world->GetBlock(pos.x, pos.y, pos.z);
+
+            if (src != BlockID::Grass) {
+                // growCrop (BoneMealItem.java:63-81) needs BonemealableBlock —
+                // BLOCKED: no block growth stages (wheat/carrots/… are single
+                // BlockIDs). The water/seagrass branch (:83-136) is skipped
+                // too — no fluid simulation.
+                return UseResult::Pass;
+            }
+
+            // GrassBlock.performBonemeal — 128 random-walk attempts from the
+            // block above; each valid air cell over grass gets short grass,
+            // or 1-in-8 a flower (the biome flower feature collapsed to the
+            // plains dandelion/poppy pair).
+            static std::mt19937 rng{std::random_device{}()};
+            auto nextInt = [&](int bound) {
+                return std::uniform_int_distribution<int>(0, bound - 1)(rng);
+            };
+
+            bool anyPlaced = false;
+            const glm::ivec3 above = pos + glm::ivec3(0, 1, 0);
+            for (int i = 0; i < 128; ++i) {
+                glm::ivec3 current = above;
+                bool walkValid = true;
+                for (int j = 0; j < i / 16; ++j) {
+                    current += glm::ivec3(nextInt(3) - 1,
+                                          (nextInt(3) - 1) * nextInt(3) / 2,
+                                          nextInt(3) - 1);
+                    if (!ctx.world->IsValidPosition(current.x, current.y - 1, current.z)
+                        || ctx.world->GetBlock(current.x, current.y - 1, current.z)
+                               != BlockID::Grass) {
+                        walkValid = false;
+                        break;
+                    }
+                }
+                if (!walkValid) continue;
+                if (!ctx.world->IsValidPosition(current.x, current.y, current.z)) continue;
+                if (ctx.world->GetBlock(current.x, current.y, current.z) != BlockID::Air) continue;
+
+                BlockID plant = BlockID::ShortGrass;
+                if (nextInt(8) == 0) {
+                    plant = (nextInt(2) == 0) ? BlockID::Dandelion : BlockID::Poppy;
+                }
+                if (ctx.world->SetBlock(current.x, current.y, current.z, plant,
+                                        World::UpdateFlags::All)) {
+                    anyPlaced = true;
+                }
+            }
+
+            if (!anyPlaced) return UseResult::Fail;
+
+            // :43 levelEvent 1505 (bone-meal particles) — particle system TODO.
+            PlaySound("item.bone_meal.use", pos);
+            // :73 itemStack.shrink(1) — creative restored by dispatch snapshot.
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            return UseResult::Success;
+        }
+
+        // ── Buckets — mirror BucketItem.java:43-95 ──────────────────────────
+        // MC buckets are `use` (air-click) items that do their OWN POV
+        // raycast (Item.getPlayerPOVHitResult, Item.java:354-358) with a
+        // fluid mode: SOURCE_ONLY for the empty bucket (ray stops on fluid),
+        // NONE for filled buckets (fluids invisible, ray hits the ground).
+        // The client-side world raycast treats fluids as non-solid, so
+        // clicking water arrives here as an air-use — exactly the flow MC
+        // has. Implemented as a small server-side DDA over World::GetBlock.
+        struct BucketHit {
+            glm::ivec3 pos;
+            glm::ivec3 beforePos;   // the cell the ray was in before the hit
+            BlockID    block;
+        };
+        std::optional<BucketHit> BucketClip(World* world,
+                                            const Server::ServerPlayer& player,
+                                            bool stopOnFluid) {
+            // Eye + direction from the server-authoritative rotation (the
+            // UseItemC2S handler snapped it to the click's exact aim).
+            const glm::dvec3 p = player.getPosition();
+            const glm::vec3 eye(static_cast<float>(p.x),
+                                static_cast<float>(p.y) + 1.62f,
+                                static_cast<float>(p.z));
+            const float yaw   = glm::radians(player.getYaw());
+            const float pitch = glm::radians(player.getPitch());
+            const glm::vec3 dir(std::cos(yaw) * std::cos(pitch),
+                                std::sin(pitch),
+                                std::sin(yaw) * std::cos(pitch));
+
+            constexpr float kReach = 5.0f;   // blockInteractionRange
+            constexpr float kStep  = 0.05f;  // fine march — fluid cells are full cubes
+            glm::ivec3 prevCell(
+                static_cast<int>(std::floor(eye.x)),
+                static_cast<int>(std::floor(eye.y)),
+                static_cast<int>(std::floor(eye.z)));
+            for (float t = 0.0f; t <= kReach; t += kStep) {
+                const glm::vec3 sample = eye + dir * t;
+                const glm::ivec3 cell(
+                    static_cast<int>(std::floor(sample.x)),
+                    static_cast<int>(std::floor(sample.y)),
+                    static_cast<int>(std::floor(sample.z)));
+                if (cell == prevCell && t > 0.0f) continue;
+                if (!world->IsValidPosition(cell.x, cell.y, cell.z)) return std::nullopt;
+                const BlockID block = world->GetBlock(cell.x, cell.y, cell.z);
+                const bool isFluid = (block == BlockID::Water || block == BlockID::Lava);
+                const bool isSolid = (block != BlockID::Air) && !isFluid;
+                if (isSolid || (isFluid && stopOnFluid)) {
+                    return BucketHit{cell, prevCell, block};
+                }
+                prevCell = cell;
+            }
+            return std::nullopt;
+        }
+
+        // Empty bucket — BucketItem.java:43-74 (fill path).
+        UseResult Use_EmptyBucket(World* world, Server::ServerPlayer* player,
+                                  uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            auto hit = BucketClip(world, *player, /*stopOnFluid=*/true);   // :45 SOURCE_ONLY
+            if (!hit) return UseResult::Pass;                              // :46-47
+            if (hit->block != BlockID::Water && hit->block != BlockID::Lava) {
+                return UseResult::Pass;                                    // :93-94 (BLOCK hit → pass)
+            }
+
+            // :55-74 — pickupBlock (no fluid levels: every water/lava cell is
+            // a source), sound, transform bucket → filled variant.
+            world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z, BlockID::Air,
+                            World::UpdateFlags::All);
+            PlaySound(hit->block == BlockID::Lava ? "item.bucket.fill_lava"
+                                                  : "item.bucket.fill",
+                      hit->pos);
+            // ItemUtils.createFilledResult (:62): creative keeps the empty
+            // bucket, survival transforms it. Component patch reset — a
+            // fresh filled bucket carries no per-stack state.
+            if (player->getGameMode() != Server::GameMode::CREATIVE) {
+                stack = ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
+                                                              : Items::WaterBucket, 1);
+                player->markSlotDirty(player->handSlotIndex(hand));
+            }
+            return UseResult::Success;
+        }
+
+        // Filled bucket — BucketItem.java:76-95 + emptyContents (:104-179,
+        // simplified: no fluid simulation, sources are static cubes).
+        UseResult Use_FilledBucket(World* world, Server::ServerPlayer* player,
+                                   uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            const bool isLava = (stack.itemId == Items::LavaBucket);
+            auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);  // ClipContext.Fluid.NONE
+            if (!hit) return UseResult::Pass;
+
+            // :76-77 — target = clicked cell when replaceable, else the cell
+            // the ray came from (pos.relative(direction)).
+            const Game::Block& hitDef = BlockRegistry::Get(hit->block);
+            (void)hitDef;
+            glm::ivec3 target = hit->beforePos;
+            const BlockID targetBlock =
+                world->IsValidPosition(target.x, target.y, target.z)
+                    ? world->GetBlock(target.x, target.y, target.z)
+                    : BlockID::Bedrock;
+            // emptyContents' mayInteract/replaceable gate (:161-163): air and
+            // fluids are pour-into-able; anything else is blocked.
+            if (targetBlock != BlockID::Air
+                && targetBlock != BlockID::Water && targetBlock != BlockID::Lava) {
+                return UseResult::Fail;                                     // :88
+            }
+
+            if (!world->SetBlock(target.x, target.y, target.z,
+                                 isLava ? BlockID::Lava : BlockID::Water,
+                                 World::UpdateFlags::All)) {
+                return UseResult::Fail;
+            }
+            PlaySound(isLava ? "item.bucket.empty_lava" : "item.bucket.empty",
+                      target);                                              // :175-179
+            // :97-99 getEmptySuccessItem — creative keeps the filled bucket.
+            if (player->getGameMode() != Server::GameMode::CREATIVE) {
+                stack = ItemStack(Items::Bucket, 1);
+                player->markSlotDirty(player->handSlotIndex(hand));
+            }
+            return UseResult::Success;                                      // :90
+        }
+
     } // namespace
 
     void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems) {
@@ -318,6 +707,39 @@ namespace Game {
                 Items::GoldenShovel, Items::IronShovel,   Items::DiamondShovel,
                 Items::NetheriteShovel }) {
             wireUseOn(id, &UseOn_Shovel);
+        }
+
+        // Every axe tier shares strip/scrape/wax-off (AxeItem.java:38-105).
+        for (ItemID id : {
+                Items::WoodenAxe, Items::CopperAxe, Items::StoneAxe,
+                Items::GoldenAxe, Items::IronAxe,   Items::DiamondAxe,
+                Items::NetheriteAxe }) {
+            wireUseOn(id, &UseOn_Axe);
+        }
+
+        // Honeycomb waxing (HoneycombItem.java:46-73).
+        wireUseOn(Items::Honeycomb, &UseOn_Honeycomb);
+
+        // Bone meal — grass-scatter branch only (BoneMealItem.java:35-61;
+        // crop growth BLOCKED on block growth stages).
+        wireUseOn(Items::BoneMeal, &UseOn_BoneMeal);
+
+        // Buckets — `use` (air-click + own POV raycast), not `useOn`,
+        // matching BucketItem's design (BucketItem.java:43-95).
+        auto wireUse = [&](ItemID id, ItemUseFn fn) {
+            auto it = pureItems.find(id);
+            if (it != pureItems.end()) it->second.use = fn;
+        };
+        wireUse(Items::Bucket,      &Use_EmptyBucket);
+        wireUse(Items::WaterBucket, &Use_FilledBucket);
+        wireUse(Items::LavaBucket,  &Use_FilledBucket);
+        // Filled buckets stack to 1 (Items.java `.stacksTo(1)` on all buckets;
+        // the empty bucket stacks to 16).
+        if (auto it = pureItems.find(Items::Bucket); it != pureItems.end())
+            it->second.maxStackSize = 16;
+        for (ItemID id : { Items::WaterBucket, Items::LavaBucket }) {
+            if (auto it = pureItems.find(id); it != pureItems.end())
+                it->second.maxStackSize = 1;
         }
 
         // ── Tool data component (MC parity) ─────────────────────────────────
@@ -379,7 +801,48 @@ namespace Game {
         setTool(Items::DiamondSword,     Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
         setTool(Items::NetheriteSword,   Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
         // Shears (single tier; MC speed = 1.5 against most, 15.0 vs wool/leaves)
+        // No useOn wired: ShearsItem's interactions (beehive honeycombs,
+        // pumpkin carving) all produce item DROPS — BLOCKED on item entities.
         setTool(Items::Shears,           Tool{ToolType::Shears,  MiningTier::Iron,      1.5f});
+
+        // ── RARITY defaults (name-line tooltip color) ───────────────────────
+        // Rows verbatim from Items.java `.rarity(...)` builders in THIS
+        // vendored snapshot (note: golden_apple has NO rarity here — plain
+        // COMMON; enchanted_golden_apple and enchanted_book are RARE, not the
+        // older EPIC/UNCOMMON). Extend freely as more items matter.
+        {
+            auto setRarity = [&](ItemID id, Rarity r) {
+                auto it = pureItems.find(id);
+                if (it != pureItems.end()) {
+                    it->second.defaultComponents.set(DataComponents::RARITY, r);
+                }
+            };
+            setRarity(Items::ChainmailHelmet,      Rarity::UNCOMMON); // Items.java:2572
+            setRarity(Items::ChainmailChestplate,  Rarity::UNCOMMON); // :2573
+            setRarity(Items::ChainmailLeggings,    Rarity::UNCOMMON); // :2574
+            setRarity(Items::ChainmailBoots,       Rarity::UNCOMMON); // :2575
+            setRarity(Items::EnchantedGoldenApple, Rarity::RARE);     // :2597
+            setRarity(Items::RecoveryCompass,      Rarity::UNCOMMON); // :2645
+            setRarity(Items::Elytra,               Rarity::EPIC);     // :2472
+            setRarity(Items::ExperienceBottle,     Rarity::UNCOMMON); // :2827
+            setRarity(Items::Mace,                 Rarity::EPIC);     // :2833
+            setRarity(Items::NetherStar,           Rarity::RARE);     // :2850
+            setRarity(Items::EnchantedBook,        Rarity::RARE);     // :2854
+            setRarity(Items::DragonBreath,         Rarity::UNCOMMON); // :2900
+            setRarity(Items::TotemOfUndying,       Rarity::UNCOMMON); // :2913
+            setRarity(Items::Trident,              Rarity::RARE);     // :2941
+            setRarity(Items::CreeperBannerPattern, Rarity::UNCOMMON); // :2953
+            setRarity(Items::MojangBannerPattern,  Rarity::RARE);     // :2955
+        }
+
+        // Food/consumable component defaults (FoodDefs.cpp).
+        ItemRegistry_RegisterFoods(pureItems);
+
+        // Armor/shield equipment defaults (EquipmentBehavior.cpp).
+        ItemRegistry_RegisterEquipment(pureItems);
+
+        // Bundle click behaviours + crafting remainders (BundleBehavior.cpp).
+        ItemRegistry_RegisterBundles(pureItems);
 
         Log::Info("[ItemRegistry] Wired use-behaviour callbacks "
                   "(FlintAndSteel, 7 hoes, 7 shovels) + Tool components on 36 tool items");

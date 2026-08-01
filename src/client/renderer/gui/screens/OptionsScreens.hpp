@@ -80,6 +80,38 @@ namespace Render {
         void AddOptions() override;
     };
 
+    // ── World Settings ─────────────────────────────────────────────────────
+    // Per-world options (currently the skybox + its day/night behavior).
+    // Unlike the other sub-screens these persist to the CURRENT world's
+    // entry in worlds.json, not to options.txt — so PlatformMain announces
+    // which world is active at session start (and clears it on quit-to-title,
+    // which also greys out the button on the title screen's options menu).
+    namespace WorldSettingsContext {
+        void Set(const std::string& worldName, bool canPersist);
+        void Clear();
+        bool Active();
+        const std::string& WorldName();
+        bool CanPersist();
+    }
+
+    class WorldSettingsScreen : public OptionsSubScreen {
+    public:
+        WorldSettingsScreen() : OptionsSubScreen("World Settings") {}
+    protected:
+        void AddOptions() override;
+    };
+
+    // Scrollable pick-one list of every discovered skybox (MC language-screen
+    // pattern — the codebase has no floating dropdown widget, and a full
+    // screen list scales to any number of sets). Selecting applies + pops
+    // back to World Settings, whose button label refreshes on re-init.
+    class SkyboxSelectScreen : public OptionsSubScreen {
+    public:
+        SkyboxSelectScreen() : OptionsSubScreen("Select Skybox") {}
+    protected:
+        void AddOptions() override;
+    };
+
     class SoundOptionsScreen : public OptionsSubScreen {
     public:
         SoundOptionsScreen() : OptionsSubScreen("Music & Sound Options") {}

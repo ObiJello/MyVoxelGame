@@ -94,6 +94,8 @@ namespace Input {
             case Key::N:           glfwKey = GLFW_KEY_N; break;
             case Key::P:           glfwKey = GLFW_KEY_P; break;
             case Key::T:           glfwKey = GLFW_KEY_T; break;
+            case Key::F:           glfwKey = GLFW_KEY_F; break;
+            case Key::Q:           glfwKey = GLFW_KEY_Q; break;
             case Key::Slash:       glfwKey = GLFW_KEY_SLASH; break;
             case Key::Alpha1:      glfwKey = GLFW_KEY_1; break;
             case Key::Alpha2:      glfwKey = GLFW_KEY_2; break;
@@ -105,6 +107,7 @@ namespace Input {
             case Key::Alpha8:      glfwKey = GLFW_KEY_8; break;
             case Key::Alpha9:      glfwKey = GLFW_KEY_9; break;
             case Key::F3:          glfwKey = GLFW_KEY_F3; break;
+            case Key::F5:          glfwKey = GLFW_KEY_F5; break;
             case Key::F11:         glfwKey = GLFW_KEY_F11; break;
             case Key::Tilde:       glfwKey = GLFW_KEY_GRAVE_ACCENT; break;
             default: return false;
@@ -180,6 +183,8 @@ namespace Input {
         currentKeyStates[Key::N] = IsKeyDown(Key::N);
         currentKeyStates[Key::P] = IsKeyDown(Key::P);
         currentKeyStates[Key::T] = IsKeyDown(Key::T);
+        currentKeyStates[Key::F] = IsKeyDown(Key::F);
+        currentKeyStates[Key::Q] = IsKeyDown(Key::Q);
         currentKeyStates[Key::Slash] = IsKeyDown(Key::Slash);
         currentKeyStates[Key::Alpha1] = IsKeyDown(Key::Alpha1);
         currentKeyStates[Key::Alpha2] = IsKeyDown(Key::Alpha2);
@@ -193,6 +198,7 @@ namespace Input {
         currentKeyStates[Key::LeftMouse] = IsMouseButtonDown(Key::LeftMouse);
         currentKeyStates[Key::RightMouse] = IsMouseButtonDown(Key::RightMouse);
         currentKeyStates[Key::F3] = IsKeyDown(Key::F3);
+        currentKeyStates[Key::F5] = IsKeyDown(Key::F5);
         currentKeyStates[Key::F11] = IsKeyDown(Key::F11);
         currentKeyStates[Key::Tilde] = IsKeyDown(Key::Tilde);
     }

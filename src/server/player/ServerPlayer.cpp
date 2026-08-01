@@ -1,5 +1,6 @@
 // File: src/server/player/ServerPlayer.cpp
 #include "ServerPlayer.hpp"
+#include "common/entity/ConsumableBehavior.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
@@ -38,6 +39,14 @@ namespace Server {
         if (m_invulnerabilityTicks > 0) {
             m_invulnerabilityTicks--;
         }
+
+        // Void damage — MC Entity.checkBelowWorld: 64 blocks below the world
+        // floor (minY -64 → threshold -128) deals 4/hit until death. The
+        // invulnerability window rate-limits it; creative/spectator are
+        // immune inside damage().
+        if (!m_isDead && m_position.y < -128.0) {
+            damage(4.0f, DamageSource::VOID_DAMAGE);
+        }
         
         // TODO: Process status effects
         // for (auto& effect : m_effects) {
@@ -63,27 +72,147 @@ namespace Server {
         //     m_fallDistance = 0.0f;
         // }
         
-        // TODO: Process food/hunger
-        // if (m_gameMode == GameMode::SURVIVAL) {
-        //     m_exhaustion += 0.01f; // Base exhaustion
-        //     if (m_exhaustion >= 4.0f) {
-        //         m_food = std::max(0, m_food - 1);
-        //         m_exhaustion = 0.0f;
-        //     }
-        // }
-        
+        // Hunger / saturation / regen / starvation — MC FoodData.tick
+        // (FoodData.java:32-73). Survival only: creative doesn't drain or
+        // starve (MC gates via Player.tick's abilities checks — exhaustion
+        // sources never fire in creative and food is hidden).
+        if (m_gameMode == GameMode::SURVIVAL || m_gameMode == GameMode::ADVENTURE) {
+            m_foodData.tick(*this);
+        }
+
         // TODO: Handle portal cooldown
         // if (m_portalCooldown > 0) {
         //     m_portalCooldown--;
         // }
         
+        // Item-use countdown (eating, blocking, …). Mirrors MC's
+        // LivingEntity.baseTick → updatingUsingItem (LivingEntity.java:3254).
+        updatingUsingItem();
+
         // Update position with physics (existing functionality)
         updatePosition(world);
-        
+
         // Update mining progress
         if (m_isBreaking) {
             continueDestroyBlock(m_breakingPos);
         }
+    }
+
+    // === ITEM USE LIFECYCLE — mirrors LivingEntity.java:3246-3449 ===
+
+    int ServerPlayer::handSlotIndex(uint32_t hand) const {
+        return hand == 0
+            ? Game::Inventory::HotbarToIndex(m_inventory.GetSelectedSlot())
+            : Game::Inventory::OFFHAND_BEGIN;
+    }
+
+    Game::ItemStack& ServerPlayer::getItemInHand(uint32_t hand) {
+        return m_inventory.MutableSlot(handSlotIndex(hand));
+    }
+
+    const Game::ItemStack& ServerPlayer::getItemInHand(uint32_t hand) const {
+        return m_inventory.GetSlot(handSlotIndex(hand));
+    }
+
+    void ServerPlayer::setItemInHand(uint32_t hand, const Game::ItemStack& stack) {
+        const int slot = handSlotIndex(hand);
+        m_inventory.SetSlotFull(slot, stack);
+        markSlotDirty(slot);
+    }
+
+    // Mirrors LivingEntity.startUsingItem (LivingEntity.java:3325-3340).
+    void ServerPlayer::startUsingItem(uint32_t hand) {
+        const Game::ItemStack& stack = getItemInHand(hand);
+        if (!stack.IsEmpty() && !m_isUsingItem) {
+            m_useItem          = stack;                          // :3328
+            m_useItemRemaining = Game::GetUseDuration(stack);    // :3329
+            m_isUsingItem      = true;                           // :3331 (flag bit 1)
+            m_usedItemHand     = hand;                           // :3332 (flag bit 2)
+            // :3333 causeUseVibration → game-event system TODO (log-stub level)
+            // :3334-3336 KINETIC_WEAPON bookkeeping omitted — no combat.
+        }
+    }
+
+    // Mirrors LivingEntity.updatingUsingItem (LivingEntity.java:3254-3264).
+    void ServerPlayer::updatingUsingItem() {
+        if (!m_isUsingItem) return;
+        Game::ItemStack& inHand = getItemInHand(m_usedItemHand);
+        // MC: `ItemStack.isSameItem(getItemInHand(hand), useItem)` — compare
+        // item identity only; count changes (stacking) don't cancel the use.
+        if (inHand.itemId == m_useItem.itemId && !inHand.IsEmpty()) {
+            m_useItem = inHand;              // :3257 — refresh to the live stack
+            updateUsingItem();               // :3258
+        } else {
+            stopUsingItem();                 // :3260
+        }
+    }
+
+    // Mirrors LivingEntity.updateUsingItem (LivingEntity.java:3296-3302).
+    void ServerPlayer::updateUsingItem() {
+        // :3297 useItem.onUseTick → ItemStack.onUseTick (ItemStack.java:1060-1064)
+        // — the periodic consume-phase eat sound/particle stub.
+        Game::ConsumableBehavior::OnUseTick(*this, m_useItem, m_useItemRemaining);
+        // :3298 — `--useItemRemaining == 0 && !useOnRelease → completeUsingItem`
+        // (useOnRelease is crossbow-only; we have no item that sets it).
+        if (--m_useItemRemaining == 0) {
+            completeUsingItem();
+        }
+    }
+
+    // Mirrors LivingEntity.completeUsingItem (LivingEntity.java:3388-3405).
+    void ServerPlayer::completeUsingItem() {
+        const uint32_t hand = m_usedItemHand;
+        Game::ItemStack& inHand = getItemInHand(hand);
+        if (inHand.itemId != m_useItem.itemId) {   // :3391 — hand changed under us
+            releaseUsingItem();
+            return;
+        }
+        if (!m_useItem.IsEmpty() && m_isUsingItem) {   // :3394
+            Game::ItemStack result = finishUsingItem(inHand);   // :3395
+            // Always write the (possibly mutated/replaced) stack back through
+            // setItemInHand so the slot is marked dirty and broadcast. MC only
+            // assigns when the reference changed (:3396-3398); with our
+            // value-semantics stacks the write-through is how mutation lands.
+            setItemInHand(hand, result);
+            stopUsingItem();   // :3400
+        }
+    }
+
+    // Mirrors ItemStack.finishUsingItem → Item.finishUsingItem
+    // (Item.java:221-224) + applyAfterUseComponentSideEffects (USE_REMAINDER,
+    // ItemStack.java:332-348). Delegated to ConsumableBehavior::FinishUsing.
+    Game::ItemStack ServerPlayer::finishUsingItem(Game::ItemStack& stack) {
+        return Game::ConsumableBehavior::FinishUsing(*this, stack);
+    }
+
+    // Mirrors LivingEntity.releaseUsingItem (LivingEntity.java:3426-3437).
+    void ServerPlayer::releaseUsingItem() {
+        Game::ItemStack& inHand = getItemInHand(m_usedItemHand);
+        if (!m_useItem.IsEmpty() && inHand.itemId == m_useItem.itemId) {   // :3428
+            m_useItem = inHand;   // :3429
+            // :3430 useItem.releaseUsing(level, this, remaining) — per-item
+            // release hook (Bow fires here). Default is a no-op
+            // (Item.java:324-326); no item overrides it yet.
+            // :3431-3433 useOnRelease (crossbow) omitted — no such item.
+        }
+        stopUsingItem();   // :3436
+    }
+
+    // Mirrors Player.isBlocking → getItemBlockingWith: the use must have
+    // outlasted the item's blockDelayTicks (shield: 0.25 s = 5 ticks).
+    bool ServerPlayer::isBlocking() const {
+        if (!m_isUsingItem) return false;
+        auto blocks = m_useItem.get(Game::DataComponents::BLOCKS_ATTACKS);
+        if (!blocks) return false;
+        return getTicksUsingItem() >= blocks->blockDelayTicks();
+    }
+
+    // Mirrors LivingEntity.stopUsingItem (LivingEntity.java:3439-3449).
+    void ServerPlayer::stopUsingItem() {
+        m_isUsingItem      = false;
+        m_usedItemHand     = 0;
+        m_useItem          = Game::ItemStack{};
+        m_useItemRemaining = 0;
     }
 
     void ServerPlayer::respawn(const glm::vec3& spawnPos) {
@@ -93,7 +222,9 @@ namespace Server {
         m_position = glm::dvec3(spawnPos);
         m_velocity = glm::vec3(0.0f);
         m_health = 20.0f;
-        m_food = 20;
+        m_isDead = false;
+        m_foodData.setFoodLevel(20);
+        m_foodData.setSaturation(5.0f);
         m_fallDistance = 0.0f;
         m_invulnerabilityTicks = 60; // 3 seconds of invulnerability
         
@@ -289,8 +420,12 @@ namespace Server {
     // === DAMAGE & EFFECTS ===
 
     void ServerPlayer::damage(float amount, DamageSource source) {
-        // TODO: Implement damage calculation
-        
+        // Already dead — nothing left to kill (the death screen is up and
+        // the body is frozen until PERFORM_RESPAWN).
+        if (m_isDead) {
+            return;
+        }
+
         // Check for invulnerability
         if (m_invulnerabilityTicks > 0) {
             return;
@@ -322,16 +457,24 @@ namespace Server {
         // TODO: Play hurt sound
         
         if (m_health <= 0.0f) {
-            // Player died
-            Log::Info("ServerPlayer: Player %u died", m_playerId);
-            // TODO: Drop inventory
-            // TODO: Send death message
-            // TODO: Trigger respawn
+            // Player died. Inventory is KEPT (no dropped-item-entity system —
+            // deliberate deviation from MC's default). The health=0 in the
+            // next SetHealthS2C push is the client's death signal (same as
+            // MC), which opens the DeathScreen; PERFORM_RESPAWN revives via
+            // respawn().
+            m_isDead = true;
+            m_isBreaking = false;
+            stopUsingItem();
+            Log::Info("ServerPlayer: Player %u died (source %d)",
+                      m_playerId, static_cast<int>(source));
         }
     }
 
     void ServerPlayer::heal(float amount) {
-        // TODO: Implement healing
+        // Dead players don't regenerate — MC LivingEntity.heal is a no-op
+        // when dead; without this, FoodData regen could quietly "revive" a
+        // corpse waiting on the death screen.
+        if (m_isDead) return;
         if (m_health < 20.0f) {
             m_health = std::min(20.0f, m_health + amount);
             Log::Debug("ServerPlayer: Player %u healed %.1f (health: %.1f)",
@@ -357,13 +500,16 @@ namespace Server {
 
     void ServerPlayer::setGameMode(GameMode mode) {
         m_gameMode = mode;
-        
-        // Update abilities based on game mode
+
+        // Mirrors MC GameType.updatePlayerAbilities: creative grants
+        // mayfly/instabuild but does NOT force flying (you keep walking
+        // until you double-tap space); only spectator forces flying.
+        // Invulnerability is derived from the mode inside damage() — no
+        // timer hack needed here.
         switch (mode) {
             case GameMode::CREATIVE:
                 m_canFly = true;
                 m_instabuild = true;
-                m_invulnerabilityTicks = -1; // Always invulnerable
                 break;
             case GameMode::SPECTATOR:
                 m_canFly = true;
@@ -375,10 +521,9 @@ namespace Server {
                 m_canFly = false;
                 m_flying = false;
                 m_instabuild = false;
-                m_invulnerabilityTicks = 0;
                 break;
         }
-        
+
         Log::Info("ServerPlayer: Player %u game mode changed to %d", m_playerId, static_cast<int>(mode));
     }
 
