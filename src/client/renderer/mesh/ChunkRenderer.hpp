@@ -200,18 +200,21 @@ namespace Render {
         // Occlusion culling graph (BFS from player, skips sections behind solid terrain)
         SectionOcclusionGraph m_occlusionGraph;
 
-        // Visible sections cache
+        // BFS occlusion-graph result: every reachable section with geometry,
+        // sorted front-to-back. Cached across frames — rebuilt only when the
+        // camera enters a new section or the world changes (mesh upload/unload).
+        // Matches Minecraft: the graph update is throttled, the frustum is not.
+        std::vector<SectionRenderData> m_reachableSections;
+
+        // Per-frame draw list: m_reachableSections filtered through the current
+        // frustum. Rebuilt every frame (cheap — a few thousand AABB tests), so
+        // sections entering the view during small rotations appear immediately.
         std::vector<SectionRenderData> m_visibleSections;
 
-        // Visible section cache — avoids rebuilding the visible list every frame
-        // when the camera hasn't moved significantly. Matches Minecraft's approach
-        // of only recalculating visibility on chunk transitions and rotation changes.
         bool m_visibleSectionsDirty = true;
         int m_lastCameraChunkX = INT_MAX;
         int m_lastCameraChunkZ = INT_MAX;
         int m_lastCameraSectionY = INT_MAX;
-        float m_lastCameraYaw = 0.0f;
-        float m_lastCameraPitch = 0.0f;
 
         // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
         std::vector<std::vector<int32_t>> m_perSlabCounts;

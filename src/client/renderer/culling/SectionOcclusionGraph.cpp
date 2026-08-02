@@ -24,9 +24,9 @@ namespace Render {
         }
     }
 
-    void SectionOcclusionGraph::update(const glm::vec3& cameraPos, const Frustum& frustum,
+    void SectionOcclusionGraph::update(const glm::vec3& cameraPos,
                                         bool smartCull, int renderDistance,
-                                        std::vector<SectionRenderData>& outVisible) {
+                                        std::vector<SectionRenderData>& outReachable) {
         PROFILE_ZONE;
 
         int playerChunkX = static_cast<int>(std::floor(cameraPos.x / 16.0f));
@@ -102,19 +102,16 @@ namespace Render {
             int idx = getIdx(entry.rx, entry.rz, entry.sy);
             GridNode& node = m_gridNodes[idx];
 
-            // World position for frustum test
             int worldCX = playerChunkX - renderDistance + entry.rx;
             int worldCZ = playerChunkZ - renderDistance + entry.rz;
             float sectionMinX = static_cast<float>(worldCX * 16);
             float sectionMinY = static_cast<float>(entry.sy * 16 + Config::MinY);
             float sectionMinZ = static_cast<float>(worldCZ * 16);
 
-            bool inFrustum = frustum.IsBoxVisible(
-                glm::vec3(sectionMinX, sectionMinY, sectionMinZ),
-                glm::vec3(sectionMinX + 16.0f, sectionMinY + 16.0f, sectionMinZ + 16.0f));
-
-            // Add to visible list if in frustum AND has geometry
-            if (inFrustum && node.gpuData && node.gpuData->HasGeometry()) {
+            // Add every reachable section with geometry — the frustum test is
+            // applied per frame by ChunkRenderer over this cached list, so the
+            // BFS result stays valid while the camera merely rotates.
+            if (node.gpuData && node.gpuData->HasGeometry()) {
                 float dx = (sectionMinX + 8.0f) - cameraPos.x;
                 float dy = (sectionMinY + 8.0f) - cameraPos.y;
                 float dz = (sectionMinZ + 8.0f) - cameraPos.z;
@@ -122,12 +119,11 @@ namespace Render {
 
                 Game::Math::ChunkPos chunkPos{worldCX, worldCZ};
                 SectionRenderData rd(chunkPos, entry.sy, node.gpuData, dist);
-                rd.inFrustum = true;
                 rd.layerMask = 0;
                 if (node.gpuData->opaqueVertexCount > 0)      rd.layerMask |= 1;
                 if (node.gpuData->cutoutVertexCount > 0)       rd.layerMask |= 2;
                 if (node.gpuData->translucentVertexCount > 0)  rd.layerMask |= 4;
-                outVisible.push_back(rd);
+                outReachable.push_back(rd);
             }
 
             // Determine VisibilitySet:
@@ -285,7 +281,7 @@ namespace Render {
 
         m_lastVisitedCount = visitedCount;
         m_lastOccludedCount = occludedCount;
-        m_lastRenderedCount = static_cast<int>(outVisible.size());
+        m_lastRenderedCount = static_cast<int>(outReachable.size());
         m_needsFullUpdate = false;
     }
 

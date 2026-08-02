@@ -29,6 +29,7 @@ namespace Render {
 
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
+        m_reachableSections.reserve(2048);
         m_visibleSections.reserve(2048);
         m_perSlabCounts.reserve(16);
         m_perSlabOffsets.reserve(16);
@@ -293,7 +294,11 @@ namespace Render {
         PROFILE_ZONE;
         auto overallStartTime = std::chrono::high_resolution_clock::now();
 
-        // --- Visible section caching ---
+        // --- Reachable-section caching (BFS occlusion graph) ---
+        // The BFS result depends only on the camera's SECTION and world state,
+        // so it is cached across frames. The frustum test is applied fresh
+        // every frame below — rotation never goes stale, which fixes chunks
+        // at the screen edge not appearing until the camera moved enough.
         int currentChunkX = static_cast<int>(std::floor(camera.position.x / 16.0f));
         int currentChunkZ = static_cast<int>(std::floor(camera.position.z / 16.0f));
         int currentSectionY = static_cast<int>(std::floor((camera.position.y - Config::MinY) / 16.0f));
@@ -301,63 +306,76 @@ namespace Render {
         bool cameraMoved = (currentChunkX != m_lastCameraChunkX ||
                             currentChunkZ != m_lastCameraChunkZ ||
                             currentSectionY != m_lastCameraSectionY);
-        bool cameraRotated = (std::abs(camera.yaw - m_lastCameraYaw) > 3.0f ||
-                              std::abs(camera.pitch - m_lastCameraPitch) > 3.0f);
 
-        if (!m_visibleSectionsDirty && !cameraMoved && !cameraRotated && !m_visibleSections.empty()) {
-            // Preserve occlusion stats from last BFS run (Reset() cleared them)
-            m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
-            m_stats.sectionsAvailable = m_occlusionGraph.getLastVisitedCount();
-            m_stats.sectionsSkipped = m_occlusionGraph.getLastOccludedCount();
-            auto overallEndTime = std::chrono::high_resolution_clock::now();
-            m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
-            return;
+        if (m_visibleSectionsDirty || cameraMoved || m_reachableSections.empty()) {
+            m_lastCameraChunkX = currentChunkX;
+            m_lastCameraChunkZ = currentChunkZ;
+            m_lastCameraSectionY = currentSectionY;
+            m_visibleSectionsDirty = false;
+
+            m_reachableSections.clear();
+
+            if (!g_clientMeshManager) {
+                m_visibleSections.clear();
+                m_stats.buildDrawListsTimeMs = 0.0f;
+                return;
+            }
+
+            // Get effective render distance
+            int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
+            if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+                renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
+            }
+
+            // Run occlusion graph BFS — only sections reachable through non-solid
+            // terrain are added. Sections behind mountains/underground are skipped.
+            auto iterationStart = std::chrono::high_resolution_clock::now();
+            m_occlusionGraph.update(camera.position, m_enableSmartCull,
+                                    renderDistanceChunks, m_reachableSections);
+            auto iterationEnd = std::chrono::high_resolution_clock::now();
+            m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
+            m_stats.gpuDataLoadTimeMs = 0.0f;
+
+            // Sort front-to-back once per rebuild; the per-frame frustum filter
+            // below preserves this order (opaque early-z; translucent iterates
+            // the filtered list in reverse).
+            auto sortingStart = std::chrono::high_resolution_clock::now();
+            if (m_reachableSections.size() > 1) {
+                std::sort(m_reachableSections.begin(), m_reachableSections.end(),
+                         [](const SectionRenderData& a, const SectionRenderData& b) {
+                             return a.distanceToCamera < b.distanceToCamera;
+                         });
+            }
+            auto sortingEnd = std::chrono::high_resolution_clock::now();
+            m_stats.sortingTimeMs = std::chrono::duration<float, std::milli>(sortingEnd - sortingStart).count();
+        } else {
+            m_stats.chunkIterationTimeMs = 0.0f;
+            m_stats.sortingTimeMs = 0.0f;
+            m_stats.gpuDataLoadTimeMs = 0.0f;
         }
 
-        m_lastCameraChunkX = currentChunkX;
-        m_lastCameraChunkZ = currentChunkZ;
-        m_lastCameraSectionY = currentSectionY;
-        m_lastCameraYaw = camera.yaw;
-        m_lastCameraPitch = camera.pitch;
-        m_visibleSectionsDirty = false;
-
+        // --- Per-frame frustum filter over the cached reachable set ---
+        auto cullStart = std::chrono::high_resolution_clock::now();
         m_visibleSections.clear();
-
-        if (!g_clientMeshManager) {
-            m_stats.buildDrawListsTimeMs = 0.0f;
-            return;
+        if (m_enableFrustumCulling) {
+            for (const auto& section : m_reachableSections) {
+                float minX = static_cast<float>(section.chunkPos.x * 16);
+                float minY = static_cast<float>(section.sectionY * 16 + Config::MinY);
+                float minZ = static_cast<float>(section.chunkPos.z * 16);
+                if (frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
+                                         glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
+                    m_visibleSections.push_back(section);
+                }
+            }
+        } else {
+            m_visibleSections = m_reachableSections;
         }
-
-        // Get effective render distance
-        int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
-        if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
-            renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
-        }
-
-        // Run occlusion graph BFS — only sections reachable through non-solid terrain
-        // are added to m_visibleSections. Sections behind mountains/underground are skipped.
-        auto iterationStart = std::chrono::high_resolution_clock::now();
-        m_occlusionGraph.update(camera.position, frustum, m_enableSmartCull,
-                                renderDistanceChunks, m_visibleSections);
-        auto iterationEnd = std::chrono::high_resolution_clock::now();
-        m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
-        m_stats.frustumCullingTimeMs = m_stats.chunkIterationTimeMs;
-        m_stats.gpuDataLoadTimeMs = 0.0f;
+        auto cullEnd = std::chrono::high_resolution_clock::now();
+        m_stats.frustumCullingTimeMs = std::chrono::duration<float, std::milli>(cullEnd - cullStart).count();
 
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
         m_stats.sectionsSkipped = m_occlusionGraph.getLastOccludedCount();
         m_stats.sectionsAvailable = m_occlusionGraph.getLastVisitedCount();
-
-        // Sort front-to-back for opaque early-z; translucent pass iterates in reverse
-        auto sortingStart = std::chrono::high_resolution_clock::now();
-        if (m_visibleSections.size() > 1) {
-            std::sort(m_visibleSections.begin(), m_visibleSections.end(),
-                     [](const SectionRenderData& a, const SectionRenderData& b) {
-                         return a.distanceToCamera < b.distanceToCamera;
-                     });
-        }
-        auto sortingEnd = std::chrono::high_resolution_clock::now();
-        m_stats.sortingTimeMs = std::chrono::duration<float, std::milli>(sortingEnd - sortingStart).count();
 
         auto overallEndTime = std::chrono::high_resolution_clock::now();
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();

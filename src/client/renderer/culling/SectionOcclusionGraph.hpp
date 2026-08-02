@@ -30,11 +30,14 @@ namespace Render {
         // Mark that a full BFS rebuild is needed (view distance changed, world reload, etc.)
         void invalidate() { m_needsFullUpdate = true; }
 
-        // Run BFS from the player's section and populate outVisible with reachable sections.
+        // Run BFS from the player's section and populate outReachable with every
+        // reachable section that has geometry. NO frustum test happens here — the
+        // caller (ChunkRenderer) applies the frustum per frame over this list, so
+        // the BFS result can be cached across frames/rotations without going stale.
         // smartCull: if true, use VisibilitySet to occlude; if false, skip occlusion (debug).
-        void update(const glm::vec3& cameraPos, const Frustum& frustum,
+        void update(const glm::vec3& cameraPos,
                     bool smartCull, int renderDistance,
-                    std::vector<SectionRenderData>& outVisible);
+                    std::vector<SectionRenderData>& outReachable);
 
         // Stats
         int getLastVisitedCount() const { return m_lastVisitedCount; }
