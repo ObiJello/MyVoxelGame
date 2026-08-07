@@ -137,15 +137,18 @@ namespace Render {
         // Apply Minecraft directional face shading
         ApplyDirectionalShade(surfaceVerts, BlockFace::PositiveY);
 
-        // Add to translucent mesh (fluids are always translucent)
-        if (surfaceVerts.size() == 4) {
-            uint32_t baseIndex = static_cast<uint32_t>(mesh.translucentVerts.size());
+        // Add to translucent mesh (fluids are always translucent).
+        // 16-bit index guard: section layer capped at 65,536 vertices.
+        if (surfaceVerts.size() == 4 && mesh.translucentVerts.size() + 4 <= 65536) {
+            uint16_t baseIndex = static_cast<uint16_t>(mesh.translucentVerts.size());
             mesh.translucentVerts.insert(mesh.translucentVerts.end(), surfaceVerts.begin(), surfaceVerts.end());
 
             // Add indices for two triangles
             mesh.translucentIdxs.insert(mesh.translucentIdxs.end(), {
-                baseIndex + 0, baseIndex + 1, baseIndex + 2,
-                baseIndex + 0, baseIndex + 2, baseIndex + 3
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
+                static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 3)
             });
 
             //Log::Debug("Added fluid top surface: %zu vertices, %zu indices", surfaceVerts.size(), 6);
@@ -176,13 +179,16 @@ namespace Render {
         // Apply Minecraft directional face shading
         ApplyDirectionalShade(faceVerts, face);
 
-        if (faceVerts.size() == 4) {
-            uint32_t baseIndex = static_cast<uint32_t>(mesh.translucentVerts.size());
+        // 16-bit index guard: section layer capped at 65,536 vertices.
+        if (faceVerts.size() == 4 && mesh.translucentVerts.size() + 4 <= 65536) {
+            uint16_t baseIndex = static_cast<uint16_t>(mesh.translucentVerts.size());
             mesh.translucentVerts.insert(mesh.translucentVerts.end(), faceVerts.begin(), faceVerts.end());
 
             mesh.translucentIdxs.insert(mesh.translucentIdxs.end(), {
-                baseIndex + 0, baseIndex + 1, baseIndex + 2,
-                baseIndex + 0, baseIndex + 2, baseIndex + 3
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
+                static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+                static_cast<uint16_t>(baseIndex + 3)
             });
 
             //Log::Debug("Added fluid face: %zu vertices, %zu indices", faceVerts.size(), 6);

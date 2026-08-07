@@ -29,6 +29,10 @@
 #include "Item.hpp"
 #include "../data/DataComponents.hpp"
 #include "../core/Log.hpp"
+// World must be COMPLETE here, not just forward-declared: OnGunUseOn
+// downcasts ctx.world (an ILevelWrite*) back to the concrete World* the
+// server-only PortalRegistry API takes.
+#include "../world/level/World.hpp"
 #include "server/portal/PortalRegistry.hpp"
 #include "server/player/ServerPlayer.hpp"
 
@@ -82,8 +86,14 @@ namespace Game::Portal {
         // Hand off to the registry: walks the candidate-orientation list
         // (vertical-up → vertical-down → horizontal → ...) and registers
         // the first valid placement.
+        // The portal registry is server-only state. This callback is
+        // therefore never run client-side — ClientPlayerController::
+        // PredictUseItemOn explicitly skips PortalGun (the client fires
+        // projectiles through SpawnPortalProjectile instead), so the concrete
+        // types behind these interfaces are always the server's here.
         const PlaceResult result = ServerRegistry().PlacePortal(
-            id, ctx.world, ctx.hitResult, color, ctx.player);
+            id, static_cast<Game::World*>(ctx.world), ctx.hitResult, color,
+            static_cast<Server::ServerPlayer*>(ctx.player));
 
         if (result == PlaceResult::Fizzled) {
             // TODO(sound): play fizzle sound when the audio system lands.

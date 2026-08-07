@@ -476,9 +476,12 @@ if(APPLE)
             src/server/commands/KillCommand.cpp
             src/server/commands/TimeCommand.cpp
             src/server/commands/GameRuleCommand.cpp
-            src/server/inventory/InventoryClickHandler.cpp
+            src/common/inventory/Slot.cpp
+            src/common/inventory/AbstractContainerMenu.cpp
+            src/common/inventory/InventoryMenu.cpp
             src/client/world/ClientChunkManager.cpp
             src/client/world/ClientBlockAccess.cpp
+            src/client/world/BlockStatePrediction.cpp
             src/client/world/PendingDiffsManager.cpp
             src/server/world/ServerWorkerPool.cpp
             src/client/world/ClientWorkerPool.cpp
@@ -698,6 +701,11 @@ else()
             src/client/world/ClientChunkManager.hpp
             src/client/world/ClientBlockAccess.cpp
             src/client/world/ClientBlockAccess.hpp
+            src/client/world/ClientUsePlayer.hpp
+            src/common/entity/IUsePlayer.hpp
+            src/common/world/level/ILevelWrite.hpp
+            src/client/world/BlockStatePrediction.cpp
+            src/client/world/BlockStatePrediction.hpp
             src/client/world/ClientWorkerPool.cpp
             src/client/world/ClientWorkerPool.hpp
             src/client/world/PendingDiffsManager.cpp
@@ -813,9 +821,14 @@ else()
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
 
-            # Server inventory
-            src/server/inventory/InventoryClickHandler.cpp
-            src/server/inventory/InventoryClickHandler.hpp
+            # Container menus (shared by client prediction and server authority)
+            src/common/inventory/Container.hpp
+            src/common/inventory/Slot.cpp
+            src/common/inventory/Slot.hpp
+            src/common/inventory/AbstractContainerMenu.cpp
+            src/common/inventory/AbstractContainerMenu.hpp
+            src/common/inventory/InventoryMenu.cpp
+            src/common/inventory/InventoryMenu.hpp
 
             # Server world - Cache
             src/server/world/cache/ChunkCache.cpp
@@ -1011,6 +1024,20 @@ target_link_libraries(MyVoxelGame PRIVATE
 # Link with Asio if using standalone
 if(TARGET asio)
     target_link_libraries(MyVoxelGame PRIVATE asio)
+endif()
+
+# ─── Hard-error on unconditional self-recursion ─────────────────────────────
+# ContainerClick::MayPlaceInSlot once shadowed the free Game::MayPlaceInSlot
+# with a member of the same name whose body called itself — unqualified lookup
+# inside a member function finds the class member and stops, so every inventory
+# pickup/merge/swap recursed until the stack blew (or spun forever once the
+# self-tail-call was optimized into a jump). The compiler already detects this
+# exact shape; promote it to an error so it can never ship again.
+#
+# Target-scoped on purpose: vendored code in ext/ and my_terrain_library is not
+# ours to keep warning-clean. MSVC has no equivalent diagnostic.
+if(NOT MSVC)
+    target_compile_options(MyVoxelGame PRIVATE -Werror=infinite-recursion)
 endif()
 
 # Link Tracy profiler if enabled

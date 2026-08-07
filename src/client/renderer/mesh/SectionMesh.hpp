@@ -13,19 +13,22 @@ namespace Render {
     // Forward declaration for DestroyAllResources
     class RenderBackend;
 
-    // Plain-old data struct to hold CPU-side mesh buffers for one 16x16x16 section
+    // Plain-old data struct to hold CPU-side mesh buffers for one 16x16x16 section.
+    // Indices are 16-bit: they are relative to the section's own vertex range
+    // (drawn with a per-section baseVertex), and a section layer is capped at
+    // 65,536 vertices — see the guards in Mesher::GenerateQuad / FluidMeshBuilder.
     struct SectionMesh {
         // Opaque geometry (solid blocks like stone, dirt)
         std::vector<Vertex> opaqueVerts;
-        std::vector<uint32_t> opaqueIdxs;
+        std::vector<uint16_t> opaqueIdxs;
 
         // Cutout geometry (alpha-test blocks like leaves, grass)
         std::vector<Vertex> cutoutVerts;
-        std::vector<uint32_t> cutoutIdxs;
+        std::vector<uint16_t> cutoutIdxs;
 
         // Translucent geometry (blended blocks like glass, water, ice)
         std::vector<Vertex> translucentVerts;
-        std::vector<uint32_t> translucentIdxs;
+        std::vector<uint16_t> translucentIdxs;
 
         // Section position
         Game::Math::ChunkPos chunkPos{0, 0};
@@ -131,7 +134,7 @@ namespace Render {
         // Get total memory usage estimate
         size_t GetMemoryUsage() const {
             return (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) *
-                   (sizeof(Vertex) + sizeof(uint32_t));
+                   (sizeof(Vertex) + sizeof(uint16_t));
         }
 
         // No-op: GPU resources are now owned by ChunkMegaBuffer.

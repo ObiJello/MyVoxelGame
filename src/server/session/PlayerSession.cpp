@@ -1,5 +1,6 @@
 // File: src/server/session/PlayerSession.cpp
 #include "PlayerSession.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../network/NetworkServer.hpp"
@@ -18,7 +19,7 @@
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
 #include "../IntegratedServer.hpp"
-#include "../inventory/InventoryClickHandler.hpp"
+#include "common/inventory/AbstractContainerMenu.hpp"
 #include "common/core/Features.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../portal/PortalRegistry.hpp"
@@ -97,6 +98,7 @@ namespace Server {
     }
 
     void PlayerSession::Tick(int64_t serverTick) {
+        PROFILE_ZONE_N("SessionTick");
         auto tickStart = std::chrono::steady_clock::now();
         
         // Skip if not in playing state
@@ -155,23 +157,19 @@ namespace Server {
                 }
             }
 
-            // Broadcast any slots the player tick mutated (item-use hand
-            // writes, finishUsingItem replacements) — the standing per-slot
-            // delta channel, same as HandleInventoryClick's re-broadcast.
-            auto& dirty = m_player->dirtySlots();
-            if (!dirty.empty() && m_connection) {
-                // De-dupe (a slot can be written twice in one tick).
-                std::sort(dirty.begin(), dirty.end());
-                dirty.erase(std::unique(dirty.begin(), dirty.end()), dirty.end());
-                for (int slotIdx : dirty) {
-                    Network::InventorySetSlotS2CPacket out;
-                    out.slotIndex = static_cast<int16_t>(slotIdx);
-                    out.stack     = m_player->getInventory().GetSlot(slotIdx);
-                    auto data = Network::Serialization::Serialize(out);
-                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
-                }
-            }
-            dirty.clear();
+            // Per-tick container diff — MC ServerPlayer.doTick's
+            // containerMenu.broadcastChanges(). This SUPERSEDES the old
+            // hand-rolled dirty-slot broadcast: routing every server-side
+            // inventory mutation through the same diff is what keeps
+            // m_remoteSlots an accurate model of the client. The old loop sent
+            // slots directly and left the model stale, which then made the
+            // next click re-send those slots needlessly.
+            //
+            // dirtySlots is still drained (other code marks it), but it no
+            // longer drives sends — the diff finds every real change on its
+            // own, including ones nothing bothered to mark.
+            m_player->dirtySlots().clear();
+            BroadcastContainerChanges();
         }
         
         // Store tick number
@@ -325,6 +323,7 @@ namespace Server {
     // === WATCH SET MANAGEMENT ===
 
     void PlayerSession::UpdateWatchSet() {
+        PROFILE_ZONE;
         // Compute new watch set
         auto newWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
 
@@ -399,6 +398,7 @@ namespace Server {
     void PlayerSession::SendNextChunks(Game::World* world) {
         if (!world || !m_connection) return;
         if (m_pendingChunksToSend.empty()) return;
+        PROFILE_ZONE_N("SendNextChunks");
 
         // Back-pressure: don't send if too many unacknowledged batches
         if (m_unackedBatches >= m_maxUnackedBatches) return;
@@ -466,6 +466,7 @@ namespace Server {
         size_t sentCount = 0;
         for (size_t i = 0; i < toSend; ++i) {
             const auto& cd = candidates[i];
+            PROFILE_ZONE_N("SerializeChunk");
 
             // Build ChunkDataS2CPacket
             Network::ChunkDataS2CPacket packet;
@@ -773,6 +774,18 @@ namespace Server {
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
+        // MC acks EVERY ServerboundPlayerActionPacket regardless of outcome
+        // (ServerGamePacketListenerImpl.handlePlayerAction line 1332) — the ack
+        // is "I processed this", not "I agreed with it". Rejections still get
+        // corrected, because a refused break leaves the block where it was and
+        // the client's prediction rolls back to it on retirement.
+        //
+        // This runs before the early returns below on purpose: a reach-check
+        // rejection MUST still ack, or the client's predicted break would be
+        // stranded forever, permanently swallowing every future server update
+        // at that position.
+        AckBlockChangesUpTo(packet.sequenceNumber);
+
         if (!m_player) return;
 
         switch (packet.action) {
@@ -811,7 +824,13 @@ namespace Server {
                 Game::BlockID oldBlock = (packet.blockId != Game::BlockID::Air)
                                        ? packet.blockId
                                        : world->GetBlock(pos.x, pos.y, pos.z);
-                if (oldBlock == Game::BlockID::Air || oldBlock == Game::BlockID::Bedrock) return;
+                if (oldBlock == Game::BlockID::Air) return;
+                // Bedrock is unbreakable in survival/adventure, but creative
+                // destroys it outright (MC's ServerPlayerGameMode never
+                // consults destroyTime on the creative path).
+                const bool creativeBreak =
+                    (m_player->getGameMode() == Server::GameMode::CREATIVE);
+                if (oldBlock == Game::BlockID::Bedrock && !creativeBreak) return;
 
                 // SetBlock may already be a no-op (the world is already Air in integrated
                 // mode), but call it anyway so dedicated multiplayer still clears the
@@ -838,22 +857,18 @@ namespace Server {
                 // though the client predicts the pickup, causing inventory clicks to
                 // be no-ops (server sees empty slots) and shift-click-clear to leave
                 // ghost items on screen (no SetSlot deltas for already-empty slots).
-                if (m_connection) {
-                    auto& inv = m_player->getInventory();
-                    std::array<Game::ItemStack, Game::Inventory::TOTAL_SIZE> before;
-                    for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-                        before[i] = inv.GetSlot(i);
-                    }
-                    inv.AddBlocks(oldBlock, 1);
-                    for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-                        const auto& after = inv.GetSlot(i);
-                        if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
-                        Network::InventorySetSlotS2CPacket out;
-                        out.slotIndex = static_cast<int16_t>(i);
-                        out.stack     = after;  // full stack — components ride along
-                        auto data = Network::Serialization::Serialize(out);
-                        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
-                    }
+                //
+                // Creative is exempt: MC's ServerPlayerGameMode.destroyBlock
+                // bails out immediately after removing the block when
+                // isCreative(), so no drop is ever produced.
+                if (m_connection && !creativeBreak) {
+                    // Mutate only. BroadcastContainerChanges (this tick, from
+                    // Tick()) diffs the container against m_remoteSlots and
+                    // sends the deltas with a correct stateId. Sending them
+                    // by hand here left m_remoteSlots stale AND stamped
+                    // stateId=0 onto the client, which disabled the click
+                    // staleness guard until the next full sync.
+                    m_player->getInventory().AddBlocks(oldBlock, 1);
                 }
                 break;
             }
@@ -879,85 +894,176 @@ namespace Server {
         }
     }
 
+    namespace {
+        // MC compares with ItemStack.matches (item + count + components).
+        // Game::ItemStacksMatch is exactly that; it used to be open-coded here
+        // by serializing both stacks and diffing the bytes, which allocated two
+        // PacketBuffers per call — 46 slots × every player × every tick.
+        bool StacksIdentical(const Game::ItemStack& a, const Game::ItemStack& b) {
+            return Game::ItemStacksMatch(a, b);
+        }
+    } // namespace
+
+    void PlayerSession::InvalidateRemoteSlot(int index) {
+        if (index < 0 || index >= Game::Inventory::TOTAL_SIZE) return;
+        // count = -1 is unreachable for a real stack (empty slots are count 0),
+        // so ItemStacksMatch is guaranteed to report a difference and the diff
+        // will resend this slot.
+        m_remoteSlots[index] = Game::ItemStack{};
+        m_remoteSlots[index].count = -1;
+    }
+
+    void PlayerSession::BroadcastContainerChanges() {
+        if (!m_player || !m_connection) return;
+        const auto& inv = m_player->getInventory();
+
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
+            const Game::ItemStack& actual = inv.GetSlot(i);
+            if (StacksIdentical(actual, m_remoteSlots[i])) continue;
+
+            m_remoteSlots[i] = actual;
+            BumpContainerState();
+            Network::InventorySetSlotS2CPacket out;
+            out.slotIndex = static_cast<int16_t>(i);
+            out.stack     = actual;
+            out.stateId   = m_containerStateId;
+            auto data = Network::Serialization::Serialize(out);
+            m_connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+        }
+
+        const Game::ItemStack& carried = m_player->getCarried();
+        if (!StacksIdentical(carried, m_remoteCarried)) {
+            m_remoteCarried = carried;
+            BumpContainerState();
+            Network::InventorySetCarriedS2CPacket out;
+            out.stack   = carried;
+            out.stateId = m_containerStateId;
+            auto data = Network::Serialization::Serialize(out);
+            m_connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+        }
+    }
+
+    // Flip to 1 to trace every container click through the authoritative
+    // handler. Logs the cursor and clicked slot on BOTH sides of the call, so
+    // a divergence between what the client is showing and what the server
+    // believes shows up as the first line whose "before" state is not what the
+    // previous line's "after" state left behind.
+#define INVENTORY_CLICK_TRACE 0
+
     void PlayerSession::HandleInventoryClick(const Network::InventoryClickC2SPacket& packet) {
         if (!m_player || !m_connection) return;
 
-        auto result = InventoryClickHandler::Handle(*m_player, packet);
+#if INVENTORY_CLICK_TRACE
+        const auto& traceInv = m_player->getInventory();
+        const auto  beforeCarried = m_player->getCarried();
+        const auto  beforeSlot = (packet.slotIndex >= 0 && packet.slotIndex < Game::Inventory::TOTAL_SIZE)
+                               ? traceInv.GetSlot(packet.slotIndex) : Game::ItemStack{};
+        Log::Info("[ClickTrace] IN  action=%u slot=%d btn=%u | cursor=%u x%d | slot=%u x%d",
+                  (unsigned)packet.action, (int)packet.slotIndex, (unsigned)packet.button,
+                  (unsigned)beforeCarried.itemId, beforeCarried.count,
+                  (unsigned)beforeSlot.itemId, beforeSlot.count);
+#endif
 
-        // Broadcast slot deltas
-        for (uint8_t slotIdx : result.changedSlots) {
-            const auto& s = m_player->getInventory().GetSlot(slotIdx);
-            Network::InventorySetSlotS2CPacket out;
-            out.slotIndex = static_cast<int16_t>(slotIdx);
-            out.stack     = s;  // full stack — components ride along
-            auto data = Network::Serialization::Serialize(out);
-            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
-        }
-        if (result.carriedChanged) {
-            Network::InventorySetCarriedS2CPacket out;
-            out.stack = m_player->getCarried();
-            auto data = Network::Serialization::Serialize(out);
-            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+        // MC handleContainerClick's very first check: does this click even
+        // target the menu that is open? The server bumps containerId on close,
+        // so a click aimed at a menu that has since been replaced is dropped
+        // rather than applied to whatever took its place. id 0 means the client
+        // has not learned an id yet (pre-first-snapshot) and is accepted.
+        if (packet.containerId != 0
+            && packet.containerId != m_player->container().containerId) {
+            Log::Debug("[PlayerSession %u] Click for container %u (open: %u) — dropped",
+                       m_playerId, packet.containerId,
+                       m_player->container().containerId);
+            return;
         }
 
-        // Resync healing: always echo the clicked slot (and the cursor when
-        // the client was carrying something), even when the handler refused
-        // the click and changed nothing. A refused click used to produce
-        // ZERO packets, so any client-side mis-prediction (e.g. the old
-        // drag-preview committing into an armor slot) stuck around forever.
-        // MC has the same property via its per-click state-id resync.
-        if (packet.slotIndex >= 0 && packet.slotIndex < Game::Inventory::TOTAL_SIZE) {
-            const uint8_t clicked = static_cast<uint8_t>(packet.slotIndex);
-            if (std::find(result.changedSlots.begin(), result.changedSlots.end(), clicked)
-                    == result.changedSlots.end()) {
-                Network::InventorySetSlotS2CPacket out;
-                out.slotIndex = packet.slotIndex;
-                out.stack     = m_player->getInventory().GetSlot(clicked);
-                auto data = Network::Serialization::Serialize(out);
-                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
-            }
-            if (!result.carriedChanged) {
-                Network::InventorySetCarriedS2CPacket out;
-                out.stack = m_player->getCarried();
-                auto data = Network::Serialization::Serialize(out);
-                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
-            }
+        auto result = m_player->container().DoClick(packet);
+
+#if INVENTORY_CLICK_TRACE
+        {
+            const auto afterCarried = m_player->getCarried();
+            const auto afterSlot = (packet.slotIndex >= 0 && packet.slotIndex < Game::Inventory::TOTAL_SIZE)
+                                 ? traceInv.GetSlot(packet.slotIndex) : Game::ItemStack{};
+            Log::Info("[ClickTrace] OUT cursor=%u x%d | slot=%u x%d | changed=%zu carriedChanged=%d",
+                      (unsigned)afterCarried.itemId, afterCarried.count,
+                      (unsigned)afterSlot.itemId, afterSlot.count,
+                      result.changedSlots.size(), result.carriedChanged ? 1 : 0);
         }
+#endif
+
+        // Adopt the client's PREDICTED outcome as our model of what it now
+        // believes (MC: setRemoteSlotNoCopy / setRemoteCarried for every entry
+        // in the packet's changedSlots). This is the piece that makes the diff
+        // below able to catch a slot the client wrote but the server did not —
+        // the client tells us it wrote it, so the model disagrees with the
+        // truth and we correct it. Without this, such a slot is invisible to
+        // any delta scheme and survives as a ghost item.
+        if (packet.hasPrediction) {
+            for (const auto& [slot, stack] : packet.predictedSlots) {
+                if (slot < Game::Inventory::TOTAL_SIZE) m_remoteSlots[slot] = stack;
+            }
+            m_remoteCarried = packet.predictedCarried;
+        }
+
+        // Predicted against a revision we have already moved past → the
+        // client's whole picture is suspect, so replace it wholesale rather
+        // than patching (MC does the same on a state mismatch).
+        if (packet.stateId != 0 && packet.stateId != m_containerStateId) {
+            Log::Debug("[PlayerSession %u] Click predicted against state %u (server at %u) — full resync",
+                       m_playerId, packet.stateId, m_containerStateId);
+            SendInventoryFull();
+            return;
+        }
+
+        // Normal path: send only what the client actually has wrong. A correct
+        // prediction sends nothing at all.
+        (void)result;
+        BroadcastContainerChanges();
+
         // TODO: spawn dropped item entity if !result.droppedItem.IsEmpty()
     }
 
     void PlayerSession::HandleInventoryClose(const Network::InventoryCloseC2SPacket&) {
         if (!m_player || !m_connection) return;
+#if INVENTORY_CLICK_TRACE
+        {
+            const auto c = m_player->getCarried();
+            Log::Info("[ClickTrace] CLOSE cursor=%u x%d (goes back into inventory)",
+                      (unsigned)c.itemId, c.count);
+        }
+#endif
         // MC drops the cursor item as a world entity when the inventory closes,
         // but since we have no item-entity system yet, dropping = the item just
         // disappears. Better UX: try to put the carried stack back into the
         // player's inventory (matching what the user expects when pressing E
         // without intentionally dropping). Only items that don't fit get
         // silently dropped (acceptable since the inventory is large).
+        // MC's doCloseContainer swaps containerMenu back to inventoryMenu, so
+        // the id the client was clicking against stops being current. Bump ours
+        // for the same effect: any click still in flight for the closed menu is
+        // rejected by the containerId guard in HandleInventoryClick.
+        m_player->container().containerId++;
+
+        int leftover = 0;
         auto& carried = m_player->getCarried();
-        if (carried.IsEmpty()) return;
-
-        auto& inv = m_player->getInventory();
-        std::array<Game::ItemStack, Game::Inventory::TOTAL_SIZE> before;
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) before[i] = inv.GetSlot(i);
-
-        int leftover = inv.AddItems(carried.itemId, carried.count);
-        // Whatever didn't fit is silently dropped (no item-entity system).
-        carried.Clear();
-
-        // Broadcast slot deltas + the cleared cursor.
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            const auto& after = inv.GetSlot(i);
-            if (after.itemId == before[i].itemId && after.count == before[i].count) continue;
-            Network::InventorySetSlotS2CPacket s;
-            s.slotIndex = static_cast<int16_t>(i);
-            s.stack     = after;
-            auto data = Network::Serialization::Serialize(s);
-            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+        if (!carried.IsEmpty()) {
+            // AddStack, not AddItems: the cursor may hold an enchanted book or
+            // any other stack with per-stack components, and (id, count) would
+            // drop them.
+            leftover = m_player->getInventory().AddStack(carried);
+            // Whatever didn't fit is silently dropped (no item-entity system).
+            carried.Clear();
         }
-        Network::InventorySetCarriedS2CPacket out;  // default = empty stack
-        auto data = Network::Serialization::Serialize(out);
-        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetCarriedS2C), data);
+
+        // Always full-sync on close, even when nothing moved: containerId rides
+        // ONLY on InventoryFullS2C, and a client that never learns the new id
+        // would have every subsequent click rejected by the guard above. This
+        // is also what MC does when the open menu changes (sendAllDataToRemote).
+        // No hand-rolled per-slot sends here — the snapshot covers the returned
+        // cursor and every slot it landed in, and refreshes m_remoteSlots.
+        SendInventoryFull();
 
         if (leftover > 0) {
             Log::Debug("[HandleInventoryClose] Dropped %d items (no entity system to spawn them)",
@@ -988,15 +1094,45 @@ namespace Server {
         }
         out.carried            = m_player->getCarried();
         out.selectedHotbarSlot = static_cast<uint8_t>(inv.GetSelectedSlot());
+        BumpContainerState();
+        out.stateId            = m_containerStateId;
+        // The only packet carrying containerId — this is how the client learns
+        // which menu to stamp on its clicks.
+        out.containerId        = m_player->container().containerId;
+#if INVENTORY_CLICK_TRACE
+        // This is the other path that pushes a cursor to the client (join,
+        // instant item-use in DispatchUseItem, respawn). If a stale cursor is
+        // being resurrected, expect to see it here.
+        Log::Info("[ClickTrace] FULLSYNC cursor=%u x%d",
+                  (unsigned)out.carried.itemId, out.carried.count);
+#endif
 
         auto data = Network::Serialization::Serialize(out);
         m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryFullS2C), data);
+
+        // The client adopts this snapshot verbatim, so our model of its state
+        // is now exactly what we just sent.
+        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) m_remoteSlots[i] = out.slots[i];
+        m_remoteCarried = out.carried;
     }
 
     void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
         // === 1. Thread safety & basic validation ===
         ASSERT_SERVER_THREAD();
-        
+
+        // Record the ack up front so EVERY exit path below is covered,
+        // including the bail-outs that predate prediction (no world, stale
+        // sequence, …). An interaction that is never acked strands the
+        // client's prediction for that position forever, and a stranded
+        // prediction permanently swallows all future server block updates
+        // there — a far worse failure than acking a request we ignored.
+        //
+        // Recording early is safe because the ack PACKET is not sent here: it
+        // is emitted by FlushBlockChangeAck after this tick's block updates
+        // (see IntegratedServer's tick), so any correction this handler sends
+        // still reaches the client first.
+        AckBlockChangesUpTo(packet.sequence);
+
         if (!m_player) {
             Log::Warning("HandleUseItemOn: No player attached to session");
             return;
@@ -1484,13 +1620,8 @@ namespace Server {
             if (!slot.IsEmpty()) {
                 slot.count--;
                 if (slot.count <= 0) slot.Clear();
-                if (m_connection) {
-                    Network::InventorySetSlotS2CPacket out;
-                    out.slotIndex = static_cast<int16_t>(selUnified);
-                    out.stack     = slot;
-                    auto data = Network::Serialization::Serialize(out);
-                    m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
-                }
+                // Mutate only — this tick's BroadcastContainerChanges sends the
+                // delta with a correct stateId and updates m_remoteSlots.
             }
         }
         
@@ -1728,15 +1859,17 @@ namespace Server {
             // the server rejects the placement we need to push the true
             // count back, otherwise the client's count keeps ticking down
             // toward 0 even though nothing was consumed.
+            //
+            // This is the one path where a plain diff is not enough: the
+            // server's slot never changed (that's the point — the placement was
+            // rejected), so it still matches m_remoteSlots and
+            // BroadcastContainerChanges would send nothing. Invalidate the
+            // model entry first to force the resend.
             if (m_player) {
-                auto& inv = m_player->getInventory();
-                const int sel = Game::Inventory::HOTBAR_BEGIN + inv.GetSelectedSlot();
-                const auto& slot = inv.MutableSlot(sel);
-                Network::InventorySetSlotS2CPacket out;
-                out.slotIndex = static_cast<int16_t>(sel);
-                out.stack     = slot;
-                auto data = Network::Serialization::Serialize(out);
-                m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
+                const int sel = Game::Inventory::HOTBAR_BEGIN
+                              + m_player->getInventory().GetSelectedSlot();
+                InvalidateRemoteSlot(sel);
+                BroadcastContainerChanges();
             }
         }
 
@@ -1809,15 +1942,35 @@ namespace Server {
     
     void PlayerSession::AckInteraction(uint32_t sequence, bool success) {
         m_lastInteractionSequence = sequence;
-        
-        // TODO: Send acknowledgment packet to client
-        // Network::AckInteractionS2CPacket packet;
-        // packet.sequence = sequence;
-        // packet.success = success;
-        // m_connection->SendPacket(packet);
-        
+
+        // The ack itself carries no success flag — MC's
+        // ClientboundBlockChangedAckPacket is a bare sequence. "Failure" is
+        // communicated by the corrective block updates the reject paths
+        // already send (ResyncAndAck), which the client applies when the
+        // prediction retires. Keeping the flag in this signature documents
+        // intent at the call sites and drives the debug log.
+        AckBlockChangesUpTo(sequence);
+
         Log::Debug("PlayerSession: Acknowledged interaction seq=%u success=%s",
                   sequence, success ? "true" : "false");
+    }
+
+    void PlayerSession::AckBlockChangesUpTo(uint32_t sequence) {
+        // MC takes the max so a tick that handled several interactions emits
+        // one ack covering all of them.
+        if (sequence > m_ackBlockChangesUpTo) {
+            m_ackBlockChangesUpTo = sequence;
+        }
+    }
+
+    void PlayerSession::FlushBlockChangeAck() {
+        if (m_ackBlockChangesUpTo == 0 || !m_connection) return;
+
+        Network::BlockChangedAckS2CPacket packet(m_ackBlockChangesUpTo);
+        auto data = Network::Serialization::Serialize(packet);
+        m_connection->SendPacket(
+            static_cast<uint8_t>(Network::PacketId::BlockChangedAckS2C), data);
+        m_ackBlockChangesUpTo = 0;
     }
     
     void PlayerSession::OnChunkSendComplete(Game::Math::ChunkPos chunk) {

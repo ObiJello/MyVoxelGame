@@ -252,12 +252,23 @@ namespace Game {
         // Target chunk status for generation
         const minecraft::world::chunk::status::ChunkStatus* m_targetStatus = nullptr;
 
-        // Helper to map block types to game BlockIDs.
-        // Uses m_blockIdCache to avoid repeated string lookups — Block* pointers are
-        // stable (created once in Blocks::bootstrap), so pointer equality is sufficient.
+        // Helper to map block types to game BlockIDs. Lock-free: uses a
+        // thread_local Block*→BlockID cache plus a last-block memo (terrain is
+        // dominated by runs of identical states, so the memo absorbs most
+        // lookups). The cache is epoch-guarded — Blocks::bootstrap() in
+        // Initialize() can recreate Block objects on world reload, so each
+        // worker's cache resets when the generator epoch advances. Replaces
+        // the old mutex-protected member cache, which took ~98k lock/unlock
+        // per converted chunk under contention from all worker threads.
         BlockID MapBlockType(minecraft::world::BlockState* blockState) const;
-        mutable std::mutex m_blockIdCacheMutex;
-        mutable std::unordered_map<const minecraft::world::level::block::Block*, BlockID> m_blockIdCache;
+
+        // Shared conversion: terrain-library chunk → game chunk. Iterates
+        // section-wise (skipping all-air sections entirely) and writes
+        // directly into game ChunkSection arrays. Used by GenerateChunk and
+        // GetCompletedChunk.
+        std::shared_ptr<Chunk> ConvertLibChunk(minecraft::world::IChunk* chunk,
+                                               Math::ChunkPos position,
+                                               int* outBlocksSet) const;
     };
 
 } // namespace Game

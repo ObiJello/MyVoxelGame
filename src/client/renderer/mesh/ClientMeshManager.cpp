@@ -81,6 +81,14 @@ namespace Render {
         {
             std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
             m_gpuData.clear();
+            m_gpuDataGraveyard.clear();  // tombstones die with the world too
+        }
+
+        // Every GPUSectionData was just destroyed — cached reachable lists in
+        // the chunk renderer must be discarded before the next world renders.
+        if (Render::g_chunkRenderer) {
+            Render::g_chunkRenderer->MarkSectionDataErased();
+            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
         }
 
         // Clear any pending destroys (mega-buffers already cleaned up)
@@ -142,6 +150,10 @@ namespace Render {
 
         // Destroy any GPU resources that were deferred during chunk unloads
         ProcessPendingDestroys();
+
+        // Free tombstoned GPUSectionData that no cached reachable list can
+        // reference anymore (see TombstoneGpuDataEntry).
+        ReclaimGpuDataTombstones();
 
         // Periodic cleanup: remove empty slabs from mega-buffer pools.
         // With slab pool architecture, this just frees unused GPU memory — no data copy.
@@ -475,7 +487,13 @@ namespace Render {
         SectionKey key{chunkPos, sectionY};
         auto it = m_gpuData.find(key);
         if (it != m_gpuData.end()) {
-            // Tell the grid this section is gone
+            // Clear the section's published pointer BEFORE erasing the map entry —
+            // the occlusion BFS reads this atomic directly, so leaving it set
+            // would dangle into a freed map node.
+            auto* sectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
+            if (sectionInfo) {
+                sectionInfo->gpuData.store(nullptr, std::memory_order_release);
+            }
             m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
             // Remove from mega-buffers (frees GPU regions)
@@ -484,7 +502,14 @@ namespace Render {
             m_cutoutMegaBuffer.RemoveSection(megaKey);
             m_translucentMegaBuffer.RemoveSection(megaKey);
 
-            m_gpuData.erase(it);
+            // Tombstone instead of destroy: cached reachable lists may still
+            // hold the pointer — it stays alive (drawing nothing) until
+            // every list has been rebuilt.
+            TombstoneGpuDataEntry(it);
+
+            if (Render::g_chunkRenderer) {
+                Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+            }
             LogMeshActivity("Removed section GPU data", chunkPos, sectionY);
         }
     }
@@ -512,11 +537,15 @@ namespace Render {
 
                 m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
-                m_gpuData.erase(it);
+                // Tombstone instead of destroy: cached reachable lists may
+                // still hold the pointer — it stays alive (drawing nothing)
+                // until every list has been rebuilt. Avoids the old
+                // MarkSectionDataErased hammer that forced a synchronous
+                // main-thread BFS rebuild on every chunk unload.
+                TombstoneGpuDataEntry(it);
             }
         }
 
-        // Notify renderer that visible sections need rebuilding
         if (Render::g_chunkRenderer) {
             Render::g_chunkRenderer->MarkVisibleSectionsDirty();
         }
@@ -532,6 +561,43 @@ namespace Render {
         m_pendingDestroys.clear();
     }
 
+    void ClientMeshManager::TombstoneGpuDataEntry(GpuDataMap::iterator it) {
+        GPUSectionData& g = it->second;
+        // Stop every render path cold: cached reachable lists gate all draws
+        // on cachedDrawCmd.valid, and the BFS gates on HasGeometry().
+        g.opaqueDrawCmd = {};
+        g.cutoutDrawCmd = {};
+        g.translucentDrawCmd = {};
+        g.opaqueIndexCount = g.cutoutIndexCount = g.translucentIndexCount = 0;
+        g.opaqueVertexCount = g.cutoutVertexCount = g.translucentVertexCount = 0;
+
+        // extract() preserves the element's address — stale pointers in the
+        // renderer's cached lists stay dereferenceable (and draw nothing)
+        // until ReclaimGpuDataTombstones proves no list can reference them.
+        const uint32_t death = Render::g_chunkRenderer
+            ? Render::g_chunkRenderer->GetPrepareCounter() : 0;
+        m_gpuDataGraveyard.push_back({m_gpuData.extract(it), death});
+    }
+
+    void ClientMeshManager::ReclaimGpuDataTombstones() {
+        PROFILE_ZONE;
+        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
+        if (m_gpuDataGraveyard.empty()) return;
+        if (!Render::g_chunkRenderer) {
+            m_gpuDataGraveyard.clear();  // no renderer, no readers
+            return;
+        }
+        // A cached list built at prepare-counter N was snapshotted from the
+        // section-info atomics, which are nulled before a tombstone's death
+        // counter is stamped — so any list with buildCounter > deathCounter
+        // cannot contain the pointer. Once the OLDEST live list is newer
+        // than a tombstone, it is unreachable and safe to destroy.
+        const uint32_t minLive = Render::g_chunkRenderer->GetMinLiveBuildCounter();
+        std::erase_if(m_gpuDataGraveyard, [minLive](const GpuDataTombstone& t) {
+            return t.deathCounter < minLive;
+        });
+    }
+
     void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
                                                  const Network::MeshBuildResult::SectionMeshData& meshData,
                                                  const VisibilitySet& visSet) {
@@ -545,6 +611,9 @@ namespace Render {
         }
 
         SectionKey key{chunkPos, sectionY};
+        // Whether this section already had a (published) entry — decides
+        // tombstone vs plain erase if the new mesh turns out empty below.
+        const bool hadEntry = m_gpuData.find(key) != m_gpuData.end();
         GPUSectionData& gpuData = m_gpuData[key];
 
         // Initialize GPU data
@@ -619,9 +688,27 @@ namespace Render {
         gpuData.needsUpload = false;
 
         // Skip empty sections entirely to avoid "zombie" entries in m_gpuData
-        // that waste map lookup time during rendering.
+        // that waste map lookup time during rendering. Clear the section's
+        // published atomic pointer first — a previous upload of this section
+        // may have set it, and the occlusion BFS reads it directly.
         if (!gpuData.HasGeometry()) {
-            m_gpuData.erase(key);
+            auto* emptySectionInfo = m_chunkManager->GetSectionInfo(chunkPos, sectionY);
+            if (emptySectionInfo) {
+                emptySectionInfo->gpuData.store(nullptr, std::memory_order_release);
+            }
+            auto it = m_gpuData.find(key);
+            if (hadEntry) {
+                // Had geometry, remeshed to empty: cached reachable lists may
+                // still point at it — tombstone (address-preserving) instead
+                // of destroying, so no full cache invalidation is needed.
+                TombstoneGpuDataEntry(it);
+            } else {
+                // Fresh entry created by this very call — nothing references it.
+                m_gpuData.erase(it);
+            }
+            if (Render::g_chunkRenderer) {
+                Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+            }
             return;
         }
 

@@ -275,11 +275,37 @@ namespace Render {
         // Use shared_mutex for reader-writer lock pattern
         // Multiple threads can read concurrently, but writes are exclusive
         mutable std::shared_mutex m_gpuDataMutex;
-        std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash> m_gpuData;
-        
+        using GpuDataMap = std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash>;
+        GpuDataMap m_gpuData;
+
         // NOTE: m_activeSections was removed — m_gpuData only contains sections
         // with geometry (empty sections are erased at upload time), so iterating
         // m_gpuData directly is equivalent and avoids a redundant hash set.
+
+        // --- Deferred GPUSectionData destruction (tombstones) ---
+        // The chunk renderer's cached reachable lists and in-flight BFS
+        // results hold raw GPUSectionData pointers. Destroying an object the
+        // moment its section dies would force the renderer to invalidate
+        // every cached list and rebuild the occlusion BFS synchronously on
+        // the main thread (the old MarkSectionDataErased hammer — it fired
+        // nearly every frame during movement). Instead, a dying entry is
+        // tombstoned: its draw commands are invalidated in place (so stale
+        // lists render nothing for it) and its map node is EXTRACTED — which
+        // preserves the element's address — into this graveyard. The node is
+        // destroyed only once every cached list that could reference it has
+        // been rebuilt (see ReclaimGpuDataTombstones / ChunkRenderer::
+        // GetMinLiveBuildCounter). MarkSectionDataErased remains only for
+        // Shutdown, where m_gpuData.clear() genuinely frees everything.
+        struct GpuDataTombstone {
+            GpuDataMap::node_type node;
+            uint32_t deathCounter;  // renderer prepare-counter at extraction
+        };
+        std::vector<GpuDataTombstone> m_gpuDataGraveyard;
+
+        // Caller must hold m_gpuDataMutex exclusively.
+        void TombstoneGpuDataEntry(GpuDataMap::iterator it);
+        // Destroys tombstones no live cached list can reference (per frame).
+        void ReclaimGpuDataTombstones();
 
         // Deferred GPU resource destruction queue.
         // Instead of destroying GPU buffers synchronously during chunk unload

@@ -1207,9 +1207,13 @@ namespace Debug {
 
         ImGui::Separator();
 
-        // VSync
-        static bool vsyncEnabled = true;
+        // VSync — mirrors the REAL game setting (same one as Options → Video
+        // Settings), so this checkbox and the options-screen toggle can never
+        // fight each other. The old version kept its own static bool that
+        // started at "on" regardless of the actual state and never persisted.
+        bool vsyncEnabled = Platform::g_gameSettings.GetVSync();
         if (ImGui::Checkbox("VSync", &vsyncEnabled)) {
+            Platform::g_gameSettings.SetVSync(vsyncEnabled);
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->SetVSync(vsyncEnabled);
             } else {
@@ -1219,7 +1223,18 @@ namespace Debug {
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Sync frame rate with monitor refresh");
+            ImGui::SetTooltip("Sync frame rate with monitor refresh\n(same setting as Options > Video Settings)");
+
+        // GPU pass timers (GL_TIME_ELAPSED around opaque/cutout/translucent).
+        // Default OFF: glEndQuery flushes cost ~2.3ms each on Apple's GL
+        // (~7ms/frame for three passes) — measured via Tracy 2026-08.
+        ImGui::Checkbox("GPU Pass Timers", &Render::g_enableGpuPassTimers);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Measures per-pass GPU time (shown in Performance panel).\n"
+                              "COSTS ~7ms/frame on macOS GL (query flushes) — enable\n"
+                              "briefly to read GPU load, then turn back off.");
 
         // Rendering mode
         ImGui::Separator();

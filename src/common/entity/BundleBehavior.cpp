@@ -22,8 +22,7 @@
 #include "Inventory.hpp"
 #include "../data/DataComponents.hpp"
 #include "../core/Log.hpp"
-#include "server/inventory/InventoryClickHandler.hpp"
-#include "server/player/ServerPlayer.hpp"
+#include "../inventory/AbstractContainerMenu.hpp"
 
 #include <algorithm>
 #include <unordered_map>
@@ -124,14 +123,14 @@ namespace Game {
 
         // Mirrors BundleItem.overrideStackedOnOther (BundleItem.java:50-85):
         // the CARRIED bundle was clicked onto a slot.
-        bool Bundle_StackedOnOther(ItemStack& carried, Inventory& inv, int slotIndex,
-                                   ClickAction action, Server::ServerPlayer& player,
-                                   Server::InventoryClickResult& result) {
-            (void)player;
+        bool Bundle_StackedOnOther(ItemStack& carried, AbstractContainerMenu& menu,
+                                   int slotIndex, ClickAction action,
+                                   ContainerClickResult& result) {
             auto initial = carried.get(DataComponents::BUNDLE_CONTENTS);
             if (!initial) return false;                    // :52-53
             BundleContents contents = *initial;            // Mutable copy (:56)
-            ItemStack& other = inv.MutableSlot(slotIndex); // slot.getItem (:55)
+            Slot& slot = menu.GetSlot(slotIndex);
+            ItemStack& other = slot.GetItemMut();          // slot.getItem (:55)
 
             if (action == ClickAction::PRIMARY && !other.IsEmpty()) {
                 // :57-66 tryTransfer — absorb the clicked slot's stack.
@@ -149,7 +148,7 @@ namespace Game {
                 // :67-80 removeOne → into the empty slot (safeInsert).
                 ItemStack removed = RemoveOne(contents);
                 if (!removed.IsEmpty()) {
-                    other = removed;                       // :70 (slot was empty)
+                    slot.SetByPlayer(removed);             // :70 (slot was empty)
                     Log::Debug("[Bundle] remove one — TODO: wire sound system"); // :74
                 }
                 carried.components.set(DataComponents::BUNDLE_CONTENTS, contents); // :78
@@ -163,10 +162,10 @@ namespace Game {
         // Mirrors BundleItem.overrideOtherStackedOnMe (BundleItem.java:87-125):
         // another stack (the cursor) was clicked onto the bundle in a slot.
         bool Bundle_OtherStackedOnMe(ItemStack& slotStack, ItemStack& carried,
-                                     Inventory& inv, int slotIndex,
-                                     ClickAction action, Server::ServerPlayer& player,
-                                     Server::InventoryClickResult& result) {
-            (void)inv; (void)player;
+                                     AbstractContainerMenu& menu, int slotIndex,
+                                     ClickAction action,
+                                     ContainerClickResult& result) {
+            (void)menu;
             if (action == ClickAction::PRIMARY && carried.IsEmpty()) {
                 // :88-90 toggleSelectedItem(-1) — selection is client-side
                 // only here; nothing to do server-side. Fall through to the

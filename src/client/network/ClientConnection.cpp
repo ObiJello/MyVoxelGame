@@ -523,6 +523,11 @@ namespace Client {
                 return std::make_unique<SetHealthS2CPacketImpl>(data);
             }
 
+            case PacketId::BlockChangedAckS2C: {
+                auto data = Serialization::DeserializeBlockChangedAckS2C(payload);
+                return std::make_unique<BlockChangedAckS2CPacketImpl>(data);
+            }
+
             case PacketId::PlayerAbilities: {
                 auto data = Serialization::DeserializePlayerAbilitiesS2C(payload);
                 return std::make_unique<PlayerAbilitiesS2CPacketImpl>(data);

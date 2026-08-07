@@ -549,6 +549,18 @@ namespace Game {
         return false;
     }
 
+    bool IsSameItemSameComponents(const ItemStack& a, const ItemStack& b) {
+        if (a.itemId != b.itemId) return false;
+        // MC treats two empty stacks as the same item (both ItemStack.EMPTY),
+        // and an empty stack never carries meaningful components.
+        if (a.IsEmpty() && b.IsEmpty()) return true;
+        return a.components.Equals(b.components);
+    }
+
+    bool ItemStacksMatch(const ItemStack& a, const ItemStack& b) {
+        return a.count == b.count && IsSameItemSameComponents(a, b);
+    }
+
     const std::unordered_map<ItemID, Item>& ItemRegistry::AllPureItems() {
         return g_pureItems;
     }

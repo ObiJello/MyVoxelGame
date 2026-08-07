@@ -6,6 +6,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include <glm/glm.hpp>
+#include <array>
 #include <unordered_set>
 #include <unordered_map>
 #include <vector>
@@ -230,7 +231,38 @@ namespace Server {
         void SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
         void SendInventoryUpdate(int slot); // TODO: Implement with inventory system
         void AckInteraction(uint32_t sequence, bool success);
-        
+
+        // Container revision (MC AbstractContainerMenu.stateId). Bumped
+        // whenever the server mutates the player's inventory or cursor, and
+        // stamped onto every InventoryFullS2C so the client can tell a fresh
+        // authoritative snapshot from a stale one.
+        void BumpContainerState() { ++m_containerStateId; }
+
+        // Diff the authoritative container against m_remote* (our model of
+        // what the client believes) and send ONLY the slots that disagree,
+        // updating the model as we go. Mirrors MC
+        // AbstractContainerMenu.broadcastChanges + synchronizeCarriedToRemote.
+        void BroadcastContainerChanges();
+        uint32_t ContainerStateId() const { return m_containerStateId; }
+
+        // Force the next BroadcastContainerChanges to resend `index` even
+        // though the authoritative stack has not changed. Needed when the
+        // CLIENT mutated its copy on a prediction the server rejected: the
+        // server's slot still matches m_remoteSlots, so the plain diff would
+        // find nothing to correct and the bad prediction would stick.
+        // MC's equivalent is RemoteSlot.force with a non-matching value.
+        void InvalidateRemoteSlot(int index);
+
+        // Client block-prediction acknowledgement (MC
+        // ServerGamePacketListenerImpl.ackBlockChangesUpTo). Interaction
+        // handlers only RECORD the sequence; the packet is emitted by
+        // FlushBlockChangeAck once this tick's block updates have gone out.
+        // Sending it any earlier lets the client retire a prediction before
+        // the correcting block update arrives, which shows up as a flicker.
+        void AckBlockChangesUpTo(uint32_t sequence);
+        void FlushBlockChangeAck();
+
+
         // Track packet acknowledgments
         void OnChunkSendComplete(Game::Math::ChunkPos chunk);
         void OnChunkUnloadComplete(Game::Math::ChunkPos chunk);
@@ -355,6 +387,23 @@ namespace Server {
         
         // === INTERACTION TRACKING ===
         uint32_t m_lastInteractionSequence = 0;  // For acknowledging client predictions
+
+        // Highest interaction sequence processed since the last ack flush.
+        // 0 = nothing to ack (client sequences start at 1).
+        uint32_t m_ackBlockChangesUpTo = 0;
+
+        // Monotonic container revision — see BumpContainerState.
+        uint32_t m_containerStateId = 1;
+
+        // Server-side model of the CLIENT's container state (MC
+        // AbstractContainerMenu.remoteSlots / remoteCarried). Updated from
+        // three places: what we send it, and what the client tells us it
+        // predicted. Diffing the truth against this is what lets a correct
+        // prediction cost zero packets while still catching a slot the client
+        // wrongly wrote — the client reports that write, so the model shows
+        // the disagreement.
+        std::array<Game::ItemStack, 46> m_remoteSlots{};
+        Game::ItemStack                 m_remoteCarried{};
 
         // Last-sent stat triple for the SetHealthS2C dirty-check — mirrors
         // ServerPlayer.lastSentHealth / lastSentFood / lastSaturationLevel.

@@ -15,6 +15,8 @@
 // Lets the inventory carried-item update flow without pulling the GUI header here.
 namespace Render {
     void SetInventoryScreenCarriedItem(const Game::ItemStack& stack);
+    void SetInventoryScreenStateId(uint32_t id);
+    void SetInventoryScreenContainerId(uint32_t id);
     // Defined in screens/DeathScreen.cpp — death flow hooks (health<=0 opens,
     // health>0 closes). Same no-GUI-header convention as above.
     void ShowDeathScreen();
@@ -87,6 +89,14 @@ namespace Client {
         
         Log::Debug("[ClientPacketHandler] Block change at (%d, %d, %d) to %d", 
                   packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
+    }
+
+    void ClientPacketHandler::handleBlockChangedAck(const Network::BlockChangedAckS2CPacket& packet) {
+        if (!m_chunkManager) return;
+        // Every interaction up to this sequence is now settled — retire those
+        // predictions, snapping back wherever the server disagreed with us.
+        m_chunkManager->HandleBlockChangedAck(packet.sequence);
+        m_stats.packetsProcessed++;
     }
 
     void ClientPacketHandler::handleSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) {
@@ -344,6 +354,12 @@ namespace Client {
             m_player->inventory.SetSlotFull(i, packet.slots[i]);
         }
         m_player->inventory.SetSelectedSlot(packet.selectedHotbarSlot);
+        // Remember the revision this snapshot describes so subsequent clicks
+        // can be stamped with it (MC ServerboundContainerClickPacket.stateId).
+        ::Render::SetInventoryScreenStateId(packet.stateId);
+        // Only the full snapshot carries containerId (it changes on close, and
+        // close always full-syncs), so this is the one place it is learned.
+        ::Render::SetInventoryScreenContainerId(packet.containerId);
         Log::Debug("[ClientPacketHandler] Inventory full sync: selected=%d carried=%u(%d)",
                    packet.selectedHotbarSlot, packet.carried.itemId, packet.carried.count);
         // Push the carried portion through the same path so it lands on the screen.
@@ -356,6 +372,7 @@ namespace Client {
         if (!m_player) return;
         // SetSlotFull preserves per-stack DataComponents (see handleInventoryFull).
         m_player->inventory.SetSlotFull(packet.slotIndex, packet.stack);
+        ::Render::SetInventoryScreenStateId(packet.stateId);
         m_stats.packetsProcessed++;
     }
 
@@ -363,6 +380,7 @@ namespace Client {
         // Defined in InventoryScreen.cpp; forward-declared at file scope at the top of this file
         // (avoids pulling in the GUI header from the network handler).
         ::Render::SetInventoryScreenCarriedItem(packet.stack);
+        ::Render::SetInventoryScreenStateId(packet.stateId);
         m_stats.packetsProcessed++;
     }
 

@@ -3,10 +3,8 @@
 
 #include <glm/glm.hpp>
 #include "Blocks.hpp"
-
-namespace Game {
-    class World;
-}
+#include "../level/ILevelWrite.hpp"
+#include "../../entity/IUsePlayer.hpp"
 
 namespace Server {
     class ServerPlayer;
@@ -71,8 +69,10 @@ namespace Game {
     
     // Context for block placement/interaction
     struct UseOnContext {
-        World* world;
-        Server::ServerPlayer* player;
+        // Interfaces, not concrete types, so the whole useOn chain can run
+        // client-side for prediction as well as server-side for authority.
+        ILevelWrite* world;
+        IUsePlayer*  player;
         uint32_t hand;              // 0 = main hand, 1 = off hand
         BlockHitResult hitResult;
         float playerYaw;            // Player's yaw for orientation
@@ -82,7 +82,7 @@ namespace Game {
                                     // = blue, right = orange).
 
         UseOnContext() = default;
-        UseOnContext(World* w, Server::ServerPlayer* p, uint32_t h, const BlockHitResult& hit)
+        UseOnContext(ILevelWrite* w, IUsePlayer* p, uint32_t h, const BlockHitResult& hit)
             : world(w), player(p), hand(h), hitResult(hit), playerYaw(0), playerPitch(0) {}
         
         // Calculate the position where a block would be placed

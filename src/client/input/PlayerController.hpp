@@ -23,6 +23,7 @@ namespace Game {
 
     // Forward declaration
     class World;
+    class IBlockAccess;
 
     // Client-side player controller that handles interaction and (future) networking
     class ClientPlayerController {
@@ -40,6 +41,13 @@ namespace Game {
         // blocks shouldn't stutter). Run with 0 so the next held-mine
         // starts on the very next tick.
         static constexpr int POST_BREAK_DELAY_TICKS = 0;
+        // Creative-mode instant break cadence. MC's MultiPlayerGameMode sets
+        // destroyDelay = 5 on every creative destroy (both the startDestroy
+        // click path and the continueDestroy held path), so held-LMB in
+        // creative clears 4 blocks/second while a fresh click is always
+        // instant. Unlike POST_BREAK_DELAY_TICKS this one is kept at MC's
+        // value — it's what gives creative mining its familiar rhythm.
+        static constexpr int CREATIVE_BREAK_DELAY_TICKS = 5;
         // MC's de-facto continuous-place interval (the cycle from item-use
         // animation reset → next BlockItem.useOn in a held-RMB strip). At 20
         // TPS that's 0.2 s between placements.
@@ -58,6 +66,14 @@ namespace Game {
         void SetPlayer(ClientPlayer* player);
         void SetWorld(World* world);
         void SetNetworkClient(Client::NetworkClient* networkClient);
+
+        // Block reader for interaction logic. REQUIRED in both modes — the
+        // integrated host passes the server World, a remote client passes
+        // ClientBlockAccess (the client chunk cache). Before this existed the
+        // controller read blocks through `world`, which is null on a remote
+        // client: every lookup returned Air, so mining read Air's destroyTime
+        // of 0 and finished in one tick no matter what the block actually was.
+        void SetBlockAccess(const IBlockAccess* access);
 
         // Main update tick (call once per frame)
         void Tick(float deltaTime);
@@ -112,6 +128,7 @@ namespace Game {
         // References
         ClientPlayer* player;
         World* world;
+        const IBlockAccess* blockAccess = nullptr;  // Block reads (host: World, remote: client chunk cache)
         Client::NetworkClient* networkClient;  // Network client for sending packets
 
         // Mining state — mirrors MultiPlayerGameMode's fields exactly.
@@ -143,13 +160,56 @@ namespace Game {
         bool lastSentFlying = false;    // Fly state last shipped via PlayerAbilitiesC2S
 
         // Internal methods
+        // Read a block from whichever source this session has (see
+        // SetBlockAccess). Returns Air for unloaded/invalid positions.
+        BlockID ReadBlock(const glm::ivec3& pos) const;
+        // Live look angles in degrees, derived from lookDir (player->yaw/pitch
+        // are stale — see the implementation comment).
+        void LookAngles(float& yawDeg, float& pitchDeg) const;
+        // Apply a predicted block change to the client's own chunk data so it
+        // shows up this frame instead of a round trip later, and register it
+        // with ClientChunkManager's prediction handler under `sequence` so the
+        // server's ack can confirm or roll it back.
+        void PredictBlock(const glm::ivec3& pos, BlockID newBlock, uint32_t sequence);
         void SendMovementIfDue();  // TODO: Implement for networking
         void StartDig(const glm::ivec3& pos, int face);
         void AbortDig();
         void FinishDig();
-        void SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
+        // Creative-mode destroy: removes the block outright, with no progress
+        // accumulation and no destroyTime gate (so bedrock/obsidian go in one
+        // click). Mirrors MC's `instabuild` branches in
+        // MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock.
+        void CreativeDestroy(const glm::ivec3& pos);
+        // Returns the interaction sequence the packet was stamped with (0 if
+        // nothing was sent) so a matching block prediction can be filed.
+        uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
+
+        // Work out what a right-click on `hit` will place, if anything — the
+        // client-side mirror of the placement half of
+        // PlayerSession::HandleUseItemOn. Deliberately conservative: it only
+        // returns true for plain BlockItem placement into an empty cell with
+        // no block/item interaction in the way, because those are the cases
+        // whose outcome the client can derive exactly. Everything else falls
+        // back to the un-predicted (wait-for-server) path rather than risk
+        // predicting a block the server won't place.
+        bool ComputePredictedPlacement(const RaycastHit& hit,
+                                       glm::ivec3& outPos, BlockID& outBlock) const;
+
+        // Run the shared block-use / item-useOn chain locally so its block
+        // edits land this frame, exactly as MC does inside
+        // MultiPlayerGameMode.performUseItemOn (MultiPlayerGameMode.java:322).
+        // Any SetBlock the behaviours perform is captured as a prediction
+        // under `sequence`. Returns true if the chain consumed the click, in
+        // which case no placement prediction should follow — the same
+        // short-circuit the server applies.
+        bool PredictUseItemOn(const RaycastHit& hit, uint32_t hand, uint32_t sequence);
+
+        // Air-click item use (bucket fill/empty). Mirrors the tail of MC's
+        // MultiPlayerGameMode.useItem prediction block.
+        void PredictUseItem(uint32_t hand, uint32_t sequence);
         // Use item in air — sends UseItemC2S (MC ServerboundUseItemPacket).
-        void SendUseItem(int hand);
+        // Returns the interaction sequence it was stamped with (0 if not sent).
+        uint32_t SendUseItem(int hand);
         // Which hand a right-click "use" should act on — MC's
         // MAIN_HAND → OFF_HAND loop (offhand shield with a tool in main hand).
         uint32_t PickUseHand() const;
@@ -188,13 +248,18 @@ namespace Game {
         void UpdateBreakingTick();          // run once per 1/20s tick
         void UpdatePlacingTick();           // continuous-RMB placement
         void TryPlaceBlock();
-        void FinishBreaking();  // Local block breaking implementation
+        // Local (predicted) block breaking. `sequence` is the interaction id
+        // the STOP_DESTROY packet was sent with, used to reconcile against the
+        // server's BlockChangedAckS2C.
+        void FinishBreaking(uint32_t sequence);
         bool CanPlaceBlockAt(const glm::ivec3& pos);
         void MarkSurroundingSectionsForRemesh(const glm::ivec3& worldPos);
         BlockID GetBreakingBlockType(const glm::ivec3& pos);
-        // Send a START/STOP/ABORT_DESTROY packet to the server.
-        void SendDigPacket(Network::BlockActionType action,
-                           const glm::ivec3& pos, BlockID blockId);
+        // Send a START/STOP/ABORT_DESTROY packet to the server. Returns the
+        // interaction sequence it was stamped with, which is what a matching
+        // block prediction must be registered under (0 if nothing was sent).
+        uint32_t SendDigPacket(Network::BlockActionType action,
+                               const glm::ivec3& pos, BlockID blockId);
     };
 
     // Typedef for compatibility during transition

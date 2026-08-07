@@ -42,6 +42,7 @@
 #include "packets/game/InventorySetCarriedS2CPacket.hpp"
 #include "packets/game/BlockEntityDataS2CPacket.hpp"
 #include "packets/game/SetHealthS2CPacket.hpp"
+#include "packets/game/BlockChangedAckS2CPacket.hpp"
 #include "packets/game/PlayerAbilitiesS2CPacket.hpp"
 #include "packets/game/PortalSetS2CPacket.hpp"            // Features.hpp ENABLE_PORTAL_GUN strips body
 #include "packets/game/PortalRemoveS2CPacket.hpp"         // Features.hpp ENABLE_PORTAL_GUN strips body

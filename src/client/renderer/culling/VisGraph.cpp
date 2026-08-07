@@ -1,6 +1,5 @@
 // File: src/client/renderer/culling/VisGraph.cpp
 #include "VisGraph.hpp"
-#include <queue>
 
 namespace Render {
 
@@ -43,14 +42,19 @@ namespace Render {
 
     uint8_t VisGraph::floodFill(int startIndex) {
         uint8_t faceMask = 0;
-        std::queue<int> queue;
+
+        // Fixed-size stack instead of std::queue — each of the 4096 voxels is
+        // pushed at most once (marked filled on push), so the bound is exact.
+        // DFS vs BFS order doesn't matter for a reachability fill, and this
+        // avoids per-fill deque heap allocations on the worker threads.
+        int16_t stack[4096];
+        int stackSize = 0;
 
         m_filled.set(startIndex);
-        queue.push(startIndex);
+        stack[stackSize++] = static_cast<int16_t>(startIndex);
 
-        while (!queue.empty()) {
-            int idx = queue.front();
-            queue.pop();
+        while (stackSize > 0) {
+            int idx = stack[--stackSize];
 
             // Check if this voxel is on any boundary face
             faceMask |= getFaceMask(idx);
@@ -60,7 +64,7 @@ namespace Render {
                 int neighbor = getNeighbor(idx, dir);
                 if (neighbor >= 0 && !m_filled.test(neighbor)) {
                     m_filled.set(neighbor);
-                    queue.push(neighbor);
+                    stack[stackSize++] = static_cast<int16_t>(neighbor);
                 }
             }
         }

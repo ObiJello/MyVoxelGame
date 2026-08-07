@@ -7,6 +7,8 @@
 
 namespace Client {
 
+    ClientBlockAccess* g_clientBlockAccess = nullptr;
+
     Game::BlockID ClientBlockAccess::GetBlock(int worldX, int worldY, int worldZ) const {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             return Game::BlockID::Air;
@@ -25,6 +27,22 @@ namespace Client {
         int localX = worldX - (chunkPos.x * Game::Math::CHUNK_SIZE_X);
         int localZ = worldZ - (chunkPos.z * Game::Math::CHUNK_SIZE_Z);
         return chunk->chunkData->GetBlock(localX, worldY, localZ);
+    }
+
+    bool ClientBlockAccess::SetBlock(int worldX, int worldY, int worldZ,
+                                     Game::BlockID blockId, uint32_t /*updateFlags*/) {
+        // Only ever writes inside an explicit prediction window — see
+        // BeginPrediction. Outside one this is a hard no-op: the client is not
+        // authoritative and an unreconciled local write would desync until the
+        // next chunk reload.
+        if (!m_predicting || !g_clientChunkManager) return false;
+        if (!IsValidPosition(worldX, worldY, worldZ)) return false;
+
+        // updateFlags is intentionally ignored: neighbour dirtying and the
+        // remesh are ClientChunkManager's job, and the client has no
+        // neighbour-notification or lighting pipeline to drive with them.
+        g_clientChunkManager->PredictBlockChange({worldX, worldY, worldZ}, blockId, m_sequence);
+        return true;
     }
 
     bool ClientBlockAccess::IsChunkLoaded(int chunkX, int chunkZ) const {

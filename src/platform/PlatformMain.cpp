@@ -63,6 +63,7 @@
 #include "client/network/FriendsClient.hpp"
 #include "client/network/UPnPPortMapper.hpp"
 #include "common/core/FriendsServiceConfig.hpp"
+#include <algorithm> // std::clamp (FOV modifier)
 #include <cstdlib>   // getenv (temp autoplay diagnostic)
 #include <functional>
 #include <sstream>
@@ -667,6 +668,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         double tickAccum = 0.0;
 
         while (!glfwWindowShouldClose(window)) {
+            // Title/menu frames get their own Tracy frame set + zone so menu
+            // time is attributable in captures instead of appearing as
+            // unaccounted main-thread time.
+            PROFILE_ZONE_N("TitleFrame");
             glfwPollEvents();
             Input::UpdateKeyStates();
 
@@ -766,6 +771,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 glfwSwapBuffers(window);
             }
             Input::ResetMouseDelta();
+            PROFILE_FRAME_MARK_NAMED("TitleFrame");
 
             // ── Did a button commit to something? ──────────────────────────
             TitleAction action = Render::ConsumeTitleAction();
@@ -1218,6 +1224,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             return -1;
         }
 
+        // Apply the SAVED vsync setting through the backend — this must run
+        // AFTER InitializeGameDirectorySystem (which loads options.txt);
+        // before that, GetVSync() returns the compiled-in default (true).
+        // The GL-only glfwSwapInterval during GL setup has the same
+        // too-early problem, so this call is the authoritative one for both
+        // backends. On Vulkan it flags a swapchain recreate (present mode
+        // lives in the swapchain; VKBackend defaults to vsync-on FIFO).
+        if (Render::g_renderBackend) {
+            Render::g_renderBackend->SetVSync(Platform::g_gameSettings.GetVSync());
+        }
+
         // Initialize input
         Input::Init(window);
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
@@ -1438,9 +1455,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Threading::InitializeClientWorkerPool(threadAlloc.clientMeshWorkers);
             Log::Info("✓ Client worker pool initialized (%d threads)", threadAlloc.clientMeshWorkers);
 
-            // Create ClientBlockAccess for physics and raycast
-            clientBlockAccess = std::make_unique<Client::ClientBlockAccess>();
+            // Physics/raycast read through this on a remote client. It is
+            // ALSO created for the host below — see the shared setup.
         }
+
+        // ClientBlockAccess is needed in BOTH modes. Besides being the remote
+        // client's physics/raycast source, it is the ILevelWrite that item
+        // behaviours (hoe, shovel, bucket, …) write through when the client
+        // runs them for prediction — and prediction always targets the CLIENT
+        // chunk cache, never the server World, because that cache is what the
+        // renderer meshes from.
+        clientBlockAccess = std::make_unique<Client::ClientBlockAccess>();
+        Client::g_clientBlockAccess = clientBlockAccess.get();
 
         // 4. Initialize client-side systems (always needed)
         Client::InitializeClientChunkManager();
@@ -1455,9 +1481,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::GetInventoryScreen().SetPlayer(&player);
         if (!isRemoteClient) {
             playerController.SetWorld(world);
+            playerController.SetBlockAccess(world);
         } else {
-            // Remote client: no World for block placement (server handles it)
+            // Remote client: no World for block placement (server handles it).
+            // Block READS still have to work though — the controller needs
+            // hardness/target lookups for the mining state machine, and it
+            // gets them from the client chunk cache. Leaving this null was why
+            // mining on a remote server ignored hardness entirely: every
+            // lookup returned Air, whose destroyTime of 0 means "instant".
             playerController.SetWorld(nullptr);
+            playerController.SetBlockAccess(clientBlockAccess.get());
         }
 
         // 6. Configure IntegratedServer with player (host only)
@@ -1710,6 +1743,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         static constexpr auto CLIENT_TICK_INTERVAL = std::chrono::milliseconds(50);
         static constexpr int MAX_TICKS_PER_FRAME = 10;
         auto nextClientTick = std::chrono::steady_clock::now();
+
+        // Speed-driven FOV (MC GameRenderer.tickFov + fovModifier). Smoothed
+        // at 20 TPS with MC's 0.5 blend factor and lerped across the frame so
+        // the zoom eases in instead of snapping the instant sprint engages.
+        float fovModifier    = 1.0f;   // current (this tick)
+        float fovModifierOld = 1.0f;   // previous tick — render lerps between
+        double fovTickAccum  = 0.0;
 
         // Set by the pause menu's "Save and Quit to Title": breaks the main
         // loop, the session teardown below runs, and the outer session loop
@@ -2297,6 +2337,43 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             camera.Update(dt);
             player.UpdateRaycast(camera);
             playerController.Tick(dt);
+
+            // === Speed-driven FOV ==========================================
+            // MC AbstractClientPlayer.getFieldOfViewModifier (line 103):
+            //   modifier  = 1
+            //   if flying          → modifier *= 1.1
+            //   speedFactor        = MOVEMENT_SPEED / walkingSpeed
+            //   modifier *= (speedFactor + 1) / 2
+            //   modifier  = lerp(fovEffectScale, 1, modifier)
+            // Our currentSpeed is the direct analogue of the MOVEMENT_SPEED
+            // attribute (walk/sprint plus the consecutive-jump bonus), so
+            // dividing by WALK_SPEED reproduces MC's ratio exactly: walking
+            // gives 1.0 (no change) and sprinting 1.3 → ×1.15.
+            {
+                float target = 1.0f;
+                if (player.physics.isFlying) target *= 1.1f;
+                const float speedFactor =
+                    player.physics.currentSpeed / Game::PlayerPhysics::WALK_SPEED;
+                target *= (speedFactor + 1.0f) * 0.5f;
+
+                const float effectScale = Platform::g_gameSettings.GetFOVEffectScale();
+                target = 1.0f + (target - 1.0f) * effectScale;
+
+                // MC advances this once per client tick with a fixed 0.5
+                // blend; run the same discrete step so the ease-in duration
+                // doesn't drift with framerate.
+                fovTickAccum += dt;
+                while (fovTickAccum >= 0.05) {
+                    fovModifierOld = fovModifier;
+                    fovModifier   += (target - fovModifier) * 0.5f;
+                    fovModifier    = std::clamp(fovModifier, 0.1f, 1.5f);
+                    fovTickAccum  -= 0.05;
+                }
+
+                // Sub-tick interpolation (MC getFov's lerp(partialTicks, …)).
+                const float partial = static_cast<float>(fovTickAccum / 0.05);
+                camera.fov *= fovModifierOld + (fovModifier - fovModifierOld) * partial;
+            }
             player.UpdateVisual(dt);
             player.UpdateStatistics(dt);
             PROFILE_TIMER_END(gamelogic, metrics.gameLogicTime);
@@ -2437,6 +2514,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Own projection — the 512-radius sky disc would be clipped by
             // the main far plane at low render distances.
             {
+                PROFILE_ZONE_N("SkyPass");
                 glm::mat4 skyProj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, 2048.0f);
                 glm::mat4 viewRotation = glm::mat4(glm::mat3(view));
                 Render::g_skyRenderer.Render(skyProj, viewRotation);
@@ -2496,6 +2574,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 return (sdF * sdH) <= 0.0f;
             };
             if (Client::g_remotePlayerManager) {
+                PROFILE_ZONE_N("RemotePlayers");
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
@@ -2666,6 +2745,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // but before portals (so they're masked correctly when seen
             // through a portal).
             if (Render::g_blockEntityRenderDispatcher && Client::g_clientChunkManager) {
+                PROFILE_ZONE_N("BlockEntities");
                 Render::g_blockEntityRenderDispatcher->RenderAll(
                     Client::g_clientChunkManager.get(),
                     proj, view, camera.position, /*partialTick=*/0.0f);
@@ -2680,6 +2760,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // the portal renderer; the lambda just renders. No nametags or
             // chat bubbles in see-through (per user request — model only).
             {
+                PROFILE_ZONE_N("PortalRender");
                 // partialTick — interpolation fraction within the current
                 // 50ms client tick. Same calc as the main remote-player
                 // render below; recomputed here so it's in lambda scope.
@@ -2862,6 +2943,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Clouds — MC's cloud pass runs after terrain and particles
             // (translucent, depth-tested against the world, no depth write).
             {
+                PROFILE_ZONE_N("CloudPass");
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
@@ -2892,6 +2974,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 (renderMainHand ||
                  !player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).IsEmpty());
             if (drawHeldItem) {
+                PROFILE_ZONE_N("HeldItem");
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
                     : 16.0f / 9.0f;
@@ -2927,7 +3010,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             g_hudRenderer.SetFood(player.food);
             g_hudRenderer.SetSaturation(player.saturation);
             g_hudRenderer.SetStatsHidden(player.IsCreative() || player.IsSpectator());
-            RenderHUD(window, player.inventory, dt, proj, view);
+            {
+                PROFILE_ZONE_N("HudRender");
+                RenderHUD(window, player.inventory, dt, proj, view);
+            }
             // Hide the crosshair while any Screen is shown (inventory, pause
             // menu, options). In MC the crosshair sits on an early HUD stratum
             // and screens draw over it; ours is a standalone pass drawn AFTER
@@ -3323,6 +3409,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         // Clean up ClientBlockAccess (remote client only)
+        Client::g_clientBlockAccess = nullptr;
         clientBlockAccess.reset();
         
         // 8. Shutdown rendering systems

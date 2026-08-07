@@ -22,6 +22,7 @@ namespace Network {
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
     struct SetHealthS2CPacket;
+    struct BlockChangedAckS2CPacket;
     struct PlayerAbilitiesS2CPacket;
 #if ENABLE_PORTAL_GUN
     struct PortalSetS2CPacket;
@@ -84,6 +85,9 @@ namespace Network {
 
         // Player stats (MC ClientboundSetHealthPacket)
         virtual void onSetHealthS2C(const SetHealthS2CPacket& packet) {}
+
+        // Block-prediction ack (MC ClientboundBlockChangedAckPacket)
+        virtual void onBlockChangedAckS2C(const BlockChangedAckS2CPacket& packet) {}
 
         // Abilities + game mode (MC ClientboundPlayerAbilitiesPacket + CHANGE_GAME_MODE)
         virtual void onPlayerAbilitiesS2C(const PlayerAbilitiesS2CPacket& packet) {}

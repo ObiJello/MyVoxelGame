@@ -99,15 +99,17 @@ void main() {
 
     void GuiRenderer::Shutdown() {
         if (g_renderBackend) {
-            if (m_mesh != INVALID_MESH) { g_renderBackend->DestroyMesh(m_mesh); m_mesh = INVALID_MESH; }
-            if (m_vertexBuffer != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_vertexBuffer); m_vertexBuffer = INVALID_BUFFER; }
-            if (m_indexBuffer != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(m_indexBuffer); m_indexBuffer = INVALID_BUFFER; }
+            for (auto& fb : m_frames) {
+                if (fb.mesh != INVALID_MESH) { g_renderBackend->DestroyMesh(fb.mesh); fb.mesh = INVALID_MESH; }
+                if (fb.vbo != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(fb.vbo); fb.vbo = INVALID_BUFFER; }
+                if (fb.ibo != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(fb.ibo); fb.ibo = INVALID_BUFFER; }
+                fb.vboCapacity = 0;
+                fb.iboCapacity = 0;
+            }
             if (m_texturedShader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_texturedShader); m_texturedShader = INVALID_SHADER; }
             if (m_colorShader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_colorShader); m_colorShader = INVALID_SHADER; }
             if (m_dummyTexture != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_dummyTexture); m_dummyTexture = INVALID_TEXTURE; }
         }
-        m_vertexBufferCapacity = 0;
-        m_indexBufferCapacity = 0;
     }
 
     glm::vec2 GuiRenderer::TransformPoint(const glm::mat3x2& m, float x, float y) {
@@ -360,31 +362,50 @@ void main() {
     void GuiRenderer::ExecuteBatches(int fbWidth, int fbHeight, float guiScale) {
         if (m_batches.empty() || m_vertices.empty()) return;
 
-        // Recreate GPU buffers if needed
         size_t vertexDataSize = m_vertices.size() * sizeof(GuiVertex);
         size_t indexDataSize = m_indices.size() * sizeof(uint32_t);
 
-        // Destroy old mesh/buffers if they exist
-        if (m_mesh != INVALID_MESH) {
-            g_renderBackend->DestroyMesh(m_mesh);
-            m_mesh = INVALID_MESH;
-        }
-        if (m_vertexBuffer != INVALID_BUFFER) {
-            g_renderBackend->DestroyBuffer(m_vertexBuffer);
-            m_vertexBuffer = INVALID_BUFFER;
-        }
-        if (m_indexBuffer != INVALID_BUFFER) {
-            g_renderBackend->DestroyBuffer(m_indexBuffer);
-            m_indexBuffer = INVALID_BUFFER;
+        // Persistent double-buffered GPU buffers: map/memcpy into this frame's
+        // set, alternating so the previous frame's in-flight commands never
+        // read memory we're writing. Grown with 1.5x headroom only when the
+        // GUI outgrows a set (old buffers deferred-destroyed so in-flight
+        // frames finish with them first). The previous code destroyed and
+        // recreated Static buffers EVERY frame — on Vulkan that meant two
+        // staging uploads plus two vkQueueWaitIdle pipeline drains per frame,
+        // measured at ~4.6ms/frame (HudRender was 25% of a Tracy capture).
+        FrameBuffers& fb = m_frames[m_frameIndex];
+        m_frameIndex = (m_frameIndex + 1) % 2;
+
+        if (fb.mesh == INVALID_MESH ||
+            fb.vboCapacity < vertexDataSize || fb.iboCapacity < indexDataSize) {
+            if (fb.mesh != INVALID_MESH) {
+                g_renderBackend->DeferredDestroyMesh(fb.mesh);
+                fb.mesh = INVALID_MESH;
+            }
+            if (fb.vbo != INVALID_BUFFER) {
+                g_renderBackend->DeferredDestroyBuffer(fb.vbo);
+                fb.vbo = INVALID_BUFFER;
+            }
+            if (fb.ibo != INVALID_BUFFER) {
+                g_renderBackend->DeferredDestroyBuffer(fb.ibo);
+                fb.ibo = INVALID_BUFFER;
+            }
+
+            fb.vboCapacity = std::max(vertexDataSize + vertexDataSize / 2,
+                                      static_cast<size_t>(64 * 1024));
+            fb.iboCapacity = std::max(indexDataSize + indexDataSize / 2,
+                                      static_cast<size_t>(32 * 1024));
+            fb.vbo = g_renderBackend->CreateBuffer(
+                BufferUsage::Vertex, fb.vboCapacity, nullptr, BufferAccess::Dynamic);
+            fb.ibo = g_renderBackend->CreateBuffer(
+                BufferUsage::Index, fb.iboCapacity, nullptr, BufferAccess::Dynamic);
+            fb.mesh = g_renderBackend->CreateMesh(fb.vbo, fb.ibo, GetBlockVertexLayout());
         }
 
-        m_vertexBuffer = g_renderBackend->CreateBuffer(
-            BufferUsage::Vertex, vertexDataSize, m_vertices.data());
-        m_indexBuffer = g_renderBackend->CreateBuffer(
-            BufferUsage::Index, indexDataSize, m_indices.data());
-        m_mesh = g_renderBackend->CreateMesh(m_vertexBuffer, m_indexBuffer, GetBlockVertexLayout());
+        if (fb.mesh == INVALID_MESH) return;
 
-        if (m_mesh == INVALID_MESH) return;
+        g_renderBackend->UpdateBuffer(fb.vbo, 0, vertexDataSize, m_vertices.data());
+        g_renderBackend->UpdateBuffer(fb.ibo, 0, indexDataSize, m_indices.data());
 
         // Orthographic projection in GUI-scaled coordinates.
         //
@@ -481,7 +502,7 @@ void main() {
 
             // TODO: Scissor rect support via glScissor/vkCmdSetScissor
 
-            g_renderBackend->DrawIndexed(m_mesh, batch.indexCount, batch.firstIndex);
+            g_renderBackend->DrawIndexed(fb.mesh, batch.indexCount, batch.firstIndex);
         }
 
         g_renderBackend->UnbindMesh();

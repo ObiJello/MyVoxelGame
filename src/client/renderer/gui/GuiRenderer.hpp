@@ -42,11 +42,23 @@ namespace Render {
         TextureHandle m_dummyTexture = INVALID_TEXTURE; // 1x1 white pixel for color-only draws on Vulkan
 
         // Dynamic vertex buffer — rebuilt each frame
-        BufferHandle m_vertexBuffer = INVALID_BUFFER;
-        BufferHandle m_indexBuffer = INVALID_BUFFER;
-        MeshHandle m_mesh = INVALID_MESH;
-        size_t m_vertexBufferCapacity = 0;
-        size_t m_indexBufferCapacity = 0;
+        // Persistent per-frame GPU buffer sets, double-buffered: with Vulkan's
+        // MAX_FRAMES_IN_FLIGHT=2, alternating sets guarantees we never map/write
+        // a buffer the previous frame's command buffer may still be reading
+        // (the frame-slot fence has been waited on by then). Buffers are
+        // Dynamic (host-visible on VK) and grown with headroom only when the
+        // GUI outgrows them — NOT recreated per frame (the old per-frame
+        // Static create/destroy cost two staging uploads + two
+        // vkQueueWaitIdle pipeline drains every frame on Vulkan, ~4.6ms).
+        struct FrameBuffers {
+            BufferHandle vbo = INVALID_BUFFER;
+            BufferHandle ibo = INVALID_BUFFER;
+            MeshHandle mesh = INVALID_MESH;
+            size_t vboCapacity = 0;
+            size_t iboCapacity = 0;
+        };
+        FrameBuffers m_frames[2];
+        int m_frameIndex = 0;
 
         struct DrawBatch {
             TextureHandle texture;    // INVALID_TEXTURE for fills

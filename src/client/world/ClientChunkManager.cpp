@@ -45,7 +45,14 @@ namespace Client {
         
         // Reset generation counter
         m_nextGeneration = 1;
-        
+
+        // Bind the prediction handler's world hooks (MC ClientLevel owns the
+        // equivalent handler and calls straight into its own setBlock).
+        m_prediction.Clear();
+        m_prediction.SetHooks(
+            [this](const glm::ivec3& pos, Game::BlockID state) { SetBlockLocal(pos, state); },
+            [this](const glm::ivec3& pos) { return GetBlockAt(pos); });
+
         Log::Info("ClientChunkManager initialized successfully");
     }
 
@@ -116,6 +123,7 @@ namespace Client {
                 
                 // Also update legacy dirty set for compatibility
                 chunk->dirtySections.insert(sectionY);
+                m_chunksWithDirtySections.insert(chunkPos);
             } else {
                 // Section is empty (all air) — reset state
                 sectionInfo.hasCpuData = true;
@@ -196,7 +204,8 @@ namespace Client {
             sectionInfo.version++;
             sectionInfo.dirty = true;
             it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
-            Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)", 
+            m_chunksWithDirtySections.insert(chunkPos);
+            Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)",
                       chunkPos.x, chunkPos.z, sectionY, sectionInfo.version);
         }
     }
@@ -212,6 +221,7 @@ namespace Client {
                 sectionInfo.dirty = true;
                 it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
             }
+            m_chunksWithDirtySections.insert(chunkPos);
             Log::Debug("Marked all sections in chunk (%d, %d) as dirty", chunkPos.x, chunkPos.z);
         }
     }
@@ -264,6 +274,7 @@ namespace Client {
                 dirtyCount++;
             }
             if (dirtyCount > 0) {
+                m_chunksWithDirtySections.insert(neighborPos);
                 Log::Debug("  %s neighbor (%d, %d): marked %d sections dirty",
                           dirLabel, neighborPos.x, neighborPos.z, dirtyCount);
             }
@@ -522,44 +533,91 @@ namespace Client {
     // Process block change packet
     void ClientChunkManager::ProcessBlockChange(const Network::BlockChangeS2CPacket& packet) {
         ASSERT_MAIN_THREAD();
+        const glm::ivec3 pos{packet.worldX, packet.worldY, packet.worldZ};
+
+        // MC ClientLevel.setServerVerifiedBlockState: if we have an
+        // outstanding prediction at this position, the server's state is filed
+        // against that prediction instead of being written now. Writing it
+        // would undo the player's predicted block for the rest of the round
+        // trip — the exact flicker prediction exists to avoid.
+        if (m_prediction.RecordServerState(pos, packet.newBlockId)) {
+            return;
+        }
+
         // Calculate chunk position from world coordinates
         Game::Math::ChunkPos chunkPos{
             packet.worldX >> 4,  // Divide by 16
             packet.worldZ >> 4
         };
-        
+
         // Get the chunk
         ClientChunk* chunk = GetChunk(chunkPos);
         if (!chunk || !chunk->chunkData) {
             // Chunk not loaded yet - add to pending diffs
-            Log::Debug("Chunk (%d, %d) not loaded - adding block change to pending diffs", 
+            Log::Debug("Chunk (%d, %d) not loaded - adding block change to pending diffs",
                       chunkPos.x, chunkPos.z);
             if (m_pendingDiffs) {
                 m_pendingDiffs->AddBlockChange(chunkPos, packet);
             }
             return;
         }
-        
+
+        SetBlockLocal(pos, packet.newBlockId);
+    }
+
+    void ClientChunkManager::SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId) {
+        ASSERT_MAIN_THREAD();
+        Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
+
+        ClientChunk* chunk = GetChunk(chunkPos);
+        if (!chunk || !chunk->chunkData) return;
+
         // Calculate local block position within chunk
-        int localX = packet.worldX & 0xF;  // mod 16
-        int localZ = packet.worldZ & 0xF;
-        int sectionY = (packet.worldY + 64) >> 4;  // Convert to section index
-        
+        int localX = pos.x & 0xF;  // mod 16
+        int localZ = pos.z & 0xF;
+        int sectionY = (pos.y + 64) >> 4;  // Convert to section index
+
         // Set the block in the chunk
-        chunk->chunkData->SetBlock(localX, packet.worldY, localZ, packet.newBlockId);
+        chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId);
 
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY);
 
         // Mark neighbor sections dirty when block is on a chunk/section boundary
         // (the neighbor's mesh depends on this block for face culling)
-        int localY = (packet.worldY + 64) & 0xF;  // position within section (0-15)
+        int localY = (pos.y + 64) & 0xF;  // position within section (0-15)
         if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY);
         if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY);
         if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY);
         if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY);
         if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1);
         if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1);
+    }
+
+    Game::BlockID ClientChunkManager::GetBlockAt(const glm::ivec3& pos) const {
+        const ClientChunk* chunk = GetChunk({pos.x >> 4, pos.z >> 4});
+        if (!chunk || !chunk->chunkData) return Game::BlockID::Air;
+        return chunk->chunkData->GetBlock(pos.x & 0xF, pos.y, pos.z & 0xF);
+    }
+
+    void ClientChunkManager::PredictBlockChange(const glm::ivec3& pos,
+                                                Game::BlockID newBlock,
+                                                uint32_t sequence) {
+        ASSERT_MAIN_THREAD();
+        // Only predict into loaded chunks. Predicting into a chunk we don't
+        // have would leave a record whose rollback target is a fabricated Air.
+        ClientChunk* chunk = GetChunk({pos.x >> 4, pos.z >> 4});
+        if (!chunk || !chunk->chunkData) return;
+
+        // Retain BEFORE writing — the retained state is what the server still
+        // believes is there, which is exactly the pre-write block.
+        m_prediction.Retain(pos, GetBlockAt(pos), sequence);
+        SetBlockLocal(pos, newBlock);
+    }
+
+    void ClientChunkManager::HandleBlockChangedAck(uint32_t sequence) {
+        ASSERT_MAIN_THREAD();
+        m_prediction.EndPredictionsUpTo(sequence);
     }
     
     void ClientChunkManager::ApplyChunkData(Game::Math::ChunkPos chunkPos, const Network::ChunkDataS2CPacket& packet) {
@@ -676,6 +734,7 @@ namespace Client {
                             
                             // Also update legacy dirty set for now (will remove later)
                             chunk->dirtySections.insert(y);
+                            m_chunksWithDirtySections.insert(chunkPos);
                             
                             // Log::Debug("[mesh] loaded cx=%d cz=%d sy=%d ver=%u", 
                             //      chunkPos.x, chunkPos.z, y, sectionInfo.version);
@@ -742,7 +801,8 @@ namespace Client {
                 
                 chunk->chunkData->SetBlock(localX, blockPos.y, localZ, change.blockId);
                 chunk->dirtySections.insert(sectionY);
-                
+                m_chunksWithDirtySections.insert(chunkPos);
+
                 Log::Debug("Applied pending block change at (%d, %d, %d) to block %d",
                          blockPos.x, blockPos.y, blockPos.z, static_cast<int>(change.blockId));
             }
@@ -754,6 +814,7 @@ namespace Client {
                 // TODO: Apply light update
                 int sectionY = (update.pos.y + 64) >> 4;
                 chunk->dirtySections.insert(sectionY);
+                m_chunksWithDirtySections.insert(chunkPos);
             }
         }
         
@@ -794,11 +855,28 @@ namespace Client {
         if (activeAndPending >= POOL_SIZE) return;
         size_t slotsAvailable = POOL_SIZE - activeAndPending;
 
-        // Collect dirty sections — reuse persistent buffer to avoid per-call heap allocation
+        // Collect dirty sections — reuse persistent buffer to avoid per-call heap allocation.
+        // Iterates only the dirty-chunk index (not every loaded chunk); entries whose
+        // chunk is gone or fully clean are lazily erased here.
         m_meshCandidates.clear();
 
-        for (auto& [chunkPos, chunk] : m_chunks) {
-            if (!chunk || !chunk->chunkData || chunk->dirtySections.empty()) continue;
+        for (auto dirtyIt = m_chunksWithDirtySections.begin();
+             dirtyIt != m_chunksWithDirtySections.end(); ) {
+            const Game::Math::ChunkPos chunkPos = *dirtyIt;
+            auto chunkIt = m_chunks.find(chunkPos);
+            ClientChunk* chunk = (chunkIt != m_chunks.end()) ? chunkIt->second.get() : nullptr;
+
+            if (!chunk || !chunk->chunkData || chunk->dirtySections.empty()) {
+                // Unloaded or fully clean — drop from the index. Only advance via
+                // erase's return iterator; nothing below mutates the set.
+                if (!chunk || chunk->dirtySections.empty()) {
+                    dirtyIt = m_chunksWithDirtySections.erase(dirtyIt);
+                } else {
+                    ++dirtyIt;  // Loaded but no CPU data yet — keep for later
+                }
+                continue;
+            }
+            ++dirtyIt;
 
             float dx = chunkPos.x * 16.0f + 8.0f - playerPosition.x;
             float dz = chunkPos.z * 16.0f + 8.0f - playerPosition.z;
@@ -818,7 +896,7 @@ namespace Client {
                 // Initial compiles get 4x priority boost (0.5^2 = 0.25 on squared distance)
                 float effectiveDistSq = (!si.builtOnce && !si.isAllAir) ? distSq * 0.25f : distSq;
 
-                m_meshCandidates.push_back({chunkPos, sectionY, effectiveDistSq, chunk.get()});
+                m_meshCandidates.push_back({chunkPos, sectionY, effectiveDistSq, chunk});
             }
         }
 
@@ -929,6 +1007,7 @@ namespace Client {
         uint32_t expectedVersion,
         std::shared_ptr<Render::MeshJobData>& outSnapshot) {
 
+        PROFILE_ZONE_N("BuildSnapshot");
         ASSERT_MAIN_THREAD();
 
         auto it = m_chunks.find(chunkPos);
@@ -952,11 +1031,11 @@ namespace Client {
         if (section) {
             std::memcpy(outSnapshot->sectionData.blocks.data(),
                        section->blocks.data(), 4096 * sizeof(uint16_t));
-            // Check if empty — scan for any non-zero (non-Air) block
-            outSnapshot->sectionData.isEmpty = true;
-            for (int i = 0; i < 4096; ++i) {
-                if (section->blocks[i] != 0) { outSnapshot->sectionData.isEmpty = false; break; }
-            }
+            // Empty check via memcmp against a zero page — vectorized by libc,
+            // and it still early-outs on the first non-Air block.
+            static const uint16_t kZeroSection[4096] = {};
+            outSnapshot->sectionData.isEmpty =
+                std::memcmp(section->blocks.data(), kZeroSection, 4096 * sizeof(uint16_t)) == 0;
         } else {
             outSnapshot->sectionData.isEmpty = true;
             std::memset(outSnapshot->sectionData.blocks.data(), 0, 4096 * sizeof(uint16_t));
@@ -1112,6 +1191,7 @@ namespace Client {
             sectionInfo.meshingVersion = 0; // Allow rescheduling
             sectionInfo.dirty = true;
             chunk->dirtySections.insert(sectionY);
+            m_chunksWithDirtySections.insert(chunkPos);
         } else {
             sectionInfo.dirty = false;
             chunk->dirtySections.erase(sectionY);
@@ -1126,6 +1206,11 @@ namespace Client {
     void ClientChunkManager::ClearAllChunks() {
         ASSERT_MAIN_THREAD();
         m_chunks.clear();
+        m_chunksWithDirtySections.clear();
+        // Predictions reference positions in chunks that no longer exist —
+        // drop them rather than letting a late ack roll back into a chunk
+        // that has since been reloaded from scratch.
+        m_prediction.Clear();
         Log::Info("Cleared all chunks from ClientChunkManager");
     }
     

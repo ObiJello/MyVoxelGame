@@ -24,6 +24,8 @@ namespace Game {
     struct BlockHitResult;
     struct ItemStack;
     class World;
+    class ILevelWrite;
+    class IUsePlayer;
 
     // Render layer classification — determines which rendering pass a block uses
     enum class RenderLayer : uint8_t {
@@ -37,8 +39,8 @@ namespace Game {
     // `ServerPlayerGameMode.useItemOn` line 354 when the held item returned
     // TryEmptyHandInteraction). Examples: open door, flip lever, press button,
     // open chest, sit in boat. Default nullptr → Pass.
-    using BlockUseWithoutItemFn = UseResult (*)(World* world, const glm::ivec3& pos,
-                                                Server::ServerPlayer* player,
+    using BlockUseWithoutItemFn = UseResult (*)(ILevelWrite* world, const glm::ivec3& pos,
+                                                IUsePlayer* player,
                                                 const BlockHitResult& hit);
 
     // Right-click WITH an item on this block. Mirrors MC's
@@ -49,8 +51,8 @@ namespace Game {
     // useWithoutItem (i.e., "I'd react to an empty-hand click here, ignore
     // the item").
     using BlockUseItemOnFn = UseResult (*)(struct ItemStack& stack,
-                                           World* world, const glm::ivec3& pos,
-                                           Server::ServerPlayer* player, uint32_t hand,
+                                           ILevelWrite* world, const glm::ivec3& pos,
+                                           IUsePlayer* player, uint32_t hand,
                                            const BlockHitResult& hit);
 
     struct Block {

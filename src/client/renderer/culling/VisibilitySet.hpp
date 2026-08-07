@@ -52,14 +52,18 @@ namespace Render {
             return (m_bits >> (from + to * 6)) & 1;
         }
 
+        // All 36 bits set — the "vision passes between every face pair" state
+        static constexpr uint64_t kAllVisibleBits = 0x0000000FFFFFFFFFULL;
+
         // Set all 36 bits (all-visible or all-invisible)
         void setAll(bool visible) {
-            m_bits = visible ? 0x0000000FFFFFFFFFULL : 0;  // 36 bits set
+            m_bits = visible ? kAllVisibleBits : 0;
         }
 
-        bool isAllVisible() const { return m_bits == 0x0000000FFFFFFFFFULL; }
+        bool isAllVisible() const { return m_bits == kAllVisibleBits; }
 
         uint64_t raw() const { return m_bits; }
+        void setRaw(uint64_t bits) { m_bits = bits; }
 
     private:
         uint64_t m_bits = 0;

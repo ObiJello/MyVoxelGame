@@ -22,10 +22,14 @@
     #define PROFILE_FRAME_MARK              FrameMark
     #define PROFILE_FRAME_MARK_NAMED(name)  FrameMarkNamed(name)
     #define PROFILE_THREAD(name)            tracy::SetThreadName(name)
+    // Numeric time-series plot (name must be a string literal). Shows up in
+    // Tracy's Plots pane — use for per-frame counts (visible sections, uploads).
+    #define PROFILE_PLOT(name, value)       TracyPlot(name, value)
 #else
     #define PROFILE_ZONE            (void)0
     #define PROFILE_ZONE_N(name)    (void)0
     #define PROFILE_FRAME_MARK              (void)0
     #define PROFILE_FRAME_MARK_NAMED(name)  (void)0
     #define PROFILE_THREAD(name)    (void)0
+    #define PROFILE_PLOT(name, value)       (void)0
 #endif

@@ -19,6 +19,12 @@ namespace Game {
     class World;
 }
 
+namespace Client {
+namespace Render {
+    struct SectionSnapshot;  // MeshJobData.hpp — fast-path mesh input
+}
+}
+
 namespace Render {
 
     // Face directions for block meshing
@@ -63,8 +69,16 @@ namespace Render {
         // **NEW**: Set world reference for cross-chunk neighbor access
         void SetWorld(Game::World* world);
 
-        // Rebuild mesh for one 16x16x16 section
+        // Rebuild mesh for one 16x16x16 section (generic path: fills the block
+        // cache through the IBlockAccess interface, then meshes from the cache)
         void BuildSectionMesh(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
+
+        // Fast path for worker threads: fills the block cache directly from the
+        // snapshot's flat arrays (memcpy for the interior and axis-aligned halo
+        // planes) instead of ~10k virtual GetBlock calls per section. Produces
+        // identical output to the IBlockAccess path over a SnapshotBlockAccess.
+        void BuildSectionMesh(const Client::Render::SectionSnapshot& snapshot,
+                              Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
 
         // Convenience: rebuild entire chunk (all 24 sections)
         // DEPRECATED: Use BuildSectionMesh with IBlockAccess instead
@@ -103,17 +117,27 @@ namespace Render {
 
         void EnsureBlockPropsCache();
 
-        // Per-section opaque cache: 18x18x18 covering the 16x16x16 section plus a
-        // 1-block border on all sides. Built once at the start of BuildSectionMesh
-        // and indexed during AO and face culling to avoid redundant GetBlock +
-        // IsBlockOpaque calls (eliminates ~12 lookups per face).
-        // Index with [localX+1][localY+1][localZ+1] where local coords are in [-1,16].
+        // Per-section block/opaque caches: 18x18x18 covering the 16x16x16 section
+        // plus a 1-block border on all sides. Built once at the start of
+        // BuildSectionMesh; ALL subsequent block reads (main loop, face culling,
+        // AO, fluid neighbor sampling via CacheBlockAccess) index these arrays —
+        // no virtual GetBlock calls remain on the meshing hot path.
+        // Layout is [y][z][x] (x contiguous) to match SectionSnapshot's flat
+        // array so the interior and Y/Z halo planes fill via memcpy.
+        // Index with [localY+1][localZ+1][localX+1] where local coords are in [-1,16].
+        Game::BlockID m_blockCache[18][18][18];
         bool m_opaqueCache[18][18][18];
         int m_sectionBaseWorldX;
         int m_sectionBaseWorldY;
         int m_sectionBaseWorldZ;
-        void BuildOpaqueCache(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY);
+        void FillBlockCacheFromAccess(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY);
+        void FillBlockCacheFromSnapshot(const Client::Render::SectionSnapshot& snapshot,
+                                        Game::Math::ChunkPos chunkPos, int sectionY);
+        void DeriveOpaqueCache();
+        // Shared meshing body — reads only from m_blockCache/m_opaqueCache
+        void BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
         bool GetCachedOpaque(int worldX, int worldY, int worldZ) const;
+        Game::BlockID GetCachedBlock(int worldX, int worldY, int worldZ) const;
 
         // UV cache: thread-local so it persists across Mesher instances on the same
         // worker thread, avoiding ResolveTexture string allocs + atlas hash lookups
@@ -132,7 +156,7 @@ namespace Render {
                          int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
 
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                         std::vector<Vertex>& outVerts, std::vector<uint32_t>& outIndices);
+                         std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIndices);
 
         // Culling and optimization (uses m_opaqueCache for fast neighbor lookups)
         bool ShouldCullFace(int worldX, int worldY, int worldZ, BlockFace face);

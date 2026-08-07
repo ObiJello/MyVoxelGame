@@ -24,6 +24,10 @@ namespace Server {
         m_inventory.SetSlot(Game::Inventory::HotbarToIndex(7), Game::BlockID::Water,     64);
         m_inventory.SetSlot(Game::Inventory::HotbarToIndex(8), Game::BlockID::Bedrock,   64);
 
+        // m_inventoryMenu is built over m_inventory by its member initialiser;
+        // only the game-mode-dependent flag needs setting here.
+        m_inventoryMenu.creative = (m_gameMode == GameMode::CREATIVE);
+
         Log::Info("ServerPlayer: Created player %u '%s' at (%.1f, %.1f, %.1f)",
                  m_playerId, m_name.c_str(), m_position.x, m_position.y, m_position.z);
     }
@@ -500,6 +504,9 @@ namespace Server {
 
     void ServerPlayer::setGameMode(GameMode mode) {
         m_gameMode = mode;
+        // Keeps the creative-only click paths (CLONE, creative grid, destroy
+        // slot) in step with the gamemode.
+        m_inventoryMenu.creative = (mode == GameMode::CREATIVE);
 
         // Mirrors MC GameType.updatePlayerAbilities: creative grants
         // mayfly/instabuild but does NOT force flying (you keep walking

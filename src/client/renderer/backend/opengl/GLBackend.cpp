@@ -20,10 +20,11 @@ namespace Render {
     void RenderBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
                                                     const size_t* indexByteOffsets,
                                                     const int32_t* baseVertices,
-                                                    uint32_t drawCount) {
+                                                    uint32_t drawCount,
+                                                    IndexType indexType) {
         for (uint32_t i = 0; i < drawCount; i++) {
             if (indexCounts[i] > 0)
-                DrawIndexedBaseVertex(indexCounts[i], indexByteOffsets[i], baseVertices[i]);
+                DrawIndexedBaseVertex(indexCounts[i], indexByteOffsets[i], baseVertices[i], indexType);
         }
     }
 
@@ -205,10 +206,13 @@ namespace Render {
         auto it = m_buffers.find(handle);
         if (it == m_buffers.end()) return;
 
+        // No unbind afterwards: every draw path binds its own buffers before use,
+        // so restoring binding 0 here was pure driver churn (2+ redundant calls
+        // per mesh upload). Note ELEMENT_ARRAY binding is per-VAO state either
+        // way — BindSlab rebinds the IBO before every terrain draw.
         glBindBuffer(it->second.target, it->second.glId);
         glBufferSubData(it->second.target, static_cast<GLintptr>(offset),
                        static_cast<GLsizeiptr>(size), data);
-        glBindBuffer(it->second.target, 0);
     }
 
     void GLBackend::DestroyBuffer(BufferHandle handle) {
@@ -901,11 +905,12 @@ namespace Render {
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second.glId);
     }
 
-    void GLBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) {
+    void GLBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
+                                          IndexType indexType) {
         glDrawElementsBaseVertex(
             GL_TRIANGLES,
             static_cast<GLsizei>(indexCount),
-            GL_UNSIGNED_INT,
+            indexType == IndexType::Uint16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT,
             reinterpret_cast<const void*>(indexByteOffset),
             static_cast<GLint>(baseVertex));
     }
@@ -913,7 +918,10 @@ namespace Render {
     void GLBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
                                                 const size_t* indexByteOffsets,
                                                 const int32_t* baseVertices,
-                                                uint32_t drawCount) {
+                                                uint32_t drawCount,
+                                                IndexType indexType) {
+        const GLenum glIndexType =
+            indexType == IndexType::Uint16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
         // Convert size_t byte offsets to const void* for GL
         // Stack-allocate for typical draw counts, heap for large batches
         if (drawCount <= 256) {
@@ -923,7 +931,7 @@ namespace Render {
             glMultiDrawElementsBaseVertex(
                 GL_TRIANGLES,
                 reinterpret_cast<const GLsizei*>(indexCounts),
-                GL_UNSIGNED_INT,
+                glIndexType,
                 offsets,
                 static_cast<GLsizei>(drawCount),
                 const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
@@ -934,7 +942,7 @@ namespace Render {
             glMultiDrawElementsBaseVertex(
                 GL_TRIANGLES,
                 reinterpret_cast<const GLsizei*>(indexCounts),
-                GL_UNSIGNED_INT,
+                glIndexType,
                 offsets.data(),
                 static_cast<GLsizei>(drawCount),
                 const_cast<GLint*>(reinterpret_cast<const GLint*>(baseVertices)));
@@ -1006,17 +1014,20 @@ namespace Render {
 
     float GLBackend::GetGPUTimerResultMs(GPUTimerHandle handle) {
         auto it = m_timers.find(handle);
-        if (it == m_timers.end()) return 0.0f;
+        if (it == m_timers.end()) return -1.0f;
 
         if (!it->second.resultReady) {
             GLint available = 0;
             glGetQueryObjectiv(it->second.queryId, GL_QUERY_RESULT_AVAILABLE, &available);
-            if (available) {
-                GLuint64 timeNs = 0;
-                glGetQueryObjectui64v(it->second.queryId, GL_QUERY_RESULT, &timeNs);
-                it->second.resultMs = static_cast<float>(timeNs) / 1000000.0f;
-                it->second.resultReady = true;
+            if (!available) {
+                // Result not on the GPU yet — keep the query alive so the
+                // caller can poll again next frame (never blocks the pipeline).
+                return -1.0f;
             }
+            GLuint64 timeNs = 0;
+            glGetQueryObjectui64v(it->second.queryId, GL_QUERY_RESULT, &timeNs);
+            it->second.resultMs = static_cast<float>(timeNs) / 1000000.0f;
+            it->second.resultReady = true;
         }
 
         float result = it->second.resultMs;

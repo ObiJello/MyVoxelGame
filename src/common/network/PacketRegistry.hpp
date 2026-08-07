@@ -61,6 +61,7 @@
             BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
             BlockEntityActionS2C   = 0x32, // BE "block event" (chest lid open count, bell ring) — MC Level.blockEvent path
             SetHealthS2C           = 0x33, // health float + food VarInt + saturation float — mirrors MC ClientboundSetHealthPacket
+            BlockChangedAckS2C     = 0x34, // Retire client block predictions up to a sequence — mirrors MC ClientboundBlockChangedAckPacket
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -139,6 +140,7 @@
                 case PacketId::BlockEntityRemoveS2C: return "BlockEntityRemoveS2C";
                 case PacketId::BlockEntityActionS2C: return "BlockEntityActionS2C";
                 case PacketId::SetHealthS2C: return "SetHealthS2C";
+                case PacketId::BlockChangedAckS2C: return "BlockChangedAckS2C";
 #if ENABLE_PORTAL_GUN
                 case PacketId::PortalSetS2C:           return "PortalSetS2C";
                 case PacketId::PortalRemoveS2C:        return "PortalRemoveS2C";

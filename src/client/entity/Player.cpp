@@ -39,7 +39,12 @@ namespace Game {
     void ClientPlayer::UpdatePhysics(float deltaTime, IBlockAccess* blockAccess) {
         // Update physics state based on input
         physics.isSneaking = sneakPressed;
-        physics.isSprinting = sprintPressed && !sneakPressed;
+        // Sneak normally blocks sprinting, but shift while flying is "descend",
+        // not crouch — MC's canStartSprinting only rejects on isMovingSlowly()
+        // → isCrouching(), and the crouch pose is never entered while
+        // abilities.flying (LocalPlayer.java:1075, 622). Without the flying
+        // exemption, sprint-descending would silently drop back to base speed.
+        physics.isSprinting = sprintPressed && (!sneakPressed || physics.isFlying);
 
         // Create physics context with block access (World, ClientBlockAccess, etc.)
         PhysicsContext context;

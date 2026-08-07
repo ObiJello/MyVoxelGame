@@ -204,6 +204,22 @@ namespace Game {
         // Reset current speed when changing movement modes
         if (!physics.isSprinting) {
             physics.currentSpeed = physics.baseSpeed;
+        } else if (physics.currentSpeed < physics.baseSpeed) {
+            // Sprint just started (or baseSpeed rose out from under a stale
+            // currentSpeed). MC applies SPEED_MODIFIER_SPRINTING — a ×1.3
+            // ADD_MULTIPLIED_TOTAL modifier on MOVEMENT_SPEED — the moment
+            // setSprinting(true) runs (LivingEntity.java:2165-2167), so the
+            // speed-up is immediate on the ground with no jump involved.
+            //
+            // Previously currentSpeed was only ever written by HandleJump, so
+            // tapping sprint while walking changed baseSpeed but left
+            // currentSpeed at WALK_SPEED — the movement code reads
+            // currentSpeed, so nothing happened until you jumped.
+            //
+            // Raising it only when it's BELOW baseSpeed leaves the
+            // consecutive-jump momentum bonus (which pushes currentSpeed
+            // above baseSpeed) completely untouched.
+            physics.currentSpeed = physics.baseSpeed;
         }
     }
 
@@ -358,16 +374,25 @@ namespace Game {
             if (physics.isFlying) {
                 // Creative flight: MC speeds, full collision, no gravity
                 // (ApplyGravity/HandleJump are skipped upstream).
-                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED *
-                        (physics.isSprinting ? PlayerPhysics::FLY_SPRINT_MULTIPLIER : 1.0f);
+                const float sprintMul = physics.isSprinting
+                                      ? PlayerPhysics::FLY_SPRINT_MULTIPLIER : 1.0f;
+                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED * sprintMul;
                 // Direct vertical control: Space up / Shift down. Use the
                 // input's sign — CalculateMovementInput normalizes the whole
                 // vector, so the raw y magnitude shrinks when combined with
                 // WASD. Instant stop on release matches this codebase's
                 // no-friction land model.
+                //
+                // DELIBERATE MC DEVIATION: vanilla only sprint-doubles the
+                // horizontal (Player.getFlyingSpeed, Player.java:1877-1879);
+                // the vertical impulse reads the undoubled ability value
+                // (LocalPlayer.java:812 — `abilities.getFlyingSpeed() * 3`),
+                // so sprint-ascending in MC is no faster than a walk. We
+                // apply the same multiplier to the vertical so sprint scales
+                // flight uniformly in every direction.
                 const float vert = movementInput.y > 0.01f ? 1.0f
                                  : movementInput.y < -0.01f ? -1.0f : 0.0f;
-                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED;
+                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED * sprintMul;
             }
 
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);

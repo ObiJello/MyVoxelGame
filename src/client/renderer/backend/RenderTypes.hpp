@@ -30,6 +30,11 @@ namespace Render {
 
     enum class BackendType { OpenGL, Vulkan };
 
+    // Index element width for indexed draws. Chunk terrain uses Uint16 (indices
+    // are relative to each section's baseVertex, so 16 bits always suffice —
+    // halves index memory and fetch bandwidth); everything else defaults to Uint32.
+    enum class IndexType { Uint32, Uint16 };
+
     // ========================================================================
     // BUFFER TYPES
     // ========================================================================

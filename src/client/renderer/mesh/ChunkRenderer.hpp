@@ -11,6 +11,7 @@
 #include "../backend/RenderTypes.hpp"
 #include <climits>
 #include <vector>
+#include <array>
 #include <memory>
 
 namespace Render {
@@ -143,6 +144,24 @@ namespace Render {
         // Mark visible sections as dirty (call when sections are uploaded/removed)
         void MarkVisibleSectionsDirty() { m_visibleSectionsDirty = true; }
 
+        // Call when a GPUSectionData object is ERASED (chunk unload, section
+        // remeshed to empty, mesh-manager shutdown) — cached reachable lists
+        // and any in-flight async BFS result hold raw pointers into those
+        // objects, so they must all be discarded, not just refreshed. The
+        // next PrepareVisibleSections invalidates every slot, bumps the erase
+        // token (dropping stale async results on arrival), and rebuilds
+        // synchronously. Dirty-only events (uploads) keep the async path.
+        void MarkSectionDataErased() { m_sectionDataErased = true; }
+
+        // --- Tombstone reclamation support (see ClientMeshManager) ---
+        // Monotonic per-PrepareVisibleSections counter; stamps when cached
+        // reachable lists were snapshotted and when GPUSectionData died.
+        uint32_t GetPrepareCounter() const { return m_prepareCounter; }
+        // Oldest buildCounter among all live pointer holders (valid cache
+        // slots + the in-flight async BFS job). Tombstones older than this
+        // are unreachable and safe to destroy. Main thread only.
+        uint32_t GetMinLiveBuildCounter();
+
 
         // Debug rendering options
         void SetWireframeMode(bool enable);
@@ -204,17 +223,47 @@ namespace Render {
         // sorted front-to-back. Cached across frames — rebuilt only when the
         // camera enters a new section or the world changes (mesh upload/unload).
         // Matches Minecraft: the graph update is throttled, the frustum is not.
-        std::vector<SectionRenderData> m_reachableSections;
+        //
+        // Multiple slots keyed by camera section: the portal see-through pass
+        // renders the scene again from a virtual camera in a DIFFERENT section,
+        // which with a single cache would force two full BFS rebuilds per frame
+        // (main camera evicts portal camera and vice versa). With slots, each
+        // camera keeps its own cached result. LRU eviction by last-used counter.
+        struct ReachableCacheSlot {
+            bool valid = false;
+            int cx = INT_MAX, cz = INT_MAX, sy = INT_MAX;  // Camera section key
+            uint32_t lastUsed = 0;
+            uint64_t worldVersion = 0;  // World state the BFS saw (staleness check)
+            // Prepare-counter at which this slot's list was SNAPSHOTTED
+            // (BuildInput time, not adoption time) — drives tombstone
+            // reclamation in ClientMeshManager: a GPUSectionData that died
+            // at counter D can only be referenced by lists built at <= D.
+            uint32_t buildCounter = 0;
+            std::vector<SectionRenderData> sections;
+        };
+        static constexpr int kReachableSlots = 4;  // Main camera + up to 3 portal views
+        std::array<ReachableCacheSlot, kReachableSlots> m_reachableSlots;
+        uint32_t m_prepareCounter = 0;  // Monotonic, for LRU slot eviction
 
-        // Per-frame draw list: m_reachableSections filtered through the current
-        // frustum. Rebuilt every frame (cheap — a few thousand AABB tests), so
-        // sections entering the view during small rotations appear immediately.
+        // Async BFS bookkeeping. m_worldVersion advances on every dirty event
+        // (mesh upload/unload) — slots built against an older version are
+        // usable but trigger an async refresh. m_eraseToken advances only on
+        // GPUSectionData ERASURE — results/slots from an older token hold
+        // dangling pointers and are discarded outright (see
+        // MarkSectionDataErased). BFS stats are copied out of completed jobs.
+        bool m_sectionDataErased = false;
+        uint64_t m_worldVersion = 1;
+        uint64_t m_eraseToken = 1;
+        int m_bfsVisitedCount = 0;
+        int m_bfsOccludedCount = 0;
+
+        // Per-frame draw list: the active slot's sections filtered through the
+        // current frustum. Rebuilt every frame (cheap — a few thousand AABB
+        // tests), so sections entering the view during rotations appear
+        // immediately.
         std::vector<SectionRenderData> m_visibleSections;
 
         bool m_visibleSectionsDirty = true;
-        int m_lastCameraChunkX = INT_MAX;
-        int m_lastCameraChunkZ = INT_MAX;
-        int m_lastCameraSectionY = INT_MAX;
 
         // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
         std::vector<std::vector<int32_t>> m_perSlabCounts;
@@ -230,6 +279,18 @@ namespace Render {
         RenderPassConfig m_opaqueConfig;
         RenderPassConfig m_cutoutConfig;
         RenderPassConfig m_translucentConfig;
+
+        // GPU pass timers (GL_TIME_ELAPSED). One in-flight query per pass:
+        // results arrive 1-2 frames later and are polled non-blocking at the
+        // start of the next RenderAll; while a pass's query is still pending,
+        // no new one is started for it. Only the MAIN scene render is timed
+        // (portal see-through re-entries are skipped) so the numbers cleanly
+        // mean "GPU cost of this pass for the main view". m_gpuPassResultMs
+        // holds the last completed reading and feeds m_stats.gpu*TimeMs.
+        static constexpr int kGpuPassCount = 3;  // opaque, cutout, translucent
+        GPUTimerHandle m_gpuTimerPending[kGpuPassCount] = {
+            INVALID_GPU_TIMER, INVALID_GPU_TIMER, INVALID_GPU_TIMER};
+        float m_gpuPassResultMs[kGpuPassCount] = {0.0f, 0.0f, 0.0f};
 
         // OpenGL state management
         void SetupRenderPass(const RenderPassConfig& config);
@@ -269,6 +330,12 @@ namespace Render {
 
     // Global chunk renderer instance
     extern std::unique_ptr<ChunkRenderer> g_chunkRenderer;
+
+    // Runtime toggle for the per-pass GL_TIME_ELAPSED GPU timers (defined in
+    // ChunkRenderer.cpp, exposed in the Debug UI's Render Controls panel).
+    // Exists to A/B whether query begin/end/poll act as driver flush points
+    // on Apple's GL — disable during Tracy captures for clean numbers.
+    extern bool g_enableGpuPassTimers;
 
     // Utility functions for integration
     bool InitializeChunkRenderer();

@@ -11,6 +11,8 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
+#include "common/inventory/InventoryMenu.hpp"
+#include "common/entity/IUsePlayer.hpp"
 #include "FoodData.hpp"
 
 namespace Game {
@@ -49,7 +51,7 @@ namespace Server {
 
     // Server-side player entity representing authoritative gameplay state
     // This class owns all gameplay logic and state for a player
-    class ServerPlayer {
+    class ServerPlayer : public Game::IUsePlayer {
     public:
         ServerPlayer(uint32_t playerId, const std::string& name);
         ~ServerPlayer();
@@ -113,21 +115,40 @@ namespace Server {
         Game::Inventory&       getInventory()       { return m_inventory; }
         const Game::Inventory& getInventory() const { return m_inventory; }
 
-        // Cursor item (carried while inventory is open)
-        Game::InventorySlot&       getCarried()       { return m_carriedItem; }
-        const Game::InventorySlot& getCarried() const { return m_carriedItem; }
-        void setCarried(const Game::InventorySlot& s) { m_carriedItem = s; }
+        // Cursor item (carried while a menu is open). Lives on the menu so
+        // Game::AbstractContainerMenu::DoClick drives it identically here
+        // (authority) and on the client (prediction).
+        // Routed through the CURRENT menu, not m_inventoryMenu: in MC the cursor
+        // belongs to whichever menu is open and is handed over by
+        // transferState when one replaces another. Identical today (the two
+        // always point at the same object) — correct once chests exist.
+        Game::InventorySlot&       getCarried()       { return m_containerMenu->getCarried(); }
+        const Game::InventorySlot& getCarried() const { return m_containerMenu->getCarried(); }
+        void setCarried(const Game::InventorySlot& s) { m_containerMenu->setCarried(s); }
+
+        // The menu clicks are dispatched against. Mirrors MC ServerPlayer's
+        // inventoryMenu (always present) / containerMenu (the one on top —
+        // swapped when a chest or furnace is opened, restored on close). Only
+        // the inventory menu exists today, so containerMenu always points at it.
+        //
+        // `creative` is refreshed on every access rather than once at
+        // construction so a game-mode change can never leave it stale.
+        Game::AbstractContainerMenu& container() {
+            m_containerMenu->creative = (m_gameMode == GameMode::CREATIVE);
+            return *m_containerMenu;
+        }
+        Game::InventoryMenu& inventoryMenu() { return m_inventoryMenu; }
 
         // === HAND SLOTS ===
         // hand 0 = main hand (hotbar 36 + selected), hand 1 = offhand (slot 45).
         // Mirrors MC Player.getItemInHand / setItemInHand.
-        Game::ItemStack&       getItemInHand(uint32_t hand);
+        Game::ItemStack&       getItemInHand(uint32_t hand) override;
         const Game::ItemStack& getItemInHand(uint32_t hand) const;
         // Writes the stack AND records the slot in m_dirtySlots so
         // PlayerSession broadcasts the delta after the tick.
         void setItemInHand(uint32_t hand, const Game::ItemStack& stack);
         // Unified inventory index for a hand (36+selected / 45).
-        int  handSlotIndex(uint32_t hand) const;
+        int  handSlotIndex(uint32_t hand) const override;
 
         // === ITEM USE STATE — mirrors LivingEntity.java:3246-3449 ===
         // The hold-to-use lifecycle: startUsingItem sets useItem + the
@@ -157,13 +178,8 @@ namespace Server {
         // finishUsingItem replacements). Drained by PlayerSession::Tick into
         // per-slot InventorySetSlotS2C broadcasts.
         std::vector<int>& dirtySlots() { return m_dirtySlots; }
-        void markSlotDirty(int slotIndex) { m_dirtySlots.push_back(slotIndex); }
+        void markSlotDirty(int slotIndex) override { m_dirtySlots.push_back(slotIndex); }
 
-        // QUICK_CRAFT (drag-distribute) state — see InventoryClickHandler
-        uint8_t  m_quickcraftStatus = 0;
-        uint8_t  m_quickcraftType   = 0;
-        std::vector<uint8_t> m_quickcraftSlots;
-        
         // === DAMAGE & EFFECTS ===
         
         // Apply damage to player
@@ -182,6 +198,10 @@ namespace Server {
         
         // Set game mode
         void setGameMode(GameMode mode);
+
+        // Game::IUsePlayer — lets item behaviours ask about creative without
+        // common code depending on Server::GameMode.
+        bool isCreative() const override { return m_gameMode == GameMode::CREATIVE; }
         
         // Set flying state
         void setFlying(bool flying);
@@ -200,9 +220,9 @@ namespace Server {
         uint8_t getColorId() const { return m_colorId; }
         void    setColorId(uint8_t id) { m_colorId = id; }
         
-        const glm::dvec3& getPosition() const { return m_position; }
-        float getYaw() const { return m_rotation.x; }
-        float getPitch() const { return m_rotation.y; }
+        const glm::dvec3& getPosition() const override { return m_position; }
+        float getYaw() const override { return m_rotation.x; }
+        float getPitch() const override { return m_rotation.y; }
         const glm::vec2& getRotation() const { return m_rotation; }
         
         int getDimensionId() const { return m_dimensionId; }
@@ -237,7 +257,7 @@ namespace Server {
         bool isOnGround() const { return m_onGround; }
         void setOnGround(bool onGround) { m_onGround = onGround; }
         
-        bool IsSneaking() const { return m_sneaking; }
+        bool IsSneaking() const override { return m_sneaking; }
         void setSneaking(bool sneaking) { m_sneaking = sneaking; }
         
         Game::Math::ChunkPos getChunkPosition() const {
@@ -301,12 +321,17 @@ namespace Server {
         // === INVENTORY ===
         // 46-slot MC-compatible inventory (crafting + armor + main + hotbar + offhand).
         Game::Inventory m_inventory;
-        // Cursor item carried while the inventory screen is open.
-        Game::InventorySlot m_carriedItem;
+        // The always-present player menu (cursor + QUICK_CRAFT drag state live
+        // on it). Declared AFTER m_inventory so the menu's slots are built over
+        // a fully-constructed inventory.
+        Game::InventoryMenu m_inventoryMenu{&m_inventory};
+        // The menu on top. MC swaps this to a ChestMenu/FurnaceMenu on open and
+        // restores it on close; with no block containers yet it always aims at
+        // m_inventoryMenu.
+        Game::AbstractContainerMenu* m_containerMenu = &m_inventoryMenu;
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;
-        // TODO: Container* m_openContainer = nullptr;
         
         // === GAMEPLAY TIMERS ===
         int m_invulnerabilityTicks = 0;

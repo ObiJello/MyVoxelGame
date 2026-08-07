@@ -1,6 +1,7 @@
 // File: src/common/world/level/World.cpp
 #include "World.hpp"
 #include "../../core/Log.hpp"
+#include "../../core/Profiling_Tracy.hpp"
 #include "../block/BlockRegistry.hpp"
 #include "../block/entity/BlockEntity.hpp"
 #include "../block/entity/BlockEntityType.hpp"
@@ -483,6 +484,7 @@ namespace Game {
     // ========================================================================
 
     void World::WorldLoop(float deltaTime) {
+        PROFILE_ZONE_N("WorldLoop");
         if (m_stopRequested.load()) return;
 
         // World simulation only — chunk loading is driven by the session system

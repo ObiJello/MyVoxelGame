@@ -58,6 +58,12 @@ namespace Game {
     }
 
     int Inventory::AddItems(ItemID id, int count) {
+        return AddStack(ItemStack{id, count});
+    }
+
+    int Inventory::AddStack(const ItemStack& proto) {
+        const ItemID id  = proto.itemId;
+        const int   count = proto.count;
         if (id == Items::Air || count <= 0) return count;
 
         int remaining = count;
@@ -74,7 +80,10 @@ namespace Game {
         auto tryMerge = [&](int slotIdx) {
             if (remaining <= 0) return;
             auto& slot = slots[slotIdx];
-            if (slot.itemId == id && slot.count > 0 && slot.count < maxStack) {
+            // Same item AND components — merging an enchanted stack into a
+            // plain one (or vice versa) would silently rewrite its components.
+            if (slot.count > 0 && slot.count < maxStack
+                && IsSameItemSameComponents(slot, proto)) {
                 int toAdd = std::min(remaining, maxStack - slot.count);
                 slot.count += toAdd;
                 remaining -= toAdd;
@@ -85,7 +94,7 @@ namespace Game {
             auto& slot = slots[slotIdx];
             if (slot.IsEmpty()) {
                 int toAdd = std::min(remaining, maxStack);
-                slot.itemId = id;
+                slot = proto;          // component-preserving copy
                 slot.count  = toAdd;
                 remaining -= toAdd;
             }
@@ -168,22 +177,6 @@ namespace Game {
             return toAdd;
         }
         return 0;
-    }
-
-    bool MayPlaceInSlot(int slotIndex, const ItemStack& stack) {
-        // Crafting stays refuse-insert (no crafting system).
-        if (Inventory::IsCraftGridSlot(slotIndex) || Inventory::IsCraftResultSlot(slotIndex)) {
-            return false;
-        }
-        // Armor slot i accepts exactly the stack whose EQUIPPABLE maps there
-        // (mirrors ArmorSlot.mayPlace → equippable.slot check).
-        if (Inventory::IsArmorSlot(slotIndex)) {
-            auto equippable = stack.get(DataComponents::EQUIPPABLE);
-            return equippable
-                && InventoryIndexFor(equippable->slot) == slotIndex;
-        }
-        // Offhand + main/hotbar accept anything (MC's offhand slot is unfiltered).
-        return true;
     }
 
 } // namespace Game

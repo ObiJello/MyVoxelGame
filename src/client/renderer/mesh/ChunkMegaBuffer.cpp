@@ -98,7 +98,7 @@ namespace Render {
 
     bool ChunkMegaBuffer::UploadSection(const MegaBufferSectionKey& key,
                                          const float* vertexData, size_t vertexCount,
-                                         const uint32_t* indexData, size_t indexCount) {
+                                         const uint16_t* indexData, size_t indexCount) {
         PROFILE_ZONE;
         if (vertexCount == 0 || indexCount == 0) return false;
         if (!vertexData || !indexData) return false;
@@ -121,7 +121,7 @@ namespace Render {
 
     bool ChunkMegaBuffer::TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                                            const float* vertexData, size_t vertexCount,
-                                           const uint32_t* indexData, size_t indexCount) {
+                                           const uint16_t* indexData, size_t indexCount) {
         if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
 
@@ -239,8 +239,14 @@ namespace Render {
         while (!m_slabs.empty() && m_slabs.back().sectionCount == 0 && m_slabs.size() > 1) {
             Slab& slab = m_slabs.back();
             if (g_renderBackend) {
-                if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
-                if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
+                // Deferred: the slab emptied this frame, but the PREVIOUS
+                // frame's command stream may still reference these buffers.
+                // GL's default is an immediate delete (driver refcounts
+                // pending commands); Vulkan queues the handles on the
+                // current frame's deletion queue and frees them after its
+                // fence — destroying immediately there is use-after-free.
+                if (slab.vbo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.vbo);
+                if (slab.ibo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.ibo);
             }
             Log::Debug("ChunkMegaBuffer: freed empty slab %zu", m_slabs.size() - 1);
             m_slabs.pop_back();

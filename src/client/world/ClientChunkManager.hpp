@@ -6,6 +6,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "../renderer/core/Frustum.hpp"
 #include "PendingDiffsManager.hpp"
+#include "BlockStatePrediction.hpp"
 #include <glad/glad.h>
 
 // Include mesh job data types
@@ -145,9 +146,32 @@ namespace Client {
         
         // Process block change packet
         void ProcessBlockChange(const Network::BlockChangeS2CPacket& packet);
-        
+
         // Clear all chunks
         void ClearAllChunks();
+
+        // ========================================================================
+        // CLIENT-SIDE BLOCK PREDICTION (MC ClientLevel + BlockStatePredictionHandler)
+        // ========================================================================
+
+        // Apply a locally-predicted block change immediately (world write +
+        // remesh) and remember the state to roll back to if the server
+        // disagrees. `sequence` must be the same sequence carried by the C2S
+        // packet for this interaction — that's what the server's
+        // BlockChangedAckS2C refers to.
+        void PredictBlockChange(const glm::ivec3& pos, Game::BlockID newBlock, uint32_t sequence);
+
+        // BlockChangedAckS2C arrived: retire predictions up to `sequence`,
+        // snapping back anywhere the server disagreed with us.
+        void HandleBlockChangedAck(uint32_t sequence);
+
+        // Read the live client block state (Air when the chunk isn't loaded).
+        Game::BlockID GetBlockAt(const glm::ivec3& pos) const;
+
+        // Write a block into the client's chunk store and mark the affected
+        // sections dirty. This is the shared body behind ProcessBlockChange,
+        // predictions and rollbacks.
+        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId);
         
 
         // Mark individual section dirty for mesh rebuilding
@@ -219,9 +243,20 @@ namespace Client {
     private:
         // Chunk storage - main thread only, no mutex needed
         std::unordered_map<Game::Math::ChunkPos, std::unique_ptr<ClientChunk>, Game::Math::ChunkPosHash> m_chunks;
-        
+
+        // Index of chunks that (may) have dirty sections — lets the mesh
+        // scheduler iterate only chunks with work instead of every loaded chunk
+        // at 30Hz. Inserted wherever dirtySections gains an entry; entries whose
+        // chunk is gone or fully clean are lazily erased during scheduling, so
+        // erase sites don't need to maintain it.
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_chunksWithDirtySections;
+
         // Pending diffs for chunks that haven't arrived yet
         std::unique_ptr<PendingDiffsManager> m_pendingDiffs;
+
+        // Outstanding client-side block predictions (MC ClientLevel's
+        // blockStatePredictionHandler). Hooks are bound in Initialize().
+        BlockStatePrediction m_prediction;
         
         // Generation counter for staleness control
         std::atomic<uint32_t> m_nextGeneration{1};

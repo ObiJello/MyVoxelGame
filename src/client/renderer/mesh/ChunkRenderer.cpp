@@ -24,12 +24,21 @@ namespace Render {
     // Global chunk renderer instance
     std::unique_ptr<ChunkRenderer> g_chunkRenderer = nullptr;
 
+    // Runtime toggle for the per-pass GL_TIME_ELAPSED timers (Debug UI →
+    // Render Controls). DEFAULT OFF: measured on Apple's GL driver,
+    // glEndQuery forces a full flush costing ~2.3ms per call — with three
+    // passes that's ~7ms/frame, far more than the passes themselves. Enable
+    // only when you actively want the F3 GPU pass readings and accept the
+    // frame cost while it's on. Disabling stops NEW queries; pending ones
+    // still drain so nothing leaks.
+    bool g_enableGpuPassTimers = false;
+
     // Static portal clip plane (no clipping by default).
     glm::vec4 ChunkRenderer::s_portalClipPlane{0.0f};
 
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
-        m_reachableSections.reserve(2048);
+        for (auto& slot : m_reachableSlots) slot.sections.reserve(2048);
         m_visibleSections.reserve(2048);
         m_perSlabCounts.reserve(16);
         m_perSlabOffsets.reserve(16);
@@ -226,6 +235,39 @@ namespace Render {
         PROFILE_ZONE;
         m_stats.Reset();
 
+        // --- GPU pass timing (main scene only; portal re-entries skipped) ---
+        // Poll last frame's queries first (non-blocking: -1 means still in
+        // flight, keep waiting). A pass only starts a new query when its
+        // previous one has been collected, so there is never more than one
+        // in-flight query per pass and GL_TIME_ELAPSED brackets never nest.
+        const bool mainScene = !m_useProjectionOverride && g_renderBackend != nullptr;
+        if (mainScene) {
+            // Always drain pending queries (even when timers are toggled off,
+            // so outstanding query objects get collected and freed).
+            PROFILE_ZONE_N("GpuTimerPoll");
+            for (int i = 0; i < kGpuPassCount; ++i) {
+                if (m_gpuTimerPending[i] == INVALID_GPU_TIMER) continue;
+                float r = g_renderBackend->GetGPUTimerResultMs(m_gpuTimerPending[i]);
+                if (r >= 0.0f) {
+                    m_gpuPassResultMs[i] = r;
+                    m_gpuTimerPending[i] = INVALID_GPU_TIMER;
+                }
+            }
+        }
+        const bool gpuTiming = mainScene && g_enableGpuPassTimers;
+        auto beginPassTimer = [&](int pass, const char* name) -> GPUTimerHandle {
+            if (!gpuTiming || m_gpuTimerPending[pass] != INVALID_GPU_TIMER)
+                return INVALID_GPU_TIMER;
+            PROFILE_ZONE_N("GpuTimerBegin");
+            return g_renderBackend->BeginGPUTimer(name);
+        };
+        auto endPassTimer = [&](int pass, GPUTimerHandle t) {
+            if (t == INVALID_GPU_TIMER) return;
+            PROFILE_ZONE_N("GpuTimerEnd");
+            g_renderBackend->EndGPUTimer(t);
+            m_gpuTimerPending[pass] = t;
+        };
+
         // Prepare visible sections ONCE at the beginning of the frame.
         // This includes chunk iteration, GPU data loading, and frustum culling.
         // Note: PrepareVisibleSections manages its own clearing — the visible section
@@ -238,16 +280,24 @@ namespace Render {
         // Bind shared block VAO once per frame — all mega-buffers share this
         // VAO's vertex format.  Switching between mega-buffers only calls
         // BindBuffers() (glBindVertexBuffer + IBO rebind), avoiding the GPU
-        // pipeline flush that glBindVertexArray causes on macOS.
+        // pipeline flush that glBindVertexArray causes on macOS. Zoned because
+        // that same flush behavior makes THIS bind a candidate collection
+        // point for deferred driver work (e.g. this frame's buffer uploads).
         if (g_clientMeshManager) {
+            PROFILE_ZONE_N("BindBlockVAO");
             g_clientMeshManager->BindSharedBlockVAO();
         }
 
         // Opaque pass: uses opaque shader (no discard → early-z enabled)
-        RenderOpaque(camera, frustum);
+        {
+            GPUTimerHandle t = beginPassTimer(0, "opaque");
+            RenderOpaque(camera, frustum);
+            endPassTimer(0, t);
+        }
 
         // Switch to cutout shader for cutout + translucent passes (has discard)
         if (m_cutoutShader != INVALID_SHADER && g_renderBackend) {
+            PROFILE_ZONE_N("PassShaderSwitch");
             m_activeShader = m_cutoutShader;
             g_renderBackend->BindShader(m_cutoutShader);
             g_renderBackend->SetUniformMat4(m_cutoutShader, "uMVP", m_cachedMVP);
@@ -256,11 +306,16 @@ namespace Render {
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
-        RenderCutout(camera, frustum);
+        {
+            GPUTimerHandle t = beginPassTimer(1, "cutout");
+            RenderCutout(camera, frustum);
+            endPassTimer(1, t);
+        }
 
         // Switch to solid shader for translucent pass (no discard → early-z enabled,
         // blending handles transparency). This avoids the discard penalty entirely.
         if (m_solidShader != INVALID_SHADER && g_renderBackend) {
+            PROFILE_ZONE_N("PassShaderSwitch");
             m_activeShader = m_solidShader;
             g_renderBackend->BindShader(m_solidShader);
             g_renderBackend->SetUniformMat4(m_solidShader, "uMVP", m_cachedMVP);
@@ -269,7 +324,17 @@ namespace Render {
             g_renderBackend->BindTexture(m_backendAtlasTexture, 0);
         }
 
-        RenderTranslucent(camera, frustum);
+        {
+            GPUTimerHandle t = beginPassTimer(2, "translucent");
+            RenderTranslucent(camera, frustum);
+            endPassTimer(2, t);
+        }
+
+        // Publish the most recent completed GPU readings (1-2 frame latency)
+        m_stats.gpuOpaqueTimeMs = m_gpuPassResultMs[0];
+        m_stats.gpuCutoutTimeMs = m_gpuPassResultMs[1];
+        m_stats.gpuTranslucentTimeMs = m_gpuPassResultMs[2];
+        m_stats.gpuTotalTimeMs = m_gpuPassResultMs[0] + m_gpuPassResultMs[1] + m_gpuPassResultMs[2];
 
         // Calculate total render time as sum of all components
         m_stats.renderTimeMs = m_stats.buildDrawListsTimeMs + 
@@ -294,88 +359,212 @@ namespace Render {
         PROFILE_ZONE;
         auto overallStartTime = std::chrono::high_resolution_clock::now();
 
-        // --- Reachable-section caching (BFS occlusion graph) ---
+        // --- Reachable-section caching (async BFS occlusion graph) ---
         // The BFS result depends only on the camera's SECTION and world state,
-        // so it is cached across frames. The frustum test is applied fresh
-        // every frame below — rotation never goes stale, which fixes chunks
-        // at the screen edge not appearing until the camera moved enough.
+        // so it is cached across frames in per-camera-section slots. The frustum
+        // test is applied fresh every frame below — rotation never goes stale.
+        // The BFS itself runs on a dedicated worker: when a slot is stale
+        // (world changed) or missing (camera crossed a section), the main
+        // thread snapshots the inputs, submits a job, and keeps rendering the
+        // best available slot until the result lands 1-2 frames later. The
+        // main thread only ever runs the BFS inline on cold start (world
+        // entry / post-erase, when no usable slot exists at all).
         int currentChunkX = static_cast<int>(std::floor(camera.position.x / 16.0f));
         int currentChunkZ = static_cast<int>(std::floor(camera.position.z / 16.0f));
         int currentSectionY = static_cast<int>(std::floor((camera.position.y - Config::MinY) / 16.0f));
 
-        bool cameraMoved = (currentChunkX != m_lastCameraChunkX ||
-                            currentChunkZ != m_lastCameraChunkZ ||
-                            currentSectionY != m_lastCameraSectionY);
+        m_prepareCounter++;
 
-        if (m_visibleSectionsDirty || cameraMoved || m_reachableSections.empty()) {
-            m_lastCameraChunkX = currentChunkX;
-            m_lastCameraChunkZ = currentChunkZ;
-            m_lastCameraSectionY = currentSectionY;
+        // Erase safety: some GPUSectionData objects were destroyed. Every
+        // cached list and any in-flight result may hold dangling pointers.
+        if (m_sectionDataErased) {
+            m_sectionDataErased = false;
+            m_eraseToken++;
+            for (auto& s : m_reachableSlots) s.valid = false;
+            m_visibleSectionsDirty = true;
+        }
+
+        // Drop slots that haven't been used in a while (~10 s). Their lists
+        // pin tombstoned GPUSectionData in the mesh manager's graveyard (a
+        // slot only advances its buildCounter when it is rebuilt), and a slot
+        // this stale — e.g. a portal view that is no longer rendered — is
+        // cheap to rebuild if it's ever needed again.
+        for (auto& s : m_reachableSlots) {
+            if (s.valid && m_prepareCounter - s.lastUsed > 600) s.valid = false;
+        }
+
+        // Collect a finished async BFS result, if one is waiting.
+        if (auto job = m_occlusionGraph.TryCollect()) {
+            // Degenerate result: the snapshot never saw the camera's own
+            // chunk (player crossed into a chunk the server stream hasn't
+            // delivered yet), so the BFS seed couldn't spread and the empty
+            // result says nothing about the world. Adopting it as the exact
+            // slot would blank the whole frame ("sky flash") — drop it and
+            // keep rendering the best stale slot; the refresh kick below
+            // retries every frame until the chunk arrives.
+            const bool degenerate = job->result.empty() && !job->centerLoaded;
+            if (job->eraseToken == m_eraseToken && !degenerate) {
+                // Store into the slot matching the job's camera section
+                // (or an invalid/LRU slot).
+                ReachableCacheSlot* dst = nullptr;
+                for (auto& s : m_reachableSlots) {
+                    if (s.valid && s.cx == job->keyCx && s.cz == job->keyCz && s.sy == job->keySy) {
+                        dst = &s;
+                        break;
+                    }
+                }
+                if (!dst) {
+                    dst = &m_reachableSlots[0];
+                    for (auto& s : m_reachableSlots) {
+                        if (!s.valid) { dst = &s; break; }
+                        if (s.lastUsed < dst->lastUsed) dst = &s;
+                    }
+                }
+                dst->cx = job->keyCx;
+                dst->cz = job->keyCz;
+                dst->sy = job->keySy;
+                dst->sections.swap(job->result);
+                dst->worldVersion = job->worldVersion;
+                dst->buildCounter = job->buildCounter;  // snapshot time, not adoption time
+                dst->valid = true;
+                dst->lastUsed = m_prepareCounter;
+                m_bfsVisitedCount = job->visitedCount;
+                m_bfsOccludedCount = job->occludedCount;
+            }
+            // Stale erase token: result holds dangling pointers — drop it.
+            m_occlusionGraph.RecycleJob(std::move(job));
+        }
+
+        // World changed (mesh upload/unload, smart-cull toggle): existing
+        // results are stale (but pointer-safe) — they trigger a refresh below.
+        if (m_visibleSectionsDirty) {
             m_visibleSectionsDirty = false;
+            m_worldVersion++;
+        }
 
-            m_reachableSections.clear();
+        // Effective render distance (needed by both sync and async paths)
+        int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
+        if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
+            renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
+        }
 
+        // Pick the render source: exact-key slot if we have one, else the most
+        // recently used valid slot (approximately right for a frame or two
+        // while the async rebuild for the new section is in flight).
+        ReachableCacheSlot* exact = nullptr;
+        for (auto& s : m_reachableSlots) {
+            if (s.valid && s.cx == currentChunkX && s.cz == currentChunkZ && s.sy == currentSectionY) {
+                exact = &s;
+                break;
+            }
+        }
+        ReachableCacheSlot* usable = exact;
+        if (!usable) {
+            for (auto& s : m_reachableSlots) {
+                if (s.valid && (!usable || s.lastUsed > usable->lastUsed)) usable = &s;
+            }
+        }
+
+        if (!usable) {
+            // Cold start (world entry / post-erase): synchronous rebuild so
+            // this frame renders correct data.
             if (!g_clientMeshManager) {
                 m_visibleSections.clear();
                 m_stats.buildDrawListsTimeMs = 0.0f;
                 return;
             }
-
-            // Get effective render distance
-            int renderDistanceChunks = Platform::g_gameSettings.GetRenderDistance();
-            if (Client::g_networkClient && Client::g_networkClient->GetServerViewDistance() > 0) {
-                renderDistanceChunks = std::min(renderDistanceChunks, Client::g_networkClient->GetServerViewDistance());
+            ReachableCacheSlot* dst = &m_reachableSlots[0];
+            for (auto& s : m_reachableSlots) {
+                if (!s.valid) { dst = &s; break; }
+                if (s.lastUsed < dst->lastUsed) dst = &s;
             }
 
-            // Run occlusion graph BFS — only sections reachable through non-solid
-            // terrain are added. Sections behind mountains/underground are skipped.
+            auto job = m_occlusionGraph.AcquireJob();
+            job->keyCx = currentChunkX;
+            job->keyCz = currentChunkZ;
+            job->keySy = currentSectionY;
+            job->worldVersion = m_worldVersion;
+            job->eraseToken = m_eraseToken;
+            job->buildCounter = m_prepareCounter;
+
             auto iterationStart = std::chrono::high_resolution_clock::now();
-            m_occlusionGraph.update(camera.position, m_enableSmartCull,
-                                    renderDistanceChunks, m_reachableSections);
+            m_occlusionGraph.BuildInput(*job, camera.position, m_enableSmartCull, renderDistanceChunks);
+            m_occlusionGraph.RunSync(*job);
             auto iterationEnd = std::chrono::high_resolution_clock::now();
             m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
-            m_stats.gpuDataLoadTimeMs = 0.0f;
+            m_stats.sortingTimeMs = 0.0f;  // Sorted inside the BFS run
 
-            // Sort front-to-back once per rebuild; the per-frame frustum filter
-            // below preserves this order (opaque early-z; translucent iterates
-            // the filtered list in reverse).
-            auto sortingStart = std::chrono::high_resolution_clock::now();
-            if (m_reachableSections.size() > 1) {
-                std::sort(m_reachableSections.begin(), m_reachableSections.end(),
-                         [](const SectionRenderData& a, const SectionRenderData& b) {
-                             return a.distanceToCamera < b.distanceToCamera;
-                         });
-            }
-            auto sortingEnd = std::chrono::high_resolution_clock::now();
-            m_stats.sortingTimeMs = std::chrono::duration<float, std::milli>(sortingEnd - sortingStart).count();
+            dst->cx = currentChunkX;
+            dst->cz = currentChunkZ;
+            dst->sy = currentSectionY;
+            dst->sections.swap(job->result);
+            // A degenerate cold-start result (camera chunk not streamed in
+            // yet) renders as empty this frame — that's honest, nothing
+            // better exists — but must stay marked stale so the async
+            // refresh keeps retrying until real data exists.
+            const bool syncDegenerate = dst->sections.empty() && !job->centerLoaded;
+            dst->worldVersion = syncDegenerate ? job->worldVersion - 1 : job->worldVersion;
+            dst->buildCounter = job->buildCounter;
+            dst->valid = true;
+            m_bfsVisitedCount = job->visitedCount;
+            m_bfsOccludedCount = job->occludedCount;
+            m_occlusionGraph.RecycleJob(std::move(job));
+
+            usable = dst;
+            exact = dst;
         } else {
             m_stats.chunkIterationTimeMs = 0.0f;
             m_stats.sortingTimeMs = 0.0f;
-            m_stats.gpuDataLoadTimeMs = 0.0f;
         }
+        m_stats.gpuDataLoadTimeMs = 0.0f;
+        usable->lastUsed = m_prepareCounter;
+
+        // Kick an async refresh when the current view's data is missing or
+        // stale and the worker is idle (one job in flight at a time — no
+        // queue buildup, newest state wins).
+        const bool haveExactFresh = exact && exact->worldVersion == m_worldVersion;
+        if (!haveExactFresh && g_clientMeshManager && !m_occlusionGraph.Busy()) {
+            auto job = m_occlusionGraph.AcquireJob();
+            job->keyCx = currentChunkX;
+            job->keyCz = currentChunkZ;
+            job->keySy = currentSectionY;
+            job->worldVersion = m_worldVersion;
+            job->eraseToken = m_eraseToken;
+            job->buildCounter = m_prepareCounter;
+            m_occlusionGraph.BuildInput(*job, camera.position, m_enableSmartCull, renderDistanceChunks);
+            m_occlusionGraph.SubmitAsync(std::move(job));
+        }
+
+        ReachableCacheSlot* slot = usable;
 
         // --- Per-frame frustum filter over the cached reachable set ---
         auto cullStart = std::chrono::high_resolution_clock::now();
-        m_visibleSections.clear();
-        if (m_enableFrustumCulling) {
-            for (const auto& section : m_reachableSections) {
-                float minX = static_cast<float>(section.chunkPos.x * 16);
-                float minY = static_cast<float>(section.sectionY * 16 + Config::MinY);
-                float minZ = static_cast<float>(section.chunkPos.z * 16);
-                if (frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
-                                         glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
-                    m_visibleSections.push_back(section);
+        {
+            PROFILE_ZONE_N("FrustumFilter");
+            m_visibleSections.clear();
+            if (m_enableFrustumCulling) {
+                for (const auto& section : slot->sections) {
+                    float minX = static_cast<float>(section.chunkPos.x * 16);
+                    float minY = static_cast<float>(section.sectionY * 16 + Config::MinY);
+                    float minZ = static_cast<float>(section.chunkPos.z * 16);
+                    if (frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
+                                             glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
+                        m_visibleSections.push_back(section);
+                    }
                 }
+            } else {
+                m_visibleSections = slot->sections;
             }
-        } else {
-            m_visibleSections = m_reachableSections;
         }
         auto cullEnd = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullingTimeMs = std::chrono::duration<float, std::milli>(cullEnd - cullStart).count();
 
+        PROFILE_PLOT("ReachableSections", static_cast<int64_t>(slot->sections.size()));
+        PROFILE_PLOT("VisibleSections", static_cast<int64_t>(m_visibleSections.size()));
+
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
-        m_stats.sectionsSkipped = m_occlusionGraph.getLastOccludedCount();
-        m_stats.sectionsAvailable = m_occlusionGraph.getLastVisitedCount();
+        m_stats.sectionsSkipped = m_bfsOccludedCount;
+        m_stats.sectionsAvailable = m_bfsVisitedCount;
 
         auto overallEndTime = std::chrono::high_resolution_clock::now();
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
@@ -482,47 +671,57 @@ namespace Render {
         uint32_t totalVerts = 0, totalIndices = 0;
 
         // Group visible sections by slab index for per-slab multi-draw.
-        auto processSection = [&](const SectionRenderData& section) {
-            if (!section.gpuData) return;
-            if (!(section.layerMask & layerBit)) return;
+        // Zone split: "BuildDrawList" is OUR loop over visible sections;
+        // "SubmitMultiDraw" is time spent inside GL driver calls. If a pass
+        // shows milliseconds, this tells you which side owns them.
+        {
+            PROFILE_ZONE_N("BuildDrawList");
+            auto processSection = [&](const SectionRenderData& section) {
+                if (!section.gpuData) return;
+                if (!(section.layerMask & layerBit)) return;
 
-            const auto& cachedCmd = (layer == RenderLayer::Opaque)      ? section.gpuData->opaqueDrawCmd :
-                                    (layer == RenderLayer::Cutout)       ? section.gpuData->cutoutDrawCmd :
-                                                                           section.gpuData->translucentDrawCmd;
-            if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
-                m_perSlabCounts[cachedCmd.slabIndex].push_back(cachedCmd.indexCount);
-                m_perSlabOffsets[cachedCmd.slabIndex].push_back(cachedCmd.indexByteOffset);
-                m_perSlabBaseVertices[cachedCmd.slabIndex].push_back(cachedCmd.baseVertex);
-                layerCount++;
+                const auto& cachedCmd = (layer == RenderLayer::Opaque)      ? section.gpuData->opaqueDrawCmd :
+                                        (layer == RenderLayer::Cutout)       ? section.gpuData->cutoutDrawCmd :
+                                                                               section.gpuData->translucentDrawCmd;
+                if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
+                    m_perSlabCounts[cachedCmd.slabIndex].push_back(cachedCmd.indexCount);
+                    m_perSlabOffsets[cachedCmd.slabIndex].push_back(cachedCmd.indexByteOffset);
+                    m_perSlabBaseVertices[cachedCmd.slabIndex].push_back(cachedCmd.baseVertex);
+                    layerCount++;
 
-                totalIndices += cachedCmd.indexCount;
-                switch (layer) {
-                    case RenderLayer::Opaque:      totalVerts += section.gpuData->opaqueVertexCount; break;
-                    case RenderLayer::Cutout:       totalVerts += section.gpuData->cutoutVertexCount; break;
-                    case RenderLayer::Translucent:  totalVerts += section.gpuData->translucentVertexCount; break;
+                    totalIndices += cachedCmd.indexCount;
+                    switch (layer) {
+                        case RenderLayer::Opaque:      totalVerts += section.gpuData->opaqueVertexCount; break;
+                        case RenderLayer::Cutout:       totalVerts += section.gpuData->cutoutVertexCount; break;
+                        case RenderLayer::Translucent:  totalVerts += section.gpuData->translucentVertexCount; break;
+                    }
                 }
-            }
-        };
+            };
 
-        if (reverseOrder) {
-            for (auto it = m_visibleSections.rbegin(); it != m_visibleSections.rend(); ++it)
-                processSection(*it);
-        } else {
-            for (const auto& section : m_visibleSections)
-                processSection(section);
+            if (reverseOrder) {
+                for (auto it = m_visibleSections.rbegin(); it != m_visibleSections.rend(); ++it)
+                    processSection(*it);
+            } else {
+                for (const auto& section : m_visibleSections)
+                    processSection(section);
+            }
         }
 
         // Issue one multi-draw per slab that has sections
-        for (uint32_t s = 0; s < slabCount; s++) {
-            if (m_perSlabCounts[s].empty()) continue;
-            megaBuffer->BindSlab(s);
-            g_renderBackend->MultiDrawIndexedBaseVertex(
-                m_perSlabCounts[s].data(),
-                m_perSlabOffsets[s].data(),
-                m_perSlabBaseVertices[s].data(),
-                static_cast<uint32_t>(m_perSlabCounts[s].size())
-            );
-            m_stats.totalDrawCalls++;
+        {
+            PROFILE_ZONE_N("SubmitMultiDraw");
+            for (uint32_t s = 0; s < slabCount; s++) {
+                if (m_perSlabCounts[s].empty()) continue;
+                megaBuffer->BindSlab(s);
+                g_renderBackend->MultiDrawIndexedBaseVertex(
+                    m_perSlabCounts[s].data(),
+                    m_perSlabOffsets[s].data(),
+                    m_perSlabBaseVertices[s].data(),
+                    static_cast<uint32_t>(m_perSlabCounts[s].size()),
+                    IndexType::Uint16
+                );
+                m_stats.totalDrawCalls++;
+            }
         }
 
         m_stats.totalVerticesRendered += totalVerts;
@@ -629,6 +828,22 @@ namespace Render {
         aabb.min = glm::vec3(minX, minY, minZ);
         aabb.max = glm::vec3(maxX, maxY, maxZ);
         return aabb;
+    }
+
+    uint32_t ChunkRenderer::GetMinLiveBuildCounter() {
+        // Every holder of raw GPUSectionData pointers: the valid cache slots
+        // and the async BFS job currently in the pipeline. (The recycled pool
+        // job may also hold old pointers, but its contents are never read —
+        // BuildInput clears them before the next run.)
+        uint32_t minCounter = m_prepareCounter;
+        for (const auto& s : m_reachableSlots) {
+            if (s.valid && s.buildCounter < minCounter) minCounter = s.buildCounter;
+        }
+        uint32_t inFlight = 0;
+        if (m_occlusionGraph.InFlightBuildCounter(inFlight) && inFlight < minCounter) {
+            minCounter = inFlight;
+        }
+        return minCounter;
     }
 
     void ChunkRenderer::RenderSectionBounds(const Camera& camera, const std::vector<SectionRenderData>& sections) {

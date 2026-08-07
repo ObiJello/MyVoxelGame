@@ -98,6 +98,17 @@ namespace Render {
         GetInventoryScreen().SetCarriedItem(stack);
     }
 
+    // Exposed via extern declaration in ClientPacketHandler.cpp.
+    void SetInventoryScreenStateId(uint32_t id) {
+        GetInventoryScreen().SetContainerStateId(id);
+    }
+
+    // Exposed via extern declaration in ClientPacketHandler.cpp.
+    void SetInventoryScreenContainerId(uint32_t id) {
+        GetInventoryScreen().SetContainerId(id);
+    }
+
+
     void InventoryScreen::Open() {
         m_open = true;
         m_currentTab = Tab::Survival;
@@ -132,9 +143,24 @@ namespace Render {
         m_pendingClicks.push_back(close);
     }
 
+    void InventoryScreen::SetPlayer(Game::ClientPlayer* p) {
+        m_player = p;
+        // Rebuild the prediction menu over this player's inventory. Recreated
+        // rather than re-pointed because a menu's slots bind to their container
+        // at construction (MC builds a fresh menu per open, too).
+        m_menu = p ? std::make_unique<Game::InventoryMenu>(&p->inventory) : nullptr;
+    }
+
+    Game::InventorySlot& InventoryScreen::Carried() {
+        return m_menu ? m_menu->getCarried() : m_noMenuCarried;
+    }
+    const Game::InventorySlot& InventoryScreen::Carried() const {
+        return m_menu ? m_menu->getCarried() : m_noMenuCarried;
+    }
+
     void InventoryScreen::SetCarriedItem(const Game::ItemStack& stack) {
-        m_carriedItem = stack;
-        if (m_carriedItem.IsEmpty()) m_carriedItem.Clear();
+        Carried() = stack;
+        if (Carried().IsEmpty()) Carried().Clear();
     }
 
     bool InventoryScreen::ConsumePendingClick(Network::InventoryClickC2SPacket& out) {
@@ -153,7 +179,34 @@ namespace Render {
         p.action         = (uint8_t)action;
         p.flags          = 0;
         p.creativeItemId = creativeItem;
+        p.stateId        = m_containerStateId;
+        p.containerId    = m_menuContainerId;
         if (creativeStack) p.creativeStack = *creativeStack;
+
+        // Predict BEFORE queueing, so the packet can carry the outcome.
+        //
+        // MC runs AbstractContainerMenu.doClick on the client for instant
+        // feedback and reports the resulting slots back in
+        // ServerboundContainerClickPacket. The server adopts those as its
+        // model of what we believe and corrects only where that model
+        // disagrees with the truth — so a correct prediction costs zero
+        // packets, and a slot we wrongly wrote still gets fixed because we
+        // told the server we wrote it.
+        if (m_menu) {
+            m_menu->creative = m_player && m_player->IsCreative();
+
+            const auto result = m_menu->DoClick(p);
+
+            p.hasPrediction = true;
+            p.predictedSlots.reserve(result.changedSlots.size());
+            for (uint8_t slot : result.changedSlots) {
+                if (m_menu->IsValidSlotIndex(slot)) {
+                    p.predictedSlots.emplace_back(slot, m_menu->GetSlot(slot).GetItem());
+                }
+            }
+            p.predictedCarried = Carried();
+        }
+
         m_pendingClicks.push_back(p);
     }
 
@@ -249,37 +302,28 @@ namespace Render {
 
     // ─── Slot positions ───────────────────────────────────────
     bool InventoryScreen::GetSlotImagePos(int slotIndex, int& outX, int& outY) const {
-        // Common to both tabs: main inv + hotbar
-        if (Game::Inventory::IsMainSlot(slotIndex)) {
-            int local = slotIndex - Game::Inventory::MAIN_BEGIN;
-            outX = 9 + (local % 9) * SLOT_STEP;
-            outY = 54 + (local / 9) * SLOT_STEP; // y=54,72,90
-            return true;
+        // Positions come from the menu's Slot objects (InventoryMenu's
+        // constructor), so a slot's screen position and its click behaviour
+        // can't drift apart — they used to be two hardcoded tables.
+        if (!m_menu || !m_menu->IsValidSlotIndex(slotIndex)) return false;
+
+        const Game::Slot& slot = m_menu->GetSlot(slotIndex);
+        // Crafting result + grid: present in the 46-slot layout for MC save
+        // compatibility, never rendered (MC's creative survival tab hides them
+        // too), so HitTest can't reach them.
+        if (!slot.IsActive()) return false;
+
+        // Armor + offhand only exist on the Survival tab; the Search tab shows
+        // main + hotbar only. This is tab state, not slot state, so it stays here.
+        if (m_currentTab != Tab::Survival
+            && (Game::Inventory::IsArmorSlot(slotIndex)
+                || Game::Inventory::IsOffhandSlot(slotIndex))) {
+            return false;
         }
-        if (Game::Inventory::IsHotbarSlot(slotIndex)) {
-            int local = slotIndex - Game::Inventory::HOTBAR_BEGIN;
-            outX = 9 + local * SLOT_STEP;
-            outY = 112;
-            return true;
-        }
-        // Survival-tab-only: armor + offhand. (Crafting result + grid are off-screen in
-        // MC creative survival — we never lay them out here, so HitTest can't hit them.)
-        if (m_currentTab == Tab::Survival) {
-            if (Game::Inventory::IsArmorSlot(slotIndex)) {
-                int local = slotIndex - Game::Inventory::ARMOR_BEGIN;
-                int col = local / 2;
-                int row = local % 2;
-                outX = 54 + col * 54;
-                outY = 6 + row * 27;
-                return true;
-            }
-            if (Game::Inventory::IsOffhandSlot(slotIndex)) {
-                // MC: CreativeModeInventoryScreen.selectTab(INVENTORY) line 537-539 → (35, 20)
-                outX = 35; outY = 20;
-                return true;
-            }
-        }
-        return false;
+
+        outX = slot.x;
+        outY = slot.y;
+        return true;
     }
 
     // ─── Hit testing ──────────────────────────────────────────
@@ -470,6 +514,14 @@ namespace Render {
             return true;
         }
 
+        // F: swap the hovered slot with the offhand. MC encodes the offhand as
+        // button 40 in the SWAP action's player-inventory index space
+        // (AbstractContainerMenu.doClick: `buttonNum < 9 || buttonNum == 40`).
+        if (m_hoveredSlot >= 0 && glfwKey == GLFW_KEY_F) {
+            QueueClick(Network::ContainerInput::SWAP, (int16_t)m_hoveredSlot, 40);
+            return true;
+        }
+
         // Q: drop. Hovered slot must be a real player slot.
         if (m_hoveredSlot >= 0 && glfwKey == GLFW_KEY_Q) {
             uint8_t button = (glfwMods & GLFW_MOD_CONTROL) ? 1 : 0;
@@ -488,39 +540,19 @@ namespace Render {
             // Release: end scroll-drag and quick-craft.
             if (m_isScrolling) m_isScrolling = false;
             if (m_isDragging) {
-                // Commit the drag preview to the client's local inventory and
-                // cursor state IMMEDIATELY, before sending the END packet. The
-                // server's SetSlot/SetCarried response will arrive a few frames
-                // later with the same values; without this local commit the UI
-                // would briefly snap back to the pre-drag state during those
-                // frames, producing a visible flicker.
-                if (m_player && !m_carriedItem.IsEmpty()) {
-                    const int per = DragPerSlotCount();
-                    const int maxStack = Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
-                    int distributed = 0;
-                    for (uint8_t s : m_dragSlots) {
-                        // Defense in depth — drag entries are pre-filtered by
-                        // MayPlaceInSlot, but never locally commit into a slot
-                        // the server would refuse.
-                        if (!Game::MayPlaceInSlot(s, m_carriedItem)) continue;
-                        const auto& base = m_player->inventory.GetSlot(s);
-                        if (base.IsEmpty()) {
-                            int give = std::min(per, maxStack);
-                            m_player->inventory.SetSlot(s, m_carriedItem.itemId, give);
-                            distributed += give;
-                        } else if (base.itemId == m_carriedItem.itemId) {
-                            int give = std::min(per, maxStack - base.count);
-                            if (give > 0) {
-                                m_player->inventory.SetSlot(s, base.itemId, base.count + give);
-                                distributed += give;
-                            }
-                        }
-                        // Different-item slots are skipped (preview also skips).
-                    }
-                    int remaining = std::max(0, m_dragStartCarriedCount - distributed);
-                    m_carriedItem.count = remaining;
-                    if (remaining <= 0) m_carriedItem.Clear();
-                }
+                // NOTE: the drag distribution is NOT committed by hand here
+                // any more. QueueClick below runs Game::ContainerClick
+                // locally, whose quick-craft end phase performs the exact
+                // distribution the server will — so a hand-rolled commit
+                // would double-apply it.
+                //
+                // The old commit was also the source of the ghost-item bug:
+                // it wrote straight into m_player->inventory for every slot
+                // the mouse touched, and the server's per-slot deltas only
+                // ever described the slots the SERVER changed, so a slot the
+                // client wrote and the server didn't was never corrected.
+                // The container-wide resync on the server now closes that
+                // hole for good.
                 // End phase — server commits its own copy and replies with
                 // matching SetSlot/SetCarried packets that just confirm what we
                 // already showed locally.
@@ -558,10 +590,10 @@ namespace Render {
             // the OUTSIDE sentinel — same path as click-outside-the-panel and
             // shift+trash-slot, both of which already discard the cursor.
             if (m_hoveredCreativeStack.IsEmpty()) {
-                if (!m_carriedItem.IsEmpty()) {
+                if (!Carried().IsEmpty()) {
                     QueueClick(Network::ContainerInput::THROW,
                                Network::InventorySlotSentinel::OUTSIDE,
-                               1 /*full stack*/);
+                               0 /*button 0 = whole stack (MC PRIMARY)*/);
                 }
                 return;
             }
@@ -590,17 +622,22 @@ namespace Render {
             if (shift) {
                 QueueClick(Network::ContainerInput::CREATIVE_DESTROY_ALL,
                            Network::InventorySlotSentinel::OUTSIDE, 0);
-            } else if (!m_carriedItem.IsEmpty()) {
+            } else if (!Carried().IsEmpty()) {
                 QueueClick(Network::ContainerInput::THROW,
-                           Network::InventorySlotSentinel::OUTSIDE, 1 /*full stack*/);
+                           Network::InventorySlotSentinel::OUTSIDE,
+                           0 /*button 0 = whole stack (MC PRIMARY)*/);
             }
             return;
         }
 
-        // Outside-panel click (drop carried)
+        // Outside-panel click (drop carried). MC: left = drop the whole stack
+        // (button 0 / PRIMARY), right = drop one (button 1 / SECONDARY). This
+        // used to be inverted here to compensate for HandleThrow's OUTSIDE
+        // branch disagreeing with HandlePickup's; both now share
+        // AbstractContainerMenu::DropCarriedOutside, so the mapping is direct.
         if (hit == HIT_OUTSIDE) {
-            if (!m_carriedItem.IsEmpty()) {
-                uint8_t btn = (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 0 : 1;
+            if (!Carried().IsEmpty()) {
+                uint8_t btn = (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
                 QueueClick(Network::ContainerInput::THROW,
                            Network::InventorySlotSentinel::OUTSIDE, btn);
             }
@@ -627,8 +664,12 @@ namespace Render {
             const auto& slot = m_player ? m_player->inventory.GetSlot(hit) : Game::InventorySlot{};
             const bool sameSlot = (m_lastClickedSlot == hit);
             const bool fresh    = (now - m_lastClickTimeMs) <= DOUBLE_CLICK_MS;
-            const bool cursorMatches = !m_carriedItem.IsEmpty() &&
-                                       (slot.IsEmpty() || slot.itemId == m_carriedItem.itemId);
+            // MC's PICKUP_ALL precondition is `!slot.hasItem()` — the canonical
+            // double-click picks the stack up on click 1 (leaving the slot
+            // empty) and vacuums on click 2. Firing while the slot is still
+            // occupied is not MC behaviour; ContainerClick no-ops it on both
+            // sides, so this check only avoids a pointless packet.
+            const bool cursorMatches = !Carried().IsEmpty() && slot.IsEmpty();
 
             if (sameSlot && fresh && cursorMatches && glfwButton == GLFW_MOUSE_BUTTON_LEFT) {
                 QueueClick(Network::ContainerInput::PICKUP_ALL, (int16_t)hit, 0);
@@ -644,16 +685,16 @@ namespace Render {
             // Drag-distribute only makes sense when the slot is empty or holds
             // the SAME item as the cursor — otherwise the user expects the
             // cursor and the slot to swap contents (MC's standard behaviour).
-            if (!m_carriedItem.IsEmpty()) {
+            if (!Carried().IsEmpty()) {
                 // Slot placement filter (armor slots only accept their armor
-                // piece, craft slots refuse inserts). Same Game::MayPlaceInSlot
-                // the server enforces — refusing locally means no drag starts
-                // and no ghost item can appear.
-                if (!Game::MayPlaceInSlot(hit, m_carriedItem)) {
+                // piece, craft slots refuse inserts). Same Slot::MayPlace the
+                // server enforces — refusing locally means no drag starts and
+                // no ghost item can appear.
+                if (!m_menu || !m_menu->GetSlot(hit).MayPlace(Carried())) {
                     return;
                 }
                 const bool slotCompatible = slot.IsEmpty()
-                                         || slot.itemId == m_carriedItem.itemId;
+                                         || slot.itemId == Carried().itemId;
                 if (!slotCompatible) {
                     // Different item in slot → swap via PICKUP. HandlePickup's
                     // "both non-empty + different items" branch does std::swap
@@ -672,7 +713,7 @@ namespace Render {
                 // Snapshot the cursor count at drag start. The drag preview
                 // (in RenderSlot / RenderCarriedItem) uses this to compute
                 // what each touched slot WILL look like after END commits.
-                m_dragStartCarriedCount = m_carriedItem.count;
+                m_dragStartCarriedCount = Carried().count;
                 // Start phase
                 QueueClick(Network::ContainerInput::QUICK_CRAFT, -1, QuickcraftMask(0, type));
                 // Add this first slot
@@ -711,7 +752,7 @@ namespace Render {
         // Drag (QUICK_CRAFT) accumulator
         if (m_isDragging && m_hoveredSlot >= 0) {
             const uint8_t s = (uint8_t)m_hoveredSlot;
-            if (Game::MayPlaceInSlot(m_hoveredSlot, m_carriedItem) &&
+            if (m_menu && m_menu->GetSlot(m_hoveredSlot).MayPlace(Carried()) &&
                 std::find(m_dragSlots.begin(), m_dragSlots.end(), s) == m_dragSlots.end()) {
                 m_dragSlots.push_back(s);
                 QueueClick(Network::ContainerInput::QUICK_CRAFT, (int16_t)s, QuickcraftMask(1, m_dragType));
@@ -787,7 +828,7 @@ namespace Render {
     // touched slot AND the cursor will look like after the drag commits, and
     // rendering THAT instead of the raw server state.
     int InventoryScreen::DragPerSlotCount() const {
-        if (!m_isDragging || m_carriedItem.IsEmpty() || m_dragSlots.empty()) return 0;
+        if (!m_isDragging || Carried().IsEmpty() || m_dragSlots.empty()) return 0;
         if (m_dragType == 0) {
             // Left-drag: split as evenly as possible across touched slots.
             return m_dragStartCarriedCount / static_cast<int>(m_dragSlots.size());
@@ -797,26 +838,36 @@ namespace Render {
             return 1;
         }
         // Middle (creative-clone): full stack per slot.
-        return Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
+        return Game::ItemRegistry::Get(Carried().itemId).maxStackSize;
     }
 
     Game::InventorySlot InventoryScreen::DisplayedSlot(int slotIndex,
                                                        const Game::InventorySlot& base) const {
-        if (!m_isDragging || m_carriedItem.IsEmpty()) return base;
+        if (!m_isDragging || Carried().IsEmpty()) return base;
         if (std::find(m_dragSlots.begin(), m_dragSlots.end(),
                       static_cast<uint8_t>(slotIndex)) == m_dragSlots.end()) {
             return base;
         }
         const int per = DragPerSlotCount();
         if (per <= 0) return base;
-        const int maxStack = Game::ItemRegistry::Get(m_carriedItem.itemId).maxStackSize;
+        // Cap at the SLOT's limit, matching the authoritative end-phase commit.
+        const int maxStack = m_menu ? m_menu->GetSlot(slotIndex).GetMaxStackSize(Carried())
+                                    : Game::ItemRegistry::Get(Carried().itemId).maxStackSize;
         if (base.IsEmpty()) {
-            return Game::InventorySlot{m_carriedItem.itemId, std::min(per, maxStack)};
+            // Copy the cursor stack so the preview shows the real item —
+            // constructing from a bare id dropped components, previewing a
+            // plain book where an enchanted one will land.
+            Game::InventorySlot preview = Carried();
+            preview.count = std::min(per, maxStack);
+            return preview;
         }
-        if (base.itemId == m_carriedItem.itemId) {
+        // Same item AND components, matching CanItemQuickReplace — a differently
+        // enchanted stack does not merge, so it must not preview as merging.
+        if (Game::IsSameItemSameComponents(base, Carried())) {
             // Top up an existing same-item stack (cap at max).
-            int newCount = std::min(maxStack, base.count + per);
-            return Game::InventorySlot{base.itemId, newCount};
+            Game::InventorySlot preview = base;
+            preview.count = std::min(maxStack, base.count + per);
+            return preview;
         }
         // Different item in the slot — drag never overwrites these (server's
         // QUICK_CRAFT_addPlayerSlot also rejects them); show as-is.
@@ -824,7 +875,7 @@ namespace Render {
     }
 
     int InventoryScreen::DragRemainingCarriedCount() const {
-        if (!m_isDragging || m_carriedItem.IsEmpty()) return m_carriedItem.count;
+        if (!m_isDragging || Carried().IsEmpty()) return Carried().count;
         const int per = DragPerSlotCount();
         // Only count slots that will actually accept items in the preview
         // (empty or same-item not-yet-full). Different-item slots receive 0.
@@ -832,7 +883,7 @@ namespace Render {
         for (uint8_t s : m_dragSlots) {
             if (!m_player) break;
             const auto& base = m_player->inventory.GetSlot(s);
-            if (base.IsEmpty() || base.itemId == m_carriedItem.itemId) {
+            if (base.IsEmpty() || Game::IsSameItemSameComponents(base, Carried())) {
                 distributed += per;
             }
         }
@@ -1091,14 +1142,14 @@ namespace Render {
     }
 
     void InventoryScreen::RenderCarriedItem(GuiGraphics& g) {
-        if (m_carriedItem.IsEmpty()) return;
+        if (Carried().IsEmpty()) return;
         int x = (int)m_mouseGui.x - 8;
         int y = (int)m_mouseGui.y - 8;
         // While dragging, render the cursor with the PROJECTED remaining count
         // (start count minus what's been distributed so far) so the user sees
         // their stack shrink live as they drag across slots. After drag ends,
         // the server's SetCarried packet syncs the real value.
-        Game::InventorySlot displayed = m_carriedItem;
+        Game::InventorySlot displayed = Carried();
         if (m_isDragging) displayed.count = DragRemainingCarriedCount();
         if (displayed.IsEmpty()) return;
         g.RenderItem(displayed, x, y);
@@ -1219,7 +1270,7 @@ namespace Render {
         RenderCarriedItem(g);
 
         // Tooltip — only when not carrying
-        if (m_carriedItem.IsEmpty()) {
+        if (Carried().IsEmpty()) {
             if (m_hoveredSlot >= 0 && m_player) {
                 const auto& s = m_player->inventory.GetSlot(m_hoveredSlot);
                 if (!s.IsEmpty()) {

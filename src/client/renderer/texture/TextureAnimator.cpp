@@ -2,6 +2,7 @@
 #include "TextureAnimator.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 namespace Render {
 
@@ -79,6 +80,9 @@ namespace Render {
     void TextureAnimator::UploadFrameToAtlas(const AnimatedTexture& animTex, int frameIndex) {
         if (frameIndex < 0 || frameIndex >= static_cast<int>(animTex.frameData.size())) return;
         if (m_atlasTexture == INVALID_TEXTURE || !g_renderBackend) return;
+        // Zone per upload: the count in Tracy tells you how many animated
+        // sprites actually advanced per frame (the driver call is the cost).
+        PROFILE_ZONE_N("AnimFrameUpload");
 
         const auto& frameData = animTex.frameData[frameIndex];
         const TextureAnimation& anim = animTex.animation;

@@ -69,7 +69,7 @@ namespace Render {
 
         bool UploadSection(const MegaBufferSectionKey& key,
                            const float* vertexData, size_t vertexCount,
-                           const uint32_t* indexData, size_t indexCount);
+                           const uint16_t* indexData, size_t indexCount);
 
         void RemoveSection(const MegaBufferSectionKey& key);
         bool HasSection(const MegaBufferSectionKey& key) const;
@@ -153,7 +153,7 @@ namespace Render {
         uint32_t AllocateSlab();
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                              const float* vertexData, size_t vertexCount,
-                             const uint32_t* indexData, size_t indexCount);
+                             const uint16_t* indexData, size_t indexCount);
 
         // Internal allocation (first-fit with bump fallback, per-slab)
         static bool AllocRegion(std::vector<Slab::FreeBlock>& freeList, size_t& highWater,
@@ -162,7 +162,9 @@ namespace Render {
                                size_t offset, size_t count);
 
         static constexpr size_t VERTEX_STRIDE = 24;
-        static constexpr size_t INDEX_SIZE = sizeof(uint32_t);
+        // 16-bit indices: section-relative (drawn with baseVertex), halving
+        // index memory and GPU fetch bandwidth vs uint32.
+        static constexpr size_t INDEX_SIZE = sizeof(uint16_t);
     };
 
 } // namespace Render

@@ -390,6 +390,22 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // Retires client-side block predictions up to `sequence` (MC
+    // ClientboundBlockChangedAckPacket).
+    class BlockChangedAckS2CPacketImpl : public IS2CPacket {
+    private:
+        BlockChangedAckS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit BlockChangedAckS2CPacketImpl(BlockChangedAckS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onBlockChangedAckS2C(m_data); }
+        const BlockChangedAckS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::BlockChangedAckS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PlayerAbilitiesS2CPacketImpl : public IS2CPacket {
     private:
         PlayerAbilitiesS2CPacket m_data;

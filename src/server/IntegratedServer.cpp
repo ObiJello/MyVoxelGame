@@ -465,7 +465,22 @@ namespace Server {
         if (m_deltaBroadcaster) {
             m_deltaBroadcaster->flush();
         }
-        
+
+        // === 3b. ACK CLIENT BLOCK PREDICTIONS ===
+        // Strictly AFTER the delta flush. The ack tells each client "you may
+        // retire your predictions up to sequence N", and the client resolves a
+        // retired prediction against the last block state we sent it. If the
+        // ack overtook this tick's block updates, a correct prediction would
+        // roll back to the pre-interaction block and then get re-applied when
+        // the update landed — a visible flicker on every placement. MC gets
+        // the same ordering by flushing the ack at the top of the following
+        // tick (ServerGamePacketListenerImpl.tick:284).
+        if (m_sessionManager) {
+            for (auto& session : m_sessionManager->GetAllSessions()) {
+                if (session) session->FlushBlockChangeAck();
+            }
+        }
+
         // NOTE: Player entities (host AND remote) are ticked from
         // PlayerSession::Tick via m_sessionManager->Tick() above — the old
         // direct m_serverPlayer->tick() here would double-tick the host.
@@ -630,36 +645,48 @@ namespace Server {
             }
         }
 
-        // Iterate pending chunk loads for each session
+        // Iterate pending chunk loads for each session.
+        // The full pending set is scanned in place (no copy, no sort) — only the
+        // NEW load requests get distance-sorted. In steady state nothing is new,
+        // so the per-tick cost is just the loaded-check per pending chunk instead
+        // of the old copy + O(n log n) sort of thousands of entries every 50ms.
         auto sessions = m_sessionManager->GetAllSessions();
+        std::vector<Game::Math::ChunkPos> nowLoaded;
+        std::vector<Game::Math::ChunkPos> toRequest;
         for (const auto& session : sessions) {
             if (!session) continue;
 
-            auto anchor = session->GetAnchorChunk();
+            const auto& pending = session->GetPendingChunkLoads();
+            if (pending.empty()) continue;
 
-            // Copy pending loads into a sortable vector
-            std::vector<Game::Math::ChunkPos> pending(
-                session->GetPendingChunkLoads().begin(),
-                session->GetPendingChunkLoads().end());
+            nowLoaded.clear();
+            toRequest.clear();
 
-            // Sort nearest-first so workers process close chunks before far ones
-            std::sort(pending.begin(), pending.end(),
-                [&anchor](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
-                    int distA = std::max(std::abs(a.x - anchor.x), std::abs(a.z - anchor.z));
-                    int distB = std::max(std::abs(b.x - anchor.x), std::abs(b.z - anchor.z));
-                    return distA < distB;
-                });
-
-            // Process: move loaded chunks to ready-to-send, request loading for unloaded
-            std::vector<Game::Math::ChunkPos> nowLoaded;
             for (const auto& pos : pending) {
                 if (m_world->IsChunkLoaded(pos.x, pos.z)) {
                     nowLoaded.push_back(pos);
                 } else if (m_pendingChunkLoads.count(pos) == 0) {
-                    RequestChunkLoad(pos, 0);
+                    toRequest.push_back(pos);
                 }
             }
 
+            // Sort only the chunks being submitted this tick, nearest-first,
+            // so workers process close chunks before far ones.
+            if (toRequest.size() > 1) {
+                auto anchor = session->GetAnchorChunk();
+                std::sort(toRequest.begin(), toRequest.end(),
+                    [&anchor](const Game::Math::ChunkPos& a, const Game::Math::ChunkPos& b) {
+                        int distA = std::max(std::abs(a.x - anchor.x), std::abs(a.z - anchor.z));
+                        int distB = std::max(std::abs(b.x - anchor.x), std::abs(b.z - anchor.z));
+                        return distA < distB;
+                    });
+            }
+
+            for (const auto& pos : toRequest) {
+                RequestChunkLoad(pos, 0);
+            }
+
+            // MarkChunkReadyToSend mutates the pending set, so apply after the scan
             for (const auto& pos : nowLoaded) {
                 session->MarkChunkReadyToSend(pos);
             }

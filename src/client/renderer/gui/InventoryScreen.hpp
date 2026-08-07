@@ -6,6 +6,8 @@
 #pragma once
 
 #include "common/entity/Inventory.hpp"
+#include "common/inventory/InventoryMenu.hpp"
+#include <memory>
 #include "common/world/block/Blocks.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "../backend/RenderTypes.hpp"
@@ -61,12 +63,25 @@ namespace Render {
         void Close();
         bool IsOpen() const { return m_open; }
 
-        // Player pointer (provides access to local inventory mirror).
-        void SetPlayer(Game::ClientPlayer* p) { m_player = p; }
+        // Player pointer (provides access to local inventory mirror). Also
+        // (re)builds the menu the screen predicts against — its slots are bound
+        // to this player's inventory.
+        void SetPlayer(Game::ClientPlayer* p);
 
         // Carried item state (cursor) — driven by server packets. Takes the
         // full stack so per-stack DataComponents survive on the cursor.
         void SetCarriedItem(const Game::ItemStack& stack);
+
+        // Latest container revision from InventoryFullS2C. Stamped onto every
+        // click so the server can spot a click predicted against stale state.
+        void SetContainerStateId(uint32_t id) { m_containerStateId = id; }
+
+        // Which menu the server has open for us (InventoryFullS2C only —
+        // per-slot deltas don't carry it, because the id changes only on close
+        // and close always full-syncs). Stamped on every click so the server can
+        // drop clicks aimed at a menu it has already replaced.
+        void SetContainerId(uint32_t id) { m_menuContainerId = id; }
+
 
         // Per-frame input
         void OnCharInput(unsigned int codepoint);
@@ -84,7 +99,24 @@ namespace Render {
         // ─── State ───────────────────────────────────────────
         bool                m_open = false;
         Tab                 m_currentTab = Tab::Survival;
-        Game::InventorySlot m_carriedItem{};
+        // The menu this screen predicts against. QueueClick runs the SAME
+        // Game::AbstractContainerMenu::DoClick the server will, so a click
+        // lands on screen this frame instead of a round trip later. The server
+        // then corrects only where its authoritative result disagrees, so a
+        // mis-prediction can never survive as a ghost item.
+        //
+        // Held by pointer because its slots must be bound to the player's
+        // inventory, which only exists once SetPlayer runs.
+        std::unique_ptr<Game::InventoryMenu> m_menu;
+
+        // The cursor LIVES on the menu (that is what DoClick mutates). These
+        // accessors keep the render/hit-test call sites terse and give writes
+        // somewhere harmless to land before a player is attached.
+        Game::InventorySlot&       Carried();
+        const Game::InventorySlot& Carried() const;
+        Game::InventorySlot        m_noMenuCarried{};   // fallback, see Carried()
+        uint32_t            m_containerStateId = 0;
+        uint32_t            m_menuContainerId  = 0;
         int                 m_hoveredSlot = HIT_NONE;
         // The creative search shows multiple stacks of the same item-id when an
         // item supports per-stack variants (notably enchanted_book — one stack

@@ -1268,7 +1268,8 @@ namespace Render {
         m_megaBoundIBO = ibo;
     }
 
-    void VKBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) {
+    void VKBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
+                                          IndexType indexType) {
         if (m_boundShader == INVALID_SHADER || indexCount == 0) return;
         if (m_megaBoundVBO == INVALID_BUFFER || m_megaBoundIBO == INVALID_BUFFER) return;
         if (!m_frameActive) return;
@@ -1319,16 +1320,21 @@ namespace Render {
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, offsets);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
 
-        uint32_t firstIndex = static_cast<uint32_t>(indexByteOffset / sizeof(uint32_t));
+        const bool u16 = (indexType == IndexType::Uint16);
+        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0,
+                             u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+
+        uint32_t firstIndex = static_cast<uint32_t>(
+            indexByteOffset / (u16 ? sizeof(uint16_t) : sizeof(uint32_t)));
         vkCmdDrawIndexed(cmd, indexCount, 1, firstIndex, baseVertex, 0);
     }
 
     void VKBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
                                                 const size_t* indexByteOffsets,
                                                 const int32_t* baseVertices,
-                                                uint32_t drawCount) {
+                                                uint32_t drawCount,
+                                                IndexType indexType) {
         if (m_boundShader == INVALID_SHADER || drawCount == 0) return;
         if (m_megaBoundVBO == INVALID_BUFFER || m_megaBoundIBO == INVALID_BUFFER) return;
         if (!m_frameActive) return;
@@ -1380,12 +1386,16 @@ namespace Render {
         VkBuffer vertexBuffers[] = {vbIt->second.buffer};
         VkDeviceSize vbOffsets[] = {0};
         vkCmdBindVertexBuffers(cmd, 0, 1, vertexBuffers, vbOffsets);
-        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+        const bool u16 = (indexType == IndexType::Uint16);
+        const size_t indexSize = u16 ? sizeof(uint16_t) : sizeof(uint32_t);
+        vkCmdBindIndexBuffer(cmd, ibIt->second.buffer, 0,
+                             u16 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
 
         // Issue one draw per section (cheap — just command buffer recording)
         for (uint32_t i = 0; i < drawCount; i++) {
             if (indexCounts[i] <= 0) continue;
-            uint32_t firstIndex = static_cast<uint32_t>(indexByteOffsets[i] / sizeof(uint32_t));
+            uint32_t firstIndex = static_cast<uint32_t>(indexByteOffsets[i] / indexSize);
             vkCmdDrawIndexed(cmd, indexCounts[i], 1, firstIndex, baseVertices[i], 0);
         }
     }
@@ -1396,7 +1406,7 @@ namespace Render {
 
     GPUTimerHandle VKBackend::BeginGPUTimer(const std::string& name) { return INVALID_GPU_TIMER; }
     void VKBackend::EndGPUTimer(GPUTimerHandle) {}
-    float VKBackend::GetGPUTimerResultMs(GPUTimerHandle) { return 0.0f; }
+    float VKBackend::GetGPUTimerResultMs(GPUTimerHandle) { return -1.0f; }
 
     // ========================================================================
     // MEMORY STATS
@@ -1664,6 +1674,29 @@ namespace Render {
         auto surfaceFormat = ChooseSwapSurfaceFormat(formats);
         auto presentMode = ChooseSwapPresentMode(presentModes);
         auto extent = ChooseSwapExtent(capabilities, window);
+
+        // Log the present-mode decision — the vsync-off path silently falls
+        // back to FIFO (vsync ON) when the driver doesn't advertise
+        // MAILBOX/IMMEDIATE, and without this line that's indistinguishable
+        // from the setting being ignored.
+        {
+            auto modeName = [](VkPresentModeKHR m) -> const char* {
+                switch (m) {
+                    case VK_PRESENT_MODE_IMMEDIATE_KHR:    return "IMMEDIATE";
+                    case VK_PRESENT_MODE_MAILBOX_KHR:      return "MAILBOX";
+                    case VK_PRESENT_MODE_FIFO_KHR:         return "FIFO";
+                    case VK_PRESENT_MODE_FIFO_RELAXED_KHR: return "FIFO_RELAXED";
+                    default:                                return "OTHER";
+                }
+            };
+            std::string available;
+            for (auto m : presentModes) {
+                if (!available.empty()) available += ", ";
+                available += modeName(m);
+            }
+            Log::Info("VKBackend: swapchain present mode = %s (vsync setting: %s; available: %s)",
+                      modeName(presentMode), m_vsyncEnabled ? "on" : "off", available.c_str());
+        }
 
         uint32_t imageCount = capabilities.minImageCount + 1;
         if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount)

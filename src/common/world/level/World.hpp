@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../chunk/IBlockAccess.hpp"
+#include "ILevelWrite.hpp"
 #include "server/world/ChunkProvider.hpp"
 #include "../block/Blocks.hpp"
 #include "../math/WorldMath.hpp"
@@ -13,7 +14,7 @@
 
 namespace Game {
 
-    class World : public IBlockAccess {
+    class World : public ILevelWrite {
     public:
         // Update flags for SetBlock operations (bitfield)
         enum UpdateFlags : uint32_t {
@@ -48,7 +49,10 @@ namespace Game {
 
         // World modification
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId);
-        bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags);
+        // ILevelWrite — the interface item behaviours write through, so the
+        // same code can target the client's predicted world.
+        bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId,
+                      uint32_t updateFlags) override;
 
         // Mesh system integration
         void MarkSectionDirty(int worldX, int worldY, int worldZ);

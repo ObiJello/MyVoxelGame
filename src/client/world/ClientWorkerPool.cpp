@@ -416,18 +416,12 @@ namespace Threading {
             return result;
         }
         
-        // Build mesh using the real Mesher with snapshot data
-        // Create read-only block access adapter
-        Client::Render::SnapshotBlockAccess blockAccess(
-            job.snapshot->sectionData,
-            job.chunkPos,
-            job.sectionY
-        );
-        
-        // Use the real Mesher
+        // Build mesh using the real Mesher, feeding the snapshot directly —
+        // the fast path fills the mesher's block cache with memcpys from the
+        // snapshot's flat arrays instead of per-block virtual GetBlock calls.
         Render::Mesher mesher;
         Render::SectionMesh sectionMesh;
-        mesher.BuildSectionMesh(blockAccess, job.chunkPos, job.sectionY, sectionMesh);
+        mesher.BuildSectionMesh(job.snapshot->sectionData, job.chunkPos, job.sectionY, sectionMesh);
         
         // Convert SectionMesh to MeshBuildResult format
         result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);

@@ -24,8 +24,7 @@
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/level/World.hpp"
 #include "../core/Log.hpp"
-#include "server/player/ServerPlayer.hpp"  // bucket POV raycast needs eye pos/rotation
-                                           // (common→server precedent: PortalGunBehavior.cpp)
+#include "IUsePlayer.hpp"
 
 #include <cmath>
 #include <random>
@@ -92,7 +91,7 @@ namespace Game {
         // spawns an item entity at the clicked face with a small velocity
         // outward. Used by HoeItem when tilling rooted_dirt (drops a
         // hanging_roots item). We don't have item entities yet, so log it.
-        void PopResourceFromFace(World* world, const glm::ivec3& pos,
+        void PopResourceFromFace(ILevelWrite* world, const glm::ivec3& pos,
                                  int face, BlockID dropId) {
             (void)world; (void)face;
             // TODO(item-entities): spawn an ItemEntity(dropId * 1) at face center
@@ -113,7 +112,7 @@ namespace Game {
         // upward face OR there's a flammable neighbour (`isValidFireLocation`).
         // We approximate the sturdy-face check via "block below is opaque",
         // which covers every vanilla solid block.
-        bool CanFireBePlacedAt(World* world, const glm::ivec3& pos) {
+        bool CanFireBePlacedAt(ILevelWrite* world, const glm::ivec3& pos) {
             if (!world) return false;
             if (!world->IsValidPosition(pos.x, pos.y, pos.z)) return false;
             if (world->GetBlock(pos.x, pos.y, pos.z) != BlockID::Air) return false;
@@ -571,8 +570,8 @@ namespace Game {
             glm::ivec3 beforePos;   // the cell the ray was in before the hit
             BlockID    block;
         };
-        std::optional<BucketHit> BucketClip(World* world,
-                                            const Server::ServerPlayer& player,
+        std::optional<BucketHit> BucketClip(ILevelWrite* world,
+                                            const IUsePlayer& player,
                                             bool stopOnFluid) {
             // Eye + direction from the server-authoritative rotation (the
             // UseItemC2S handler snapped it to the click's exact aim).
@@ -612,7 +611,7 @@ namespace Game {
         }
 
         // Empty bucket — BucketItem.java:43-74 (fill path).
-        UseResult Use_EmptyBucket(World* world, Server::ServerPlayer* player,
+        UseResult Use_EmptyBucket(ILevelWrite* world, IUsePlayer* player,
                                   uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/true);   // :45 SOURCE_ONLY
@@ -631,7 +630,7 @@ namespace Game {
             // ItemUtils.createFilledResult (:62): creative keeps the empty
             // bucket, survival transforms it. Component patch reset — a
             // fresh filled bucket carries no per-stack state.
-            if (player->getGameMode() != Server::GameMode::CREATIVE) {
+            if (!player->isCreative()) {
                 stack = ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
                                                               : Items::WaterBucket, 1);
                 player->markSlotDirty(player->handSlotIndex(hand));
@@ -641,7 +640,7 @@ namespace Game {
 
         // Filled bucket — BucketItem.java:76-95 + emptyContents (:104-179,
         // simplified: no fluid simulation, sources are static cubes).
-        UseResult Use_FilledBucket(World* world, Server::ServerPlayer* player,
+        UseResult Use_FilledBucket(ILevelWrite* world, IUsePlayer* player,
                                    uint32_t hand, ItemStack& stack) {
             if (!world || !player) return UseResult::Pass;
             const bool isLava = (stack.itemId == Items::LavaBucket);
@@ -672,7 +671,7 @@ namespace Game {
             PlaySound(isLava ? "item.bucket.empty_lava" : "item.bucket.empty",
                       target);                                              // :175-179
             // :97-99 getEmptySuccessItem — creative keeps the filled bucket.
-            if (player->getGameMode() != Server::GameMode::CREATIVE) {
+            if (!player->isCreative()) {
                 stack = ItemStack(Items::Bucket, 1);
                 player->markSlotDirty(player->handSlotIndex(hand));
             }

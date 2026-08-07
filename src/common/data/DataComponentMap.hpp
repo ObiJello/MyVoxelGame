@@ -38,6 +38,22 @@ namespace Game {
         bool empty() const { return entries.empty(); }
         size_t size() const { return entries.size(); }
 
+        // Value equality — the component half of MC's
+        // ItemStack.isSameItemSameComponents. Order-INDEPENDENT: `entries` is a
+        // flat vector, so two maps holding the same components can store them
+        // in different orders depending on the order `set()` was called, and a
+        // positional compare would report them different (which would stop two
+        // otherwise-identical stacks from merging).
+        //
+        // Values are compared by their serialized bytes rather than a typed
+        // operator==, because entries are type-erased `shared_ptr<void>` and
+        // only the DataComponentType knows how to interpret them. Every
+        // registered component currently has a network codec
+        // (DataComponents.cpp), so this is a total comparison; a future
+        // codec-less component (networkId == 0) would serialize to nothing and
+        // compare equal — see the guard in the .cpp.
+        bool Equals(const DataComponentMap& other) const;
+
         // ── Network codec — mirrors MC DataComponentPatch.STREAM_CODEC
         // (DataComponentPatch.java:31-106): VarInt addedCount, VarInt
         // removedCount, then per added entry (VarInt networkId, payload).

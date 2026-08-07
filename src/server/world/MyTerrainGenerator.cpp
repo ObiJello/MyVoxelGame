@@ -1,6 +1,7 @@
 // File: src/server/world/MyTerrainGenerator.cpp
 #include "MyTerrainGenerator.hpp"
 #include "storage/SectionDataUnpacker.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <chrono>
 #include <future>
 
@@ -19,6 +20,12 @@ using minecraft::BlockState;
 static constexpr int MIN_Y = -64;
 static constexpr int HEIGHT = 384;
 static constexpr int MAX_Y = MIN_Y + HEIGHT;
+
+// Epoch for the thread_local MapBlockType caches. Bumped every generator
+// Initialize() because Blocks::bootstrap() may recreate Block objects on
+// world reload — a worker's cached pointers from the previous world would
+// otherwise alias freshly allocated blocks at reused addresses.
+static std::atomic<uint32_t> s_blockMapEpoch{1};
 
 namespace Game {
 
@@ -40,6 +47,11 @@ namespace Game {
         try {
             int64_t seed = static_cast<int64_t>(m_config.seed);
             Log::Info("[MyTerrainGenerator] Initializing with seed: %lld", seed);
+
+            // Invalidate every worker thread's MapBlockType cache — the
+            // bootstrap below may recreate Block objects, and stale cached
+            // pointers from a previous world could alias reused addresses.
+            s_blockMapEpoch.fetch_add(1, std::memory_order_release);
 
             // ================================================================
             // Step 1: Bootstrap registries (once per program)
@@ -301,9 +313,16 @@ namespace Game {
             // This provides multi-chunk neighbor access via WorldGenRegion,
             // so features like trees can span chunk boundaries correctly.
             // ================================================================
-            world::IChunk* chunk = m_chunkCache->getChunk(
-                position.x, position.z, *m_targetStatus, true
-            );
+            world::IChunk* chunk = nullptr;
+            {
+                // Time the MC generation pipeline separately from our
+                // conversion loop below — the next Tracy capture shows how
+                // the per-chunk cost splits between the two.
+                PROFILE_ZONE_N("TerrainLibGetChunk");
+                chunk = m_chunkCache->getChunk(
+                    position.x, position.z, *m_targetStatus, true
+                );
+            }
 
             if (!chunk) {
                 result.errorMessage = "ServerChunkCache returned null chunk";
@@ -312,31 +331,10 @@ namespace Game {
 
             // ================================================================
             // Convert from terrain library chunk to game chunk format
+            // (section-wise, all-air sections skipped, lock-free block map)
             // ================================================================
-            auto gameChunk = std::make_shared<Chunk>();
-            gameChunk->pos = position;
-
-            minecraft::world::ChunkPos chunkPos = chunk->getPos();
-            int worldMinX = chunkPos.getMinBlockX();
-            int worldMinZ = chunkPos.getMinBlockZ();
             int blocksSet = 0;
-
-            for (int y = MIN_Y; y < MAX_Y; y++) {
-                for (int localX = 0; localX < 16; localX++) {
-                    for (int localZ = 0; localZ < 16; localZ++) {
-                        minecraft::core::BlockPos blockPos(
-                            worldMinX + localX, y, worldMinZ + localZ
-                        );
-                        auto* blockState = chunk->getBlockState(blockPos);
-                        BlockID gameBlockId = MapBlockType(blockState);
-                        gameChunk->SetBlock(localX, y, localZ, gameBlockId);
-
-                        if (gameBlockId != BlockID::Air) {
-                            blocksSet++;
-                        }
-                    }
-                }
-            }
+            auto gameChunk = ConvertLibChunk(chunk, position, &blocksSet);
 
             auto endTime = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
@@ -362,32 +360,99 @@ namespace Game {
     BlockID MyTerrainGenerator::MapBlockType(minecraft::world::BlockState* blockState) const {
         if (!blockState) return BlockID::Stone;
 
-        // Block* pointers are stable (created once in Blocks::bootstrap, never moved).
-        // Cache the resolved BlockID per unique Block* to avoid repeated string operations.
+        // Block* pointers are stable within one bootstrap epoch (created once
+        // in Blocks::bootstrap, never moved), so pointer equality suffices.
         const auto* block = blockState->getBlock();
         if (!block) return BlockID::Stone;
 
-        {
-            std::lock_guard<std::mutex> lock(m_blockIdCacheMutex);
-            auto it = m_blockIdCache.find(block);
-            if (it != m_blockIdCache.end()) {
-                return it->second;
+        // Lock-free per-thread cache + last-block memo. Terrain is dominated
+        // by long runs of the same state (air, stone, deepslate, water), so
+        // the memo alone absorbs the vast majority of calls; the map handles
+        // the rest. No mutex — the old shared cache took ~98k lock/unlock per
+        // converted chunk with every worker contending on it.
+        struct ThreadCache {
+            uint32_t epoch = 0;
+            const void* lastBlock = nullptr;
+            BlockID lastId = BlockID::Stone;
+            std::unordered_map<const void*, BlockID> map;
+        };
+        thread_local ThreadCache tc;
+
+        const uint32_t epoch = s_blockMapEpoch.load(std::memory_order_acquire);
+        if (tc.epoch != epoch) {
+            tc.map.clear();
+            tc.lastBlock = nullptr;
+            tc.epoch = epoch;
+        }
+
+        if (block == tc.lastBlock) {
+            return tc.lastId;
+        }
+
+        auto it = tc.map.find(block);
+        if (it == tc.map.end()) {
+            // First encounter on this thread — resolve via string lookup
+            // (slow path, bounded by unique block types, ~1150 total)
+            Game::BlockStateRegistry::Initialize();
+            Game::BlockState gameState;
+            gameState.name = block->getIdentifier();
+            gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
+            it = tc.map.emplace(block, gameState.resolvedId).first;
+        }
+
+        tc.lastBlock = block;
+        tc.lastId = it->second;
+        return it->second;
+    }
+
+    std::shared_ptr<Chunk> MyTerrainGenerator::ConvertLibChunk(minecraft::world::IChunk* chunk,
+                                                               Math::ChunkPos position,
+                                                               int* outBlocksSet) const {
+        PROFILE_ZONE_N("ConvertChunk");
+        auto gameChunk = std::make_shared<Chunk>();
+        gameChunk->pos = position;
+
+        // Section-wise conversion: skips all-air sections entirely (most of a
+        // chunk's 384-block column is sky), reads block states through the
+        // section's inline palette accessor instead of per-block virtual
+        // IChunk::getBlockState with BlockPos construction, and writes
+        // directly into the game section arrays instead of per-block
+        // Chunk::SetBlock (which re-validates and re-reads every call).
+        // Equivalent output: SetBlock on a fresh chunk was a no-op for air
+        // and a plain section Set for everything else (onSectionDirty is
+        // unset during conversion).
+        const int libMinY = chunk->getMinBuildHeight();
+        const int sectionsCount = chunk->getSectionsCount();
+        int blocksSet = 0;
+
+        for (int si = 0; si < sectionsCount; ++si) {
+            auto& libSection = chunk->getSection(si);
+            if (libSection.hasOnlyAir()) continue;
+
+            const int baseY = libMinY + si * 16;
+            const int gameSectionIndex = Math::WorldCoordinates::WorldYToSectionIndex(baseY);
+            if (gameSectionIndex < 0 || gameSectionIndex >= Math::SECTIONS_PER_CHUNK) continue;
+
+            gameChunk->EnsureSection(gameSectionIndex);
+            ChunkSection* outSection = gameChunk->GetSection(gameSectionIndex);
+            if (!outSection) continue;
+
+            for (int ly = 0; ly < 16; ++ly) {
+                for (int lz = 0; lz < 16; ++lz) {
+                    for (int lx = 0; lx < 16; ++lx) {
+                        auto* blockState = libSection.getBlockState(lx, ly, lz);
+                        const BlockID id = MapBlockType(blockState);
+                        if (id != BlockID::Air) {
+                            outSection->Set(lx, ly, lz, id);
+                            ++blocksSet;
+                        }
+                    }
+                }
             }
         }
 
-        // First encounter — resolve via string lookup (slow path, ~1150 unique blocks total)
-        Game::BlockStateRegistry::Initialize();
-        const std::string& identifier = block->getIdentifier();
-
-        Game::BlockState gameState;
-        gameState.name = identifier;
-        gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
-
-        {
-            std::lock_guard<std::mutex> lock(m_blockIdCacheMutex);
-            m_blockIdCache[block] = gameState.resolvedId;
-        }
-        return gameState.resolvedId;
+        if (outBlocksSet) *outBlocksSet = blocksSet;
+        return gameChunk;
     }
 
     // === Non-blocking async API ===
@@ -447,25 +512,8 @@ namespace Game {
         if (!chunk) return nullptr;
 
         // Convert from terrain library chunk to game chunk format
-        auto gameChunk = std::make_shared<Chunk>();
-        gameChunk->pos = position;
-
-        minecraft::world::ChunkPos chunkPos = chunk->getPos();
-        int worldMinX = chunkPos.getMinBlockX();
-        int worldMinZ = chunkPos.getMinBlockZ();
-
-        for (int y = MIN_Y; y < MAX_Y; y++) {
-            for (int localX = 0; localX < 16; localX++) {
-                for (int localZ = 0; localZ < 16; localZ++) {
-                    minecraft::core::BlockPos blockPos(
-                        worldMinX + localX, y, worldMinZ + localZ
-                    );
-                    auto* blockState = chunk->getBlockState(blockPos);
-                    BlockID gameBlockId = MapBlockType(blockState);
-                    gameChunk->SetBlock(localX, y, localZ, gameBlockId);
-                }
-            }
-        }
+        // (section-wise, all-air sections skipped, lock-free block map)
+        auto gameChunk = ConvertLibChunk(chunk, position, nullptr);
 
         m_stats.chunksGenerated++;
         return gameChunk;

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Item.hpp"
+#include "../inventory/Container.hpp"
 #include "../world/block/Blocks.hpp"
 #include <array>
 #include <optional>
@@ -21,7 +22,9 @@ namespace Game {
     //   9..35   main inventory (3 rows × 9)
     //   36..44  hotbar (9 slots)
     //   45      offhand (reserved)
-    class Inventory {
+    // Implements IContainer so InventoryMenu's slots can address it, exactly as
+    // MC's `Inventory implements Container`.
+    class Inventory : public IContainer {
     public:
         // Region constants (MC-compatible)
         static constexpr int CRAFT_RESULT_BEGIN = 0;
@@ -38,6 +41,15 @@ namespace Game {
         static constexpr int MAX_STACK_SIZE     = 64;
 
         Inventory();
+
+        // ── IContainer ────────────────────────────────────────────────────
+        // Index-checked like the existing GetSlot/MutableSlot accessors, which
+        // these delegate to; a bad index yields a scratch stack rather than UB.
+        int GetContainerSize() const override { return TOTAL_SIZE; }
+        ItemStack&       GetItem(int index)       override { return MutableSlot(index); }
+        const ItemStack& GetItem(int index) const override { return GetSlot(index); }
+        void SetItem(int index, const ItemStack& stack) override { SetSlotFull(index, stack); }
+        int  GetMaxStackSize() const override { return MAX_STACK_SIZE; }
 
         // Initialize with default blocks for testing
         void InitializeDefaults();
@@ -63,7 +75,17 @@ namespace Game {
 
         // Try to add items to inventory (player region: main + hotbar).
         // Returns number of items that couldn't be added.
+        // NOTE: builds a bare (id, count) stack — any per-stack components are
+        // lost. Prefer AddStack when you already hold a real ItemStack.
         int AddItems(ItemID id, int count);
+
+        // Component-preserving AddItems: `proto.count` items of `proto` are
+        // distributed using MC's Inventory.add() priority (selected hotbar slot
+        // → offhand → hotbar → main), and each slot written takes a full copy of
+        // `proto` so DataComponents ride along. Returns the number that didn't
+        // fit. Merging requires IsSameItemSameComponents, so an enchanted stack
+        // never absorbs into a plain one.
+        int AddStack(const ItemStack& proto);
         // Convenience overload — converts BlockID to BlockItem.
         int AddBlocks(BlockID blockId, int count) {
             return AddItems(ItemRegistry::FromBlock(blockId), count);
@@ -117,11 +139,10 @@ namespace Game {
         int AddToSlot(int slotIndex, ItemID id, int count);
     };
 
-    // Slot placement filter — mirrors MC Slot.mayPlace per region
-    // (ArmorSlot checks the stack's EQUIPPABLE component; craft slots refuse
-    // inserts; offhand/main/hotbar accept anything). Shared by the server's
-    // authoritative InventoryClickHandler AND the client's InventoryScreen
-    // prediction so a refused click never leaves a ghost item.
-    bool MayPlaceInSlot(int slotIndex, const ItemStack& stack);
+    // NOTE: the per-slot placement filter and stack-size cap used to live here
+    // as free functions keyed on a raw index. They are now Slot::MayPlace and
+    // Slot::GetMaxStackSize (common/inventory/Slot.hpp) — ArmorSlot enforces the
+    // EQUIPPABLE match and a limit of 1, NoPlaceSlot refuses the crafting grid.
+    // Ask the menu's Slot rather than re-deriving policy from an index.
 
 } // namespace Game

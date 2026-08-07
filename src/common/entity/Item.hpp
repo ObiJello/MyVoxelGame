@@ -28,11 +28,18 @@
 
 namespace Game {
     class World;
+    class ILevelWrite;
+    class IUsePlayer;
     class Inventory;
+    // Container-click plumbing. Forward-declared rather than included:
+    // AbstractContainerMenu.hpp pulls in Inventory.hpp which pulls in this
+    // header, and the click-override typedefs below only need these by
+    // reference.
+    class  AbstractContainerMenu;
+    struct ContainerClickResult;
 }
 namespace Server {
     class ServerPlayer;
-    struct InventoryClickResult;
 }
 
 namespace Game {
@@ -110,7 +117,7 @@ namespace Game {
     // `use` callbacks override the default for items with unique behaviour
     // (bucket POV-raycast fill/empty; later Bow/EnderPearl once projectile
     // entities exist).
-    using ItemUseFn = UseResult (*)(World* world, Server::ServerPlayer* player,
+    using ItemUseFn = UseResult (*)(ILevelWrite* world, IUsePlayer* player,
                                     uint32_t hand, ItemStack& stack);
 
     // Base `Item.use` — mirrors Item.java:196-219. Dispatches on the held
@@ -122,6 +129,10 @@ namespace Game {
     // (MC's KINETIC_WEAPON step (:209-214) is omitted — no combat system.)
     // Implemented in Item.cpp. Server dispatch rule:
     //   item.use ? item.use(...) : Item_DefaultUse(...)
+    // NOTE: still takes the concrete World* / ServerPlayer* — unlike the
+    // per-item `use` overrides this is the CONSUMABLE / EQUIPPABLE /
+    // BLOCKS_ATTACKS lifecycle chain, which is server-authoritative state and
+    // is never run client-side for prediction.
     UseResult Item_DefaultUse(World* world, Server::ServerPlayer* player,
                               uint32_t hand, ItemStack& stack);
 
@@ -146,14 +157,16 @@ namespace Game {
     // the normal pickup/merge/swap logic runs (the bundle's click-to-insert).
     // Slot mutations must be recorded on `result` (MarkChanged-style) so
     // PlayerSession re-broadcasts them.
+    // `menu` gives access to the clicked slot (menu.GetSlot(slotIndex)), the
+    // cursor (menu.getCarried()) and the player inventory, replacing the old
+    // separate Inventory& + ContainerHost& pair.
     using ItemStackedOnOtherFn =
-        bool (*)(ItemStack& carried, Inventory& inv, int slotIndex,
-                 ClickAction action, Server::ServerPlayer& player,
-                 Server::InventoryClickResult& result);
+        bool (*)(ItemStack& carried, AbstractContainerMenu& menu, int slotIndex,
+                 ClickAction action, ContainerClickResult& result);
     using ItemOtherStackedOnMeFn =
-        bool (*)(ItemStack& slotStack, ItemStack& carried, Inventory& inv,
-                 int slotIndex, ClickAction action, Server::ServerPlayer& player,
-                 Server::InventoryClickResult& result);
+        bool (*)(ItemStack& slotStack, ItemStack& carried,
+                 AbstractContainerMenu& menu, int slotIndex, ClickAction action,
+                 ContainerClickResult& result);
 
     struct Item {
         std::string                   name;            // human-readable display name
@@ -200,7 +213,7 @@ namespace Game {
         ItemUseOnFn                   useOn = nullptr;
         ItemUseFn                     use   = nullptr;
         // Inventory click-behaviour overrides (bundle). See the fn typedefs
-        // above; consulted by InventoryClickHandler::TryItemClickBehaviourOverride
+        // above; consulted by AbstractContainerMenu::TryItemClickBehaviourOverride
         // (mirrors AbstractContainerMenu.tryItemClickBehaviourOverride).
         ItemStackedOnOtherFn          overrideStackedOnOther   = nullptr;
         ItemOtherStackedOnMeFn        overrideOtherStackedOnMe = nullptr;
@@ -334,5 +347,19 @@ namespace Game {
         // DataComponents.hpp (and the enchantment headers) into Item.hpp.
         bool HasFoil() const;
     };
+
+    // Mirrors MC `ItemStack.isSameItemSameComponents` (ItemStack.java) — same
+    // item AND identical per-stack components, ignoring count. This is the
+    // predicate that decides whether two stacks may occupy one slot, so every
+    // merge / quick-move / drag / double-click path must use it rather than a
+    // bare `itemId ==`. Comparing ids alone lets two differently-enchanted
+    // books (or any two stacks differing only in components) collapse into one,
+    // destroying one side's data.
+    bool IsSameItemSameComponents(const ItemStack& a, const ItemStack& b);
+
+    // Mirrors MC `ItemStack.matches` — isSameItemSameComponents AND equal
+    // count. Used by the container diff to answer "do I need to resend this
+    // slot".
+    bool ItemStacksMatch(const ItemStack& a, const ItemStack& b);
 
 } // namespace Game

@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include "MeshJobData.hpp"
 #include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
@@ -38,11 +39,66 @@ namespace Render {
         {-1,  0,  0}  // NegativeX
     };
 
+    // Read-only IBlockAccess adapter over the mesher's 18^3 block cache.
+    // Passed to downstream code that still takes the interface (FluidMeshBuilder,
+    // ProcessBlock/AddBlockFace signatures) — every GetBlock is a bounds check +
+    // array read, replacing SnapshotBlockAccess's per-call neighbor-plane logic.
+    // Positions outside the cached halo return Air (the fluid builder and AO
+    // only ever sample within +/-1 of the section, which the halo covers).
+    namespace {
+        class CacheBlockAccess final : public Game::IBlockAccess {
+        public:
+            CacheBlockAccess(const Game::BlockID (&cache)[18][18][18],
+                             int baseX, int baseY, int baseZ)
+                : m_cache(cache), m_baseX(baseX), m_baseY(baseY), m_baseZ(baseZ) {}
+
+            Game::BlockID GetBlock(int worldX, int worldY, int worldZ) const override {
+                const int lx = worldX - m_baseX;
+                const int ly = worldY - m_baseY;
+                const int lz = worldZ - m_baseZ;
+                if (lx < -1 || lx > 16 || ly < -1 || ly > 16 || lz < -1 || lz > 16) {
+                    return Game::BlockID::Air;
+                }
+                return m_cache[ly + 1][lz + 1][lx + 1];
+            }
+
+            bool IsChunkLoaded(int, int) const override { return true; }
+
+            bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override {
+                const int lx = worldX - m_baseX;
+                const int ly = worldY - m_baseY;
+                const int lz = worldZ - m_baseZ;
+                return lx >= -1 && lx <= 16 && ly >= -1 && ly <= 16 && lz >= -1 && lz <= 16;
+            }
+
+            bool IsBlockSolid(int worldX, int worldY, int worldZ) const override {
+                const Game::BlockID block = GetBlock(worldX, worldY, worldZ);
+                return block != Game::BlockID::Air &&
+                       block != Game::BlockID::Water &&
+                       block != Game::BlockID::Lava;
+            }
+
+            bool IsBlockFluid(int worldX, int worldY, int worldZ) const override {
+                const Game::BlockID block = GetBlock(worldX, worldY, worldZ);
+                return block == Game::BlockID::Water || block == Game::BlockID::Lava;
+            }
+
+            bool IsValidPosition(int, int worldY, int) const override {
+                return worldY >= Config::MinY && worldY <= Config::MaxY;
+            }
+
+        private:
+            const Game::BlockID (&m_cache)[18][18][18];
+            int m_baseX, m_baseY, m_baseZ;
+        };
+    }
+
     Mesher::Mesher(const MeshConfig& config) : m_config(config), m_world(nullptr) {
         m_lastStats = {};
         m_sectionBaseWorldX = 0;
         m_sectionBaseWorldY = 0;
         m_sectionBaseWorldZ = 0;
+        std::memset(m_blockCache, 0, sizeof(m_blockCache));
         std::memset(m_opaqueCache, 0, sizeof(m_opaqueCache));
         m_fluidBuilder = std::make_unique<FluidMeshBuilder>();
     }
@@ -91,7 +147,7 @@ namespace Render {
         s_blockPropsCacheValid = true;
     }
 
-    void Mesher::BuildOpaqueCache(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY) {
+    void Mesher::FillBlockCacheFromAccess(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY) {
         PROFILE_ZONE;
         m_sectionBaseWorldX = chunkPos.x * 16;
         m_sectionBaseWorldY = sectionY * 16 + Config::MinY;
@@ -99,16 +155,90 @@ namespace Render {
 
         // Sample a 18x18x18 region: the section (16^3) plus a 1-block border on all sides.
         // This covers every neighbor position that AO and face culling will access.
-        for (int lx = -1; lx <= 16; ++lx) {
-            for (int ly = -1; ly <= 16; ++ly) {
-                for (int lz = -1; lz <= 16; ++lz) {
+        for (int ly = -1; ly <= 16; ++ly) {
+            for (int lz = -1; lz <= 16; ++lz) {
+                for (int lx = -1; lx <= 16; ++lx) {
                     int wx = m_sectionBaseWorldX + lx;
                     int wy = m_sectionBaseWorldY + ly;
                     int wz = m_sectionBaseWorldZ + lz;
-                    Game::BlockID bid = blocks.GetBlock(wx, wy, wz);
-                    m_opaqueCache[lx + 1][ly + 1][lz + 1] = s_blockPropsCache[static_cast<uint16_t>(bid)].isOpaque;
+                    m_blockCache[ly + 1][lz + 1][lx + 1] = blocks.GetBlock(wx, wy, wz);
                 }
             }
+        }
+    }
+
+    void Mesher::FillBlockCacheFromSnapshot(const Client::Render::SectionSnapshot& snapshot,
+                                            Game::Math::ChunkPos chunkPos, int sectionY) {
+        PROFILE_ZONE;
+        m_sectionBaseWorldX = chunkPos.x * 16;
+        m_sectionBaseWorldY = sectionY * 16 + Config::MinY;
+        m_sectionBaseWorldZ = chunkPos.z * 16;
+
+        static_assert(sizeof(Game::BlockID) == sizeof(uint16_t),
+                      "BlockID size changed — update FillBlockCacheFromSnapshot memcpys");
+        constexpr size_t ROW_BYTES = 16 * sizeof(Game::BlockID);
+
+        // Interior 16^3: snapshot layout is blocks[y*256 + z*16 + x] (x contiguous),
+        // matching the cache's [y][z][x] layout — one memcpy per (y,z) row.
+        for (int y = 0; y < 16; ++y) {
+            for (int z = 0; z < 16; ++z) {
+                std::memcpy(&m_blockCache[y + 1][z + 1][1],
+                            &snapshot.blocks[y * 256 + z * 16], ROW_BYTES);
+            }
+        }
+
+        // Axis-aligned halo faces from the neighbor boundary planes.
+        // Plane indexing (see SectionSnapshot): N/S = [y*16+x], E/W = [y*16+z], U/D = [z*16+x].
+        for (int z = 0; z < 16; ++z) {  // Down (ly=-1): neighbor below's y=15 plane
+            std::memcpy(&m_blockCache[0][z + 1][1], &snapshot.neighbors[5][z * 16], ROW_BYTES);
+        }
+        for (int z = 0; z < 16; ++z) {  // Up (ly=16): neighbor above's y=0 plane
+            std::memcpy(&m_blockCache[17][z + 1][1], &snapshot.neighbors[4][z * 16], ROW_BYTES);
+        }
+        for (int y = 0; y < 16; ++y) {  // North (lz=-1): north neighbor's z=15 plane
+            std::memcpy(&m_blockCache[y + 1][0][1], &snapshot.neighbors[0][y * 16], ROW_BYTES);
+        }
+        for (int y = 0; y < 16; ++y) {  // South (lz=16): south neighbor's z=0 plane
+            std::memcpy(&m_blockCache[y + 1][17][1], &snapshot.neighbors[1][y * 16], ROW_BYTES);
+        }
+        for (int y = 0; y < 16; ++y) {  // West (lx=-1) / East (lx=16): strided in z
+            for (int z = 0; z < 16; ++z) {
+                m_blockCache[y + 1][z + 1][0]  = snapshot.neighbors[3][y * 16 + z];
+                m_blockCache[y + 1][z + 1][17] = snapshot.neighbors[2][y * 16 + z];
+            }
+        }
+
+        // Halo edges/corners (2+ axes out of range): the snapshot only carries
+        // face planes, so replicate SnapshotBlockAccess's dominant-axis rule
+        // (priority Y > X > Z, other coordinates clamped into [0,15]). Each
+        // such cell equals an already-filled face cell with the non-dominant
+        // coordinates clamped — avoids bright AO seams at section borders.
+        auto clampIn = [](int v) { return v < 0 ? 1 : (v > 15 ? 16 : v + 1); };
+        for (int ly = -1; ly <= 16; ++ly) {
+            const bool oy = (ly < 0 || ly > 15);
+            for (int lz = -1; lz <= 16; ++lz) {
+                const bool oz = (lz < 0 || lz > 15);
+                for (int lx = -1; lx <= 16; ++lx) {
+                    const bool ox = (lx < 0 || lx > 15);
+                    if (static_cast<int>(oy) + static_cast<int>(oz) + static_cast<int>(ox) < 2)
+                        continue;
+                    Game::BlockID v;
+                    if (oy)      v = m_blockCache[ly + 1][clampIn(lz)][clampIn(lx)];
+                    else if (ox) v = m_blockCache[ly + 1][clampIn(lz)][lx + 1];
+                    else         v = m_blockCache[ly + 1][lz + 1][clampIn(lx)];
+                    m_blockCache[ly + 1][lz + 1][lx + 1] = v;
+                }
+            }
+        }
+    }
+
+    void Mesher::DeriveOpaqueCache() {
+        PROFILE_ZONE;
+        // One pass over the 18^3 block cache: opacity via the per-thread props table
+        const Game::BlockID* src = &m_blockCache[0][0][0];
+        bool* dst = &m_opaqueCache[0][0][0];
+        for (size_t i = 0; i < 18 * 18 * 18; ++i) {
+            dst[i] = s_blockPropsCache[static_cast<uint16_t>(src[i])].isOpaque;
         }
     }
 
@@ -121,10 +251,34 @@ namespace Render {
         if (lx < 0 || lx >= 18 || ly < 0 || ly >= 18 || lz < 0 || lz >= 18) {
             return false;
         }
-        return m_opaqueCache[lx][ly][lz];
+        return m_opaqueCache[ly][lz][lx];
+    }
+
+    Game::BlockID Mesher::GetCachedBlock(int worldX, int worldY, int worldZ) const {
+        int lx = worldX - m_sectionBaseWorldX + 1;
+        int ly = worldY - m_sectionBaseWorldY + 1;
+        int lz = worldZ - m_sectionBaseWorldZ + 1;
+
+        if (lx < 0 || lx >= 18 || ly < 0 || ly >= 18 || lz < 0 || lz >= 18) {
+            return Game::BlockID::Air;
+        }
+        return m_blockCache[ly][lz][lx];
     }
 
     void Mesher::BuildSectionMesh(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
+        EnsureBlockPropsCache();
+        FillBlockCacheFromAccess(blocks, chunkPos, sectionY);
+        BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
+    }
+
+    void Mesher::BuildSectionMesh(const Client::Render::SectionSnapshot& snapshot,
+                                  Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
+        EnsureBlockPropsCache();
+        FillBlockCacheFromSnapshot(snapshot, chunkPos, sectionY);
+        BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
+    }
+
+    void Mesher::BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
         PROFILE_ZONE;
         auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -135,33 +289,32 @@ namespace Render {
         outMesh.sectionY = sectionY;
         outMesh.Reserve(1024);
 
-        // Populate per-thread block property cache (once per thread lifetime)
-        EnsureBlockPropsCache();
+        // Derive the opacity cache from the freshly filled block cache — all
+        // face culling and AO reads index this instead of registry lookups.
+        DeriveOpaqueCache();
 
-        // Build the 18x18x18 opaque cache for this section — all subsequent
-        // face culling and AO calculations index into this instead of calling
-        // GetBlock + IsBlockOpaque repeatedly.
-        BuildOpaqueCache(blocks, chunkPos, sectionY);
+        // Adapter handed to downstream IBlockAccess consumers (fluid builder);
+        // every read resolves to a cache array access.
+        CacheBlockAccess cacheAccess(m_blockCache,
+                                     m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
 
         // Build visibility graph from the opaque cache (indices offset by +1 for the border)
         VisGraph visGraph;
         for (int y = 0; y < 16; y++)
             for (int z = 0; z < 16; z++)
                 for (int x = 0; x < 16; x++)
-                    if (m_opaqueCache[x + 1][y + 1][z + 1])
+                    if (m_opaqueCache[y + 1][z + 1][x + 1])
                         visGraph.setOpaque(x, y, z);
 
         for (int localX = 0; localX < 16; ++localX) {
             for (int sectionLocalY = 0; sectionLocalY < 16; ++sectionLocalY) {
                 for (int localZ = 0; localZ < 16; ++localZ) {
-                    int worldY = sectionY * 16 + sectionLocalY + Config::MinY;
-                    int worldX = chunkPos.x * 16 + localX;
-                    int worldZ = chunkPos.z * 16 + localZ;
-
-                    Game::BlockID blockId = blocks.GetBlock(worldX, worldY, worldZ);
+                    Game::BlockID blockId =
+                        m_blockCache[sectionLocalY + 1][localZ + 1][localX + 1];
 
                     if (blockId != Game::BlockID::Air) {
-                        ProcessBlock(blocks, chunkPos, localX, worldY, localZ, sectionY, blockId, outMesh);
+                        int worldY = sectionY * 16 + sectionLocalY + Config::MinY;
+                        ProcessBlock(cacheAccess, chunkPos, localX, worldY, localZ, sectionY, blockId, outMesh);
                     }
                 }
             }
@@ -331,8 +484,14 @@ namespace Render {
     }
 
     void Mesher::GenerateQuad(const std::array<Vertex, 4>& quadVerts,
-                             std::vector<Vertex>& outVerts, std::vector<uint32_t>& outIndices) {
-        uint32_t baseIndex = static_cast<uint32_t>(outVerts.size());
+                             std::vector<Vertex>& outVerts, std::vector<uint16_t>& outIndices) {
+        // 16-bit index guard: a section layer cannot exceed 65,536 vertices.
+        // Unreachable for real content (worst-case checkerboard is ~49k verts);
+        // dropping the quad beats corrupting indices if it ever happens.
+        if (outVerts.size() + 4 > 65536) {
+            return;
+        }
+        uint16_t baseIndex = static_cast<uint16_t>(outVerts.size());
 
         // Add vertices
         outVerts.insert(outVerts.end(), quadVerts.begin(), quadVerts.end());
@@ -340,8 +499,10 @@ namespace Render {
         // **FIXED**: Correct triangle winding for counter-clockwise faces (viewed from outside)
         // Vertices are ordered: 0=bottom-left, 1=bottom-right, 2=top-right, 3=top-left
         outIndices.insert(outIndices.end(), {
-            baseIndex + 0, baseIndex + 1, baseIndex + 2,  // First triangle: 0->1->2
-            baseIndex + 0, baseIndex + 2, baseIndex + 3   // Second triangle: 0->2->3
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 1),
+            static_cast<uint16_t>(baseIndex + 2),  // First triangle: 0->1->2
+            static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
+            static_cast<uint16_t>(baseIndex + 3)   // Second triangle: 0->2->3
         });
     }
 

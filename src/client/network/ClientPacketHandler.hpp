@@ -48,6 +48,7 @@ namespace Client {
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
         void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
         void onSetHealthS2C(const Network::SetHealthS2CPacket& packet) override { handleSetHealth(packet); }
+        void onBlockChangedAckS2C(const Network::BlockChangedAckS2CPacket& packet) override { handleBlockChangedAck(packet); }
         void onPlayerAbilitiesS2C(const Network::PlayerAbilitiesS2CPacket& packet) override { handlePlayerAbilities(packet); }
 #if ENABLE_PORTAL_GUN
         void onPortalSetS2C(const Network::PortalSetS2CPacket& packet) override    { handlePortalSet(packet); }
@@ -102,6 +103,7 @@ namespace Client {
         void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
         void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
         void handleSetHealth(const Network::SetHealthS2CPacket& packet);
+        void handleBlockChangedAck(const Network::BlockChangedAckS2CPacket& packet);
 
 #if ENABLE_PORTAL_GUN
         // Portal gun (server-broadcast pair state). Forwards into

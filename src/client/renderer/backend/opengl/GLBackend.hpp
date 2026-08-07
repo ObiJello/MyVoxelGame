@@ -94,9 +94,11 @@ namespace Render {
         // Mega-buffer rendering
         void BindVertexBuffer(BufferHandle vbo, uint32_t stride) override;
         void BindIndexBuffer(BufferHandle ibo) override;
-        void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) override;
+        void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
+                                   IndexType indexType = IndexType::Uint32) override;
         void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
-                                        const int32_t* baseVertices, uint32_t drawCount) override;
+                                        const int32_t* baseVertices, uint32_t drawCount,
+                                        IndexType indexType = IndexType::Uint32) override;
 
         // Shared block vertex format (VAO)
         void SetupBlockVertexFormat() override;

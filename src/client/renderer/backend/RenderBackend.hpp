@@ -199,14 +199,16 @@ namespace Render {
         virtual void BindIndexBuffer(BufferHandle ibo) = 0;
 
         // Draw indexed geometry using currently-bound VBO + IBO with base vertex offset.
-        virtual void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex) = 0;
+        virtual void DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
+                                           IndexType indexType = IndexType::Uint32) = 0;
 
         // Batched multi-draw with base vertex. GL: native glMultiDrawElementsBaseVertex.
         // Default: loops DrawIndexedBaseVertex.
         virtual void MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
                                                 const size_t* indexByteOffsets,
                                                 const int32_t* baseVertices,
-                                                uint32_t drawCount);
+                                                uint32_t drawCount,
+                                                IndexType indexType = IndexType::Uint32);
 
         // ====================================================================
         // SHARED BLOCK VERTEX FORMAT
@@ -221,6 +223,12 @@ namespace Render {
         // ====================================================================
         // GPU TIMER QUERIES
         // ====================================================================
+        // Begin/End bracket GPU work (GL: GL_TIME_ELAPSED — queries cannot be
+        // nested, so brackets must be sequential). GetGPUTimerResultMs is
+        // NON-BLOCKING: it returns -1.0f while the result is still in flight
+        // (poll again next frame; the timer stays alive) and the elapsed
+        // milliseconds once ready (the timer is freed). Vulkan: stubbed —
+        // Begin returns INVALID_GPU_TIMER, which callers must tolerate.
 
         virtual GPUTimerHandle BeginGPUTimer(const std::string& name) = 0;
         virtual void EndGPUTimer(GPUTimerHandle handle) = 0;

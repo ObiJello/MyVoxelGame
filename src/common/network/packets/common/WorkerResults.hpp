@@ -45,17 +45,19 @@ namespace Network {
         uint8_t  neighborMask = 0; // Neighbor presence mask (PX=1, NX=2, PZ=4, NZ=8)
 
         struct SectionMeshData {
+            // Indices are 16-bit: relative to the section's baseVertex, and a
+            // section layer is capped at 65,536 vertices (see Mesher::GenerateQuad).
             // Opaque geometry (solid blocks like stone, dirt)
             std::vector<float>    opaqueVertices;
-            std::vector<uint32_t> opaqueIndices;
+            std::vector<uint16_t> opaqueIndices;
 
             // Cutout geometry (alpha-test blocks like leaves, grass)
             std::vector<float>    cutoutVertices;
-            std::vector<uint32_t> cutoutIndices;
+            std::vector<uint16_t> cutoutIndices;
 
             // Translucent geometry (blended blocks like glass, water, ice)
             std::vector<float>    translucentVertices;
-            std::vector<uint32_t> translucentIndices;
+            std::vector<uint16_t> translucentIndices;
 
             // Layer counts for validation
             size_t opaqueVertexCount      = 0;

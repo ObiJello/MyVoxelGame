@@ -19,6 +19,43 @@ namespace Game {
         }
     }
 
+    bool DataComponentMap::Equals(const DataComponentMap& other) const {
+        // Fast path: the overwhelming majority of stacks are vanilla and carry
+        // no per-stack overrides at all. Keeping this allocation-free matters —
+        // the callers are inner loops (stack merging, and the 46-slot diff that
+        // runs once per player per tick in BroadcastContainerChanges).
+        if (entries.empty() && other.entries.empty()) return true;
+        if (entries.size() != other.entries.size())   return false;
+
+        // n is 0-3 in practice, so the nested scan is cheaper than building an
+        // index. Buffers are hoisted out of the loop and reused.
+        Network::PacketBuffer mine, theirs;
+        for (const auto& e : entries) {
+            const Entry* match = nullptr;
+            for (const auto& o : other.entries) {
+                if (o.type == e.type) { match = &o; break; }
+            }
+            if (!match) return false;
+
+            if (!e.type->HasNetworkCodec()) {
+                // No codec means no way to inspect the value. Fall back to
+                // identity: distinct allocations compare unequal. That is the
+                // SAFE direction to be wrong in — it refuses to merge two
+                // stacks that may in fact differ, rather than merging them and
+                // destroying one side's data.
+                if (e.value.get() != match->value.get()) return false;
+                continue;
+            }
+
+            mine.Clear();
+            theirs.Clear();
+            e.type->SerializeErased(mine, e.value.get());
+            match->type->SerializeErased(theirs, match->value.get());
+            if (mine.GetData() != theirs.GetData()) return false;
+        }
+        return true;
+    }
+
     // Mirrors DataComponentPatch.STREAM_CODEC.encode (DataComponentPatch.java:57-100).
     void DataComponentMap::Serialize(Network::PacketBuffer& buffer) const {
         uint32_t added = 0;

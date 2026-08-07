@@ -146,7 +146,7 @@ The terrain library uses GCC/Clang-specific features that need MSVC equivalents:
 **`NoiseChunk.cpp`**: Replace `__restrict__` with `#ifdef _MSC_VER __restrict` (MSVC uses different keyword).
 
 ### MapBlockType thread safety
-`MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. The `m_blockIdCache` unordered_map must be protected with `m_blockIdCacheMutex` (already in MyTerrainGenerator.hpp/cpp, not in the terrain library).
+`MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. It is lock-free by design: each thread keeps a `thread_local` Block*→BlockID cache plus a last-block memo (see MyTerrainGenerator.cpp). The caches are guarded by `s_blockMapEpoch`, bumped in `Initialize()` — `Blocks::bootstrap()` may recreate Block objects on world reload, so stale cached pointers must be invalidated. Do NOT replace this with a shared mutex-protected map: the old design took ~98k lock/unlock per converted chunk with all workers contending (measured 6.66ms/chunk conversion cost).
 
 ### DensityFunctionRegistry re-bootstrap (quit-to-title support)
 `DensityFunctionRegistry::clear()` must NOT delete the `zero()` density function — it is `Constant::ZERO()`, a process-lifetime singleton whose static accessor caches the pointer. Deleting it leaves the cache dangling; the next `bootstrap()` (second world in one process via quit-to-title → rejoin) re-registers the freed pointer and the first `NoiseRouterData::overworld()` build segfaults.
