@@ -260,15 +260,17 @@ bool WorldCarver<C>::carveBlock(
         return false;
     }
 
-    std::string blockName = blockType->getIdentifier();
-
     // Check for grass/mycelium - Reference: lines 112-114
-    if (blockName == "minecraft:grass_block" || blockName == "minecraft:mycelium") {
+    // (mycelium has no static accessor; resolve once post-bootstrap)
+    static minecraft::world::level::block::Block* const s_myceliumBlock =
+        minecraft::world::level::block::Blocks::getBlock("minecraft:mycelium");
+    if (blockType->is(minecraft::world::level::block::Blocks::GRASS_BLOCK) ||
+        blockType->is(s_myceliumBlock)) {
         hasGrass = true;
     }
 
     // Check if block can be replaced - Reference: lines 116-117
-    if (configuration.replaceable.count(blockName) == 0) {
+    if (!canReplaceBlock(configuration, blockType)) {
         return false;
     }
 
@@ -285,7 +287,7 @@ bool WorldCarver<C>::carveBlock(
     if (hasGrass) {
         helperPos.setWithOffset(blockPos, 0, -1, 0);  // Direction::DOWN
         BlockState* belowBlock = chunk->getBlockState(helperPos);
-        if (belowBlock && belowBlock->getIdentifier() == "minecraft:dirt") {
+        if (belowBlock && belowBlock->is(minecraft::world::level::block::Blocks::DIRT)) {
             // Get top material from context (could be grass, podzol, etc.)
             BlockState* topBlock = context.topMaterial(biomeGetter, chunk, helperPos,
                                                                   carvedBlock->isFluid());
@@ -330,9 +332,9 @@ BlockState* WorldCarver<C>::getCarveState(
         // Java returns AIR (not CAVE_AIR) for normal caves
         if (block->isAir()) {
             return minecraft::world::level::block::Blocks::AIR->defaultBlockState();  // Normal cave - use AIR (matches Java)
-        } else if (block->getIdentifier() == "minecraft:water") {
+        } else if (block->is(minecraft::world::level::block::Blocks::WATER)) {
             return minecraft::world::level::block::Blocks::WATER->defaultBlockState();  // Underwater cave
-        } else if (block->getIdentifier() == "minecraft:lava") {
+        } else if (block->is(minecraft::world::level::block::Blocks::LAVA)) {
             return minecraft::world::level::block::Blocks::LAVA->defaultBlockState();  // Lava
         }
 
@@ -346,8 +348,19 @@ BlockState* WorldCarver<C>::getCarveState(
 
 template<typename C>
 bool WorldCarver<C>::canReplaceBlock(const C& configuration, const BlockState* block) const {
-    // Check if block name is in replaceable set - Reference: line 175
-    return block && configuration.replaceable.count(block->getIdentifier()) > 0;
+    // Check membership in the replaceable set - Reference: line 175.
+    // Pointer-identity mirror of the name set, built once after bootstrap.
+    if (!block) {
+        return false;
+    }
+    std::call_once(configuration.replaceableBlocksOnce, [&configuration]() {
+        for (const std::string& name : configuration.replaceable) {
+            if (auto* b = minecraft::world::level::block::Blocks::getBlock(name)) {
+                configuration.replaceableBlocks.insert(b);
+            }
+        }
+    });
+    return configuration.replaceableBlocks.count(block->getBlock()) > 0;
 }
 
 template<typename C>

@@ -18,6 +18,7 @@ using Blocks = ::minecraft::world::level::block::Blocks;
 
 // Static members
 RandomPatchFeature VegetationFeatures::s_randomPatchFeature;
+levelgen::BambooFeature VegetationFeatures::s_bambooFeature;
 SimpleBlockFeature VegetationFeatures::s_simpleBlockFeature;
 VinesFeature VegetationFeatures::s_vinesFeature;
 bool VegetationFeatures::s_initialized = false;
@@ -112,12 +113,19 @@ ConfiguredFeature* VegetationFeatures::MEADOW_TREES = nullptr;
 // Storage for ConfiguredFeatureImpl instances
 static std::vector<std::unique_ptr<ConfiguredFeature>> s_features;
 static std::vector<std::unique_ptr<RandomPatchConfiguration>> s_configs;
+static std::vector<std::unique_ptr<ProbabilityFeatureConfiguration>> s_probabilityConfigs;
 
 // Storage for RandomSelectorFeature and its configuration
 static std::unique_ptr<RandomSelectorFeature> s_randomSelectorFeature;
 static std::vector<std::unique_ptr<RandomFeatureConfiguration>> s_randomConfigs;
+static std::unique_ptr<RandomBooleanSelectorFeature> s_randomBooleanSelectorFeature;
+static std::vector<std::unique_ptr<RandomBooleanFeatureConfiguration>> s_randomBooleanConfigs;
 static std::vector<std::unique_ptr<PlacementModifier>> s_inlinePlacementModifiers;
 static std::vector<std::shared_ptr<levelgen::feature::stateproviders::BlockStateProvider>> s_blockStateProviders;
+static VegetationPatchFeature s_vegetationPatchFeature;
+static std::vector<std::unique_ptr<VegetationPatchConfiguration>> s_vegPatchConfigs;
+static BlockColumnFeature s_blockColumnFeature;
+static std::vector<std::unique_ptr<BlockColumnConfiguration>> s_blockColumnConfigs;
 
 // Storage for HugeMushroomFeature instances and configurations
 static std::unique_ptr<HugeBrownMushroomFeature> s_hugeBrownMushroomFeature;
@@ -158,6 +166,10 @@ void VegetationFeatures::bootstrap() {
         s_simpleRandomSelectorFeature = std::make_unique<SimpleRandomSelectorFeature>();
     }
 
+    if (!s_randomBooleanSelectorFeature) {
+        s_randomBooleanSelectorFeature = std::make_unique<RandomBooleanSelectorFeature>();
+    }
+
     auto storePlacementModifier = [](auto modifier) -> PlacementModifier* {
         using Modifier = std::decay_t<decltype(modifier)>;
         auto stored = std::make_unique<Modifier>(std::move(modifier));
@@ -181,6 +193,19 @@ void VegetationFeatures::bootstrap() {
             SimpleBlockConfiguration(rawProvider, scheduleTick)
         );
         ConfiguredFeature* raw = feature.get();
+        s_features.push_back(std::move(feature));
+        return raw;
+    };
+
+    auto createBlockColumnConfiguredFeature = [&](BlockColumnConfiguration&& config) -> ConfiguredFeature* {
+        auto storedConfig = std::make_unique<BlockColumnConfiguration>(std::move(config));
+        auto* rawConfig = storedConfig.get();
+        auto feature = std::make_unique<ConfiguredFeatureImpl<BlockColumnConfiguration, BlockColumnFeature>>(
+            &s_blockColumnFeature,
+            *rawConfig
+        );
+        ConfiguredFeature* raw = feature.get();
+        s_blockColumnConfigs.push_back(std::move(storedConfig));
         s_features.push_back(std::move(feature));
         return raw;
     };
@@ -235,6 +260,24 @@ void VegetationFeatures::bootstrap() {
         return simplePatchConfiguration(std::move(provider), {}, tries);
     };
 
+    auto nearWaterPredicate = [](minecraft::world::level::block::Block* block) -> std::shared_ptr<blockpredicates::BlockPredicate> {
+        using namespace levelgen::blockpredicates;
+        return BlockPredicate::allOf(
+            std::vector<std::shared_ptr<BlockPredicate>>{
+                BlockPredicate::ONLY_IN_AIR_PREDICATE,
+                BlockPredicate::wouldSurvive(block->defaultBlockState(), core::Vec3i::ZERO()),
+                BlockPredicate::anyOf(
+                    std::vector<std::shared_ptr<BlockPredicate>>{
+                        BlockPredicate::matchesFluids({1, -1, 0}, {"minecraft:water", "minecraft:flowing_water"}),
+                        BlockPredicate::matchesFluids({-1, -1, 0}, {"minecraft:water", "minecraft:flowing_water"}),
+                        BlockPredicate::matchesFluids({0, -1, 1}, {"minecraft:water", "minecraft:flowing_water"}),
+                        BlockPredicate::matchesFluids({0, -1, -1}, {"minecraft:water", "minecraft:flowing_water"}),
+                    }
+                )
+            }
+        );
+    };
+
     auto segmentedBlockPatchBuilder = [](minecraft::world::level::block::Block* block,
                                          int minState,
                                          int maxState,
@@ -281,8 +324,12 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_GRASS - short grass
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState());
+        auto config = grassPatch(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::SHORT_GRASS
+            ),
+            32
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -293,8 +340,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_TALL_GRASS
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::TALL_GRASS->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::TALL_GRASS
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -305,8 +355,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_FERN
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::FERN->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::FERN
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -317,8 +370,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_LARGE_FERN
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::LARGE_FERN->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::LARGE_FERN
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -395,8 +451,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_BROWN_MUSHROOM
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 4, 2);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::BROWN_MUSHROOM->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::BROWN_MUSHROOM
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -407,8 +466,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_RED_MUSHROOM
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 4, 2);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::RED_MUSHROOM->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::RED_MUSHROOM
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -424,26 +486,12 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_DEAD_BUSH
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(4, 7, 3);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // Dead bush can grow on sand, terracotta, dirt
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
-
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:sand" && id != "minecraft:red_sand" &&
-                id != "minecraft:terracotta" && id != "minecraft:dirt" &&
-                id.find("terracotta") == std::string::npos) {
-                return false;
-            }
-
-            level->setBlock(pos, minecraft::world::level::block::Blocks::DEAD_BUSH->defaultBlockState(), 2);
-            return true;
-        };
+        auto config = grassPatch(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::DEAD_BUSH
+            ),
+            4
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -454,29 +502,58 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_CACTUS
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(10, 7, 3);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // Cactus grows on sand
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
+        auto cactusProvider = levelgen::feature::stateproviders::BlockStateProvider::simple(
+            minecraft::world::level::block::Blocks::CACTUS
+        );
+        auto cactusFlowerProvider = levelgen::feature::stateproviders::BlockStateProvider::simple(
+            minecraft::world::level::block::Blocks::CACTUS_FLOWER
+        );
+        s_blockStateProviders.push_back(cactusProvider);
+        s_blockStateProviders.push_back(cactusFlowerProvider);
 
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:sand" && id != "minecraft:red_sand") return false;
-
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            // Random height 1-3
-            int height = 1 + random.nextInt(3);
-            for (int dy = 0; dy < height; ++dy) {
-                core::BlockPos dyPos(pos.getX(), pos.getY() + dy, pos.getZ());
-                BlockState* checkBlock = level->getBlockState(dyPos);
-                if (checkBlock && !checkBlock->isAir()) break;
-                level->setBlock(dyPos, minecraft::world::level::block::Blocks::CACTUS->defaultBlockState(), 2);
-            }
-            return true;
+        std::vector<BlockColumnConfiguration::Layer> layers = {
+            BlockColumnConfiguration::layer(
+                std::make_shared<util::BiasedToBottomInt>(1, 3),
+                cactusProvider
+            ),
+            BlockColumnConfiguration::layer(
+                util::WeightedListInt::builder()
+                    .add(std::make_shared<util::ConstantInt>(0), 3)
+                    .add(std::make_shared<util::ConstantInt>(1), 1)
+                    .buildShared(),
+                cactusFlowerProvider
+            )
         };
+
+        auto config = simpleRandomPatchConfiguration(
+            10,
+            createPlacedFeature(
+                createBlockColumnConfiguredFeature(
+                    BlockColumnConfiguration(
+                        layers,
+                        core::Direction::UP,
+                        blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE,
+                        false
+                    )
+                ),
+                {
+                    storePlacementModifier(
+                        BlockPredicateFilter::forPredicate(
+                            blockpredicates::BlockPredicate::allOf(
+                                std::vector<std::shared_ptr<blockpredicates::BlockPredicate>>{
+                                    blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE,
+                                    blockpredicates::BlockPredicate::wouldSurvive(
+                                        minecraft::world::level::block::Blocks::CACTUS->defaultBlockState(),
+                                        core::Vec3i::ZERO()
+                                    )
+                                }
+                            )
+                        )
+                    )
+                },
+                "patch_cactus"
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -491,8 +568,11 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_SUNFLOWER
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(10, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::SUNFLOWER->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::SUNFLOWER
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -503,8 +583,12 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_PUMPKIN
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::PUMPKIN->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::PUMPKIN
+            ),
+            {minecraft::world::level::block::Blocks::GRASS_BLOCK}
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -515,8 +599,27 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_MELON
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::MELON->defaultBlockState());
+        auto melonPredicate = blockpredicates::BlockPredicate::allOf(
+            std::vector<std::shared_ptr<blockpredicates::BlockPredicate>>{
+                blockpredicates::BlockPredicate::replaceable(),
+                blockpredicates::BlockPredicate::noFluid(),
+                blockpredicates::BlockPredicate::matchesBlocks(core::Vec3i(0, -1, 0), "minecraft:grass_block")
+            }
+        );
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            64,
+            7,
+            3,
+            createPlacedFeature(
+                createSimpleBlockConfiguredFeature(
+                    levelgen::feature::stateproviders::BlockStateProvider::simple(
+                        minecraft::world::level::block::Blocks::MELON
+                    )
+                ),
+                {storePlacementModifier(BlockPredicateFilter::forPredicate(melonPredicate))},
+                "patch_melon"
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -527,39 +630,26 @@ void VegetationFeatures::bootstrap() {
 
     // PATCH_SUGAR_CANE
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(20, 4, 0);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // Sugar cane grows on sand/dirt next to water
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
+        auto sugarCaneProvider = levelgen::feature::stateproviders::BlockStateProvider::simple(
+            minecraft::world::level::block::Blocks::SUGAR_CANE
+        );
+        s_blockStateProviders.push_back(sugarCaneProvider);
 
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:sand" && id != "minecraft:grass_block" && id != "minecraft:dirt") return false;
-
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            // Check for water nearby (simplified - just check adjacent)
-            bool hasWater = false;
-            for (int dx = -1; dx <= 1 && !hasWater; dx += 2) {
-                BlockState* adj = level->getBlockState(core::BlockPos(pos.getX() + dx, pos.getY() - 1, pos.getZ()));
-                if (adj && adj->getIdentifier() == "minecraft:water") hasWater = true;
-            }
-            for (int dz = -1; dz <= 1 && !hasWater; dz += 2) {
-                BlockState* adj = level->getBlockState(core::BlockPos(pos.getX(), pos.getY() - 1, pos.getZ() + dz));
-                if (adj && adj->getIdentifier() == "minecraft:water") hasWater = true;
-            }
-
-            if (!hasWater) return false;
-
-            // Random height 1-4
-            int height = 1 + random.nextInt(4);
-            for (int dy = 0; dy < height; ++dy) {
-                level->setBlock(core::BlockPos(pos.getX(), pos.getY() + dy, pos.getZ()), minecraft::world::level::block::Blocks::SUGAR_CANE->defaultBlockState(), 2);
-            }
-            return true;
-        };
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            20,
+            4,
+            0,
+            createPlacedFeature(
+                createBlockColumnConfiguredFeature(
+                    BlockColumnConfiguration::simple(
+                        std::make_shared<util::BiasedToBottomInt>(2, 4),
+                        sugarCaneProvider
+                    )
+                ),
+                {storePlacementModifier(BlockPredicateFilter::forPredicate(nearWaterPredicate(minecraft::world::level::block::Blocks::SUGAR_CANE)))},
+                "patch_sugar_cane"
+            )
+        );
 
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
@@ -656,9 +746,16 @@ void VegetationFeatures::bootstrap() {
     // Reference: HugeFungusConfiguration.java / HugeMushroomFeatureConfiguration
     // foliageRadius = 3 (flat cap extends 3 blocks from center)
     {
+        // Reference: TreeFeatures.java - cap has down=false, stem has up=false,down=false
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
         auto config = std::make_unique<HugeMushroomFeatureConfiguration>(
-            std::make_shared<SimpleStateProvider>(minecraft::world::level::block::Blocks::BROWN_MUSHROOM_BLOCK->defaultBlockState()),
-            std::make_shared<SimpleStateProvider>(minecraft::world::level::block::Blocks::MUSHROOM_STEM->defaultBlockState()),
+            std::make_shared<SimpleStateProvider>(
+                minecraft::world::level::block::Blocks::BROWN_MUSHROOM_BLOCK->defaultBlockState()
+                    ->setValue(*BlockStateProperties::DOWN, false)),
+            std::make_shared<SimpleStateProvider>(
+                minecraft::world::level::block::Blocks::MUSHROOM_STEM->defaultBlockState()
+                    ->setValue(*BlockStateProperties::UP, false)
+                    ->setValue(*BlockStateProperties::DOWN, false)),
             3  // foliageRadius
         );
 
@@ -672,9 +769,16 @@ void VegetationFeatures::bootstrap() {
     // HUGE_RED_MUSHROOM
     // foliageRadius = 2 (dome cap is smaller)
     {
+        // Reference: TreeFeatures.java - cap has down=false, stem has up=false,down=false
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
         auto config = std::make_unique<HugeMushroomFeatureConfiguration>(
-            std::make_shared<SimpleStateProvider>(minecraft::world::level::block::Blocks::RED_MUSHROOM_BLOCK->defaultBlockState()),
-            std::make_shared<SimpleStateProvider>(minecraft::world::level::block::Blocks::MUSHROOM_STEM->defaultBlockState()),
+            std::make_shared<SimpleStateProvider>(
+                minecraft::world::level::block::Blocks::RED_MUSHROOM_BLOCK->defaultBlockState()
+                    ->setValue(*BlockStateProperties::DOWN, false)),
+            std::make_shared<SimpleStateProvider>(
+                minecraft::world::level::block::Blocks::MUSHROOM_STEM->defaultBlockState()
+                    ->setValue(*BlockStateProperties::UP, false)
+                    ->setValue(*BlockStateProperties::DOWN, false)),
             2  // foliageRadius
         );
 
@@ -1270,59 +1374,22 @@ void VegetationFeatures::bootstrap() {
     // BAMBOO_NO_PODZOL - Feature.BAMBOO, ProbabilityFeatureConfiguration(0.0F)
     // Reference: VegetationFeatures.java line 162
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 2, 1);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            // Bamboo placement (no podzol generation)
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
-
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:grass_block" && id != "minecraft:dirt" && id != "minecraft:sand" &&
-                id != "minecraft:gravel" && id != "minecraft:podzol") return false;
-
-            // Place bamboo (simplified - just one block)
-            // In Java this grows bamboo stalk
-            return true;
-        };
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        auto config = std::make_unique<ProbabilityFeatureConfiguration>(0.0f);
+        auto feature = std::make_unique<ConfiguredFeatureImpl<ProbabilityFeatureConfiguration, levelgen::BambooFeature>>(
+            &s_bambooFeature, *config);
         BAMBOO_NO_PODZOL = feature.get();
-        s_configs.push_back(std::move(config));
+        s_probabilityConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
     // BAMBOO_SOME_PODZOL - Feature.BAMBOO, ProbabilityFeatureConfiguration(0.2F)
     // Reference: VegetationFeatures.java line 163
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 2, 1);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
-
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:grass_block" && id != "minecraft:dirt" && id != "minecraft:sand" &&
-                id != "minecraft:gravel" && id != "minecraft:podzol") return false;
-
-            // 20% chance to place podzol
-            if (random.nextFloat() < 0.2f) {
-                level->setBlock(below,
-                    minecraft::world::level::block::Blocks::PODZOL ?
-                    minecraft::world::level::block::Blocks::PODZOL->defaultBlockState() : blockBelow, 2);
-            }
-            return true;
-        };
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        auto config = std::make_unique<ProbabilityFeatureConfiguration>(0.2f);
+        auto feature = std::make_unique<ConfiguredFeatureImpl<ProbabilityFeatureConfiguration, levelgen::BambooFeature>>(
+            &s_bambooFeature, *config);
         BAMBOO_SOME_PODZOL = feature.get();
-        s_configs.push_back(std::move(config));
+        s_probabilityConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
@@ -1340,8 +1407,12 @@ void VegetationFeatures::bootstrap() {
     // PATCH_GRASS_MEADOW - grassPatch with SHORT_GRASS, tries=16
     // Reference: VegetationFeatures.java line 172
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState());
+        auto config = grassPatch(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::SHORT_GRASS
+            ),
+            16
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_GRASS_MEADOW = feature.get();
@@ -1352,28 +1423,28 @@ void VegetationFeatures::bootstrap() {
     // PATCH_GRASS_JUNGLE - WeightedStateProvider with SHORT_GRASS:3, FERN:1
     // Reference: VegetationFeatures.java line 174
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        std::vector<BlockState*> states = {
-            minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(),
-            minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(),
-            minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(),
-            minecraft::world::level::block::Blocks::FERN->defaultBlockState()
-        };
-        config->featurePlacer = [states](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
-
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:grass_block" && id != "minecraft:dirt" && id != "minecraft:podzol") return false;
-
-            BlockState* state = states[random.nextInt(static_cast<int>(states.size()))];
-            level->setBlock(pos, state, 2);
-            return true;
-        };
+        auto provider = std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+            std::vector<levelgen::feature::stateproviders::WeightedStateEntry>{
+                {minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(), 3},
+                {minecraft::world::level::block::Blocks::FERN->defaultBlockState(), 1}
+            }
+        );
+        auto junglePredicate = blockpredicates::BlockPredicate::allOf(
+            blockpredicates::BlockPredicate::ONLY_IN_AIR_PREDICATE,
+            blockpredicates::BlockPredicate::not_(
+                blockpredicates::BlockPredicate::matchesBlocks(core::Vec3i(0, -1, 0), "minecraft:podzol")
+            )
+        );
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            32,
+            7,
+            3,
+            createPlacedFeature(
+                createSimpleBlockConfiguredFeature(provider),
+                {storePlacementModifier(BlockPredicateFilter::forPredicate(junglePredicate))},
+                "patch_grass_jungle"
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_GRASS_JUNGLE = feature.get();
@@ -1384,29 +1455,15 @@ void VegetationFeatures::bootstrap() {
     // PATCH_TAIGA_GRASS - WeightedStateProvider with SHORT_GRASS:1, FERN:4
     // Reference: VegetationFeatures.java line 170
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        std::vector<BlockState*> states = {
-            minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(),
-            minecraft::world::level::block::Blocks::FERN->defaultBlockState(),
-            minecraft::world::level::block::Blocks::FERN->defaultBlockState(),
-            minecraft::world::level::block::Blocks::FERN->defaultBlockState(),
-            minecraft::world::level::block::Blocks::FERN->defaultBlockState()
-        };
-        config->featurePlacer = [states](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow) return false;
-
-            std::string id = blockBelow->getIdentifier();
-            if (id != "minecraft:grass_block" && id != "minecraft:dirt" && id != "minecraft:podzol") return false;
-
-            BlockState* state = states[random.nextInt(static_cast<int>(states.size()))];
-            level->setBlock(pos, state, 2);
-            return true;
-        };
+        auto config = grassPatch(
+            std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                std::vector<levelgen::feature::stateproviders::WeightedStateEntry>{
+                    {minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(), 1},
+                    {minecraft::world::level::block::Blocks::FERN->defaultBlockState(), 4}
+                }
+            ),
+            32
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_TAIGA_GRASS = feature.get();
@@ -1417,8 +1474,15 @@ void VegetationFeatures::bootstrap() {
     // PATCH_DRY_GRASS - WeightedStateProvider with SHORT_DRY_GRASS:1, TALL_DRY_GRASS:1
     // Reference: VegetationFeatures.java line 177
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(64, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState());
+        auto config = grassPatch(
+            std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+                std::vector<levelgen::feature::stateproviders::WeightedStateEntry>{
+                    {minecraft::world::level::block::Blocks::SHORT_DRY_GRASS->defaultBlockState(), 1},
+                    {minecraft::world::level::block::Blocks::TALL_DRY_GRASS->defaultBlockState(), 1},
+                }
+            ),
+            64
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_DRY_GRASS = feature.get();
@@ -1429,18 +1493,16 @@ void VegetationFeatures::bootstrap() {
     // PATCH_WATERLILY - tries=10, lily pad
     // Reference: VegetationFeatures.java line 179
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(10, 7, 3);
-        config->featurePlacer = [](WorldGenLevel* level, ChunkGenerator* gen, WorldgenRandom& random, const core::BlockPos& pos) -> bool {
-            BlockState* targetBlock = level->getBlockState(pos);
-            if (!targetBlock || !targetBlock->isAir()) return false;
-
-            core::BlockPos below(pos.getX(), pos.getY() - 1, pos.getZ());
-            BlockState* blockBelow = level->getBlockState(below);
-            if (!blockBelow || blockBelow->getIdentifier() != "minecraft:water") return false;
-
-            // Place lily pad on water - skip for now as LILY_PAD may not exist
-            return false;
-        };
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            10,
+            7,
+            3,
+            onlyWhenEmptySimpleBlock(
+                levelgen::feature::stateproviders::BlockStateProvider::simple(
+                    minecraft::world::level::block::Blocks::LILY_PAD
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_WATERLILY = feature.get();
@@ -1451,8 +1513,18 @@ void VegetationFeatures::bootstrap() {
     // PATCH_BUSH - tries=24, bush block
     // Reference: VegetationFeatures.java line 182
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(24, 5, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::BUSH->defaultBlockState());
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            24,
+            5,
+            3,
+            onlyWhenEmptySimpleBlock(
+                levelgen::feature::stateproviders::BlockStateProvider::simple(
+                    minecraft::world::level::block::Blocks::BUSH
+                ),
+                false,
+                "patch_bush"
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_BUSH = feature.get();
@@ -1463,8 +1535,16 @@ void VegetationFeatures::bootstrap() {
     // PATCH_FIREFLY_BUSH - tries=20
     // Reference: VegetationFeatures.java line 185
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(20, 4, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState());
+        auto config = std::make_unique<RandomPatchConfiguration>(
+            20,
+            4,
+            3,
+            onlyWhenEmptySimpleBlock(
+                levelgen::feature::stateproviders::BlockStateProvider::simple(
+                    minecraft::world::level::block::Blocks::FIREFLY_BUSH
+                )
+            )
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_FIREFLY_BUSH = feature.get();
@@ -1475,8 +1555,15 @@ void VegetationFeatures::bootstrap() {
     // PATCH_BERRY_BUSH - sweet berry bush
     // Reference: VegetationFeatures.java line 169
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(32, 7, 3);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::DEAD_BUSH->defaultBlockState());
+        auto config = simplePatchConfiguration(
+            levelgen::feature::stateproviders::BlockStateProvider::simple(
+                minecraft::world::level::block::Blocks::SWEET_BERRY_BUSH->defaultBlockState()->setValue(
+                    *BlockStateProperties::AGE_3,
+                    3
+                )
+            ),
+            {minecraft::world::level::block::Blocks::GRASS_BLOCK}
+        );
         auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
             &s_randomPatchFeature, *config);
         PATCH_BERRY_BUSH = feature.get();
@@ -1709,9 +1796,10 @@ void VegetationFeatures::bootstrap() {
     // Reference: VegetationFeatures.java line 198
     {
         using TreePl = placement::TreePlacements;
-        if (TreePl::PALE_OAK_CHECKED) {
+        if (TreePl::PALE_OAK_CREAKING_CHECKED && TreePl::PALE_OAK_CHECKED) {
             auto config = std::make_unique<RandomFeatureConfiguration>(
                 std::vector<WeightedPlacedFeature>{
+                    WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::PALE_OAK_CREAKING_CHECKED), 0.1f),
                     WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::PALE_OAK_CHECKED), 0.9f),
                 },
                 const_cast<PlacedFeature*>(TreePl::PALE_OAK_CHECKED)
@@ -1724,16 +1812,61 @@ void VegetationFeatures::bootstrap() {
         }
     }
 
-    // PALE_MOSS_PATCH - VegetationPatchFeature
-    // Reference: VegetationFeatures.java line 200
-    // Using RandomPatch as simplified implementation
+    // PALE_MOSS_VEGETATION
+    // Reference: VegetationFeatures.java line 199
     {
-        auto config = std::make_unique<RandomPatchConfiguration>(16, 4, 2);
-        config->featurePlacer = createGrassPlacer(minecraft::world::level::block::Blocks::MOSS_CARPET->defaultBlockState());
-        auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-            &s_randomPatchFeature, *config);
+        auto provider = std::make_shared<levelgen::feature::stateproviders::WeightedStateProvider>(
+            std::vector<levelgen::feature::stateproviders::WeightedStateEntry>{
+                {minecraft::world::level::block::Blocks::PALE_MOSS_CARPET->defaultBlockState(), 25},
+                {minecraft::world::level::block::Blocks::SHORT_GRASS->defaultBlockState(), 25},
+                {minecraft::world::level::block::Blocks::TALL_GRASS->defaultBlockState(), 10},
+            }
+        );
+
+        PALE_MOSS_VEGETATION = createSimpleBlockConfiguredFeature(provider);
+    }
+
+    // PALE_MOSS_PATCH
+    // Reference: VegetationFeatures.java line 200
+    {
+        auto config = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:moss_replaceable",
+            BlockStateProvider::simple(Blocks::PALE_MOSS_BLOCK),
+            createPlacedFeature(PALE_MOSS_VEGETATION, {}, "PALE_MOSS_VEGETATION_INLINE"),
+            minecraft::levelgen::CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(1),
+            0.0f,
+            5,
+            0.3f,
+            std::make_shared<util::UniformInt>(2, 4),
+            0.75f
+        );
+        auto feature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
+            &s_vegetationPatchFeature, *config);
         PALE_MOSS_PATCH = feature.get();
-        s_configs.push_back(std::move(config));
+        s_vegPatchConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
+    // PALE_MOSS_PATCH_BONEMEAL
+    // Reference: VegetationFeatures.java line 201
+    {
+        auto config = std::make_unique<VegetationPatchConfiguration>(
+            "minecraft:moss_replaceable",
+            BlockStateProvider::simple(Blocks::PALE_MOSS_BLOCK),
+            createPlacedFeature(PALE_MOSS_VEGETATION, {}, "PALE_MOSS_VEGETATION_BONEMEAL_INLINE"),
+            minecraft::levelgen::CaveSurface::FLOOR,
+            std::make_shared<util::ConstantInt>(1),
+            0.0f,
+            5,
+            0.6f,
+            std::make_shared<util::UniformInt>(1, 2),
+            0.75f
+        );
+        auto feature = std::make_unique<ConfiguredFeatureImpl<VegetationPatchConfiguration, VegetationPatchFeature>>(
+            &s_vegetationPatchFeature, *config);
+        PALE_MOSS_PATCH_BONEMEAL = feature.get();
+        s_vegPatchConfigs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
 
@@ -1760,14 +1893,15 @@ void VegetationFeatures::bootstrap() {
     // Reference: VegetationFeatures.java line 219
     {
         using TreePl = placement::TreePlacements;
-        if (TreePl::FANCY_OAK_CHECKED && TreePl::JUNGLE_BUSH && TreePl::MEGA_JUNGLE_TREE_CHECKED) {
+        if (TreePl::FANCY_OAK_CHECKED && TreePl::JUNGLE_BUSH &&
+            TreePl::MEGA_JUNGLE_TREE_CHECKED && PATCH_GRASS_JUNGLE) {
             auto config = std::make_unique<RandomFeatureConfiguration>(
                 std::vector<WeightedPlacedFeature>{
                     WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::FANCY_OAK_CHECKED), 0.05f),
                     WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::JUNGLE_BUSH), 0.15f),
                     WeightedPlacedFeature(const_cast<PlacedFeature*>(TreePl::MEGA_JUNGLE_TREE_CHECKED), 0.7f),
                 },
-                const_cast<PlacedFeature*>(TreePl::JUNGLE_BUSH)
+                inlinePlaced(PATCH_GRASS_JUNGLE)
             );
             auto feature = std::make_unique<ConfiguredFeatureImpl<RandomFeatureConfiguration, RandomSelectorFeature>>(
                 s_randomSelectorFeature.get(), *config);
@@ -1780,20 +1914,15 @@ void VegetationFeatures::bootstrap() {
     // MUSHROOM_ISLAND_VEGETATION - RandomBooleanSelector with huge mushrooms
     // Reference: VegetationFeatures.java line 220
     {
-        // Using huge red mushroom as default for now
         if (HUGE_RED_MUSHROOM && HUGE_BROWN_MUSHROOM) {
-            auto config = std::make_unique<RandomFeatureConfiguration>(
-                std::vector<WeightedPlacedFeature>{
-                    // 50/50 red vs brown
-                },
-                nullptr  // Will use RandomBooleanSelector logic
+            auto config = std::make_unique<RandomBooleanFeatureConfiguration>(
+                inlinePlaced(HUGE_RED_MUSHROOM),
+                inlinePlaced(HUGE_BROWN_MUSHROOM)
             );
-            // Using RandomPatch as simplified implementation
-            auto simpleConfig = std::make_unique<RandomPatchConfiguration>(1, 0, 0);
-            auto feature = std::make_unique<ConfiguredFeatureImpl<RandomPatchConfiguration, RandomPatchFeature>>(
-                &s_randomPatchFeature, *simpleConfig);
+            auto feature = std::make_unique<ConfiguredFeatureImpl<RandomBooleanFeatureConfiguration, RandomBooleanSelectorFeature>>(
+                s_randomBooleanSelectorFeature.get(), *config);
             MUSHROOM_ISLAND_VEGETATION = feature.get();
-            s_configs.push_back(std::move(simpleConfig));
+            s_randomBooleanConfigs.push_back(std::move(config));
             s_features.push_back(std::move(feature));
         }
     }

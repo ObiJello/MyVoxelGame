@@ -32,7 +32,8 @@ public:
             return false;
         }
 
-        return (attachedToState && isHeadOrBody(attachedToState)) ||
+        return (attachedToState && attachedToState->is(getHeadBlock())) ||
+               (attachedToState && attachedToState->is(getBodyBlock())) ||
                (attachedToState && attachedToState->isFaceSturdy(level, attachedToPos, m_growthDirection));
     }
 
@@ -42,6 +43,8 @@ protected:
     }
 
     virtual bool isHeadOrBody(BlockState* state) const = 0;
+    virtual const Block* getHeadBlock() const = 0;
+    virtual const Block* getBodyBlock() const = 0;
 
     core::Direction growthDirection() const {
         return m_growthDirection;

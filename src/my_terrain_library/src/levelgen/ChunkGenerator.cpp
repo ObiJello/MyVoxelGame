@@ -1,5 +1,6 @@
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
+#include <mutex>
 #include "levelgen/FeatureSorter.h"
 #include "levelgen/placement/PlacedFeature.h"
 #include "levelgen/feature/Feature.h"
@@ -98,32 +99,32 @@ void ChunkGenerator::applyBiomeDecoration(
         *s_featureLogStream << "# DecorationSeed: " << decorationSeed << "\n\n";
     }
 
-    // Collect biomes from 3x3 chunk area
+    // Collect biomes from 3x3 chunk area.
     // Reference: ChunkPos.rangeClosed(sectionPos.chunk(), 1).forEach(...)
+    // Java iterates each section's stored biome palette values, then retains only
+    // biomes present in biomeSource.possibleBiomes().
     std::set<const world::biome::Biome*> possibleBiomes;
+    world::biome::BiomeSource* biomeSource = nullptr;
+    if (auto* noiseBasedGenerator = dynamic_cast<NoiseBasedChunkGenerator*>(this)) {
+        biomeSource = noiseBasedGenerator->getBiomeSource();
+    }
+    const auto& sourcePossibleBiomes =
+        biomeSource ? biomeSource->possibleBiomes() : std::set<world::biome::BiomeKey>{};
     for (int dz = -1; dz <= 1; ++dz) {
         for (int dx = -1; dx <= 1; ++dx) {
             ::world::IChunk* neighborChunk = level->getChunk(centerPos.x() + dx, centerPos.z() + dz);
             if (neighborChunk) {
-                // Collect all biomes from all sections
-                for (int sectionY = neighborChunk->getMinBuildHeight() >> 4;
-                     sectionY < neighborChunk->getMaxBuildHeight() >> 4; ++sectionY) {
-                    // Sample biomes at section corners (simplified)
-                    int blockY = sectionY << 4;
-                    for (int y = 0; y < 16; y += 4) {
-                        for (int x = 0; x < 16; x += 4) {
-                            for (int z = 0; z < 16; z += 4) {
-                                core::BlockPos biomePos(
-                                    neighborChunk->getPos().getMinBlockX() + x,
-                                    blockY + y,
-                                    neighborChunk->getPos().getMinBlockZ() + z
-                                );
-                                const world::biome::Biome* biome = neighborChunk->getBiome(biomePos);
-                                if (biome) {
-                                    possibleBiomes.insert(biome);
-                                }
-                            }
+                for (int32_t sectionIndex = 0; sectionIndex < neighborChunk->getSectionsCount(); ++sectionIndex) {
+                    const world::LevelChunkSection& section = neighborChunk->getSection(sectionIndex);
+                    for (const world::biome::Biome* biome : section.getBiomes()) {
+                        if (biome == nullptr) {
+                            continue;
                         }
+                        if (biomeSource &&
+                            sourcePossibleBiomes.find(biome->getName()) == sourcePossibleBiomes.end()) {
+                            continue;
+                        }
+                        possibleBiomes.insert(biome);
                     }
                 }
             }
@@ -560,7 +561,7 @@ void NoiseBasedChunkGenerator::applyCarvers(
 
     // Create WorldgenRandom with LegacyRandomSource for carver seeding - Reference: line 201
     // CRITICAL: Java uses LegacyRandomSource for carving, NOT XoroshiroRandomSource
-    LegacyRandomSource legacyRandom(static_cast<int64_t>(RandomSupport::generateUniqueSeed().seedLo));
+    LegacyRandomSource legacyRandom(RandomSupport::generateUniqueSeed());
 
     // Range of chunks to check for carver starts - Reference: line 202
     constexpr int32_t CARVER_RANGE = 8;
@@ -580,10 +581,12 @@ void NoiseBasedChunkGenerator::applyCarvers(
             // Reference: Carvers.java - CAVE, CAVE_EXTRA_UNDERGROUND, CANYON
             const world::biome::BiomeGenerationSettings* genSettings = nullptr;
             if (sourceBiome) {
-                // Configure all 3 default overworld carvers to match Java exactly
+                // Configure all 3 default overworld carvers to match Java exactly.
+                // call_once: the old non-atomic bool guard raced when worker
+                // threads reached CARVERS for two chunks simultaneously.
                 static world::biome::BiomeGenerationSettings defaultSettings;
-                static bool initialized = false;
-                if (!initialized) {
+                static std::once_flag carverInitOnce;
+                std::call_once(carverInitOnce, [&] {
                     // Replaceable blocks from BlockTags.OVERWORLD_CARVER_REPLACEABLES
                     // Extracted from Minecraft 26.1-snapshot-1 data/minecraft/tags/block/overworld_carver_replaceables.json
                     static std::set<std::string> replaceable = {
@@ -710,9 +713,7 @@ void NoiseBasedChunkGenerator::applyCarvers(
                     static carver::CanyonWorldCarver canyonCarver;
                     static carver::ConfiguredCanyonCarver configuredCanyonCarver(&canyonCarver, canyonConfig);
                     defaultSettings.addCarver(&configuredCanyonCarver);
-
-                    initialized = true;
-                }
+                });
                 genSettings = &defaultSettings;
             }
 
@@ -813,7 +814,7 @@ void NoiseBasedChunkGenerator::buildSurface(
     {
         m_surfaceSystem->buildSurface(
             randomState,
-            [biomeGetter](const ::minecraft::core::BlockPos& pos) -> void* {
+            [&biomeGetter](const ::minecraft::core::BlockPos& pos) -> void* {
                 // Convert BiomeHolder (const Biome*) to void* for SurfaceSystem
                 return const_cast<void*>(static_cast<const void*>(biomeGetter(pos)));
             },

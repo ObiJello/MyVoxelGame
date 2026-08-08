@@ -3,6 +3,7 @@
 #include "random/XoroshiroRandomSource.h"
 #include "random/LegacyRandomSource.h"
 #include <cstdint>
+#include <cstdio>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -48,6 +49,11 @@ private:
     bool m_haveNextNextGaussian = false;
 
 public:
+    // Parity-debug hook: when non-null, interface-level draws (nextInt(bound),
+    // nextFloat) are appended chronologically. Mirrors the Java harness's
+    // logging RandomSource wrapper so both streams diff line-by-line.
+    inline static thread_local std::FILE* s_rngTraceFile = nullptr;
+
     struct DebugStateSnapshot {
         Algorithm algorithm;
         uint64_t seedLo;
@@ -251,25 +257,31 @@ public:
         if (bound <= 0) {
             throw std::invalid_argument("Bound must be positive");
         }
+
+        int32_t result;
         if ((bound & (bound - 1)) == 0) {
             // Power of 2 - fast path
-            return static_cast<int32_t>((static_cast<int64_t>(bound) * static_cast<int64_t>(next(31))) >> 31);
+            result = static_cast<int32_t>((static_cast<int64_t>(bound) * static_cast<int64_t>(next(31))) >> 31);
+        } else {
+            // Java's BitRandomSource.nextInt(int) relies on 32-bit signed wraparound
+            // in the rejection check: sample - modulo + (bound - 1) < 0.
+            int32_t sample;
+            int32_t modulo;
+            do {
+                sample = next(31);
+                modulo = sample % bound;
+            } while (static_cast<int32_t>(
+                static_cast<uint32_t>(sample)
+                - static_cast<uint32_t>(modulo)
+                + static_cast<uint32_t>(bound - 1)
+            ) < 0);
+            result = modulo;
         }
 
-        // Java's BitRandomSource.nextInt(int) relies on 32-bit signed wraparound
-        // in the rejection check: sample - modulo + (bound - 1) < 0.
-        int32_t sample;
-        int32_t modulo;
-        do {
-            sample = next(31);
-            modulo = sample % bound;
-        } while (static_cast<int32_t>(
-            static_cast<uint32_t>(sample)
-            - static_cast<uint32_t>(modulo)
-            + static_cast<uint32_t>(bound - 1)
-        ) < 0);
-
-        return modulo;
+        if (s_rngTraceFile) {
+            std::fprintf(s_rngTraceFile, "RNG nextInt(%d)=%d\n", bound, result);
+        }
+        return result;
     }
 
     /**
@@ -305,7 +317,11 @@ public:
      * Uses: (float)next(24) * FLOAT_MULTIPLIER (5.9604645E-8F)
      */
     float nextFloat() {
-        return static_cast<float>(next(24)) * 5.9604645E-8f;
+        float result = static_cast<float>(next(24)) * 5.9604645E-8f;
+        if (s_rngTraceFile) {
+            std::fprintf(s_rngTraceFile, "RNG nextFloat=%.9e\n", result);
+        }
+        return result;
     }
 
     /**

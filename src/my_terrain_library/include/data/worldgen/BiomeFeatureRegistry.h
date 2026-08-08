@@ -6,6 +6,7 @@
 #include "data/worldgen/placement/VegetationPlacements.h"
 #include "data/worldgen/placement/TreePlacements.h"
 #include "data/worldgen/placement/CavePlacements.h"
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -27,7 +28,7 @@ class BiomeFeatureRegistry {
 private:
     // Features per biome per step: biome_key -> [step -> features]
     static std::unordered_map<std::string, std::vector<std::vector<const levelgen::placement::PlacedFeature*>>> s_biomeFeatures;
-    static bool s_initialized;
+    static std::atomic<bool> s_initialized;
 
 public:
     /**
@@ -38,7 +39,7 @@ public:
     /**
      * Check if initialized
      */
-    static bool isInitialized() { return s_initialized; }
+    static bool isInitialized() { return s_initialized.load(std::memory_order_acquire); }
 
     /**
      * Get features for a biome at a specific generation step

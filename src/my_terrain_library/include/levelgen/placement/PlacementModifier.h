@@ -28,16 +28,35 @@ public:
      * Get positions for feature placement
      * Reference: PlacementModifier.java line 12
      *
+     * Appends results to `out` (may append zero, one, or many positions).
+     * Emission order is the parity-relevant Java stream order.
+     *
      * @param context The placement context
      * @param random Random source for stochastic placement
      * @param origin The input position
-     * @return Vector of positions (may be empty, single, or multiple)
+     * @param out Output buffer positions are appended to
      */
-    virtual std::vector<core::BlockPos> getPositions(
+    virtual void appendPositions(
+        PlacementContext& context,
+        WorldgenRandom& random,
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
+    ) = 0;
+
+    /**
+     * Allocating convenience wrapper around appendPositions().
+     * Debug/trace paths only — the generation hot path uses appendPositions
+     * with a reused buffer.
+     */
+    std::vector<core::BlockPos> getPositions(
         PlacementContext& context,
         WorldgenRandom& random,
         const core::BlockPos& origin
-    ) = 0;
+    ) {
+        std::vector<core::BlockPos> out;
+        appendPositions(context, random, origin, out);
+        return out;
+    }
 
     /**
      * Optional trace details for logging/debugging.
@@ -72,15 +91,15 @@ public:
      * Get positions - passes through if shouldPlace returns true
      * Reference: PlacementFilter.java lines 8-10
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         if (shouldPlace(context, random, origin)) {
-            return {origin};
+            out.push_back(origin);
         }
-        return {};
     }
 
     std::string getTypeName() const override { return "PlacementFilter"; }
@@ -118,15 +137,17 @@ public:
      * Get positions - returns origin count() times
      * Reference: RepeatingPlacement.java lines 11-13
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t n = count(random, origin);
         // Java's IntStream.range(0, n) returns empty stream for n <= 0
-        if (n <= 0) return {};
-        return std::vector<core::BlockPos>(n, origin);
+        for (int32_t i = 0; i < n; ++i) {
+            out.push_back(origin);
+        }
     }
 
     std::string getTypeName() const override { return "RepeatingPlacement"; }

@@ -155,8 +155,21 @@ void OrePlacements::bootstrap() {
     // Reference: OrePlacements.java bootstrap() lines 126-148
 
     // Coal - line 126-127
+    // Vanilla: uniform(absolute(136), belowTop(0)) - top resolves to 319 in the
+    // overworld (NOT 320); the wrong bound shifts every later draw's modulo.
+    auto coalUpperHeight = []() -> PlacementModifier* {
+        auto mod = std::make_unique<HeightRangePlacement>(
+            HeightRangePlacement::uniform(
+                VerticalAnchor::absolute(136),
+                VerticalAnchor::top()
+            )
+        );
+        PlacementModifier* ptr = mod.get();
+        s_modifiers.push_back(std::move(mod));
+        return ptr;
+    };
     ORE_COAL_UPPER = createPlaced(OreFeatures::ORE_COAL,
-        commonOrePlacement(30, uniformHeight(136, 320)), "ORE_COAL_UPPER");
+        commonOrePlacement(30, coalUpperHeight()), "ORE_COAL_UPPER");
     ORE_COAL_LOWER = createPlaced(OreFeatures::ORE_COAL_BURIED,
         commonOrePlacement(20, triangleHeight(0, 192)), "ORE_COAL_LOWER");
 
@@ -217,8 +230,10 @@ void OrePlacements::bootstrap() {
         commonOrePlacement(16, triangleHeight(-16, 112)), "ORE_COPPER_LARGE");
 
     // Extra Gold - for badlands/mesa biomes
-    // Reference: OrePlacements.java line 133
-    ORE_GOLD_EXTRA = createPlaced(OreFeatures::ORE_GOLD_BURIED,
+    // Reference: OrePlacements.java line 133 + ore_gold_extra.json:
+    // the feature is plain ORE_GOLD (discard 0.0), NOT ORE_GOLD_BURIED (0.5) —
+    // the buried variant's air-exposure rolls consume different RNG draws.
+    ORE_GOLD_EXTRA = createPlaced(OreFeatures::ORE_GOLD,
         commonOrePlacement(50, uniformHeight(32, 256)), "ORE_GOLD_EXTRA");
 
     // Emerald - line 143

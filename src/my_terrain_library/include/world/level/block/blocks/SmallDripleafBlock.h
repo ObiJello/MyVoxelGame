@@ -73,7 +73,14 @@ private:
             return true;
         }
 
-        return level.isWaterAt(belowPos.above()) && BushBlock::mayPlaceOn(stateBelow);
+        BlockState* aboveState = level.getBlockState(belowPos.above());
+        const bool aboveIsSourceWater =
+            aboveState &&
+            aboveState->hasWaterFluid() &&
+            (!BlockStateProperties::LEVEL ||
+             !aboveState->hasProperty(BlockStateProperties::LEVEL) ||
+             aboveState->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0);
+        return aboveIsSourceWater && BushBlock::mayPlaceOn(stateBelow);
     }
 
     static void initializeProperties() {

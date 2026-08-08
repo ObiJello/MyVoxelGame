@@ -228,6 +228,13 @@ target_include_directories(terrain_library PUBLIC
 target_link_libraries(terrain_library PUBLIC zlibstatic)
 target_compile_features(terrain_library PUBLIC cxx_std_20)
 
+# CRITICAL for Java bit parity: no FP contraction (Java never fuses multiply-add)
+# and Java wrapping signed-overflow semantics. Without these the terrain output
+# silently diverges from the reference. Do not remove.
+if(NOT MSVC)
+    target_compile_options(terrain_library PRIVATE -ffp-contract=off -fwrapv)
+endif()
+
 # MSVC doesn't define M_PI by default
 if(MSVC)
     target_compile_definitions(terrain_library PUBLIC _USE_MATH_DEFINES)

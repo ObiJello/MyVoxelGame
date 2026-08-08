@@ -91,6 +91,11 @@ public:
     public:
         virtual ~CoordinateVisitor() = default;
         virtual I* visit(I* input) = 0;
+
+        // Ownership sink for spline nodes heap-allocated during mapAll.
+        // Default: pass-through (caller leaks/owns, as before). Visitors with
+        // a bounded mapped-tree lifetime override this to record the node.
+        virtual CubicSpline<C, I>* own(CubicSpline<C, I>* node) { return node; }
     };
 
     virtual CubicSpline<C, I>* mapAll(CoordinateVisitor& visitor) const = 0;
@@ -131,8 +136,8 @@ public:
     }
 
     CubicSpline<C, I>* mapAll(typename CubicSpline<C, I>::CoordinateVisitor& visitor) const override {
-        (void)visitor;  // Constant doesn't have coordinates to visit
-        return new Constant(m_value);
+        // Constant doesn't have coordinates to visit
+        return visitor.own(new Constant(m_value));
     }
 
     float value() const { return m_value; }
@@ -464,12 +469,12 @@ CubicSpline<C, I>* CubicSpline<C, I>::Multipoint::mapAll(
         mappedValues.push_back(v->mapAll(visitor));
     }
 
-    return Multipoint::create(
+    return visitor.own(Multipoint::create(
         visitor.visit(m_coordinate),
         m_locations,
         mappedValues,
         m_derivatives
-    );
+    ));
 }
 
 // ============================================================================

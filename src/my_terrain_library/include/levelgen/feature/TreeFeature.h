@@ -7,10 +7,10 @@
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
 #include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/WorldGenLevel.h"
+#include "util/JavaHashSet.h"
 #include "core/BlockPos.h"
 #include "world/level/block/state/BlockState.h"
 #include "levelgen/WorldgenRandom.h"
-#include <set>
 #include <vector>
 #include <functional>
 #include <optional>
@@ -35,9 +35,13 @@ public:
 
 private:
     int64_t m_seed = 0;
+    minecraft::XoroshiroRandomSource m_random;
 
 public:
-    explicit ChunkWorldGenLevel(::world::IChunk* chunk) : m_chunk(chunk), m_seed(0) {}
+    explicit ChunkWorldGenLevel(::world::IChunk* chunk)
+        : m_chunk(chunk)
+        , m_seed(0)
+        , m_random(0LL) {}
 
     void setSeed(int64_t seed) { m_seed = seed; }
 
@@ -118,6 +122,10 @@ public:
 
     int64_t getSeed() const override {
         return m_seed;
+    }
+
+    minecraft::XoroshiroRandomSource& getRandom() override {
+        return m_random;
     }
 
     // Override ensureCanWrite to check chunk bounds
@@ -235,7 +243,7 @@ public:
         if (!level) {
             return false;
         }
-        return place(*level, context.random(), context.origin(), context.config());
+        return place(*level, context.chunkGenerator(), context.random(), context.origin(), context.config());
     }
 
     /**
@@ -244,6 +252,7 @@ public:
      */
     bool place(
         WorldGenLevel& level,
+        ChunkGenerator* generator,
         WorldgenRandom& random,
         const core::BlockPos& origin,
         const configurations::TreeConfiguration& config
@@ -282,27 +291,30 @@ private:
 class SimpleFoliageSetter : public foliageplacers::FoliageSetter {
 private:
     WorldGenLevel& m_level;
-    std::set<core::BlockPos>& m_foliagePositions;
+    util::JavaHashSet<core::BlockPos>& m_foliagePositions;
 
 public:
-    SimpleFoliageSetter(WorldGenLevel& level, std::set<core::BlockPos>& foliagePositions)
+    SimpleFoliageSetter(WorldGenLevel& level, util::JavaHashSet<core::BlockPos>& foliagePositions)
         : m_level(level)
         , m_foliagePositions(foliagePositions)
     {}
 
     void set(const core::BlockPos& pos, BlockState* blockState) override {
-        m_foliagePositions.insert(pos);
+        m_foliagePositions.add(pos);
         m_level.setBlock(pos, blockState, TreeFeature::BLOCK_UPDATE_FLAGS);
     }
 
     bool isSet(const core::BlockPos& pos) const override {
-        return m_foliagePositions.count(pos) > 0;
+        return m_foliagePositions.contains(pos);
+    }
+
+    BlockState* getBlockState(const core::BlockPos& pos) const override {
+        return m_level.getBlockState(pos);
     }
 
     bool canPlace(const core::BlockPos& pos) const override {
         // Reference: FoliagePlacer.java tryPlaceLeaf() -> TreeFeature.validTreePos()
-        BlockState* state = m_level.getBlockState(pos);
-        return state && (state->isAir() || state->isReplaceableByTrees());
+        return TreeFeature::validTreePos(m_level, pos);
     }
 };
 

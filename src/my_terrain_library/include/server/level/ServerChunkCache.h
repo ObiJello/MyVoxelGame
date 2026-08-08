@@ -10,10 +10,10 @@
 #include "world/chunk/status/ChunkStatus.h"
 #include "world/ChunkPos.h"
 #include "util/CompletableFuture.h"
-#include <atomic>
 #include <functional>
 #include <memory>
 #include <thread>
+#include <atomic>
 #include <array>
 
 // Reference: net/minecraft/server/level/ServerChunkCache.java
@@ -180,10 +180,8 @@ public:
         m_taskPoller = std::move(poller);
     }
 
-    /**
-     * Signal the chunk cache to abort all blocking getChunk() loops.
-     * Used for clean shutdown so worker threads don't block forever.
-     */
+    // Game patch (docs/terrain-library-patches.md, Patch 1): abort flag so
+    // blocking getChunk paths can exit during shutdown instead of hanging.
     void requestAbort() { m_abort.store(true, std::memory_order_release); }
     bool isAbortRequested() const { return m_abort.load(std::memory_order_acquire); }
 
@@ -237,7 +235,7 @@ private:
     // Task poller for managedBlock (polls main thread tasks while waiting)
     std::function<void()> m_taskPoller;
 
-    // Abort flag for clean shutdown — breaks blocking getChunk() loops
+    // Game patch (Patch 1): shutdown abort flag
     std::atomic<bool> m_abort{false};
 };
 

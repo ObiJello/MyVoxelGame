@@ -1,6 +1,7 @@
 #pragma once
 
 #include "levelgen/WorldGenLevel.h"
+#include "levelgen/blockpredicates/BlockPredicate.h"
 #include "world/level/block/Block.h"
 
 namespace minecraft {
@@ -23,21 +24,8 @@ public:
 
 protected:
     virtual bool mayPlaceOn(BlockState* stateBelow) const {
-        if (!stateBelow) {
-            return false;
-        }
-
-        const std::string& name = stateBelow->getIdentifier();
-        return name == "minecraft:dirt" ||
-               name == "minecraft:grass_block" ||
-               name == "minecraft:podzol" ||
-               name == "minecraft:coarse_dirt" ||
-               name == "minecraft:mycelium" ||
-               name == "minecraft:rooted_dirt" ||
-               name == "minecraft:mud" ||
-               name == "minecraft:muddy_mangrove_roots" ||
-               name == "minecraft:moss_block" ||
-               name == "minecraft:farmland";
+        return minecraft::levelgen::blockpredicates::matchesBlockTagName(stateBelow, "minecraft:dirt") ||
+               (stateBelow && stateBelow->getIdentifier() == "minecraft:farmland");
     }
 };
 

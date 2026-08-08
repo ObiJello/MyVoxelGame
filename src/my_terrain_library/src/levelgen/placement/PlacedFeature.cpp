@@ -2,7 +2,10 @@
 #include "levelgen/feature/Feature.h"
 #include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/ChunkGenerator.h"
+#include "levelgen/WorldgenRandom.h"
+#include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -33,6 +36,90 @@ namespace minecraft {
 namespace levelgen {
 namespace placement {
 namespace {
+
+// Parity-debug: when MC_RNG_TRACE_FEATURE names this placed feature and
+// MC_RNG_TRACE_FILE names a file, append every interface-level RNG draw and
+// setBlock made during the configured feature's place() call. Mirrors the
+// Java harness's per-feature RandomSource + WorldGenLevel wrappers so the two
+// chronological streams diff line-by-line.
+struct FeatureRngTraceScope {
+    std::FILE* f = nullptr;
+    // Env lookups are cached process-wide; the feature name (a demangle when
+    // unnamed) is only materialized when tracing is actually configured.
+    static bool configured() {
+        static const bool v = [] {
+            const char* want = std::getenv("MC_RNG_TRACE_FEATURE");
+            const char* path = std::getenv("MC_RNG_TRACE_FILE");
+            return want && path && *path;
+        }();
+        return v;
+    }
+    FeatureRngTraceScope(const PlacedFeature& placedFeature, const core::BlockPos& pos) {
+        if (!configured()) {
+            return;
+        }
+        const char* want = std::getenv("MC_RNG_TRACE_FEATURE");
+        const char* path = std::getenv("MC_RNG_TRACE_FILE");
+        if (placedFeature.getDebugName() == want) {
+            f = std::fopen(path, "a");
+            if (f) {
+                std::fprintf(f, "RNGTRACE_BEGIN origin=%d,%d,%d\n",
+                             pos.getX(), pos.getY(), pos.getZ());
+                WorldgenRandom::s_rngTraceFile = f;
+            }
+        }
+    }
+    ~FeatureRngTraceScope() {
+        if (f) {
+            WorldgenRandom::s_rngTraceFile = nullptr;
+            std::fprintf(f, "RNGTRACE_END\n");
+            std::fclose(f);
+        }
+    }
+};
+
+// Parity-debug: when MC_TRACE_WATCH="x,y,z" is set (with MC_RNG_TRACE_FILE),
+// log a WATCH line whenever the watched position's block changes across a
+// configured feature's place() call. Mirrors the Java --trace-watch flag.
+struct WatchPos {
+    static const core::BlockPos* get() {
+        static core::BlockPos pos(0, 0, 0);
+        static bool parsed = false;
+        static bool valid = false;
+        if (!parsed) {
+            parsed = true;
+            if (const char* s = std::getenv("MC_TRACE_WATCH")) {
+                int x, y, z;
+                if (std::sscanf(s, "%d,%d,%d", &x, &y, &z) == 3) {
+                    pos = core::BlockPos(x, y, z);
+                    valid = true;
+                }
+            }
+        }
+        return valid ? &pos : nullptr;
+    }
+
+    static void report(const std::string& featureName, const core::BlockPos& origin,
+                       BlockState* before, BlockState* after) {
+        const core::BlockPos* wp = get();
+        if (!wp || before == after) {
+            return;
+        }
+        const char* path = std::getenv("MC_RNG_TRACE_FILE");
+        if (!path || !*path) {
+            return;
+        }
+        if (std::FILE* f = std::fopen(path, "a")) {
+            std::fprintf(f, "WATCH %s origin=%d,%d,%d pos=%d,%d,%d %s -> %s\n",
+                         featureName.c_str(),
+                         origin.getX(), origin.getY(), origin.getZ(),
+                         wp->getX(), wp->getY(), wp->getZ(),
+                         before ? before->toStateString().c_str() : "null",
+                         after ? after->toStateString().c_str() : "null");
+            std::fclose(f);
+        }
+    }
+};
 
 struct BatchModifierTraceTransform {
     core::BlockPos inputPos;
@@ -109,6 +196,34 @@ std::string formatRandomState(const WorldgenRandom::DebugStateSnapshot& state) {
     }
     return out.str();
 }
+
+// Reusable per-modifier position buffers for the placement pipeline. Leases
+// nest — a configured feature can itself place other placed features
+// mid-pipeline — so a deque-backed pool with a depth cursor keeps every live
+// frame's buffer reference stable (deque push_back never invalidates) while
+// buffers retain capacity across chunks.
+thread_local std::deque<std::vector<core::BlockPos>> t_positionBufferPool;
+thread_local size_t t_positionBufferDepth = 0;
+
+struct PositionBufferLease {
+    std::vector<core::BlockPos>& buffer;
+
+    PositionBufferLease() : buffer(acquire()) {}
+    ~PositionBufferLease() {
+        buffer.clear();
+        --t_positionBufferDepth;
+    }
+    PositionBufferLease(const PositionBufferLease&) = delete;
+    PositionBufferLease& operator=(const PositionBufferLease&) = delete;
+
+private:
+    static std::vector<core::BlockPos>& acquire() {
+        if (t_positionBufferDepth == t_positionBufferPool.size()) {
+            t_positionBufferPool.emplace_back();
+        }
+        return t_positionBufferPool[t_positionBufferDepth++];
+    }
+};
 
 } // namespace
 
@@ -196,17 +311,28 @@ bool PlacedFeature::placeWithContext(
     WorldgenRandom& random,
     const core::BlockPos& origin
 ) {
-    const std::string featureName = getDebugName();
-    const bool traceEnabled = s_loggingEnabled && s_logStream && s_modifierTracingEnabled;
-    const std::string previousBlockTraceFeatureName = feature::BlockChangeTrace::currentFeatureName;
-    feature::BlockChangeTrace::currentFeatureName = featureName;
+    const bool loggingActive = s_loggingEnabled && s_logStream;
+    const bool traceEnabled = loggingActive && s_modifierTracingEnabled;
+    // getDebugName() demangles a type name when the feature has no explicit
+    // name; only pay for it (and the BlockChangeTrace name bookkeeping) when
+    // some debug consumer is actually on.
+    const bool maintainName = loggingActive || feature::BlockChangeTrace::enabled;
+    std::string featureName;
+    std::string previousBlockTraceFeatureName;
+    if (maintainName) {
+        featureName = getDebugName();
+        previousBlockTraceFeatureName = feature::BlockChangeTrace::currentFeatureName;
+        feature::BlockChangeTrace::currentFeatureName = featureName;
+    }
 
     if (!m_feature) {
-        if (s_loggingEnabled && s_logStream) {
+        if (loggingActive) {
             *s_logStream << "STEP=" << s_currentStep << " IDX=" << s_currentIndex
                          << " " << featureName << " | placed=0 | null_feature=true\n";
         }
-        feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
+        if (maintainName) {
+            feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
+        }
         return false;
     }
 
@@ -279,8 +405,7 @@ bool PlacedFeature::placeWithContext(
         random.restoreDebugState(traceStartState);
     }
 
-    std::function<void(const core::BlockPos&, size_t)> processAndPlace;
-    processAndPlace = [&](const core::BlockPos& pos, size_t modifierIdx) {
+    auto processAndPlace = [&](auto&& self, const core::BlockPos& pos, size_t modifierIdx) -> void {
         if (modifierIdx >= m_placement.size()) {
             if (traceEnabled) {
                 PlacementTraceCall traceCall;
@@ -293,7 +418,17 @@ bool PlacedFeature::placeWithContext(
                     traceCall.blockChanges.push_back(event);
                 });
 
-                traceCall.placed = m_feature->place(level, generator, random, pos);
+                {
+                    BlockState* watchBefore = nullptr;
+                    if (const core::BlockPos* wp = WatchPos::get()) {
+                        watchBefore = level->getBlockState(*wp);
+                    }
+                    FeatureRngTraceScope rngScope(*this, pos);
+                    traceCall.placed = m_feature->place(level, generator, random, pos);
+                    if (const core::BlockPos* wp = WatchPos::get()) {
+                        WatchPos::report(getDebugName(), pos, watchBefore, level->getBlockState(*wp));
+                    }
+                }
 
                 feature::BlockChangeTrace::setCallback(previousCallback);
                 traceCall.randomAfter = random.captureDebugState();
@@ -306,7 +441,19 @@ bool PlacedFeature::placeWithContext(
                 return;
             }
 
-            if (m_feature->place(level, generator, random, pos)) {
+            bool placedHere;
+            {
+                BlockState* watchBefore = nullptr;
+                if (const core::BlockPos* wp = WatchPos::get()) {
+                    watchBefore = level->getBlockState(*wp);
+                }
+                FeatureRngTraceScope rngScope(*this, pos);
+                placedHere = m_feature->place(level, generator, random, pos);
+                if (const core::BlockPos* wp = WatchPos::get()) {
+                    WatchPos::report(getDebugName(), pos, watchBefore, level->getBlockState(*wp));
+                }
+            }
+            if (placedHere) {
                 placedAny = true;
                 ++placedCount;
             }
@@ -318,7 +465,6 @@ bool PlacedFeature::placeWithContext(
             return;
         }
 
-        std::vector<core::BlockPos> newPositions;
         if (traceEnabled) {
             ActualModifierTraceCall traceCall;
             traceCall.callIndex = actualModifierCallIndex++;
@@ -329,18 +475,22 @@ bool PlacedFeature::placeWithContext(
             traceCall.outputPositions = modifier->getPositions(context, random, pos);
             traceCall.detail = modifier->describeTrace(context, pos, traceCall.outputPositions);
             traceCall.randomAfter = random.captureDebugState();
-            newPositions = traceCall.outputPositions;
+            std::vector<core::BlockPos> newPositions = traceCall.outputPositions;
             actualModifierTraceCalls.push_back(std::move(traceCall));
-        } else {
-            newPositions = modifier->getPositions(context, random, pos);
+            for (const core::BlockPos& newPos : newPositions) {
+                self(self, newPos, modifierIdx + 1);
+            }
+            return;
         }
 
-        for (const core::BlockPos& newPos : newPositions) {
-            processAndPlace(newPos, modifierIdx + 1);
+        PositionBufferLease lease;
+        modifier->appendPositions(context, random, pos, lease.buffer);
+        for (const core::BlockPos& newPos : lease.buffer) {
+            self(self, newPos, modifierIdx + 1);
         }
     };
 
-    processAndPlace(origin, 0);
+    processAndPlace(processAndPlace, origin, 0);
 
     if (traceEnabled) {
         *s_logStream << "FEATURE STEP=" << s_currentStep << " IDX=" << s_currentIndex
@@ -427,13 +577,15 @@ bool PlacedFeature::placeWithContext(
         }
 
         *s_logStream << "  RESULT: placed=" << placedCount << "\n";
-    } else if (s_loggingEnabled && s_logStream) {
+    } else if (loggingActive) {
         *s_logStream << "STEP=" << s_currentStep << " IDX=" << s_currentIndex
                      << " " << featureName
                      << " | placed=" << placedCount << "\n";
     }
 
-    feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
+    if (maintainName) {
+        feature::BlockChangeTrace::currentFeatureName = previousBlockTraceFeatureName;
+    }
     return placedAny;
 }
 

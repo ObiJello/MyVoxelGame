@@ -81,14 +81,15 @@ public:
      * Get positions - random XZ offset within chunk
      * Reference: InSquarePlacement.java lines 16-20
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t x = random.nextInt(16) + origin.getX();
         int32_t z = random.nextInt(16) + origin.getZ();
-        return {core::BlockPos(x, origin.getY(), z)};
+        out.push_back(core::BlockPos(x, origin.getY(), z));
     }
 
     std::string getTypeName() const override { return "InSquarePlacement"; }
@@ -191,18 +192,18 @@ public:
      * Get positions - set Y to heightmap value
      * Reference: HeightmapPlacement.java lines 22-27
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t x = origin.getX();
         int32_t z = origin.getZ();
         int32_t height = context.getHeight(m_heightmap, x, z);
         if (height > context.getMinY()) {
-            return {core::BlockPos(x, height, z)};
+            out.push_back(core::BlockPos(x, height, z));
         }
-        return {};
     }
 
     std::string getTypeName() const override { return "HeightmapPlacement"; }
@@ -275,13 +276,14 @@ public:
      * Get positions - set Y from height provider
      * Reference: HeightRangePlacement.java lines 33-35
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t y = m_height->sample(random, context);
-        return {core::BlockPos(origin.getX(), y, origin.getZ())};
+        out.push_back(core::BlockPos(origin.getX(), y, origin.getZ()));
     }
 
     std::string getTypeName() const override { return "HeightRangePlacement"; }
@@ -449,15 +451,16 @@ public:
      * Get positions with random offset
      * Reference: RandomOffsetPlacement.java lines 33-38
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t scatterX = origin.getX() + m_xzSpread->sample(random);
         int32_t scatterY = origin.getY() + m_ySpread->sample(random);
         int32_t scatterZ = origin.getZ() + m_xzSpread->sample(random);
-        return {core::BlockPos(scatterX, scatterY, scatterZ)};
+        out.push_back(core::BlockPos(scatterX, scatterY, scatterZ));
     }
 
     std::string getTypeName() const override { return "RandomOffsetPlacement"; }
@@ -809,43 +812,43 @@ public:
      * Reference: EnvironmentScanPlacement.java getPositions()
      * Algorithm: Scan up/down until finding target or hitting boundary
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         core::BlockPos::MutableBlockPos pos(origin.getX(), origin.getY(), origin.getZ());
 
         if (!m_allowedSearchCondition(context, pos)) {
-            return {};
+            return;
         }
 
         int32_t yDelta = (m_directionOfSearch == Direction::UP) ? 1 : -1;
 
         for (int32_t i = 0; i < m_maxSteps; ++i) {
             if (m_targetCondition(context, pos)) {
-                return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
+                out.push_back(core::BlockPos(pos.getX(), pos.getY(), pos.getZ()));
+                return;
             }
 
             pos.setY(pos.getY() + yDelta);
 
             if (context.getLevel()->isOutsideBuildHeight(pos)) {
-                return {};
+                return;
             }
 
             if (!m_allowedSearchCondition(context, pos)) {
                 if (m_targetCondition(context, pos)) {
-                    return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
+                    out.push_back(core::BlockPos(pos.getX(), pos.getY(), pos.getZ()));
                 }
-                return {};
+                return;
             }
         }
 
         if (m_targetCondition(context, pos)) {
-            return {core::BlockPos(pos.getX(), pos.getY(), pos.getZ())};
+            out.push_back(core::BlockPos(pos.getX(), pos.getY(), pos.getZ()));
         }
-
-        return {};
     }
 
 private:
@@ -896,21 +899,20 @@ public:
      * Reference: FixedPlacement.java getPositions()
      * Algorithm: Filter positions to current chunk
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
         int32_t chunkX = origin.getX() >> 4;
         int32_t chunkZ = origin.getZ() >> 4;
 
-        std::vector<core::BlockPos> result;
         for (const auto& pos : m_positions) {
             if ((pos.getX() >> 4) == chunkX && (pos.getZ() >> 4) == chunkZ) {
-                result.push_back(pos);
+                out.push_back(pos);
             }
         }
-        return result;
     }
 
 private:
@@ -1028,12 +1030,12 @@ public:
      * 3. For each position, find the ground Y at that layer
      * 4. Continue until no valid positions found on a layer
      */
-    std::vector<core::BlockPos> getPositions(
+    void appendPositions(
         PlacementContext& context,
         WorldgenRandom& random,
-        const core::BlockPos& origin
+        const core::BlockPos& origin,
+        std::vector<core::BlockPos>& out
     ) override {
-        std::vector<core::BlockPos> positions;
         int32_t layer = 0;
         bool foundAny;
 
@@ -1048,15 +1050,13 @@ public:
                 int32_t y = findOnGroundYPosition(context, x, startY, z, layer);
 
                 if (y != std::numeric_limits<int32_t>::max()) {
-                    positions.push_back(core::BlockPos(x, y, z));
+                    out.push_back(core::BlockPos(x, y, z));
                     foundAny = true;
                 }
             }
 
             ++layer;
         } while (foundAny);
-
-        return positions;
     }
 
 private:

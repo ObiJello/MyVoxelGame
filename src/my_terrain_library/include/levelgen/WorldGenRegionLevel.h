@@ -182,6 +182,10 @@ public:
         return m_region->getSeed();
     }
 
+    minecraft::XoroshiroRandomSource& getRandom() override {
+        return m_region->getRandom();
+    }
+
     bool ensureCanWrite(const core::BlockPos& pos) const override {
         return m_region->ensureCanWrite(pos);
     }

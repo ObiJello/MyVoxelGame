@@ -7,6 +7,8 @@
 #include "world/chunk/status/ChunkStep.h"
 #include "world/IChunk.h"
 #include "world/level/block/state/BlockState.h"
+#include "levelgen/RandomState.h"
+#include "random/XoroshiroRandomSource.h"
 #include "core/BlockPos.h"
 #include <atomic>
 #include <functional>
@@ -59,6 +61,7 @@ public:
      */
     WorldGenRegion(
         ServerLevel& level,
+        minecraft::levelgen::RandomState* randomState,
         util::StaticCache2D<GenerationChunkHolder*>& cache,
         const world::chunk::status::ChunkStep& generatingStep,
         ChunkAccess& center
@@ -147,6 +150,12 @@ public:
     int64_t getSeed() const;
 
     /**
+     * Get the region-local random source.
+     * Reference: WorldGenRegion.java getRandom()
+     */
+    minecraft::XoroshiroRandomSource& getRandom();
+
+    /**
      * Get the minimum Y level
      * Reference: WorldGenRegion.java lines 406-408
      */
@@ -202,6 +211,9 @@ private:
 
     // World seed
     int64_t m_seed;
+
+    // Region-local random source
+    minecraft::XoroshiroRandomSource m_random;
 
     // Currently generating feature (for crash reports)
     std::function<std::string()> m_currentlyGenerating;

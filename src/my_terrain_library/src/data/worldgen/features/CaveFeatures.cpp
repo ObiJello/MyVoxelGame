@@ -1,6 +1,7 @@
 #include "data/worldgen/features/CaveFeatures.h"
 #include "data/worldgen/features/TreeFeatures.h"
 #include "levelgen/placement/PlacedFeature.h"
+#include "levelgen/placement/PlacementModifiers.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "levelgen/carver/CarverConfiguration.h"
 #include "util/IntProvider.h"
@@ -411,7 +412,7 @@ void CaveFeatures::bootstrap() {
             "minecraft:moss_replaceable",
             mossGroundState,
             mossVegetation,
-            CaveSurface::FLOOR,
+            levelgen::CaveSurface::FLOOR,
             std::make_shared<util::ConstantInt>(1),
             0.0f,
             5,
@@ -435,7 +436,7 @@ void CaveFeatures::bootstrap() {
             "minecraft:moss_replaceable",
             mossGroundState,
             mossVegetation,
-            CaveSurface::FLOOR,
+            levelgen::CaveSurface::FLOOR,
             std::make_shared<util::ConstantInt>(1),
             0.0f,
             5,
@@ -530,7 +531,7 @@ void CaveFeatures::bootstrap() {
             "minecraft:lush_ground_replaceable",
             clayGroundState,
             dripleafPlaced,
-            CaveSurface::FLOOR,
+            levelgen::CaveSurface::FLOOR,
             std::make_shared<util::ConstantInt>(3),
             0.8f,
             2,
@@ -549,7 +550,7 @@ void CaveFeatures::bootstrap() {
             "minecraft:lush_ground_replaceable",
             BlockStateProvider::simple(Blocks::CLAY),
             createPlacedFeature(DRIPLEAF, "DRIPLEAF_WATERLOGGED_INLINE"),
-            CaveSurface::FLOOR,
+            levelgen::CaveSurface::FLOOR,
             std::make_shared<util::ConstantInt>(3),
             0.8f,
             5,
@@ -585,7 +586,7 @@ void CaveFeatures::bootstrap() {
             "minecraft:moss_replaceable",
             BlockStateProvider::simple(Blocks::MOSS_BLOCK),
             createPlacedFeature(CAVE_VINE_IN_MOSS, "CAVE_VINE_IN_MOSS_INLINE"),
-            CaveSurface::CEILING,
+            levelgen::CaveSurface::CEILING,
             std::make_shared<util::UniformInt>(1, 2),
             0.0f,
             5,
@@ -722,8 +723,11 @@ void CaveFeatures::bootstrap() {
         config->maxStalagmiteStalactiteHeightDiff = 1;
         config->heightDeviation = 3;
         config->dripstoneBlockLayerThickness = std::make_shared<::minecraft::util::UniformInt>(2, 4);
-        config->wetness = std::make_shared<levelgen::carver::UniformFloat>(0.3f, 0.7f);
-        config->density = std::make_shared<levelgen::carver::ClampedNormalFloat>(0.1f, 0.3f, 0.1f, 0.9f);
+        // JSON: wetness = clamped_normal(mean 0.1, dev 0.3, 0.1..0.9);
+        //       density = uniform(0.3, 0.7). (These were swapped once - the
+        //       wetness gaussian draw count is stream-critical.)
+        config->wetness = std::make_shared<levelgen::carver::ClampedNormalFloat>(0.1f, 0.3f, 0.1f, 0.9f);
+        config->density = std::make_shared<levelgen::carver::UniformFloat>(0.3f, 0.7f);
         config->chanceOfDripstoneColumnAtMaxDistanceFromCenter = 0.1f;
         config->maxDistanceFromEdgeAffectingChanceOfDripstoneColumn = 3;
         config->maxDistanceFromCenterAffectingHeightBias = 8;
@@ -759,18 +763,98 @@ void CaveFeatures::bootstrap() {
 
     // =========================================================================
     // POINTED_DRIPSTONE
-    // Reference: CaveFeatures.java line 103
-    // PointedDripstoneConfiguration(0.2, 0.7, 0.5, 0.5)
-    // Note: Java wraps this in SimpleRandomSelector with EnvironmentScan placement,
-    // but we register the inner feature directly since placement handles the scanning
+    // Reference: CaveFeatures.java line 103 / pointed_dripstone.json
+    // simple_random_selector over TWO placed variants of the pointed_dripstone
+    // feature: [environment_scan(down, target solid, allowed air|water, 12) +
+    // random_offset(0, +1)] and [environment_scan(up, ...) + random_offset(0, -1)].
+    // The selector draws nextInt(2) BEFORE any placement.
     // =========================================================================
     {
         static PointedDripstoneFeature s_pointedDripFeature;
+        static std::deque<EnvironmentScanPlacement> s_dripEnvScans;
+        static std::deque<RandomOffsetPlacement> s_dripOffsets;
+        static levelgen::carver::ConstantInt s_plusOne(1);
+        static levelgen::carver::ConstantInt s_minusOne(-1);
+
         auto config = std::make_unique<PointedDripstoneConfiguration>(0.2f, 0.7f, 0.5f, 0.5f);
         auto feature = std::make_unique<ConfiguredFeatureImpl<PointedDripstoneConfiguration, PointedDripstoneFeature>>(
             &s_pointedDripFeature, *config);
-        POINTED_DRIPSTONE = feature.get();
+        ConfiguredFeature* pointedConfigured = feature.get();
         s_features.push_back(std::move(feature));
+
+        auto airOrWater = BlockPredicate::matchesBlocks(
+            std::vector<std::string>{"minecraft:air", "minecraft:water"});
+        std::vector<PlacedFeature*> variants;
+
+        s_dripEnvScans.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::DOWN,
+            BlockPredicate::solid(), airOrWater, 12));
+        s_dripOffsets.push_back(RandomOffsetPlacement::vertical(&s_plusOne));
+        {
+            auto placed = std::make_unique<PlacedFeature>(
+                pointedConfigured,
+                std::vector<PlacementModifier*>{&s_dripEnvScans.back(), &s_dripOffsets.back()},
+                "POINTED_DRIPSTONE_DOWN_INLINE");
+            variants.push_back(placed.get());
+            s_placedFeatures.push_back(std::move(placed));
+        }
+
+        s_dripEnvScans.push_back(EnvironmentScanPlacement::scanningFor(
+            EnvironmentScanPlacement::Direction::UP,
+            BlockPredicate::solid(), airOrWater, 12));
+        s_dripOffsets.push_back(RandomOffsetPlacement::vertical(&s_minusOne));
+        {
+            auto placed = std::make_unique<PlacedFeature>(
+                pointedConfigured,
+                std::vector<PlacementModifier*>{&s_dripEnvScans.back(), &s_dripOffsets.back()},
+                "POINTED_DRIPSTONE_UP_INLINE");
+            variants.push_back(placed.get());
+            s_placedFeatures.push_back(std::move(placed));
+        }
+
+        auto selectorConfig = std::make_unique<SimpleRandomFeatureConfiguration>(variants);
+        auto selector = std::make_unique<ConfiguredFeatureImpl<SimpleRandomFeatureConfiguration, SimpleRandomSelectorFeature>>(
+            &s_simpleRandomSelectorFeature, *selectorConfig);
+        POINTED_DRIPSTONE = selector.get();
+        s_simpleRandomConfigs.push_back(std::move(selectorConfig));
+        s_features.push_back(std::move(selector));
+    }
+
+    // =========================================================================
+    // FOSSIL_COAL / FOSSIL_DIAMONDS
+    // Reference: CaveFeatures.java lines 60-61 / fossil_coal.json,
+    // fossil_diamonds.json. Base processors: fossil_rot (block_rot 0.9);
+    // overlay: fossil_coal (0.1) or fossil_diamonds (0.1 + coal->deepslate
+    // diamond rule). All lists end with protected_blocks.
+    // =========================================================================
+    {
+        static std::vector<std::unique_ptr<FossilFeatureConfiguration>> s_fossilConfigs;
+        std::vector<std::string> fossils = {
+            "minecraft:fossil/spine_1", "minecraft:fossil/spine_2",
+            "minecraft:fossil/spine_3", "minecraft:fossil/spine_4",
+            "minecraft:fossil/skull_1", "minecraft:fossil/skull_2",
+            "minecraft:fossil/skull_3", "minecraft:fossil/skull_4"};
+        std::vector<std::string> overlays = {
+            "minecraft:fossil/spine_1_coal", "minecraft:fossil/spine_2_coal",
+            "minecraft:fossil/spine_3_coal", "minecraft:fossil/spine_4_coal",
+            "minecraft:fossil/skull_1_coal", "minecraft:fossil/skull_2_coal",
+            "minecraft:fossil/skull_3_coal", "minecraft:fossil/skull_4_coal"};
+
+        auto coalCfg = std::make_unique<FossilFeatureConfiguration>(
+            fossils, overlays, 0.9f, 0.1f, false, 4);
+        auto coalFeature = std::make_unique<ConfiguredFeatureImpl<FossilFeatureConfiguration, FossilFeature>>(
+            &s_fossilFeature, *coalCfg);
+        FOSSIL_COAL = coalFeature.get();
+        s_fossilConfigs.push_back(std::move(coalCfg));
+        s_features.push_back(std::move(coalFeature));
+
+        auto diamondCfg = std::make_unique<FossilFeatureConfiguration>(
+            fossils, overlays, 0.9f, 0.1f, true, 4);
+        auto diamondFeature = std::make_unique<ConfiguredFeatureImpl<FossilFeatureConfiguration, FossilFeature>>(
+            &s_fossilFeature, *diamondCfg);
+        FOSSIL_DIAMONDS = diamondFeature.get();
+        s_fossilConfigs.push_back(std::move(diamondCfg));
+        s_features.push_back(std::move(diamondFeature));
     }
 
     s_initialized = true;

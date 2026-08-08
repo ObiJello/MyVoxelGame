@@ -121,6 +121,21 @@ inline Direction fromHorizontalIndex(int index) {
 }
 
 /**
+ * Random pick from Direction.Plane.HORIZONTAL - the plane's faces array is
+ * {NORTH, EAST, SOUTH, WEST}, which is NOT the from2DDataValue order above.
+ * Reference: Direction.Plane.HORIZONTAL + Plane.getRandomDirection()
+ */
+inline Direction horizontalPlaneDirection(int index) {
+    switch (index & 3) {
+        case 0: return Direction::NORTH;
+        case 1: return Direction::EAST;
+        case 2: return Direction::SOUTH;
+        case 3: return Direction::WEST;
+        default: return Direction::NORTH;
+    }
+}
+
+/**
  * Get direction from index (0-5)
  * Reference: Direction.java from3DDataValue()
  */
@@ -186,7 +201,13 @@ inline const char* getName(Direction dir) {
  */
 template<typename RandomSource>
 inline Direction horizontalRandom(RandomSource& random) {
-    return fromHorizontalIndex(random.nextInt(4));
+    static constexpr Direction kHorizontalPlaneFaces[] = {
+        Direction::NORTH,
+        Direction::EAST,
+        Direction::SOUTH,
+        Direction::WEST
+    };
+    return kHorizontalPlaneFaces[random.nextInt(4)];
 }
 
 } // namespace core

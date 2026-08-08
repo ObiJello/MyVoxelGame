@@ -1,5 +1,6 @@
 #include "levelgen/feature/trunkplacers/TrunkPlacer.h"
 #include "levelgen/feature/Feature.h"
+#include "levelgen/feature/BlockChangeTrace.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "world/level/block/blocks/RotatedPillarBlock.h"
 #include "core/Direction.h"
@@ -52,6 +53,23 @@ bool TrunkPlacer::validTreePos(LevelReader& level, const core::BlockPos& pos) co
                              state,
                              "minecraft:replaceable_by_trees"
                          ));
+    });
+}
+
+bool UpwardsBranchingTrunkPlacer::validTreePos(LevelReader& level, const core::BlockPos& pos) const {
+    if (TrunkPlacer::validTreePos(level, pos)) {
+        return true;
+    }
+    return level.isStateAtPosition(pos, [](BlockState* state) {
+        return state && ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+            state, "minecraft:mangrove_logs_can_grow_through");
+    });
+}
+
+bool TrunkPlacer::isFree(LevelReader& level, const core::BlockPos& pos) const {
+    // Reference: TrunkPlacer.java isFree() -> validTreePos || LOGS tag
+    return validTreePos(level, pos) || level.isStateAtPosition(pos, [](BlockState* state) {
+        return state && state->isLog();
     });
 }
 

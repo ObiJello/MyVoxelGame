@@ -48,7 +48,7 @@ std::shared_ptr<ChunkGenerationTask> ChunkGenerationTask::create(
     );
 }
 
-std::shared_ptr<util::CompletableFuture<void>> ChunkGenerationTask::runUntilWait() {
+ChunkGenerationTask::FutureType ChunkGenerationTask::runUntilWait() {
     // Reference: ChunkGenerationTask.java lines 40-54
     while (true) {
         auto waitingFor = waitForScheduledLayer();
@@ -212,19 +212,14 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
     }
 }
 
-std::shared_ptr<util::CompletableFuture<void>> ChunkGenerationTask::waitForScheduledLayer() {
+ChunkGenerationTask::FutureType ChunkGenerationTask::waitForScheduledLayer() {
     // Reference: ChunkGenerationTask.java lines 159-174
     while (!m_scheduledLayer.empty()) {
         FutureType lastFuture = m_scheduledLayer.back();
         ChunkResultType resultNow = lastFuture->getNow(nullptr);
 
         if (resultNow == nullptr) {
-            // Need to wait - convert to void future
-            auto waitFuture = std::make_shared<util::CompletableFuture<void>>();
-            lastFuture->thenAccept([waitFuture](ChunkResultType) {
-                waitFuture->complete();
-            });
-            return waitFuture;
+            return lastFuture;
         }
 
         m_scheduledLayer.pop_back();

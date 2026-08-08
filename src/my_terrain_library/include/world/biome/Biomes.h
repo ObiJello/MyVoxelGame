@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
 
 // Forward declaration
@@ -140,17 +141,27 @@ private:
         return s_registry;
     }
 
+    // get() auto-creates biomes on first lookup and is reached from parallel
+    // worldgen phases (section biome fill), so the registry must be locked.
+    // Not hot: interned Biome* storage means per-block/per-quart queries no
+    // longer go through the registry at all.
+    static std::mutex& registryMutex() {
+        static std::mutex s_mutex;
+        return s_mutex;
+    }
+
 public:
     /**
      * Register a biome in the registry
      */
     static void registerBiome(const BiomeKey& key, Biome* biome) {
+        std::lock_guard<std::mutex> lock(registryMutex());
         registry()[key] = biome;
     }
 
     /**
      * Get a biome by key
-     * Auto-creates a minimal biome if not found
+     * Auto-creates a minimal biome if not found (thread-safe)
      * Implementation in Biomes.cpp
      */
     static BiomeHolder get(const BiomeKey& key);
@@ -159,6 +170,7 @@ public:
      * Check if a biome is registered
      */
     static bool has(const BiomeKey& key) {
+        std::lock_guard<std::mutex> lock(registryMutex());
         return registry().find(key) != registry().end();
     }
 };

@@ -56,10 +56,17 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
 {
     // If not on main thread, dispatch and wait
     if (std::this_thread::get_id() != m_mainThreadId) {
-        // Note: In full implementation, would use managedBlock
-        // For now, simple synchronous call
+        // Game patch (docs/terrain-library-patches.md, Patch 1): abort-aware
+        // poll instead of blocking join() so workers can exit at shutdown.
+        if (m_abort.load(std::memory_order_acquire)) return nullptr;
+
         auto future = getChunkFuture(x, z, targetStatus, loadOrGenerate);
-        auto result = future->join();
+
+        while (!future->isDone()) {
+            if (m_abort.load(std::memory_order_acquire)) return nullptr;
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        auto result = future->getNow(nullptr);
         return result ? result->orElse(nullptr) : nullptr;
     }
 
@@ -88,7 +95,12 @@ ServerChunkCache::ChunkAccess* ServerChunkCache::getChunk(
     //       }
     //   }
     ChunkResultType result = nullptr;
-    while (!future->isDone() && !m_abort.load(std::memory_order_acquire)) {
+    while (!future->isDone()) {
+        // Game patch (Patch 1): allow shutdown to interrupt the wait.
+        if (m_abort.load(std::memory_order_acquire)) {
+            return nullptr;
+        }
+
         // Poll task: run distance manager updates and generation tasks
         // Reference: ServerChunkCache.MainThreadExecutor.pollTask() returns true if work done
         bool didWork = runDistanceManagerUpdates();

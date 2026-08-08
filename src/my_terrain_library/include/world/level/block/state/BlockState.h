@@ -46,6 +46,7 @@ private:
     bool m_isLeaves;
     bool m_isLog;
     bool m_isReplaceableByTrees;
+    bool m_blocksMotionResult;  // cached blocksMotion() (identifier + solid flags are ctor-fixed)
     std::string m_identifier;  // Block name like "minecraft:stone"
 
 public:
@@ -77,21 +78,23 @@ public:
     bool isLeaves() const { return m_isLeaves; }
     bool isLog() const { return m_isLog; }
     bool isReplaceableByTrees() const { return m_isReplaceableByTrees; }
-    std::string getIdentifier() const { return m_identifier; }
+    const std::string& getIdentifier() const { return m_identifier; }
 
     /**
      * Alias for getIdentifier() for compatibility
      */
-    std::string getBlockName() const { return m_identifier; }
+    const std::string& getBlockName() const { return m_identifier; }
 
     /**
      * Check if this state is of the same block type as another state
      * Reference: BlockState.java is(BlockState)
+     * Blocks are registry singletons (enforced in Blocks::registerBlock),
+     * so same-block ⇔ same owner pointer.
      */
     bool is(const BlockState* other) const {
         if (this == other) return true;
         if (!other) return false;
-        return m_identifier == other->m_identifier;
+        return m_owner == other->m_owner;
     }
 
     /**
@@ -104,6 +107,15 @@ public:
      * Get properties as string map for serialization
      */
     std::unordered_map<std::string, std::string> getProperties() const;
+
+    /**
+     * Canonical full-state string for parity dumps:
+     * "minecraft:name[prop1=val1,prop2=val2]" with properties sorted
+     * alphabetically by name, matching Java StateHolder.toString() order
+     * (StateDefinition stores properties in an ImmutableSortedMap).
+     * States without properties serialize as just the registry name.
+     */
+    std::string toStateString() const;
 
     bool hasProperties() const {
         return !m_values.empty();
@@ -150,6 +162,7 @@ public:
 
     bool canBeReplaced() const { return m_isReplaceable; }
     bool hasWaterFluid() const;
+    bool hasSourceWaterFluid() const;
     bool hasAnyFluid() const;
 
     bool canSurvive(const minecraft::levelgen::WorldGenLevel& level, const core::BlockPos& pos) const;

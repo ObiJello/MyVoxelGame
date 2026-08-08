@@ -63,7 +63,12 @@ public:
      */
     explicit GenerationChunkHolder(const world::ChunkPos& pos);
 
-    virtual ~GenerationChunkHolder() = default;
+    // Deletes the chunk carried in this holder's completed futures — the
+    // holder is the chunk's sole owner in this pipeline (holders are never
+    // erased mid-run, so deletion happens only at ChunkMap teardown).
+    // SimpleGenerationChunkHolder bypasses m_futures, so its externally
+    // owned chunk is unaffected.
+    virtual ~GenerationChunkHolder();
 
     /**
      * Schedule chunk generation to reach the given status

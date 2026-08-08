@@ -343,6 +343,40 @@ void GenerationChunkHolder::decreaseGenerationRefCount() {
     }
 }
 
+GenerationChunkHolder::~GenerationChunkHolder() {
+    // The holder owns the chunk referenced by its completed futures; nothing
+    // else deletes it (this was the ProtoChunk→NoiseChunk→density-tree leak
+    // root). All statuses normally share one chunk pointer; dedup anyway in
+    // case a status ever stored a different one.
+    std::lock_guard<std::mutex> lock(m_futuresMutex);
+    ChunkAccess* seen[STATUS_COUNT];
+    int seenCount = 0;
+    for (int i = 0; i < STATUS_COUNT; ++i) {
+        FutureType& future = m_futures[i];
+        if (future == nullptr) {
+            continue;
+        }
+        ChunkResultType result = future->getNow(NOT_DONE_YET);
+        ChunkAccess* chunk = result ? result->orElse(nullptr) : nullptr;
+        if (chunk == nullptr) {
+            continue;
+        }
+        bool alreadySeen = false;
+        for (int j = 0; j < seenCount; ++j) {
+            if (seen[j] == chunk) {
+                alreadySeen = true;
+                break;
+            }
+        }
+        if (!alreadySeen) {
+            seen[seenCount++] = chunk;
+        }
+    }
+    for (int j = 0; j < seenCount; ++j) {
+        delete seen[j];
+    }
+}
+
 GenerationChunkHolder::ChunkAccess* GenerationChunkHolder::getChunkIfPresentUnchecked(
     const world::chunk::status::ChunkStatus& status
 ) const {

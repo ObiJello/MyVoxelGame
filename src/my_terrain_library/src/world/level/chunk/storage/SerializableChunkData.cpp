@@ -495,9 +495,9 @@ std::unique_ptr<ProtoChunk> SerializableChunkData::readDirect(
 
                 if (bitsPerEntry == 0) {
                     // Single biome for entire section
-                    biome::BiomeKey key = biomePaletteEntries[0];
+                    biome::BiomeHolder holder = biome::Biomes::get(biomePaletteEntries[0]);
                     for (int i = 0; i < LevelChunkSection::BIOMES_PER_SECTION; ++i) {
-                        section.getBiomes()[i] = key;
+                        section.getBiomes()[i] = holder;
                     }
                 } else {
                     // Unpack biome data
@@ -505,7 +505,7 @@ std::unique_ptr<ProtoChunk> SerializableChunkData::readDirect(
                     for (int i = 0; i < 64; ++i) {
                         int paletteIndex = storage.get(i);
                         if (paletteIndex < static_cast<int>(biomePaletteEntries.size())) {
-                            section.getBiomes()[i] = biomePaletteEntries[paletteIndex];
+                            section.getBiomes()[i] = biome::Biomes::get(biomePaletteEntries[paletteIndex]);
                         }
                     }
                 }
@@ -619,14 +619,15 @@ std::unique_ptr<SerializableChunkData> SerializableChunkData::copyOfDirect(
         {
             const auto& biomes = section.getBiomes();
 
-            // Build unique palette of biomes
+            // Build unique palette of biomes (first-seen order, exactly as
+            // with the old string keys; holders convert to names for NBT)
             std::vector<biome::BiomeKey> biomePaletteEntries;
-            std::unordered_map<biome::BiomeKey, int> biomeToIndex;
+            std::unordered_map<biome::BiomeHolder, int> biomeToIndex;
 
-            for (const auto& biomeKey : biomes) {
-                if (biomeToIndex.find(biomeKey) == biomeToIndex.end()) {
-                    biomeToIndex[biomeKey] = static_cast<int>(biomePaletteEntries.size());
-                    biomePaletteEntries.push_back(biomeKey);
+            for (const auto& holder : biomes) {
+                if (biomeToIndex.find(holder) == biomeToIndex.end()) {
+                    biomeToIndex[holder] = static_cast<int>(biomePaletteEntries.size());
+                    biomePaletteEntries.push_back(holder ? holder->getName() : biome::BiomeKey());
                 }
             }
 

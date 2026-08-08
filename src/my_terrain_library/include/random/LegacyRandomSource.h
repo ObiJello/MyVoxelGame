@@ -99,6 +99,10 @@ public:
         return (static_cast<int64_t>(next(32)) << 32) + next(32);
     }
 
+    bool nextBoolean() {
+        return next(1) != 0;
+    }
+
     int64_t getInternalSeed() const {
         return m_seed;
     }

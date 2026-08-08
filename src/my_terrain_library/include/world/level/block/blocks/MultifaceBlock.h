@@ -102,8 +102,13 @@ public:
         const core::BlockPos& neighbourPos,
         BlockState* neighbourState
     ) {
-        return neighbourState &&
-               neighbourState->isFaceSturdy(level, neighbourPos, core::getOpposite(directionTowardsNeighbour));
+        if (!neighbourState) {
+            return false;
+        }
+
+        const core::Direction face = core::getOpposite(directionTowardsNeighbour);
+        return neighbourState->isFaceSturdy(level, neighbourPos, face) ||
+               neighbourState->isCollisionShapeFullBlock(level, neighbourPos);
     }
 
     bool isValidStateForPlacement(
@@ -135,11 +140,15 @@ public:
         }
 
         BlockState* newState = nullptr;
+        const bool isSourceWater =
+            oldState &&
+            oldState->hasWaterFluid() &&
+            (!BlockStateProperties::LEVEL ||
+             !oldState->hasProperty(BlockStateProperties::LEVEL) ||
+             oldState->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0);
         if (oldState && oldState->is(this)) {
             newState = oldState;
-        } else if (oldState &&
-                   (oldState->getIdentifier() == "minecraft:water" ||
-                    oldState->getValueOrElse(*WATERLOGGED, false))) {
+        } else if (isSourceWater) {
             newState = defaultBlockState()->setValue(*WATERLOGGED, true);
         } else {
             newState = defaultBlockState();

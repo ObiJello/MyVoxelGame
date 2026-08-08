@@ -1,6 +1,7 @@
 #include "levelgen/feature/treedecorators/TreeDecorator.h"
 #include "levelgen/feature/Feature.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
+#include "data/worldgen/features/VegetationFeatures.h"
 #include "core/Direction.h"
 #include "world/level/block/state/properties/BlockStateProperties.h"
 #include <algorithm>
@@ -189,9 +190,13 @@ void CocoaDecorator::place(DecoratorContext& context) {
             continue;
         }
 
-        // Check all horizontal directions
+        // Reference: Direction.Plane.HORIZONTAL order = N,E,S,W (NOT the
+        // from2DDataValue order) - the per-direction rolls consume RNG.
+        static constexpr core::Direction kHorizontal[4] = {
+            core::Direction::NORTH, core::Direction::EAST,
+            core::Direction::SOUTH, core::Direction::WEST};
         for (int dirIdx = 0; dirIdx < 4; ++dirIdx) {
-            core::Direction direction = core::fromHorizontalIndex(dirIdx);
+            core::Direction direction = kHorizontal[dirIdx];
 
             if (random.nextFloat() <= 0.25f) {
                 core::Direction opposite = core::opposite(direction);
@@ -285,6 +290,14 @@ void BeehiveDecorator::place(DecoratorContext& context) {
         if (context.isAir(pos) && context.isAir(pos.relative(worldgenFacing))) {
             BlockState* hiveState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:bee_nest"));
             if (!hiveState) return;
+
+            if (minecraft::world::level::block::state::properties::BlockStateProperties::HORIZONTAL_FACING &&
+                hiveState->hasProperty(minecraft::world::level::block::state::properties::BlockStateProperties::HORIZONTAL_FACING)) {
+                hiveState = hiveState->setValue(
+                    *minecraft::world::level::block::state::properties::BlockStateProperties::HORIZONTAL_FACING,
+                    worldgenFacing
+                );
+            }
 
             context.setBlock(pos, hiveState);
 
@@ -473,21 +486,12 @@ void CreakingHeartDecorator::place(DecoratorContext& context) {
     for (const auto& pos : heartPlacements) {
         bool allSidesAreLogs = true;
 
-        // Check all 6 directions
+        // Check all 6 directions against the actual world state.
         for (int dir = 0; dir < 6; ++dir) {
             core::Direction direction = static_cast<core::Direction>(dir);
-            core::BlockPos neighborPos = pos.relative(direction);
-
-            // Check if neighbor is a log (in our context, we check if it's in the logs list)
-            bool isLog = false;
-            for (const auto& logPos : logs) {
-                if (logPos == neighborPos) {
-                    isLog = true;
-                    break;
-                }
-            }
-
-            if (!isLog) {
+            if (!context.checkBlock(pos.relative(direction), [](BlockState* state) {
+                return state && state->isLog();
+            })) {
                 allSidesAreLogs = false;
                 break;
             }
@@ -496,8 +500,23 @@ void CreakingHeartDecorator::place(DecoratorContext& context) {
         if (allSidesAreLogs) {
             // Place creaking heart block - Reference: line 47
             BlockState* heartState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:creaking_heart"));
-            
-            
+            if (!heartState) {
+                return;
+            }
+
+            using minecraft::world::level::block::state::properties::BlockStateProperties;
+            using minecraft::world::level::block::state::properties::CreakingHeartState;
+            if (BlockStateProperties::CREAKING_HEART_STATE &&
+                heartState->hasProperty(BlockStateProperties::CREAKING_HEART_STATE)) {
+                heartState = heartState->setValue(
+                    *BlockStateProperties::CREAKING_HEART_STATE,
+                    CreakingHeartState(CreakingHeartState::DORMANT));
+            }
+            if (BlockStateProperties::NATURAL &&
+                heartState->hasProperty(BlockStateProperties::NATURAL)) {
+                heartState = heartState->setValue(*BlockStateProperties::NATURAL, true);
+            }
+
             context.setBlock(pos, heartState);
             return;
         }
@@ -535,8 +554,16 @@ void PaleMossDecorator::place(DecoratorContext& context) {
         }
     }
 
-    // Ground probability - place moss patch (skipped as requires configured feature)
-    // Reference: lines 43-44
+    if (random.nextFloat() < m_groundProbability &&
+        context.level() &&
+        data::worldgen::features::VegetationFeatures::PALE_MOSS_PATCH) {
+        data::worldgen::features::VegetationFeatures::PALE_MOSS_PATCH->place(
+            context.level(),
+            context.chunkGenerator(),
+            random,
+            origin.above()
+        );
+    }
 
     // Place hanging moss on logs - Reference: lines 47-55
     for (const auto& pos : context.logs()) {
@@ -565,14 +592,30 @@ void PaleMossDecorator::addMossHanger(const core::BlockPos& startPos, DecoratorC
 
     while (context.isAir(pos.below()) && !(context.random().nextFloat() < 0.5f)) {
         BlockState* mossState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:pale_hanging_moss"));
-        
+        if (mossState &&
+            minecraft::world::level::block::state::properties::BlockStateProperties::TIP &&
+            mossState->hasProperty(minecraft::world::level::block::state::properties::BlockStateProperties::TIP)) {
+            mossState = mossState->setValue(
+                *minecraft::world::level::block::state::properties::BlockStateProperties::TIP,
+                false
+            );
+        }
+
         context.setBlock(pos, mossState);
         pos = pos.below();
     }
 
     // Place the tip
     BlockState* tipState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:pale_hanging_moss"));
-    
+    if (tipState &&
+        minecraft::world::level::block::state::properties::BlockStateProperties::TIP &&
+        tipState->hasProperty(minecraft::world::level::block::state::properties::BlockStateProperties::TIP)) {
+        tipState = tipState->setValue(
+            *minecraft::world::level::block::state::properties::BlockStateProperties::TIP,
+            true
+        );
+    }
+
     context.setBlock(pos, tipState);
 }
 
@@ -650,6 +693,11 @@ void PlaceOnGroundDecorator::attemptToPlaceBlockAbove(DecoratorContext& context,
     // Reference: PlaceOnGroundDecorator.java line 67
     BlockState* aboveState = context.getBlockState(abovePos);
     if (!aboveState->isAir() && aboveState->getIdentifier() != "minecraft:vine") {
+        if (std::FILE* trace = minecraft::levelgen::WorldgenRandom::s_rngTraceFile) {
+            std::fprintf(trace, "# POG fail above=%s at %d,%d,%d\n",
+                         aboveState->getIdentifier().c_str(),
+                         abovePos.getX(), abovePos.getY(), abovePos.getZ());
+        }
         return;
     }
 
@@ -657,6 +705,11 @@ void PlaceOnGroundDecorator::attemptToPlaceBlockAbove(DecoratorContext& context,
     // Reference: PlaceOnGroundDecorator.java line 67: context.checkBlock(pos, BlockBehaviour.BlockStateBase::isSolidRender)
     BlockState* posState = context.getBlockState(pos);
     if (!posState || !posState->isSolidRender()) {
+        if (std::FILE* trace = minecraft::levelgen::WorldgenRandom::s_rngTraceFile) {
+            std::fprintf(trace, "# POG fail solidRender ground=%s at %d,%d,%d\n",
+                         posState ? posState->getIdentifier().c_str() : "null",
+                         pos.getX(), pos.getY(), pos.getZ());
+        }
         return;
     }
 

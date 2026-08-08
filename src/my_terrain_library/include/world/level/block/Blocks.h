@@ -14,6 +14,7 @@
 #include "world/level/block/blocks/LeafLitterBlock.h"
 #include "world/level/block/blocks/FlowerBedBlock.h"
 #include "world/level/block/blocks/CarpetBlock.h"
+#include "world/level/block/blocks/MossyCarpetBlock.h"
 #include "world/level/block/blocks/RotatedPillarBlock.h"
 #include "world/level/block/blocks/VineBlock.h"
 #include "world/level/block/blocks/AzaleaBlock.h"
@@ -170,6 +171,8 @@ public:
     static BushBlock* FERN;
     static DoublePlantBlock* LARGE_FERN;
     static BushBlock* DEAD_BUSH;
+    static Block* SHORT_DRY_GRASS;
+    static Block* TALL_DRY_GRASS;
     static BushBlock* BUSH;
 
     // =========================================================================
@@ -253,12 +256,17 @@ public:
     static Block* TALL_SEAGRASS;
     static Block* KELP;
     static Block* KELP_PLANT;
+    static Block* BAMBOO;
 
     // =========================================================================
     // Other vegetation
     // =========================================================================
     static Block* CACTUS;
+    static Block* CACTUS_FLOWER;
     static Block* SUGAR_CANE;
+    static Block* SWEET_BERRY_BUSH;
+    static Block* LILY_PAD;
+    static Block* FIREFLY_BUSH;
     static Block* PUMPKIN;
     static Block* MELON;
     static Block* COCOA;
@@ -399,6 +407,10 @@ private:
      * Helper to create a simple block (no properties)
      */
     static Block* createSimpleBlock(const std::string& name);
+    static Block* createNoOcclusionBlock(const std::string& name);
+    static Block* createNoCollisionBlock(const std::string& name);
+    static Block* createForceSolidOnNoCollisionBlock(const std::string& name);
+    static Block* createForceSolidOnNoOcclusionBlock(const std::string& name);
 
     /**
      * Helper to create an air block
@@ -416,7 +428,16 @@ private:
     static Block* createPlantBlock(const std::string& name);
     static Block* createReplaceablePlantBlock(const std::string& name);
     static CarpetBlock* createCarpetBlock(const std::string& name);
-    static BushBlock* createBushBlock(const std::string& name);
+    static MossyCarpetBlock* createMossyCarpetBlock(const std::string& name);
+    static BushBlock* createBushBlock(const std::string& name, bool replaceable = true);
+    static BushBlock* createDryVegetationBlock(const std::string& name);
+    static BushBlock* createCactusFlowerBlock(const std::string& name);
+    static Block* createSugarCaneBlock(const std::string& name);
+    static Block* createSweetBerryBushBlock(const std::string& name);
+    static Block* createWaterlilyBlock(const std::string& name);
+    static Block* createFireflyBushBlock(const std::string& name);
+    static Block* createPaleHangingMossBlock(const std::string& name);
+    static Block* createCocoaBlock(const std::string& name);
     static VineBlock* createVineBlock(const std::string& name);
     static AzaleaBlock* createAzaleaBlock(const std::string& name);
     static CaveVinesBlock* createCaveVinesBlock(const std::string& name);

@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <string>
 #include <cstdint>
+#include <mutex>
 
 // Forward declarations
 namespace minecraft {
@@ -56,10 +57,12 @@ private:
     // Reference: RandomState.java line 25
     // Map of noise name -> NormalNoise instance
     std::unordered_map<std::string, NormalNoise*> m_noiseInstances;
+    mutable std::mutex m_noiseInstancesMutex;
 
     // Reference: RandomState.java line 26
     // Map of identifier -> PositionalRandomFactory
     std::unordered_map<std::string, random::PositionalRandomFactory*> m_positionalRandoms;
+    mutable std::mutex m_positionalRandomsMutex;
 
 public:
     /**

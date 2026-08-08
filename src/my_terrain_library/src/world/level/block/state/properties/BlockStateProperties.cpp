@@ -77,6 +77,7 @@ EnumProperty<ComparatorMode>* BlockStateProperties::MODE_COMPARATOR = nullptr;
 EnumProperty<BambooLeaves>* BlockStateProperties::BAMBOO_LEAVES = nullptr;
 EnumProperty<Tilt>* BlockStateProperties::TILT = nullptr;
 EnumProperty<DripstoneThickness>* BlockStateProperties::DRIPSTONE_THICKNESS = nullptr;
+EnumProperty<CreakingHeartState>* BlockStateProperties::CREAKING_HEART_STATE = nullptr;
 EnumProperty<SculkSensorPhase>* BlockStateProperties::SCULK_SENSOR_PHASE = nullptr;
 EnumProperty<StructureMode>* BlockStateProperties::STRUCTUREBLOCK_MODE = nullptr;
 EnumProperty<BellAttachType>* BlockStateProperties::BELL_ATTACHMENT = nullptr;
@@ -224,6 +225,7 @@ void BlockStateProperties::initialize() {
     BAMBOO_LEAVES = own(EnumProperty<BambooLeaves>::create("leaves", BambooLeaves::values()));
     TILT = own(EnumProperty<Tilt>::create("tilt", Tilt::values()));
     DRIPSTONE_THICKNESS = own(EnumProperty<DripstoneThickness>::create("thickness", DripstoneThickness::values()));
+    CREAKING_HEART_STATE = own(EnumProperty<CreakingHeartState>::create("creaking_heart_state", CreakingHeartState::values()));
     SCULK_SENSOR_PHASE = own(EnumProperty<SculkSensorPhase>::create("sculk_sensor_phase", SculkSensorPhase::values()));
     STRUCTUREBLOCK_MODE = own(EnumProperty<StructureMode>::create("mode", StructureMode::values()));
     BELL_ATTACHMENT = own(EnumProperty<BellAttachType>::create("attachment", BellAttachType::values()));

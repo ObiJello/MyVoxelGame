@@ -173,6 +173,11 @@ static std::deque<BlockPredicateFilter> s_blockPredicateFilters;
 // Storage for shared_ptr<BlockPredicate> instances (to keep them alive)
 static std::deque<std::shared_ptr<levelgen::blockpredicates::BlockPredicate>> s_blockPredicates;
 
+static HeightmapPlacement* heightmapMotionBlockingNoLeaves() {
+    s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::MOTION_BLOCKING_NO_LEAVES));
+    return &s_heightmapPlacements.back();
+}
+
 // =========================================================================
 // HELPER METHODS
 // Reference: VegetationPlacements.java lines 125-155
@@ -709,26 +714,21 @@ void VegetationPlacements::bootstrap() {
     // =========================================================================
     {
         using namespace levelgen::blockpredicates;
-        // Create the composite predicate for near-water placement
-        // Check: air at pos AND water in one of the 4 adjacent positions below
         auto waterCheck1 = BlockPredicate::matchesFluids({1, -1, 0}, {"minecraft:water", "minecraft:flowing_water"});
         auto waterCheck2 = BlockPredicate::matchesFluids({-1, -1, 0}, {"minecraft:water", "minecraft:flowing_water"});
         auto waterCheck3 = BlockPredicate::matchesFluids({0, -1, 1}, {"minecraft:water", "minecraft:flowing_water"});
         auto waterCheck4 = BlockPredicate::matchesFluids({0, -1, -1}, {"minecraft:water", "minecraft:flowing_water"});
         auto nearWater = BlockPredicate::anyOf({waterCheck1, waterCheck2, waterCheck3, waterCheck4});
         auto airCheck = BlockPredicate::ONLY_IN_AIR_PREDICATE;
-        auto fullPredicate = BlockPredicate::allOf({airCheck, nearWater});
+        auto wouldSurvive = BlockPredicate::wouldSurvive(world::level::block::Blocks::FIREFLY_BUSH->defaultBlockState(), {0, 0, 0});
+        auto fullPredicate = BlockPredicate::allOf({airCheck, wouldSurvive, nearWater});
 
         s_blockPredicates.push_back(fullPredicate);
-        s_blockPredicateFilters.push_back(BlockPredicateFilter::hasSturdyFace(
-            [fullPredicate](const PlacementContext& ctx, const core::BlockPos& pos) {
-                return fullPredicate->test(*ctx.getLevel(), pos);
-            }
-        ));
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(fullPredicate));
 
         PATCH_FIREFLY_BUSH_NEAR_WATER = createPlaced(
             VegetationFeatures::PATCH_FIREFLY_BUSH,
-            { countOf(2), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome(), &s_blockPredicateFilters.back() },
+            { countOf(2), &InSquarePlacement::spread(), heightmapMotionBlockingNoLeaves(), &BiomeFilter::biome(), &s_blockPredicateFilters.back() },
             "PATCH_FIREFLY_BUSH_NEAR_WATER"
         );
     }
@@ -1051,7 +1051,7 @@ void VegetationPlacements::bootstrap() {
     // =========================================================================
     PALE_GARDEN_FLOWERS = createPlaced(
         VegetationFeatures::PALE_FOREST_FLOWERS,
-        { rarityOf(8), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
+        { rarityOf(8), &InSquarePlacement::spread(), heightmapMotionBlockingNoLeaves(), &BiomeFilter::biome() },
         "PALE_GARDEN_FLOWERS"
     );
 
@@ -1061,7 +1061,7 @@ void VegetationPlacements::bootstrap() {
     // =========================================================================
     PALE_MOSS_PATCH = createPlaced(
         VegetationFeatures::PALE_MOSS_PATCH,
-        { countOf(1), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
+        { countOf(1), &InSquarePlacement::spread(), heightmapMotionBlockingNoLeaves(), &BiomeFilter::biome() },
         "PALE_MOSS_PATCH"
     );
 
@@ -1158,11 +1158,19 @@ void VegetationPlacements::bootstrap() {
     // PlacementUtils.countExtra(2, 0.1F, 1), InSquarePlacement.spread(), SurfaceWaterDepthFilter.forMaxDepth(2), PlacementUtils.HEIGHTMAP_OCEAN_FLOOR, BiomeFilter.biome(), BlockPredicateFilter...
     // =========================================================================
     {
+        // trees_swamp.json: count(weighted 2:9/3:1), in_square,
+        // surface_water_depth_filter(2), HEIGHTMAP(OCEAN_FLOOR), biome,
+        // block_predicate_filter(would_survive(oak_sapling[stage=0])) LAST.
         s_countPlacements.push_back(CountPlacement::countExtra(2, 0.1f, 1));
         s_surfaceWaterDepthFilters.push_back(SurfaceWaterDepthFilter::forMaxDepth(2));
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(
+            levelgen::blockpredicates::BlockPredicate::wouldSurvive(
+                minecraft::world::level::block::Blocks::getDefaultState("minecraft:oak_sapling"),
+                core::Vec3i::ZERO())));
         TREES_SWAMP = createPlaced(
             features::TreeFeatures::SWAMP_OAK,
-            { &s_countPlacements.back(), &InSquarePlacement::spread(), &s_surfaceWaterDepthFilters.back(), heightmapOceanFloor(), &BiomeFilter::biome() },
+            { &s_countPlacements.back(), &InSquarePlacement::spread(), &s_surfaceWaterDepthFilters.back(),
+              heightmapOceanFloor(), &BiomeFilter::biome(), &s_blockPredicateFilters.back() },
             "TREES_SWAMP"
         );
     }

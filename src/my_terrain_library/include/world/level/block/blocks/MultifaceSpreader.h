@@ -5,6 +5,7 @@
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
 #include "world/level/block/blocks/MultifaceBlock.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 #include <array>
 #include <optional>
 #include <vector>
@@ -108,9 +109,18 @@ public:
             core::Direction /*placementDirection*/,
             BlockState* existingState
         ) const {
+            using state::properties::BlockStateProperties;
+
+            const bool isSourceWater =
+                existingState &&
+                existingState->getIdentifier() == "minecraft:water" &&
+                (!BlockStateProperties::LEVEL ||
+                 !existingState->hasProperty(BlockStateProperties::LEVEL) ||
+                 existingState->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0);
+
             return existingState &&
                    (existingState->isAir() || existingState->is(m_block) ||
-                    existingState->getIdentifier() == "minecraft:water");
+                    isSourceWater);
         }
 
     private:

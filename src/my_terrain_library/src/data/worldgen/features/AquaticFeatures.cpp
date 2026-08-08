@@ -96,6 +96,62 @@ void AquaticFeatures::bootstrap() {
         s_features.push_back(std::move(feature));
     }
 
+    // =========================================================================
+    // SEA_PICKLE
+    // Reference: AquaticFeatures.java line 28 / sea_pickle.json: count 20.
+    // =========================================================================
+    {
+        static SeaPickleFeature s_seaPickleFeature;
+        static std::vector<std::unique_ptr<CountConfiguration>> s_countConfigs;
+        auto config = std::make_unique<CountConfiguration>(
+            std::make_shared<util::ConstantInt>(20));
+        auto feature = std::make_unique<ConfiguredFeatureImpl<CountConfiguration, SeaPickleFeature>>(
+            &s_seaPickleFeature, *config);
+        SEA_PICKLE = feature.get();
+        s_countConfigs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
+    // =========================================================================
+    // WARM_OCEAN_VEGETATION
+    // Reference: AquaticFeatures.java line 29 / warm_ocean_vegetation.json:
+    // simple_random_selector over inline-placed coral_tree, coral_claw,
+    // coral_mushroom (each with an empty placement list). The selector draws
+    // nextInt(3) before the chosen coral feature runs.
+    // =========================================================================
+    {
+        static CoralTreeFeature s_coralTreeFeature;
+        static CoralClawFeature s_coralClawFeature;
+        static CoralMushroomFeature s_coralMushroomFeature;
+        static SimpleRandomSelectorFeature s_selectorFeature;
+        static std::deque<PlacedFeature> s_coralPlaced;
+        static std::vector<std::unique_ptr<NoneFeatureConfiguration>> s_coralNoneConfigs;
+        static std::vector<std::unique_ptr<SimpleRandomFeatureConfiguration>> s_selectorConfigs;
+
+        std::vector<PlacedFeature*> variants;
+        auto addVariant = [&](auto* featurePtr, const std::string& name) {
+            auto cfg = std::make_unique<NoneFeatureConfiguration>();
+            auto configured = std::make_unique<ConfiguredFeatureImpl<
+                NoneFeatureConfiguration, std::remove_pointer_t<decltype(featurePtr)>>>(
+                featurePtr, *cfg);
+            s_coralPlaced.emplace_back(configured.get(), std::vector<PlacementModifier*>{}, name);
+            variants.push_back(&s_coralPlaced.back());
+            s_coralNoneConfigs.push_back(std::move(cfg));
+            s_features.push_back(std::move(configured));
+        };
+        addVariant(&s_coralTreeFeature, "CORAL_TREE_INLINE");
+        addVariant(&s_coralClawFeature, "CORAL_CLAW_INLINE");
+        addVariant(&s_coralMushroomFeature, "CORAL_MUSHROOM_INLINE");
+
+        auto selectorConfig = std::make_unique<SimpleRandomFeatureConfiguration>(variants);
+        auto selector = std::make_unique<ConfiguredFeatureImpl<
+            SimpleRandomFeatureConfiguration,
+            SimpleRandomSelectorFeature>>(&s_selectorFeature, *selectorConfig);
+        WARM_OCEAN_VEGETATION = selector.get();
+        s_selectorConfigs.push_back(std::move(selectorConfig));
+        s_features.push_back(std::move(selector));
+    }
+
     s_initialized = true;
 }
 

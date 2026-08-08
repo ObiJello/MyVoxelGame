@@ -138,6 +138,29 @@ public:
 
         // NoiseHolder visiting - subclasses can override to transform noise
         virtual NoiseHolder* visitNoise(NoiseHolder* noise) { return noise; }
+
+        // Type-erased ownership sink for nodes heap-allocated during mapAll
+        // (`new Clamp(...)`, mapped CubicSpline nodes, ...). Visitors whose
+        // mapped tree has a bounded lifetime (WrapVisitor → NoiseChunk)
+        // override this to record the node for later deletion; the default is
+        // a no-op (node leaks, as before, for one-shot registry visitors).
+        // Every `new` inside a mapAll implementation must be routed through
+        // own()/ownObject().
+        virtual void takeOwnership(void* obj, void (*deleter)(void*)) {
+            (void)obj;
+            (void)deleter;
+        }
+
+        template<typename T>
+        T* ownObject(T* obj) {
+            takeOwnership(obj, [](void* p) { delete static_cast<T*>(p); });
+            return obj;
+        }
+
+        // DensityFunction nodes dominate the mapped tree, so they get their
+        // own overridable sink — owners can store them as bare pointers
+        // (deleted via the virtual dtor) instead of pointer+deleter pairs.
+        virtual DensityFunction* own(DensityFunction* node) { return ownObject(node); }
     };
 
     /**

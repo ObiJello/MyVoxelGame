@@ -55,7 +55,7 @@ public:
      *
      * @return A future to wait on, or nullptr if done
      */
-    std::shared_ptr<util::CompletableFuture<void>> runUntilWait();
+    FutureType runUntilWait();
 
     /**
      * Mark this task for cancellation
@@ -135,7 +135,7 @@ private:
      * Wait for the scheduled layer to complete
      * Reference: ChunkGenerationTask.java lines 159-174
      */
-    std::shared_ptr<util::CompletableFuture<void>> waitForScheduledLayer();
+    FutureType waitForScheduledLayer();
 
     GeneratingChunkMap* m_chunkMap;
     world::ChunkPos m_pos;

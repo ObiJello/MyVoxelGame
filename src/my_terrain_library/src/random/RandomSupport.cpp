@@ -6,8 +6,8 @@
 
 namespace minecraft {
 
-// Static counter for unique seed generation
-static std::atomic<int64_t> g_seedCounter{0};
+// Reference: RandomSupport.java line 14
+static std::atomic<int64_t> g_seedUniquifier{8682522807148012LL};
 
 uint64_t RandomSupport::mixStafford13(uint64_t z) {
     // Stafford13 mixing function from RandomSupport.java lines 17-21
@@ -90,18 +90,26 @@ int32_t RandomSupport::javaStringHashCode(const std::string& str) {
     return static_cast<int32_t>(hash);
 }
 
-Seed128bit RandomSupport::generateUniqueSeed() {
-    // Reference: WorldgenRandom.java uses System.nanoTime() ^ seedUniquifier
-    // We use high_resolution_clock and an atomic counter for thread safety
+int64_t RandomSupport::generateUniqueSeed() {
+    // Reference: RandomSupport.java line 40
+    int64_t current = g_seedUniquifier.load(std::memory_order_relaxed);
+    int64_t uniquifier = 0;
+    while (true) {
+        uniquifier = current * 1181783497276652981LL;
+        if (g_seedUniquifier.compare_exchange_weak(
+                current,
+                uniquifier,
+                std::memory_order_relaxed,
+                std::memory_order_relaxed)) {
+            break;
+        }
+    }
 
     auto now = std::chrono::high_resolution_clock::now();
     auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(
         now.time_since_epoch()).count();
 
-    int64_t counter = g_seedCounter.fetch_add(1, std::memory_order_relaxed);
-    int64_t seed = nanos ^ (counter * GOLDEN_RATIO_64);
-
-    return upgradeSeedTo128bit(seed);
+    return uniquifier ^ nanos;
 }
 
 } // namespace minecraft

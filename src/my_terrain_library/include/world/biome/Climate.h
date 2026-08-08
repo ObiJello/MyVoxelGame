@@ -1,7 +1,6 @@
 #pragma once
 
 #include <vector>
-#include <string>
 #include <cstdint>
 #include <algorithm>
 #include <cmath>
@@ -254,28 +253,34 @@ public:
         class Leaf;
         class SubTree;
 
-        // Distance metric function type
-        using DistanceMetric = std::function<int64_t(const Node*, const std::vector<int64_t>&)>;
-
     private:
         std::unique_ptr<Node> m_root;
 
-        // Thread-local cache to match Java's ThreadLocal<Leaf> lastResult behavior
-        // Each thread maintains its own lastResult cache per RTree instance
-        // This avoids race conditions and provides spatial locality benefits
-        static std::unordered_map<const RTree*, Leaf*>& getThreadLocalCache() {
-            static thread_local std::unordered_map<const RTree*, Leaf*> cache;
-            return cache;
+        // Thread-local cache to match Java's ThreadLocal<Leaf> lastResult
+        // behavior. Java keeps one ThreadLocal<Leaf> per RTree instance; a
+        // single owner-tagged slot gives identical within-instance history for
+        // the one tree active during generation without a per-search hash
+        // lookup. A different owner reads as a miss (null candidate), which
+        // only changes the pruning start, exactly like a fresh Java thread.
+        struct LastResultSlot {
+            const RTree* owner = nullptr;
+            Leaf* leaf = nullptr;
+        };
+
+        static LastResultSlot& lastResultSlot() {
+            static thread_local LastResultSlot slot;
+            return slot;
         }
 
         Leaf* getLastResult() const {
-            auto& cache = getThreadLocalCache();
-            auto it = cache.find(this);
-            return (it != cache.end()) ? it->second : nullptr;
+            const LastResultSlot& slot = lastResultSlot();
+            return (slot.owner == this) ? slot.leaf : nullptr;
         }
 
         void setLastResult(Leaf* leaf) const {
-            getThreadLocalCache()[this] = leaf;
+            LastResultSlot& slot = lastResultSlot();
+            slot.owner = this;
+            slot.leaf = leaf;
         }
 
     public:
@@ -293,14 +298,13 @@ public:
             /**
              * Search for the closest leaf node
              */
-            virtual Leaf* search(const std::vector<int64_t>& target, Leaf* candidate,
-                                const DistanceMetric& distanceMetric) = 0;
+            virtual Leaf* search(const int64_t* target, Leaf* candidate) = 0;
 
             /**
-             * Calculate distance from this node to target
+             * Calculate distance from this node to target (7 values)
              * Reference: Climate.java lines 212-220
              */
-            int64_t distance(const std::vector<int64_t>& target) const {
+            int64_t distance(const int64_t* target) const {
                 int64_t dist = 0;
                 for (size_t i = 0; i < 7 && i < parameterSpace.size(); ++i) {
                     int64_t d = parameterSpace[i].distance(target[i]);
@@ -321,8 +325,7 @@ public:
             Leaf(const ParameterPoint& point, const T& val)
                 : Node(point.parameterSpace()), value(val) {}
 
-            Leaf* search(const std::vector<int64_t>& target, Leaf* candidate,
-                        const DistanceMetric& distanceMetric) override {
+            Leaf* search(const int64_t* target, Leaf* candidate) override {
                 return this;
             }
         };
@@ -345,16 +348,15 @@ public:
              * Search through children for closest match
              * Reference: Climate.java lines 252-269
              */
-            Leaf* search(const std::vector<int64_t>& target, Leaf* candidate,
-                        const DistanceMetric& distanceMetric) override {
-                int64_t minDistance = candidate == nullptr ? INT64_MAX : distanceMetric(candidate, target);
+            Leaf* search(const int64_t* target, Leaf* candidate) override {
+                int64_t minDistance = candidate == nullptr ? INT64_MAX : candidate->distance(target);
                 Leaf* closestLeaf = candidate;
 
                 for (auto& child : children) {
-                    int64_t childDistance = distanceMetric(child.get(), target);
+                    int64_t childDistance = child->distance(target);
                     if (minDistance > childDistance) {
-                        Leaf* leaf = child->search(target, closestLeaf, distanceMetric);
-                        int64_t leafDistance = (child.get() == leaf) ? childDistance : distanceMetric(leaf, target);
+                        Leaf* leaf = child->search(target, closestLeaf);
+                        int64_t leafDistance = (child.get() == leaf) ? childDistance : leaf->distance(target);
                         if (minDistance > leafDistance) {
                             minDistance = leafDistance;
                             closestLeaf = leaf;
@@ -418,24 +420,19 @@ public:
         }
 
         /**
-         * Search for the best matching value
-         * Reference: Climate.java lines 196-201
-         */
-        T search(const TargetPoint& target, const DistanceMetric& distanceMetric) {
-            std::vector<int64_t> targetArray = target.toParameterArray();
-            Leaf* lastResult = getLastResult();
-            Leaf* leaf = m_root->search(targetArray, lastResult, distanceMetric);
-            setLastResult(leaf);
-            return leaf->value;
-        }
-
-        /**
-         * Search using default distance metric
+         * Search for the best matching value.
+         * Reference: Climate.java lines 196-201 (the only metric ever used is
+         * Node::distance, matching Java's (node, targets) -> node.distance).
          */
         T search(const TargetPoint& target) {
-            return search(target, [](const Node* node, const std::vector<int64_t>& t) {
-                return node->distance(t);
-            });
+            const int64_t targetArray[7] = {
+                target.temperature, target.humidity, target.continentalness,
+                target.erosion, target.depth, target.weirdness, 0
+            };
+            Leaf* lastResult = getLastResult();
+            Leaf* leaf = m_root->search(targetArray, lastResult);
+            setLastResult(leaf);
+            return leaf->value;
         }
 
     private:

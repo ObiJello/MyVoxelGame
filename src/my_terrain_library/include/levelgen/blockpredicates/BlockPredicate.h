@@ -319,6 +319,10 @@ protected:
 
 bool matchesBlockTagName(BlockState* state, const std::string& tag);
 
+// Tag values in file order (nested tags expanded in place, deduped) — the
+// order Java's Registry.getRandomElementOf(tag, random) indexes into.
+const std::vector<std::string>& orderedBlockTagValues(const std::string& tag);
+
 //=============================================================================
 // MatchingBlockTagPredicate - Matches blocks by tag
 // Reference: MatchingBlockTagPredicate.java
@@ -365,7 +369,7 @@ protected:
     bool test(BlockState* state) const override {
         if (!state) return false;
 
-        const bool hasWater = state->hasWaterFluid();
+        (void)0;
         const bool hasLava = state->getIdentifier() == "minecraft:lava";
         const bool hasAnyFluid = state->hasAnyFluid();
 
@@ -374,8 +378,8 @@ protected:
             return true;
         }
 
-        // Check for water
-        if (m_fluids.find("minecraft:water") != m_fluids.end() && hasWater) {
+        // Check for water (matching_fluids "minecraft:water" = SOURCE only)
+        if (m_fluids.find("minecraft:water") != m_fluids.end() && state->hasSourceWaterFluid()) {
             return true;
         }
 
@@ -550,9 +554,12 @@ namespace blockpredicates {
 class IChunkWorldGenLevel : public WorldGenLevel {
 private:
     ::world::IChunk* m_chunk;
+    minecraft::XoroshiroRandomSource m_random;
 
 public:
-    explicit IChunkWorldGenLevel(::world::IChunk* chunk) : m_chunk(chunk) {}
+    explicit IChunkWorldGenLevel(::world::IChunk* chunk)
+        : m_chunk(chunk)
+        , m_random(0LL) {}
 
     //=========================================================================
     // Block Access
@@ -673,6 +680,10 @@ public:
         // This is only used for certain features that need the world seed
         // For BlockPredicate testing, seed is not needed
         return 0;
+    }
+
+    minecraft::XoroshiroRandomSource& getRandom() override {
+        return m_random;
     }
 };
 

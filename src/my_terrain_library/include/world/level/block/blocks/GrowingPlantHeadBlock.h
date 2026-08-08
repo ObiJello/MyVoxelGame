@@ -43,9 +43,20 @@ public:
     }
 
 protected:
+    const Block* getHeadBlock() const override {
+        return this;
+    }
+
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();
         builder.add(AGE);
+    }
+
+    virtual BlockState* getGrowIntoState(
+        BlockState* growFromState,
+        minecraft::levelgen::WorldgenRandom& /*random*/
+    ) const {
+        return growFromState ? growFromState->cycle(*AGE) : nullptr;
     }
 
     virtual BlockState* updateBodyAfterConvertedFromHead(

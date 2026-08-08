@@ -62,13 +62,6 @@ bool DensityFunctionRegistry::has(const std::string& name) const {
 
 void DensityFunctionRegistry::clear() {
     for (auto& pair : m_functions) {
-        // Constant::ZERO() is a process-lifetime singleton whose static
-        // accessor caches the pointer. Deleting it here leaves that cache
-        // dangling: the NEXT bootstrap (second world in one process, e.g.
-        // quit-to-title → rejoin) re-registers the freed pointer and the
-        // first router build dereferences it — SIGSEGV. Skip it; it is
-        // reused across bootstraps by design.
-        if (pair.second == zero()) continue;
         delete pair.second;
     }
     m_functions.clear();

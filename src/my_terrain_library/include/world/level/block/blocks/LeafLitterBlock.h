@@ -56,6 +56,16 @@ public:
         return state;
     }
 
+    bool canSurvive(
+        BlockState* /*state*/,
+        const minecraft::levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const override {
+        const core::BlockPos belowPos = pos.below();
+        BlockState* belowState = level.getBlockState(belowPos);
+        return belowState && belowState->isFaceSturdy(level, belowPos, core::Direction::UP);
+    }
+
 protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();

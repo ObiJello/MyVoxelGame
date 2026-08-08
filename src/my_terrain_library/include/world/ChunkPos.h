@@ -185,9 +185,9 @@ public:
     }
 
     static int32_t hash(int32_t x, int32_t z) {
-        int32_t xTransform = HASH_A * x + HASH_C;
-        int32_t zTransform = HASH_A * (z ^ HASH_Z_XOR) + HASH_C;
-        return xTransform ^ zTransform;
+        uint32_t xTransform = static_cast<uint32_t>(HASH_A) * static_cast<uint32_t>(x) + static_cast<uint32_t>(HASH_C);
+        uint32_t zTransform = static_cast<uint32_t>(HASH_A) * static_cast<uint32_t>(z ^ HASH_Z_XOR) + static_cast<uint32_t>(HASH_C);
+        return static_cast<int32_t>(xTransform ^ zTransform);
     }
 
     // Distance calculations (ChunkPos.java lines 180-200)

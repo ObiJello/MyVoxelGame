@@ -20,10 +20,8 @@ namespace levelgen::feature::stateproviders { class BlockStateProvider; }
 
 namespace levelgen {
 namespace feature {
+namespace configurations { class TreeConfiguration; }
 namespace foliageplacers {
-
-// Forward declaration for TreeConfiguration
-class TreeConfiguration;
 
 /**
  * FoliageSetter - Interface for setting foliage blocks
@@ -35,13 +33,13 @@ public:
 
     virtual void set(const core::BlockPos& pos, BlockState* blockState) = 0;
     virtual bool isSet(const core::BlockPos& pos) const = 0;
+    virtual BlockState* getBlockState(const core::BlockPos& pos) const = 0;
 
     /**
-     * Check if a leaf can be placed at the given position
-     * Reference: FoliagePlacer.java tryPlaceLeaf() calls validTreePos() before placing
-     * Default returns true for backward compatibility
+     * Check if a leaf can be placed at the given position.
+     * Reference: FoliagePlacer.java tryPlaceLeaf() calls validTreePos() before placing.
      */
-    virtual bool canPlace(const core::BlockPos& pos) const { return true; }
+    virtual bool canPlace(const core::BlockPos& pos) const = 0;
 };
 
 /**
@@ -107,7 +105,11 @@ public:
      * Get foliage height
      * Reference: FoliagePlacer.java line 40
      */
-    virtual int foliageHeight(WorldgenRandom& random, int treeHeight) const = 0;
+    virtual int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const = 0;
 
     /**
      * Get foliage radius
@@ -215,7 +217,11 @@ public:
         , m_height(height)
     {}
 
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_height;
     }
 
@@ -261,7 +267,11 @@ public:
         , m_trunkHeight(trunkHeight)
     {}
 
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return std::max(4, treeHeight - m_trunkHeight->sample(random));
     }
 
@@ -305,7 +315,11 @@ public:
         , m_height(height)
     {}
 
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_height->sample(random);
     }
 
@@ -329,7 +343,11 @@ protected:
         int currentRadius,
         bool doubleTrunk
     ) const override {
-        return dx == currentRadius && dz == currentRadius && random.nextInt(2) == 0;
+        // Java PineFoliagePlacer: deterministic corner skip, NO rng draw.
+        (void)random;
+        (void)y;
+        (void)doubleTrunk;
+        return dx == currentRadius && dz == currentRadius && currentRadius > 0;
     }
 };
 
@@ -346,35 +364,6 @@ public:
     )
         : BlobFoliagePlacer(radius, offset, height)
     {}
-
-protected:
-    bool shouldSkipLocation(
-        WorldgenRandom& random,
-        int dx, int y, int dz,
-        int currentRadius,
-        bool doubleTrunk
-    ) const override {
-        // More rounded shape
-        return dx * dx + dz * dz > currentRadius * currentRadius;
-    }
-};
-
-/**
- * AcaciaFoliagePlacer - Flat acacia-style foliage
- * Reference: AcaciaFoliagePlacer.java
- */
-class AcaciaFoliagePlacer : public FoliagePlacer {
-public:
-    AcaciaFoliagePlacer(
-        std::shared_ptr<carver::IntProvider> radius,
-        std::shared_ptr<carver::IntProvider> offset
-    )
-        : FoliagePlacer(radius, offset)
-    {}
-
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
-        return 0;
-    }
 
 protected:
     void createFoliageImpl(
@@ -394,10 +383,60 @@ protected:
         int currentRadius,
         bool doubleTrunk
     ) const override {
-        if (dx == 0 && dz == 0) {
-            return false;
+        (void)random;
+        (void)y;
+        (void)doubleTrunk;
+        float fx = static_cast<float>(dx) + 0.5f;
+        float fz = static_cast<float>(dz) + 0.5f;
+        return fx * fx + fz * fz > static_cast<float>(currentRadius * currentRadius);
+    }
+};
+
+/**
+ * AcaciaFoliagePlacer - Flat acacia-style foliage
+ * Reference: AcaciaFoliagePlacer.java
+ */
+class AcaciaFoliagePlacer : public FoliagePlacer {
+public:
+    AcaciaFoliagePlacer(
+        std::shared_ptr<carver::IntProvider> radius,
+        std::shared_ptr<carver::IntProvider> offset
+    )
+        : FoliagePlacer(radius, offset)
+    {}
+
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
+        return 0;
+    }
+
+protected:
+    void createFoliageImpl(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        int treeHeight,
+        const FoliageAttachment& attachment,
+        int foliageHeight,
+        int leafRadius,
+        int offset
+    ) override;
+
+    bool shouldSkipLocation(
+        WorldgenRandom& /*random*/,
+        int dx, int y, int dz,
+        int currentRadius,
+        bool /*doubleTrunk*/
+    ) const override {
+        // Reference: AcaciaFoliagePlacer.java shouldSkipLocation() - fully
+        // deterministic, no RNG draws.
+        if (y == 0) {
+            return (dx > 1 || dz > 1) && dx != 0 && dz != 0;
         }
-        return (dx == currentRadius || dz == currentRadius) && random.nextInt(2) == 0;
+        return dx == currentRadius && dz == currentRadius && currentRadius > 0;
     }
 };
 
@@ -416,14 +455,34 @@ public:
     {}
 
 protected:
+    // Reference: BushFoliagePlacer.createFoliage - rows from offset downward,
+    // radius = leafRadius + radiusOffset - 1 - yo (grows toward the ground).
+    void createFoliageImpl(
+        FoliageSetter& foliageSetter,
+        WorldgenRandom& random,
+        std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+        int treeHeight,
+        const FoliageAttachment& attachment,
+        int foliageHeight,
+        int leafRadius,
+        int offset
+    ) override {
+        for (int yo = offset; yo >= offset - foliageHeight; --yo) {
+            int currentRadius = leafRadius + attachment.radiusOffset() - 1 - yo;
+            placeLeavesRow(foliageSetter, random, foliageProvider,
+                           attachment.pos(), currentRadius, yo, attachment.doubleTrunk());
+        }
+    }
+
     bool shouldSkipLocation(
         WorldgenRandom& random,
         int dx, int y, int dz,
         int currentRadius,
         bool doubleTrunk
     ) const override {
-        // More blocky
-        return false;
+        // Reference: BushFoliagePlacer.shouldSkipLocation - short-circuit
+        // order matters: the nextInt(2) draw only happens at corners.
+        return dx == currentRadius && dz == currentRadius && random.nextInt(2) == 0;
     }
 };
 
@@ -440,7 +499,11 @@ public:
         : FoliagePlacer(radius, offset)
     {}
 
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return 4;
     }
 
@@ -489,7 +552,11 @@ public:
         , m_height(height)
     {}
 
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_height;
     }
 
@@ -511,7 +578,11 @@ protected:
         int currentRadius,
         bool doubleTrunk
     ) const override {
-        return dx + dz >= 7;
+        // Reference: MegaJungleFoliagePlacer.shouldSkipLocation - circular crown
+        if (dx + dz >= 7) {
+            return true;
+        }
+        return dx * dx + dz * dz > currentRadius * currentRadius;
     }
 };
 
@@ -536,7 +607,11 @@ public:
     /**
      * Reference: MegaPineFoliagePlacer.java foliageHeight() lines 45-47
      */
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_crownHeight->sample(random);
     }
 
@@ -595,7 +670,11 @@ public:
     /**
      * Reference: RandomSpreadFoliagePlacer.java foliageHeight() lines 38-40
      */
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_foliageHeight->sample(random);
     }
 
@@ -660,7 +739,11 @@ public:
     /**
      * Reference: CherryFoliagePlacer.java foliageHeight() lines 48-50
      */
-    int foliageHeight(WorldgenRandom& random, int treeHeight) const override {
+    int foliageHeight(
+        WorldgenRandom& random,
+        int treeHeight,
+        const configurations::TreeConfiguration& config
+    ) const override {
         return m_height->sample(random);
     }
 

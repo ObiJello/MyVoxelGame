@@ -51,6 +51,7 @@ using levelgen::feature::treedecorators::CocoaDecorator;
 using levelgen::feature::treedecorators::AttachedToLogsDecorator;
 using levelgen::feature::treedecorators::AlterGroundDecorator;
 using levelgen::feature::treedecorators::PaleMossDecorator;
+using levelgen::feature::treedecorators::CreakingHeartDecorator;
 using levelgen::feature::treedecorators::LeaveVineDecorator;
 using levelgen::feature::treedecorators::AttachedToLeavesDecorator;
 using levelgen::feature::treedecorators::BeehiveDecorator;
@@ -312,7 +313,7 @@ TreeConfigurationBuilder TreeFeatures::cherry() {
         constantInt(0),    // offset
         constantInt(5),    // height
         0.25f,             // wideBottomLayerHoleChance
-        0.5f,              // cornerHoleChance
+        0.25f,             // cornerHoleChance (cherry.json corner_hole_chance)
         0.16666667f,       // hangingLeavesChance
         0.33333334f        // hangingLeavesExtensionChance
     );
@@ -535,6 +536,48 @@ void TreeFeatures::bootstrap() {
         auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
             s_treeFeature.get(), *config);
         PALE_OAK = feature.get();
+        s_configs.push_back(std::move(config));
+        s_features.push_back(std::move(feature));
+    }
+
+    // PALE_OAK_CREAKING
+    // Reference: TreeFeatures.java line 193
+    // Same pale oak tree, but with CreakingHeartDecorator(1.0F) added.
+    {
+        auto trunkProvider = BlockStateProvider::simple("minecraft:pale_oak_log");
+        auto foliageProvider = BlockStateProvider::simple("minecraft:pale_oak_leaves");
+        s_providers.push_back(trunkProvider);
+        s_providers.push_back(foliageProvider);
+
+        auto trunkPlacer = std::make_shared<DarkOakTrunkPlacer>(6, 2, 1);
+        s_trunkPlacers.push_back(trunkPlacer);
+
+        auto foliagePlacer = std::make_shared<DarkOakFoliagePlacer>(
+            constantInt(0),
+            constantInt(0)
+        );
+        s_foliagePlacers.push_back(foliagePlacer);
+
+        auto featureSize = std::make_shared<ThreeLayersFeatureSize>(1, 1, 0, 1, 2, std::nullopt);
+        s_featureSizes.push_back(featureSize);
+
+        auto paleMossDecorator = std::make_shared<PaleMossDecorator>(0.15f, 0.4f, 0.8f);
+        auto creakingHeartDecorator = std::make_shared<CreakingHeartDecorator>(1.0f);
+        s_decorators.push_back(paleMossDecorator);
+        s_decorators.push_back(creakingHeartDecorator);
+
+        auto config = std::make_unique<TreeConfiguration>(
+            TreeConfigurationBuilder(
+                trunkProvider,
+                trunkPlacer,
+                foliageProvider,
+                foliagePlacer,
+                featureSize
+            ).decorators({paleMossDecorator, creakingHeartDecorator}).ignoreVines().build()
+        );
+        auto feature = std::make_unique<ConfiguredFeatureImpl<TreeConfiguration, TreeFeature>>(
+            s_treeFeature.get(), *config);
+        PALE_OAK_CREAKING = feature.get();
         s_configs.push_back(std::move(config));
         s_features.push_back(std::move(feature));
     }
@@ -997,21 +1040,21 @@ void TreeFeatures::bootstrap() {
     // =========================================================================
 
     // Create leaf litter block states for WeightedStateProvider
-    // Java's leafLitterPatchBuilder creates states with SEGMENT_AMOUNT (1-4) and FACING (N/S/E/W)
+    // Java's leafLitterPatchBuilder creates states with SEGMENT_AMOUNT (1-4) and FACING (N/E/S/W)
     // Each state has weight 1, so sparse (1-3) = 12 states, thick (1-4) = 16 states
     // CRITICAL: WeightedStateProvider calls nextInt(totalWeight) per getState() call!
     auto leafLitter = minecraft::world::level::block::Blocks::LEAF_LITTER;
 
-    // Directions in Java's Plane.HORIZONTAL order: NORTH, SOUTH, WEST, EAST
+    // Direction.Plane.HORIZONTAL iteration order: NORTH, EAST, SOUTH, WEST
     std::vector<core::Direction> horizontalDirs = {
         core::Direction::NORTH,
+        core::Direction::EAST,
         core::Direction::SOUTH,
-        core::Direction::WEST,
-        core::Direction::EAST
+        core::Direction::WEST
     };
 
     // Build sparse leaf litter states (amounts 1-3, 4 directions = 12 states, totalWeight=12)
-    // Java order: for amount in [min..max]: for dir in [NORTH, SOUTH, WEST, EAST]
+    // Java order: for amount in [min..max]: for dir in [NORTH, EAST, SOUTH, WEST]
     std::vector<WeightedStateEntry> sparseLeafLitterStates;
     for (int amount = 1; amount <= 3; ++amount) {
         for (auto dir : horizontalDirs) {
@@ -1238,7 +1281,7 @@ void TreeFeatures::bootstrap() {
         auto config = std::make_unique<FallenTreeConfiguration>(
             birchLogProvider,
             logLength,
-            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{trunkVineDecorator},
+            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{},
             std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{attachedToLogsDecorator}
         );
 
@@ -1378,12 +1421,12 @@ void TreeFeatures::bootstrap() {
         );
         s_providers.push_back(birchLogProvider);
 
-        auto logLength = std::make_shared<util::UniformInt>(6, 10);
+        auto logLength = std::make_shared<util::UniformInt>(5, 15);
 
         auto config = std::make_unique<FallenTreeConfiguration>(
             birchLogProvider,
             logLength,
-            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{trunkVineDecorator},
+            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{},
             std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{attachedToLogsDecorator}
         );
 
@@ -1401,12 +1444,12 @@ void TreeFeatures::bootstrap() {
         );
         s_providers.push_back(spruceLogProvider);
 
-        auto logLength = std::make_shared<util::UniformInt>(4, 8);
+        auto logLength = std::make_shared<util::UniformInt>(6, 10);
 
         auto config = std::make_unique<FallenTreeConfiguration>(
             spruceLogProvider,
             logLength,
-            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{trunkVineDecorator},
+            std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{},
             std::vector<std::shared_ptr<treedecorators::TreeDecorator>>{attachedToLogsDecorator}
         );
 
@@ -1424,7 +1467,7 @@ void TreeFeatures::bootstrap() {
         );
         s_providers.push_back(jungleLogProvider);
 
-        auto logLength = std::make_shared<util::UniformInt>(5, 9);
+        auto logLength = std::make_shared<util::UniformInt>(4, 11);
 
         auto config = std::make_unique<FallenTreeConfiguration>(
             jungleLogProvider,

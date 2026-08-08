@@ -457,10 +457,10 @@ void CavePlacements::bootstrap() {
     {
         s_countPlacements.push_back(CountPlacement::of(10));
 
-        // HeightRangePlacement: Y=0 to top (256)
+        // Vanilla: uniform(absolute(0), belowTop(0)) - top resolves to 319.
         s_uniformHeights.push_back(UniformHeight(
             VerticalAnchor::absolute(0),
-            VerticalAnchor::absolute(256)
+            VerticalAnchor::top()
         ));
         s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
 
@@ -510,9 +510,10 @@ void CavePlacements::bootstrap() {
     {
         s_rarityFilters.push_back(RarityFilter::onAverageOnceEvery(64));
 
+        // Vanilla: uniform(absolute(0), belowTop(0)) - top resolves to 319.
         s_uniformHeights.push_back(UniformHeight(
             VerticalAnchor::absolute(0),
-            VerticalAnchor::absolute(256)
+            VerticalAnchor::top()
         ));
         s_heightPlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
 

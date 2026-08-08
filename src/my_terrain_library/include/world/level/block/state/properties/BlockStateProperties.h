@@ -22,6 +22,7 @@
 #include "BambooLeaves.h"
 #include "Tilt.h"
 #include "DripstoneThickness.h"
+#include "CreakingHeartState.h"
 #include "SculkSensorPhase.h"
 #include "StructureMode.h"
 #include <memory>
@@ -134,6 +135,7 @@ public:
     static EnumProperty<BambooLeaves>* BAMBOO_LEAVES;
     static EnumProperty<Tilt>* TILT;
     static EnumProperty<DripstoneThickness>* DRIPSTONE_THICKNESS;
+    static EnumProperty<CreakingHeartState>* CREAKING_HEART_STATE;
     static EnumProperty<SculkSensorPhase>* SCULK_SENSOR_PHASE;
     static EnumProperty<StructureMode>* STRUCTUREBLOCK_MODE;
     static EnumProperty<BellAttachType>* BELL_ATTACHMENT;

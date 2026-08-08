@@ -12,11 +12,14 @@
  */
 
 #include "core/BlockPos.h"
+#include "random/XoroshiroRandomSource.h"
 #include "world/ChunkPos.h"
 #include "world/IChunk.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/biome/Biome.h"
 #include "levelgen/Heightmap.h"
+#include "levelgen/WorldgenRandom.h"
+#include <cstdio>
 #include <functional>
 #include <cstdint>
 
@@ -46,7 +49,13 @@ public:
 
     virtual bool isEmptyBlock(const core::BlockPos& pos) const {
         BlockState* state = getBlockState(pos);
-        return state && state->isAir();
+        bool result = state && state->isAir();
+        // Parity-debug: mirrors the Java harness's WorldGenLevel proxy logging.
+        if (std::FILE* trace = WorldgenRandom::s_rngTraceFile) {
+            std::fprintf(trace, "CALL isEmptyBlock %d,%d,%d=%s\n",
+                         pos.getX(), pos.getY(), pos.getZ(), result ? "true" : "false");
+        }
+        return result;
     }
 
     /**
@@ -145,6 +154,12 @@ public:
      * Reference: WorldGenLevel.getSeed()
      */
     virtual int64_t getSeed() const = 0;
+
+    /**
+     * Get the level random source.
+     * Reference: LevelAccessor.getRandom()
+     */
+    virtual minecraft::XoroshiroRandomSource& getRandom() = 0;
 
     /**
      * Check if position can be written to

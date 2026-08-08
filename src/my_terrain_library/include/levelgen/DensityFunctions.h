@@ -117,7 +117,7 @@ public:
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 486: visitor.apply(new Noise(visitor.visitNoise(this.noise), ...))
         DensityFunction::NoiseHolder* visitedNoise = visitor.visitNoise(m_noise);
-        return visitor.apply(new Noise(visitedNoise, m_xzScale, m_yScale));
+        return visitor.apply(visitor.own(new Noise(visitedNoise, m_xzScale, m_yScale)));
     }
 
     double minValue() const override {
@@ -175,14 +175,14 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 637
-        return visitor.apply(new ShiftedNoise(
+        return visitor.apply(visitor.own(new ShiftedNoise(
             m_shiftX->mapAll(visitor),
             m_shiftY->mapAll(visitor),
             m_shiftZ->mapAll(visitor),
             m_xzScale,
             m_yScale,
             visitor.visitNoise(m_noise)
-        ));
+        )));
     }
 
     double minValue() const override {
@@ -345,7 +345,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 789
-        return visitor.apply(new BlendDensity(m_input->mapAll(visitor)));
+        return visitor.apply(visitor.own(new BlendDensity(m_input->mapAll(visitor))));
     }
 
     double minValue() const override {
@@ -395,7 +395,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 814: new Clamp(this.input.mapAll(visitor), this.minValue, this.maxValue)
-        return new Clamp(m_input->mapAll(visitor), m_minValue, m_maxValue);
+        return visitor.own(new Clamp(m_input->mapAll(visitor), m_minValue, m_maxValue));
     }
 
     double minValue() const override { return m_minValue; }
@@ -477,7 +477,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 876: create(this.type, this.input.mapAll(visitor))
-        return create(m_type, m_input->mapAll(visitor));
+        return visitor.own(create(m_type, m_input->mapAll(visitor)));
     }
 
     double minValue() const override { return m_minValue; }
@@ -573,7 +573,7 @@ public:
             maxValue = min * m_argument;
         }
 
-        return new MulOrAdd(m_specificType, function, minValue, maxValue, m_argument);
+        return visitor.own(new MulOrAdd(m_specificType, function, minValue, maxValue, m_argument));
     }
 
     double minValue() const override { return m_minValue; }
@@ -651,12 +651,15 @@ public:
 
         switch (m_type) {
             case TwoArgType::ADD: {  // case 0
-                double* v2 = new double[count];
+                // Reusable scratch (kept across calls) instead of a heap
+                // new[]/delete[] per fill. Safe: instances are per-chunk and a
+                // node never re-enters its own fillArray (the tree is acyclic).
+                m_addScratch.resize(count);
+                double* v2 = m_addScratch.data();
                 m_argument2->fillArray(v2, count, contextProvider);
                 for (int32_t i = 0; i < count; ++i) {
                     output[i] += v2[i];
                 }
-                delete[] v2;
                 break;
             }
 
@@ -690,7 +693,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java lines 1100-1102: create(this.type, this.argument1.mapAll(visitor), this.argument2.mapAll(visitor))
-        return createTwoArgumentFunction(m_type, m_argument1->mapAll(visitor), m_argument2->mapAll(visitor));
+        return visitor.own(createTwoArgumentFunction(m_type, m_argument1->mapAll(visitor), m_argument2->mapAll(visitor)));
     }
 
     double minValue() const override { return m_minValue; }
@@ -701,6 +704,7 @@ public:
     DensityFunction* argument2() const { return m_argument2; }
 
 private:
+    mutable std::vector<double> m_addScratch;
     TwoArgType m_type;
     DensityFunction* m_argument1;
     DensityFunction* m_argument2;
@@ -742,7 +746,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // YClampedGradient has no sub-functions, so just return copy
-        return visitor.apply(new YClampedGradient(m_fromY, m_toY, m_fromValue, m_toValue));
+        return visitor.apply(visitor.own(new YClampedGradient(m_fromY, m_toY, m_fromValue, m_toValue)));
     }
 
     double minValue() const override {
@@ -799,7 +803,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 728-729: visitor.apply(new ShiftA(visitor.visitNoise(this.offsetNoise)))
-        return visitor.apply(new ShiftA(visitor.visitNoise(m_offsetNoise)));
+        return visitor.apply(visitor.own(new ShiftA(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -854,7 +858,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 748-749: visitor.apply(new ShiftB(visitor.visitNoise(this.offsetNoise)))
-        return visitor.apply(new ShiftB(visitor.visitNoise(m_offsetNoise)));
+        return visitor.apply(visitor.own(new ShiftB(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -906,7 +910,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 768-769: visitor.apply(new Shift(visitor.visitNoise(this.offsetNoise)))
-        return visitor.apply(new Shift(visitor.visitNoise(m_offsetNoise)));
+        return visitor.apply(visitor.own(new Shift(visitor.visitNoise(m_offsetNoise))));
     }
 
     double minValue() const override {
@@ -978,7 +982,7 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 420-422
-        return visitor.apply(createMarker(type(), wrapped()->mapAll(visitor)));
+        return visitor.apply(visitor.own(createMarker(type(), wrapped()->mapAll(visitor))));
     }
 
 private:
@@ -1114,7 +1118,7 @@ public:
 
         Coordinate* mapAll(DensityFunction::Visitor& visitor) {
             // Java line 1179-1181
-            return new Coordinate(m_function->mapAll(visitor));
+            return visitor.ownObject(new Coordinate(m_function->mapAll(visitor)));
         }
 
         DensityFunction* function() const { return m_function; }
@@ -1153,7 +1157,9 @@ public:
         // Java line 1126-1128
         // return visitor.apply(new Spline(this.spline.mapAll((c) -> c.mapAll(visitor))))
 
-        // Create a CoordinateVisitor that wraps each Coordinate by calling mapAll(visitor)
+        // Create a CoordinateVisitor that wraps each Coordinate by calling
+        // mapAll(visitor) and forwards spline-node ownership to the density
+        // visitor's sink (mapped spline trees are per-mapAll allocations).
         class SplineCoordinateVisitor : public SplineType::CoordinateVisitor {
         private:
             Visitor& m_dfVisitor;
@@ -1162,11 +1168,14 @@ public:
             Coordinate* visit(Coordinate* c) override {
                 return c->mapAll(m_dfVisitor);
             }
+            SplineType* own(SplineType* node) override {
+                return m_dfVisitor.ownObject(node);
+            }
         };
 
         SplineCoordinateVisitor coordVisitor(visitor);
         SplineType* mappedSpline = m_spline->mapAll(coordVisitor);
-        return visitor.apply(new Spline(mappedSpline));
+        return visitor.apply(visitor.own(new Spline(mappedSpline)));
     }
 
     SplineType* spline() const { return m_spline; }
@@ -1226,13 +1235,13 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 680-682
-        return visitor.apply(new RangeChoice(
+        return visitor.apply(visitor.own(new RangeChoice(
             m_input->mapAll(visitor),
             m_minInclusive,
             m_maxExclusive,
             m_whenInRange->mapAll(visitor),
             m_whenOutOfRange->mapAll(visitor)
-        ));
+        )));
     }
 
     double minValue() const override {
@@ -1532,11 +1541,11 @@ public:
     }
 
     DensityFunction* mapAll(Visitor& visitor) override {
-        return visitor.apply(new WeirdScaledSampler(
+        return visitor.apply(visitor.own(new WeirdScaledSampler(
             m_input->mapAll(visitor),
             visitor.visitNoise(m_noise),
             m_mapper
-        ));
+        )));
     }
 
     // Java line 579-580
@@ -1665,7 +1674,7 @@ public:
     DensityFunction* mapAll(Visitor& visitor) override {
         // EndIslandDensityFunction has no sub-functions to map
         // Return a copy wrapped by visitor
-        return visitor.apply(new EndIslandDensityFunction(0L));
+        return visitor.apply(visitor.own(new EndIslandDensityFunction(0L)));
     }
 
     double minValue() const override {
@@ -1737,12 +1746,12 @@ public:
 
     DensityFunction* mapAll(Visitor& visitor) override {
         // Java line 1270-1272
-        return visitor.apply(new FindTopSurface(
+        return visitor.apply(visitor.own(new FindTopSurface(
             m_density->mapAll(visitor),
             m_upperBound->mapAll(visitor),
             m_lowerBound,
             m_cellHeight
-        ));
+        )));
     }
 
     double minValue() const override {

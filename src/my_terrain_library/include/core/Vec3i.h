@@ -41,15 +41,19 @@ public:
     }
 
     // Comparison for use in sorted containers (std::set, std::map)
+    // Match Vec3i.compareTo(): y, then z, then x.
     bool operator<(const Vec3i& other) const {
-        if (m_x != other.m_x) return m_x < other.m_x;
         if (m_y != other.m_y) return m_y < other.m_y;
-        return m_z < other.m_z;
+        if (m_z != other.m_z) return m_z < other.m_z;
+        return m_x < other.m_x;
     }
 
     // Hash code (Vec3i.java lines 45-47)
     int32_t hashCode() const {
-        return (m_y + m_z * 31) * 31 + m_x;
+        uint32_t hash = static_cast<uint32_t>(m_z);
+        hash = hash * 31u + static_cast<uint32_t>(m_y);
+        hash = hash * 31u + static_cast<uint32_t>(m_x);
+        return static_cast<int32_t>(hash);
     }
 
     // Distance squared (Vec3i.java lines 104-107)

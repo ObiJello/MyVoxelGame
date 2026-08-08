@@ -3,6 +3,7 @@
 #include "core/BlockPos.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/chunk/status/ChunkDependencies.h"
+#include "levelgen/WorldgenRandom.h"
 #include <stdexcept>
 #include <locale>
 #include <sstream>
@@ -18,6 +19,7 @@ using namespace world::chunk::status;
 // Reference: WorldGenRegion.java lines 84-94
 WorldGenRegion::WorldGenRegion(
     ServerLevel& level,
+    minecraft::levelgen::RandomState* randomState,
     util::StaticCache2D<GenerationChunkHolder*>& cache,
     const ChunkStep& generatingStep,
     ChunkAccess& center)
@@ -26,8 +28,15 @@ WorldGenRegion::WorldGenRegion(
     , m_center(center)
     , m_generatingStep(generatingStep)
     , m_seed(level.getSeed())
+    , m_random(0LL)
     , m_currentlyGenerating(nullptr)
 {
+    if (randomState != nullptr) {
+        random::PositionalRandomFactory* randomFactory =
+            randomState->getOrCreateRandomFactory("minecraft:worldgen_region_random");
+        const core::BlockPos worldPosition = m_center.getPos().getWorldPosition();
+        m_random = randomFactory->at(worldPosition.getX(), worldPosition.getY(), worldPosition.getZ());
+    }
 }
 
 // Reference: WorldGenRegion.java lines 100-102
@@ -140,6 +149,22 @@ bool WorldGenRegion::setBlock(
     int updateFlags,
     int /*updateLimit*/)
 {
+    // Parity-debug: chronological write log interleaved with the RNG trace
+    // (see WorldgenRandom::s_rngTraceFile). Mirrors the Java harness's
+    // setBlock proxy so the streams diff line-by-line.
+    if (std::FILE* trace = minecraft::levelgen::WorldgenRandom::s_rngTraceFile) {
+        BlockState* before = nullptr;
+        try {
+            before = getBlockState(pos);
+        } catch (...) {
+        }
+        std::fprintf(trace, "SET %d,%d,%d %s -> %s flags=%d\n",
+                     pos.getX(), pos.getY(), pos.getZ(),
+                     before ? before->toStateString().c_str() : "null",
+                     blockState ? blockState->toStateString().c_str() : "null",
+                     updateFlags);
+    }
+
     if (!ensureCanWrite(pos)) {
         return false;
     }
@@ -182,6 +207,10 @@ BlockState* WorldGenRegion::getBlockState(const core::BlockPos& pos) const {
 // Reference: WorldGenRegion.java lines 346-348
 int64_t WorldGenRegion::getSeed() const {
     return m_seed;
+}
+
+minecraft::XoroshiroRandomSource& WorldGenRegion::getRandom() {
+    return m_random;
 }
 
 // Reference: WorldGenRegion.java lines 406-408

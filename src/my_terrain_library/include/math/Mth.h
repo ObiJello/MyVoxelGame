@@ -47,89 +47,134 @@ public:
      * CRITICAL: This is deprecated in Java but still used throughout the codebase
      * for positional randomness in world generation.
      */
-    static int64_t getSeed(int32_t x, int32_t y, int32_t z);
+    static inline int64_t getSeed(int32_t x, int32_t y, int32_t z) {
+        int64_t seed = static_cast<int64_t>(x * 3129871) ^
+                       static_cast<int64_t>(z) * 116129781LL ^
+                       static_cast<int64_t>(y);
+        seed = seed * seed * 42317861LL + seed * 11LL;
+        return seed >> 16;
+    }
 
     /**
      * Floor function - returns largest integer <= x
      * Reference: Mth.java floor methods
      */
-    static int32_t floor(double x);
+    static inline int32_t floor(double x) {
+        int32_t i = static_cast<int32_t>(x);
+        return x < i ? i - 1 : i;
+    }
 
     /**
      * Long floor function - returns largest long <= x
      * Reference: Mth.java lines 71-74
      */
-    static int64_t lfloor(double x);
+    static inline int64_t lfloor(double x) {
+        int64_t i = static_cast<int64_t>(x);
+        return x < static_cast<double>(i) ? i - 1L : i;
+    }
 
     /**
      * Linear interpolation between two values
      * Reference: Mth.java line 557-558
      */
-    static double lerp(double alpha, double p0, double p1);
+    static inline double lerp(double alpha, double p0, double p1) {
+        return p0 + alpha * (p1 - p0);
+    }
 
     /**
      * Clamped linear interpolation - clamps factor to [0, 1]
      * Reference: Mth.java lines 115-121
      */
-    static double clampedLerp(double factor, double min, double max);
+    static inline double clampedLerp(double factor, double min, double max) {
+        if (factor < 0.0) {
+            return min;
+        }
+        return factor > 1.0 ? max : lerp(factor, min, max);
+    }
 
     /**
      * Bilinear interpolation (2D)
      * Reference: Mth.java line 560-562
      */
-    static double lerp2(double alpha1, double alpha2, double x00, double x10, double x01, double x11);
+    static inline double lerp2(double alpha1, double alpha2, double x00, double x10, double x01, double x11) {
+        return lerp(alpha2, lerp(alpha1, x00, x10), lerp(alpha1, x01, x11));
+    }
 
     /**
      * Trilinear interpolation (3D)
      * Reference: Mth.java line 564-566
      */
-    static double lerp3(double alpha1, double alpha2, double alpha3,
-                        double x000, double x100, double x010, double x110,
-                        double x001, double x101, double x011, double x111);
+    static inline double lerp3(double alpha1, double alpha2, double alpha3,
+                               double x000, double x100, double x010, double x110,
+                               double x001, double x101, double x011, double x111) {
+        return lerp(alpha3,
+                    lerp2(alpha1, alpha2, x000, x100, x010, x110),
+                    lerp2(alpha1, alpha2, x001, x101, x011, x111));
+    }
 
     /**
      * Smoothstep function - smooth interpolation curve
      * Reference: Mth.java line 572-574
      * Formula: x^3 * (x * (6x - 15) + 10)
      */
-    static double smoothstep(double x);
+    static inline double smoothstep(double x) {
+        return x * x * x * (x * (x * static_cast<double>(6.0F) - static_cast<double>(15.0F)) + static_cast<double>(10.0F));
+    }
 
     /**
      * Derivative of smoothstep function
      * Reference: Mth.java line 576-578
      * Formula: 30 * x^2 * (x - 1)^2
      */
-    static double smoothstepDerivative(double x);
+    static inline double smoothstepDerivative(double x) {
+        return static_cast<double>(30.0F) * x * x * (x - static_cast<double>(1.0F)) * (x - static_cast<double>(1.0F));
+    }
 
     /**
      * Clamp a value between min and max
      * Reference: Mth.java line 18
      */
-    static double clamp(double value, double min, double max);
+    static inline double clamp(double value, double min, double max) {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
 
     /**
      * Clamp an integer value between min and max
      * Reference: Mth.java line 22
      */
-    static int32_t clamp(int32_t value, int32_t min, int32_t max);
+    static inline int32_t clamp(int32_t value, int32_t min, int32_t max) {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
 
     /**
      * Clamp a float value between min and max
      * Reference: Mth.java line 20
      */
-    static float clamp(float value, float min, float max);
+    static inline float clamp(float value, float min, float max) {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
 
     /**
      * Map a value from [srcMin, srcMax] to [dstMin, dstMax] (without clamping)
      * Reference: Mth.java line 127
      */
-    static double map(double value, double srcMin, double srcMax, double dstMin, double dstMax);
+    static inline double map(double value, double srcMin, double srcMax, double dstMin, double dstMax) {
+        return (value - srcMin) / (srcMax - srcMin) * (dstMax - dstMin) + dstMin;
+    }
 
     /**
      * Clamp and map a value from [srcMin, srcMax] to [dstMin, dstMax]
      * Reference: Mth.java line 123
      */
-    static double clampedMap(double value, double srcMin, double srcMax, double dstMin, double dstMax);
+    static inline double clampedMap(double value, double srcMin, double srcMax, double dstMin, double dstMax) {
+        return clamp((value - srcMin) / (srcMax - srcMin), 0.0, 1.0) * (dstMax - dstMin) + dstMin;
+    }
 
     // Float overloads matching Java's Mth float methods.
     // CRITICAL: Java has separate float implementations that compute entirely
@@ -158,7 +203,13 @@ public:
      * Reference: Java's Math.floorDiv
      * Returns the largest integer less than or equal to the algebraic quotient
      */
-    static int32_t floorDiv(int32_t x, int32_t y);
+    static inline int32_t floorDiv(int32_t x, int32_t y) {
+        int32_t quotient = x / y;
+        if ((x ^ y) < 0 && (quotient * y != x)) {
+            quotient--;
+        }
+        return quotient;
+    }
 
     /**
      * Floor modulus (Java's Math.floorMod)
@@ -237,7 +288,9 @@ public:
      * Calculate squared length (magnitude squared) of a 3D vector
      * Reference: Mth.java lengthSquared method
      */
-    static double lengthSquared(double x, double y, double z);
+    static inline double lengthSquared(double x, double y, double z) {
+        return x * x + y * y + z * z;
+    }
 
     /**
      * Generate a random integer between min and maxInclusive (inclusive)

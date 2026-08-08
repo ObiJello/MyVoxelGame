@@ -149,7 +149,10 @@ private:
 
     // Biome storage - 4x4x4 biomes per section (quart resolution)
     // Reference: LevelChunkSection.java biomes field
-    std::array<biome::BiomeKey, BIOMES_PER_SECTION> m_biomes;
+    // Stored as interned Biome* (registry singletons) instead of key strings:
+    // 8 bytes/entry vs a heap string, and biome queries skip the registry
+    // hash lookup. nullptr = unfilled (mirrors the old empty-string default).
+    std::array<biome::BiomeHolder, BIOMES_PER_SECTION> m_biomes{};
 
     // Reference counting for BulkSectionAccess
     // Reference: LevelChunkSection.java refCount field
@@ -200,11 +203,30 @@ public:
      * @return Previous block state
      */
     BlockState* setBlockState(int32_t x, int32_t y, int32_t z, BlockState* state, bool checkThreading = true) {
-        BlockState* previous;
-        if (checkThreading) {
-            previous = m_states.getAndSet(x, y, z, state);
-        } else {
-            previous = m_states.getAndSetUnchecked(x, y, z, state);
+        // Java's PalettedContainer does NOT lock per write; the pipeline's
+        // structure guarantees single-writer per chunk (parallel phases write
+        // only their own chunk; cross-chunk writes happen only inside the
+        // serialized FEATURES phase). The old per-block mutex burned ~100k
+        // lock/unlock per chunk in terrain fill for protection Java never
+        // needed. checkThreading is kept for signature compatibility.
+        (void)checkThreading;
+        BlockState* previous = m_states.getAndSetUnchecked(x, y, z, state);
+
+        // Parity-debug: MC_SECTION_WATCH="x,y,z" (local coords not known here,
+        // so match by section-local x/z and the low nibble of y) logs every
+        // raw section write, catching writers that bypass level wrappers.
+        {
+            static const char* s_watch = std::getenv("MC_SECTION_WATCH");
+            if (s_watch) {
+                int wx, wy, wz;
+                if (std::sscanf(s_watch, "%d,%d,%d", &wx, &wy, &wz) == 3 &&
+                    (wx & 15) == x && (wy & 15) == y && (wz & 15) == z) {
+                    std::fprintf(stderr, "SECTIONWATCH this=%p local(%d,%d,%d) %s -> %s\n",
+                                 static_cast<void*>(this), x, y, z,
+                                 previous ? previous->getIdentifier().c_str() : "null",
+                                 state ? state->getIdentifier().c_str() : "null");
+                }
+            }
         }
 
         // Update counters
@@ -338,7 +360,7 @@ public:
      * @param quartZ Local quart Z (0-3)
      * @return BiomeKey at this position
      */
-    biome::BiomeKey getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const {
+    biome::BiomeHolder getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const {
         // Index into 4x4x4 array: x + z*4 + y*16
         int32_t index = (quartX & 3) + ((quartZ & 3) << 2) + ((quartY & 3) << 4);
         return m_biomes[index];
@@ -352,7 +374,7 @@ public:
      * @param quartZ Local quart Z (0-3)
      * @param biome BiomeKey to set
      */
-    void setNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ, biome::BiomeKey biome) {
+    void setNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ, biome::BiomeHolder biome) {
         int32_t index = (quartX & 3) + ((quartZ & 3) << 2) + ((quartY & 3) << 4);
         m_biomes[index] = biome;
     }
@@ -390,7 +412,7 @@ public:
                         quartX, quartY, quartZ, sampler
                     );
 
-                    setNoiseBiome(x, y, z, biome);
+                    setNoiseBiome(x, y, z, biome::Biomes::get(biome));
                 }
             }
         }
@@ -399,11 +421,11 @@ public:
     /**
      * Get raw biome array for serialization
      */
-    std::array<biome::BiomeKey, BIOMES_PER_SECTION>& getBiomes() {
+    std::array<biome::BiomeHolder, BIOMES_PER_SECTION>& getBiomes() {
         return m_biomes;
     }
 
-    const std::array<biome::BiomeKey, BIOMES_PER_SECTION>& getBiomes() const {
+    const std::array<biome::BiomeHolder, BIOMES_PER_SECTION>& getBiomes() const {
         return m_biomes;
     }
 };

@@ -6,6 +6,9 @@ namespace world {
 namespace biome {
 
 BiomeHolder Biomes::get(const BiomeKey& key) {
+    // Whole find-or-create is under the registry mutex: get() is reached
+    // from parallel worldgen phases and inserts on miss.
+    std::lock_guard<std::mutex> lock(registryMutex());
     auto& reg = registry();
     auto it = reg.find(key);
     if (it != reg.end()) {

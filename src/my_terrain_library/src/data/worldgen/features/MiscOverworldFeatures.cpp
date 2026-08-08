@@ -263,8 +263,14 @@ void MiscOverworldFeatures::bootstrap() {
     // =========================================================================
     {
         auto sandProvider = std::make_shared<SimpleStateProvider>("minecraft:sand");
-        auto stateProvider = std::make_shared<RuleBasedBlockStateProvider>(sandProvider);
-        // TODO: Add rule for SANDSTONE below AIR
+        auto sandstoneProvider = std::make_shared<SimpleStateProvider>("minecraft:sandstone");
+        std::vector<RuleBasedBlockStateProvider::Rule> sandRules{
+            {blockpredicates::BlockPredicate::matchesBlocks(
+                 core::Vec3i(0, -1, 0), "minecraft:air"),
+             sandstoneProvider}
+        };
+        auto stateProvider = std::make_shared<RuleBasedBlockStateProvider>(
+            sandProvider, std::move(sandRules));
         s_stateProviders.push_back(stateProvider);
 
         auto targetPredicate = blockpredicates::BlockPredicate::matchesBlocks(
@@ -308,8 +314,18 @@ void MiscOverworldFeatures::bootstrap() {
     // =========================================================================
     {
         auto dirtProvider = std::make_shared<SimpleStateProvider>("minecraft:dirt");
-        auto stateProvider = std::make_shared<RuleBasedBlockStateProvider>(dirtProvider);
-        // TODO: Add rule for GRASS_BLOCK when not solid/water above
+        auto grassProvider = std::make_shared<SimpleStateProvider>("minecraft:grass_block");
+        std::vector<RuleBasedBlockStateProvider::Rule> grassRules{
+            {blockpredicates::BlockPredicate::not_(
+                 blockpredicates::BlockPredicate::anyOf(
+                     blockpredicates::BlockPredicate::solid(core::Vec3i(0, 1, 0)),
+                     blockpredicates::BlockPredicate::matchesFluids(
+                         core::Vec3i(0, 1, 0),
+                         std::vector<std::string>{"minecraft:water"}))),
+             grassProvider}
+        };
+        auto stateProvider = std::make_shared<RuleBasedBlockStateProvider>(
+            dirtProvider, std::move(grassRules));
         s_stateProviders.push_back(stateProvider);
 
         auto targetPredicate = blockpredicates::BlockPredicate::matchesBlocks(

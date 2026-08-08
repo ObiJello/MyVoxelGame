@@ -137,7 +137,7 @@ public:
      */
     void buildSurface(
         RandomState* randomState,
-        std::function<void*(const ::minecraft::core::BlockPos&)> biomeGetter,
+        const std::function<void*(const ::minecraft::core::BlockPos&)>& biomeGetter,
         bool useLegacyRandom,
         const WorldGenerationContext& generationContext,
         ::world::IChunk* chunk,

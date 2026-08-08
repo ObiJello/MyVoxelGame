@@ -1,4 +1,5 @@
 #include "world/level/block/SculkSpreader.h"
+#include "levelgen/blockpredicates/BlockPredicate.h"
 #include "levelgen/WorldgenRandom.h"
 #include "levelgen/WorldGenLevel.h"
 #include "world/level/block/Blocks.h"
@@ -55,11 +56,19 @@ static const std::array<Direction, 6> s_directions = {
 };
 
 static bool isWaterSource(BlockState* state) {
-    return state && state->getIdentifier() == "minecraft:water";
+    return state &&
+           state->is(Blocks::WATER) &&
+           (!BlockStateProperties::LEVEL ||
+            !state->hasProperty(BlockStateProperties::LEVEL) ||
+            state->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0);
 }
 
-static bool isAirOrWater(BlockState* state) {
-    return state && (state->isAir() || isWaterSource(state));
+static bool hasWaterFluid(BlockState* state) {
+    return state && state->hasWaterFluid();
+}
+
+static bool isAirOrWaterBlock(BlockState* state) {
+    return state && (state->isAir() || state->is(Blocks::WATER));
 }
 
 static bool canBeReplaced(BlockState* state) {
@@ -83,6 +92,10 @@ static bool isSculkReplaceable(const std::string& id) {
            id == "minecraft:coarse_dirt" ||
            id == "minecraft:mycelium" ||
            id == "minecraft:rooted_dirt" ||
+           id == "minecraft:moss_block" ||
+           id == "minecraft:pale_moss_block" ||
+           id == "minecraft:mud" ||
+           id == "minecraft:muddy_mangrove_roots" ||
            id == "minecraft:terracotta" ||
            id == "minecraft:white_terracotta" ||
            id == "minecraft:orange_terracotta" ||
@@ -213,7 +226,12 @@ static bool stateCanBeReplaced(
 
     const std::string& existingId = existingState->getIdentifier();
 
+    // Java: any non-empty fluid that is not source water rejects placement
+    // (flowing water AND lava of any level).
     if (existingId == "minecraft:water" && !isWaterSource(existingState)) {
+        return false;
+    }
+    if (existingId == "minecraft:lava") {
         return false;
     }
 
@@ -250,8 +268,20 @@ static bool getSpreadFromFaceTowardDirection(
     for (SpreadType type : spreadTypes) {
         SpreadPos spreadPos = getSpreadPos(pos, spreadDirection, startingFace, type);
         BlockState* existingState = level->getBlockState(spreadPos.pos);
-        if (stateCanBeReplaced(level, pos, spreadPos.pos, spreadPos.face, existingState) &&
-            SculkVeinBlock::canAttachTo(*level, spreadPos.pos, spreadPos.face)) {
+        bool canReplace = stateCanBeReplaced(level, pos, spreadPos.pos, spreadPos.face, existingState);
+        bool validPlacement = canReplace &&
+            Blocks::SCULK_VEIN->isValidStateForPlacement(existingState, *level, spreadPos.pos, spreadPos.face);
+        if (std::FILE* trace = WorldgenRandom::s_rngTraceFile) {
+            BlockState* neighbourState =
+                level->getBlockState(spreadPos.pos.relative(spreadPos.face));
+            std::fprintf(trace, "# CAND type=%d pos=%d,%d,%d face=%d existing=%s neighbour=%s replace=%d valid=%d\n",
+                         static_cast<int>(type), spreadPos.pos.getX(), spreadPos.pos.getY(), spreadPos.pos.getZ(),
+                         static_cast<int>(spreadPos.face),
+                         existingState ? existingState->getIdentifier().c_str() : "null",
+                         neighbourState ? neighbourState->getIdentifier().c_str() : "null",
+                         canReplace ? 1 : 0, validPlacement ? 1 : 0);
+        }
+        if (validPlacement) {
             outSpreadPos = spreadPos;
             return true;
         }
@@ -359,7 +389,7 @@ static BlockState* getRandomGrowthState(WorldGenLevel* level, const BlockPos& po
 
     if (state && BlockStateProperties::WATERLOGGED && state->hasProperty(BlockStateProperties::WATERLOGGED)) {
         BlockState* existingState = level->getBlockState(pos);
-        state = state->setValue(*BlockStateProperties::WATERLOGGED, isWaterSource(existingState));
+        state = state->setValue(*BlockStateProperties::WATERLOGGED, existingState && existingState->hasAnyFluid());
     }
 
     return state;
@@ -372,10 +402,12 @@ static bool attemptPlaceSculk(
     WorldgenRandom& random
 ) {
     BlockState* state = level->getBlockState(pos);
-    if (!state || state->getIdentifier() != "minecraft:sculk_vein") {
+    if (!state) {
         return false;
     }
 
+    // Java draws Direction.allShuffled unconditionally, even when the state
+    // has no vein faces - do not early-return before the shuffle.
     for (Direction support : allShuffled(random)) {
         if (!SculkVeinBlock::hasFace(state, support)) {
             continue;
@@ -412,7 +444,7 @@ static bool attemptPlaceSculk(
 
 static bool canPlaceGrowth(WorldGenLevel* level, const BlockPos& pos) {
     BlockState* stateAbove = level->getBlockState(pos.above());
-    if (!isAirOrWater(stateAbove)) {
+    if (!isAirOrWaterBlock(stateAbove)) {
         return false;
     }
 
@@ -448,7 +480,7 @@ public:
         }
 
         if (!facings->empty()) {
-            if (!state || (!state->isAir() && !isWaterSource(state))) {
+            if (!state || (!state->isAir() && !hasWaterFluid(state))) {
                 return false;
             }
 
@@ -778,7 +810,9 @@ SculkBlock::SculkBlock(const Properties& properties)
 int SculkBlock::getDecayPenalty(const SculkSpreader& spreader, const BlockPos& pos,
                                 const BlockPos& originPos, int charge) {
     int noGrowthRadius = spreader.noGrowthRadius();
-    float outerDistanceSquared = std::pow(static_cast<float>(std::sqrt(pos.distSqr(originPos))) - static_cast<float>(noGrowthRadius), 2.0f);
+    float distanceFromNoGrowthRadius =
+        static_cast<float>(std::sqrt(pos.distSqr(originPos))) - static_cast<float>(noGrowthRadius);
+    float outerDistanceSquared = distanceFromNoGrowthRadius * distanceFromNoGrowthRadius;
     int maxReachSquared = (24 - noGrowthRadius) * (24 - noGrowthRadius);
     float distanceFactor = std::min(1.0f, outerDistanceSquared / static_cast<float>(maxReachSquared));
     return std::max(1, static_cast<int>(static_cast<float>(charge) * distanceFactor * 0.5f));
@@ -798,7 +832,7 @@ BlockState* SculkBlock::getRandomGrowthState(WorldGenLevel* level, const BlockPo
 
     if (state && BlockStateProperties::WATERLOGGED && state->hasProperty(BlockStateProperties::WATERLOGGED)) {
         BlockState* existingState = level->getBlockState(pos);
-        state = state->setValue(*BlockStateProperties::WATERLOGGED, existingState && isWaterSource(existingState));
+        state = state->setValue(*BlockStateProperties::WATERLOGGED, existingState && existingState->hasAnyFluid());
     }
 
     return state;
@@ -806,7 +840,7 @@ BlockState* SculkBlock::getRandomGrowthState(WorldGenLevel* level, const BlockPo
 
 bool SculkBlock::canPlaceGrowth(WorldGenLevel* level, const BlockPos& pos) {
     BlockState* stateAbove = level->getBlockState(pos.above());
-    if (!isAirOrWater(stateAbove)) {
+    if (!isAirOrWaterBlock(stateAbove)) {
         return false;
     }
 
@@ -877,7 +911,7 @@ bool SculkVeinBlock::hasSubstrateAccess(WorldGenLevel* level, BlockState* state,
         }
 
         BlockState* adjacent = level->getBlockState(pos.relative(direction));
-        if (adjacent && isSculkReplaceable(adjacent->getIdentifier())) {
+        if (::minecraft::levelgen::blockpredicates::matchesBlockTagName(adjacent, "minecraft:sculk_replaceable")) {
             return true;
         }
     }
@@ -923,7 +957,8 @@ void SculkVeinBlock::onDischarged(WorldGenLevel* level, BlockState* state, const
     }
 
     if (!hasAnyFace(newState)) {
-        newState = level->isWaterAt(pos)
+        BlockState* currentState = level->getBlockState(pos);
+        newState = (currentState && currentState->hasAnyFluid())
             ? Blocks::WATER->defaultBlockState()
             : Blocks::AIR->defaultBlockState();
     }

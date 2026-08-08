@@ -56,7 +56,9 @@ public:
         CLIENT         // Sent to client
     };
 
-    using OpaquePredicate = std::function<bool(const BlockState*)>;
+    // Plain function pointer: every predicate is a captureless lambda and this
+    // is called per heightmap per block write.
+    using OpaquePredicate = bool (*)(const BlockState*);
     using BlockGetter = std::function<const BlockState*(int32_t x, int32_t y, int32_t z)>;
 
 private:

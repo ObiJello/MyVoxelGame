@@ -51,7 +51,7 @@ std::vector<PlacementModifier*> AquaticPlacements::seagrassPlacement(int count) 
 
     s_countPlacements.push_back(CountPlacement::of(count));
     // Use OCEAN_FLOOR for underwater placement (HEIGHTMAP_TOP_SOLID equivalent for ocean floor)
-    s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+    s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
 
     return {
         &InSquarePlacement::spread(),
@@ -145,7 +145,7 @@ void AquaticPlacements::bootstrap() {
     // Reference: AquaticPlacements.java line 55
     {
         s_noiseCountPlacements.push_back(NoiseBasedCountPlacement::of(120, 80.0, 0.0));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
 
         std::vector<PlacementModifier*> modifiers = {
             &s_noiseCountPlacements.back(),
@@ -161,7 +161,7 @@ void AquaticPlacements::bootstrap() {
     // Reference: AquaticPlacements.java line 56
     {
         s_noiseCountPlacements.push_back(NoiseBasedCountPlacement::of(80, 80.0, 0.0));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
 
         std::vector<PlacementModifier*> modifiers = {
             &s_noiseCountPlacements.back(),
@@ -180,7 +180,7 @@ void AquaticPlacements::bootstrap() {
     // =========================================================================
     {
         s_rarityFilters.push_back(RarityFilter::onAverageOnceEvery(16));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
 
         std::vector<PlacementModifier*> modifiers = {
             &s_rarityFilters.back(),
@@ -199,7 +199,7 @@ void AquaticPlacements::bootstrap() {
     // =========================================================================
     {
         s_noiseCountPlacements.push_back(NoiseBasedCountPlacement::of(20, 400.0, 0.0));
-        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR));
+        s_heightmapPlacements.push_back(HeightmapPlacement::onHeightmap(Heightmap::Types::OCEAN_FLOOR_WG));
 
         std::vector<PlacementModifier*> modifiers = {
             &s_noiseCountPlacements.back(),

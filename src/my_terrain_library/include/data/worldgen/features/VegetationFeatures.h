@@ -25,6 +25,7 @@ class VegetationFeatures {
 private:
     // Static feature instances
     static levelgen::RandomPatchFeature s_randomPatchFeature;
+    static levelgen::BambooFeature s_bambooFeature;
     static levelgen::SimpleBlockFeature s_simpleBlockFeature;
     static levelgen::VinesFeature s_vinesFeature;
 

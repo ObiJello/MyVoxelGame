@@ -18,6 +18,10 @@ public:
     {}
 
 protected:
+    const Block* getBodyBlock() const override {
+        return this;
+    }
+
     virtual BlockState* updateHeadAfterConvertedFromBody(
         BlockState* /*bodyState*/,
         BlockState* headState

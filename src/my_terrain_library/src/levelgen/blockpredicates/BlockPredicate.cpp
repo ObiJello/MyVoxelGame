@@ -21,6 +21,16 @@ std::string normalizeNamespacedId(const std::string& id, const std::string& defa
 }
 
 std::optional<fs::path> findTagRoot() {
+    // Explicit override first - avoids the CWD dependence entirely.
+    if (const char* env = std::getenv("MC_DATA_ROOT")) {
+        fs::path candidate(env);
+        if (fs::exists(candidate) && fs::is_directory(candidate)) {
+            return candidate;
+        }
+        throw std::runtime_error(
+            std::string("MC_DATA_ROOT is set but is not a directory: ") + env);
+    }
+
     fs::path current = fs::current_path();
     while (!current.empty()) {
         fs::path candidate = current / "data";
@@ -44,11 +54,55 @@ public:
         return resolveLocked(tag);
     }
 
+    // Tag values in FILE ORDER with nested tags expanded in place and
+    // duplicates dropped (Java TagLoader collects into a LinkedHashSet, and
+    // Registry.getRandomElementOf indexes that order with nextInt(size)).
+    const std::vector<std::string>& resolveOrdered(const std::string& tag) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = m_orderedCache.find(tag);
+        if (it != m_orderedCache.end()) {
+            return it->second;
+        }
+        resolveLocked(tag);  // ensures tag root discovery + loud failures
+        std::vector<std::string> ordered;
+        std::unordered_set<std::string> seen;
+        collectOrderedLocked(tag, ordered, seen);
+        return m_orderedCache.emplace(tag, std::move(ordered)).first->second;
+    }
+
 private:
     std::mutex m_mutex;
     std::optional<fs::path> m_tagRoot;
     std::unordered_map<std::string, std::unordered_set<std::string>> m_cache;
+    std::unordered_map<std::string, std::vector<std::string>> m_orderedCache;
     std::unordered_set<std::string> m_inProgress;
+
+    void collectOrderedLocked(const std::string& tag, std::vector<std::string>& out,
+                              std::unordered_set<std::string>& seen) {
+        size_t colon = tag.find(':');
+        std::string nameSpace = colon == std::string::npos ? "minecraft" : tag.substr(0, colon);
+        std::string pathPart = colon == std::string::npos ? tag : tag.substr(colon + 1);
+        fs::path tagPath = *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
+
+        std::ifstream input(tagPath);
+        json parsed;
+        input >> parsed;
+        if (!parsed.contains("values") || !parsed["values"].is_array()) {
+            return;
+        }
+        for (const auto& entry : parsed["values"]) {
+            if (!entry.is_string()) continue;
+            std::string value = entry.get<std::string>();
+            if (!value.empty() && value[0] == '#') {
+                collectOrderedLocked(normalizeNamespacedId(value.substr(1), nameSpace), out, seen);
+            } else {
+                std::string id = normalizeNamespacedId(value, nameSpace);
+                if (seen.insert(id).second) {
+                    out.push_back(std::move(id));
+                }
+            }
+        }
+    }
 
     const std::unordered_set<std::string>& resolveLocked(const std::string& tag) {
         auto it = m_cache.find(tag);
@@ -63,14 +117,20 @@ private:
         if (!m_tagRoot.has_value()) {
             m_tagRoot = findTagRoot();
         }
+        if (!m_tagRoot.has_value()) {
+            // A silently-empty tag makes trees/features silently fail placement
+            // checks - a huge, invisible parity divergence. Fail loudly instead.
+            throw std::runtime_error(
+                "Block tag root not found: no 'data/' directory above the current "
+                "working directory and MC_DATA_ROOT is unset. Cannot resolve tag '" +
+                tag + "'");
+        }
 
         m_inProgress.insert(tag);
         auto inserted = m_cache.emplace(tag, std::unordered_set<std::string>{});
         std::unordered_set<std::string>& values = inserted.first->second;
 
-        if (m_tagRoot.has_value()) {
-            loadTagValuesLocked(tag, values);
-        }
+        loadTagValuesLocked(tag, values);
 
         m_inProgress.erase(tag);
         return values;
@@ -83,19 +143,20 @@ private:
         fs::path tagPath = *m_tagRoot / nameSpace / "tags" / "block" / (pathPart + ".json");
 
         if (!fs::exists(tagPath)) {
-            return;
+            throw std::runtime_error("Block tag file missing: " + tagPath.string());
         }
 
         std::ifstream input(tagPath);
         if (!input.is_open()) {
-            return;
+            throw std::runtime_error("Block tag file unreadable: " + tagPath.string());
         }
 
         json parsed;
         try {
             input >> parsed;
-        } catch (...) {
-            return;
+        } catch (const std::exception& e) {
+            throw std::runtime_error("Block tag file unparseable: " + tagPath.string() +
+                                     ": " + e.what());
         }
 
         if (!parsed.contains("values") || !parsed["values"].is_array()) {
@@ -299,6 +360,10 @@ bool matchesBlockTagName(BlockState* state, const std::string& tag) {
 
     const auto& values = blockTagRegistry().resolve(tag);
     return values.find(state->getIdentifier()) != values.end();
+}
+
+const std::vector<std::string>& orderedBlockTagValues(const std::string& tag) {
+    return blockTagRegistry().resolveOrdered(tag);
 }
 
 } // namespace blockpredicates

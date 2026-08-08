@@ -249,7 +249,10 @@ RandomState::~RandomState() {
 
 // Reference: RandomState.java lines 122-124
 NormalNoise* RandomState::getOrCreateNoise(const std::string& noiseName) {
-    // Check if already created
+    // Java uses ConcurrentHashMap.computeIfAbsent here. Without synchronization,
+    // concurrent SURFACE/NOISE reads can race and build duplicate instances.
+    std::lock_guard<std::mutex> lock(m_noiseInstancesMutex);
+
     auto it = m_noiseInstances.find(noiseName);
     if (it != m_noiseInstances.end()) {
         return it->second;
@@ -289,7 +292,9 @@ NormalNoise* RandomState::getOrCreateNoise(const std::string& noiseName) {
 
 // Reference: RandomState.java lines 126-128
 random::PositionalRandomFactory* RandomState::getOrCreateRandomFactory(const std::string& identifier) {
-    // Check if already created
+    // Java uses ConcurrentHashMap.computeIfAbsent here as well.
+    std::lock_guard<std::mutex> lock(m_positionalRandomsMutex);
+
     auto it = m_positionalRandoms.find(identifier);
     if (it != m_positionalRandoms.end()) {
         return it->second;

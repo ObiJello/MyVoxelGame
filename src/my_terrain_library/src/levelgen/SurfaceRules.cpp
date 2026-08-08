@@ -1,4 +1,6 @@
 #include "levelgen/SurfaceRules.h"
+#include <cstdio>
+#include <cstdlib>
 #include "levelgen/SurfaceSystem.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/NoiseChunk.h"
@@ -60,7 +62,7 @@ Context::Context(
     RandomState* randomState,
     ::world::IChunk* chunk,
     NoiseChunk* noiseChunk,
-    std::function<void*(const ::minecraft::core::BlockPos&)> biomeGetter,
+    const std::function<void*(const ::minecraft::core::BlockPos&)>& biomeGetter,
     const WorldGenerationContext& genContext
 )
     : m_system(system)
@@ -324,6 +326,14 @@ std::unique_ptr<Condition> StoneDepthCheck::apply(Context& context) {
             }
 
             bool result = stoneDepth <= 1 + m_offset + surfaceDepth + secondarySurfaceDepth;
+            static const char* s_surfDbgEnv = std::getenv("MC_SURF_DEBUG");
+            if (const char* dbgEnv = s_surfDbgEnv) {
+                int dx, dz;
+                if (std::sscanf(dbgEnv, "%d,%d", &dx, &dz) == 2 &&
+                    dx == m_context.getBlockX() && dz == m_context.getBlockZ()) {
+                    std::fprintf(stderr, "COND %s y=%d -> %d\n", (m_ceiling ? "stoneDepthCeil" : "stoneDepthFloor"), m_context.getBlockY(), (int)result);
+                }
+            }
             return result;
         }
     };
@@ -366,7 +376,16 @@ std::unique_ptr<Condition> YConditionSource::apply(Context& context) {
             int32_t anchorY = m_anchor.resolveY(m_genContext);
             int32_t surfaceDepth = m_context.getSurfaceDepth();
 
-            return blockY + stoneDepthAbove >= anchorY + surfaceDepth * m_surfaceDepthMultiplier;
+            bool result = blockY + stoneDepthAbove >= anchorY + surfaceDepth * m_surfaceDepthMultiplier;
+            static const char* s_surfDbgEnv = std::getenv("MC_SURF_DEBUG");
+            if (const char* dbgEnv = s_surfDbgEnv) {
+                int dx, dz;
+                if (std::sscanf(dbgEnv, "%d,%d", &dx, &dz) == 2 &&
+                    dx == m_context.getBlockX() && dz == m_context.getBlockZ()) {
+                    std::fprintf(stderr, "COND %s y=%d -> %d\n", "yCond", m_context.getBlockY(), (int)result);
+                }
+            }
+            return result;
         }
     };
 
@@ -408,8 +427,17 @@ std::unique_ptr<Condition> WaterConditionSource::apply(Context& context) {
             int32_t stoneDepthAbove = m_addStoneDepth ? m_context.getStoneDepthAbove() : 0;
             int32_t surfaceDepth = m_context.getSurfaceDepth();
 
-            return blockY + stoneDepthAbove >= waterHeight + m_offset +
+            bool result = blockY + stoneDepthAbove >= waterHeight + m_offset +
                    surfaceDepth * m_surfaceDepthMultiplier;
+            static const char* s_surfDbgEnv = std::getenv("MC_SURF_DEBUG");
+            if (const char* dbgEnv = s_surfDbgEnv) {
+                int dx, dz;
+                if (std::sscanf(dbgEnv, "%d,%d", &dx, &dz) == 2 &&
+                    dx == m_context.getBlockX() && dz == m_context.getBlockZ()) {
+                    std::fprintf(stderr, "COND %s y=%d -> %d\n", "waterCond", m_context.getBlockY(), (int)result);
+                }
+            }
+            return result;
         }
     };
 

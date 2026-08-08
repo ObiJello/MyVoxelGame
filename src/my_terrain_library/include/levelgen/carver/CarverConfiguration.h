@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <memory>
 #include <functional>
+#include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 
 // Reference: net/minecraft/world/level/levelgen/carver/CarverConfiguration.java
 // Reference: net/minecraft/util/valueproviders/FloatProvider.java
@@ -542,18 +544,29 @@ public:
     CountExtraIntProvider(int32_t baseValue, float chance, int32_t extraValue)
         : m_baseValue(baseValue), m_chance(chance), m_extraValue(extraValue) {}
 
+    // Java's PlacementUtils.countExtra builds a WeightedListInt with
+    // distribution {base: (1/chance)-1, base+extra: 1}; WeightedList.getRandom
+    // samples it with ONE nextInt(totalWeight) draw (ConstantInt draws
+    // nothing). nextFloat() < chance has the same probability but reads
+    // different bits of the underlying draw, so values diverge.
+    int32_t totalWeight() const {
+        float weight = 1.0f / m_chance;
+        return static_cast<int32_t>(weight);
+    }
+
     int32_t sample(WorldgenRandom& random) const override {
-        // Reference: ExtraChanceDecoratorConfiguration.java
-        // Returns base + extra if random < chance, else base
-        return m_baseValue + (random.nextFloat() < m_chance ? m_extraValue : 0);
+        return random.nextInt(totalWeight()) < totalWeight() - 1
+            ? m_baseValue : m_baseValue + m_extraValue;
     }
 
     int32_t sample(LegacyRandomSource& random) const override {
-        return m_baseValue + (random.nextFloat() < m_chance ? m_extraValue : 0);
+        return random.nextInt(totalWeight()) < totalWeight() - 1
+            ? m_baseValue : m_baseValue + m_extraValue;
     }
 
     int32_t sample(XoroshiroRandomSource& random) const override {
-        return m_baseValue + (random.nextFloat() < m_chance ? m_extraValue : 0);
+        return random.nextInt(totalWeight()) < totalWeight() - 1
+            ? m_baseValue : m_baseValue + m_extraValue;
     }
 
     int32_t getMinValue() const override { return m_baseValue; }
@@ -739,6 +752,57 @@ public:
 };
 
 /**
+ * VeryBiasedToBottomHeight - Height very strongly biased toward bottom
+ * Reference: VeryBiasedToBottomHeight.java (three nested Mth.nextInt draws;
+ * Mth.nextInt(r, min, max) returns min WITHOUT drawing when min >= max)
+ */
+class VeryBiasedToBottomHeight : public HeightProvider {
+private:
+    VerticalAnchor m_minInclusive;
+    VerticalAnchor m_maxInclusive;
+    int32_t m_inner;
+
+    template <typename R>
+    static int32_t mthNextInt(R& random, int32_t minInclusive, int32_t maxInclusive) {
+        return minInclusive >= maxInclusive
+            ? minInclusive
+            : minInclusive + random.nextInt(maxInclusive - minInclusive + 1);
+    }
+
+    template <typename R>
+    int32_t sampleImpl2(R& random, const WorldGenerationContext& context) const {
+        int32_t min = m_minInclusive.resolveY(context);
+        int32_t max = m_maxInclusive.resolveY(context);
+        if (max - min - m_inner + 1 <= 0) {
+            return min;
+        }
+        int32_t upperInclusive = mthNextInt(random, min + m_inner, max);
+        int32_t biasedUpperInclusive = mthNextInt(random, min, upperInclusive - 1);
+        return mthNextInt(random, min, biasedUpperInclusive - 1 + m_inner);
+    }
+
+public:
+    VeryBiasedToBottomHeight(const VerticalAnchor& minInclusive, const VerticalAnchor& maxInclusive, int32_t inner)
+        : m_minInclusive(minInclusive), m_maxInclusive(maxInclusive), m_inner(inner) {}
+
+    static VeryBiasedToBottomHeight of(const VerticalAnchor& minInclusive, const VerticalAnchor& maxInclusive, int32_t inner) {
+        return VeryBiasedToBottomHeight(minInclusive, maxInclusive, inner);
+    }
+
+    int32_t sample(WorldgenRandom& random, const WorldGenerationContext& context) const override {
+        return sampleImpl2(random, context);
+    }
+
+    int32_t sample(LegacyRandomSource& random, const WorldGenerationContext& context) const override {
+        return sampleImpl2(random, context);
+    }
+
+    int32_t sample(XoroshiroRandomSource& random, const WorldGenerationContext& context) const override {
+        return sampleImpl2(random, context);
+    }
+};
+
+/**
  * BiasedToBottomHeight - Height biased toward lower values
  * Reference: BiasedToBottomHeight.java
  */
@@ -768,9 +832,9 @@ public:
             return min;
         }
 
-        int32_t sample1 = random.nextInt(max - min - m_inner + 1);
-        int32_t sample2 = random.nextInt(m_inner + 1);
-        return min + sample1 + sample2;
+        // Java: nested draws, NOT a sum - BiasedToBottomHeight.java lines 28-38
+        int32_t limit = random.nextInt(max - min - m_inner + 1);
+        return random.nextInt(limit + m_inner) + min;
     }
 
     int32_t sample(LegacyRandomSource& random, const WorldGenerationContext& context) const override {
@@ -781,9 +845,9 @@ public:
             return min;
         }
 
-        int32_t sample1 = random.nextInt(max - min - m_inner + 1);
-        int32_t sample2 = random.nextInt(m_inner + 1);
-        return min + sample1 + sample2;
+        // Java: nested draws, NOT a sum - BiasedToBottomHeight.java lines 28-38
+        int32_t limit = random.nextInt(max - min - m_inner + 1);
+        return random.nextInt(limit + m_inner) + min;
     }
 
     int32_t sample(XoroshiroRandomSource& random, const WorldGenerationContext& context) const override {
@@ -794,9 +858,9 @@ public:
             return min;
         }
 
-        int32_t sample1 = random.nextInt(max - min - m_inner + 1);
-        int32_t sample2 = random.nextInt(m_inner + 1);
-        return min + sample1 + sample2;
+        // Java: nested draws, NOT a sum - BiasedToBottomHeight.java lines 28-38
+        int32_t limit = random.nextInt(max - min - m_inner + 1);
+        return random.nextInt(limit + m_inner) + min;
     }
 };
 
@@ -835,6 +899,13 @@ public:
     CarverDebugSettings debugSettings;
     std::set<std::string> replaceable;  // Block names that can be replaced
 
+    // Pointer-identity mirror of `replaceable`, built lazily on first carve
+    // (after Blocks bootstrap). Membership-only — set order is never
+    // observed, so interning is order-safe. Keys are Block* (stored as
+    // const void* to avoid an include cycle with Blocks.h).
+    mutable std::once_flag replaceableBlocksOnce;
+    mutable std::unordered_set<const void*> replaceableBlocks;
+
     CarverConfiguration(
         float probability,
         const HeightProvider* y,
@@ -849,6 +920,17 @@ public:
         , lavaLevel(lavaLevel)
         , debugSettings(debugSettings)
         , replaceable(replaceable)
+    {}
+
+    // once_flag is non-copyable; copies start with a fresh (unbuilt) pointer
+    // cache and rebuild it lazily from the copied name set.
+    CarverConfiguration(const CarverConfiguration& other)
+        : probability(other.probability)
+        , y(other.y)
+        , yScale(other.yScale)
+        , lavaLevel(other.lavaLevel)
+        , debugSettings(other.debugSettings)
+        , replaceable(other.replaceable)
     {}
 
     virtual ~CarverConfiguration() = default;

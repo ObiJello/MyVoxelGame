@@ -1,9 +1,11 @@
 #pragma once
 
 #include "core/BlockPos.h"
+#include "levelgen/structure/FossilTemplate.h"
 #include "core/Direction.h"
 #include "world/IChunk.h"
 #include "world/level/block/blocks/DoublePlantBlock.h"
+#include "world/level/block/blocks/MossyCarpetBlock.h"
 #include "world/level/block/blocks/MultifaceSpreadeableBlock.h"
 #include "world/level/block/blocks/SculkVeinBlock.h"
 #include "world/level/block/blocks/BuddingAmethystBlock.h"
@@ -27,6 +29,8 @@
 #include "math/Mth.h"
 #include "synth/NormalNoise.h"
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -176,17 +180,11 @@ inline bool isStone(BlockState* state) {
  * Reference: Feature.java lines 162-164
  */
 inline bool isDirt(BlockState* state) {
+    // Reference: Feature.isDirt = state.is(BlockTags.DIRT) - data-driven; the
+    // tag also contains moss_block, pale_moss_block, mud, muddy_mangrove_roots.
     if (!state) return false;
-    const std::string& name = state->getIdentifier();
-    return name == "minecraft:dirt" ||
-           name == "minecraft:grass_block" ||
-           name == "minecraft:podzol" ||
-           name == "minecraft:coarse_dirt" ||
-           name == "minecraft:mycelium" ||
-           name == "minecraft:rooted_dirt" ||
-           name == "minecraft:mud" ||
-           name == "minecraft:muddy_mangrove_roots" ||
-           name == "minecraft:moss_block";
+    return ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+        state, "minecraft:dirt");
 }
 
 inline bool isMushroomGrowBlock(BlockState* state) {
@@ -416,11 +414,12 @@ public:
      * Takes a block getter function to allow cross-chunk access via BulkSectionAccess.
      * This matches Java's signature: isAdjacentToAir(Function<BlockPos, BlockState>, BlockPos)
      *
-     * @param blockGetter Function to get block state at any position
+     * @param blockGetter Callable to get block state at any position
      * @param pos Position to check neighbors of
      */
+    template<typename BlockGetter>
     static bool isAdjacentToAir(
-        std::function<BlockState*(const core::BlockPos&)> blockGetter,
+        BlockGetter&& blockGetter,
         const core::BlockPos& pos
     ) {
         for (const auto& [dx, dy, dz] : DIRECTION_OFFSETS) {
@@ -631,6 +630,8 @@ public:
                 return false;
             }
             doublePlantBlock->placeAt(context.level(), state, pos, 2);
+        } else if (auto* mossyCarpetBlock = dynamic_cast<world::level::block::MossyCarpetBlock*>(state->getBlock())) {
+            mossyCarpetBlock->placeAt(context.level(), pos, context.level()->getRandom(), 2);
         } else {
             context.level()->setBlock(pos, state, 2);
         }
@@ -934,15 +935,16 @@ protected:
      * This matches Java's signature: canPlaceOre(BlockState, Function<BlockPos, BlockState>, ...)
      *
      * @param orePosState Current block state at ore position
-     * @param blockGetter Function to get block state at any position (for neighbor checks)
+     * @param blockGetter Callable to get block state at any position (for neighbor checks)
      * @param random Random source
      * @param config Ore configuration
      * @param targetState Target block state configuration
      * @param orePos Position to place ore
      */
+    template<typename BlockGetter>
     static bool canPlaceOre(
         BlockState* orePosState,
-        std::function<BlockState*(const core::BlockPos&)> blockGetter,
+        BlockGetter&& blockGetter,
         WorldgenRandom& random,
         const OreConfiguration& config,
         const OreConfiguration::TargetBlockState& targetState,
@@ -1262,8 +1264,16 @@ public:
             }
         }
 
-        // Reference: LakeFeature.java lines 62-78
-        // Check for liquid interference and solid ground
+        // Reference: LakeFeature.java line 60 - fluid state is sampled BEFORE
+        // the environment check loop (RNG order matters).
+        const LakeConfiguration& config = context.config();
+        BlockState* fluid = config.fluid ? config.fluid->getState(random, origin) : nullptr;
+        if (!fluid) {
+            return false;
+        }
+
+        // Reference: LakeFeature.java lines 62-79
+        // Check for liquid interference above the waterline and non-solid walls below
         for (int xx = 0; xx < 16; ++xx) {
             for (int zz = 0; zz < 16; ++zz) {
                 for (int yy = 0; yy < 8; ++yy) {
@@ -1277,14 +1287,13 @@ public:
 
                     if (check) {
                         core::BlockPos checkPos = origin.offset(xx, yy, zz);
-                        BlockState* block = level->getBlockState(checkPos);
-                        if (block) {
-                            BlockState* blockState = static_cast<BlockState*>(block);
+                        BlockState* blockState = level->getBlockState(checkPos);
+                        if (blockState) {
                             // Reference: LakeFeature.java lines 68-74
                             if (yy >= 4 && blockState->isFluid()) {
                                 return false;
                             }
-                            if (yy < 4 && !!blockState->isAir()) {
+                            if (yy < 4 && !blockState->isSolid() && blockState != fluid) {
                                 return false;
                             }
                         }
@@ -1293,22 +1302,77 @@ public:
             }
         }
 
-        // Reference: LakeFeature.java lines 80-96
-        // Place fluid blocks
+        // Reference: LakeFeature.java lines 81-97
+        // Carve the lake: fluid below the waterline (yy < 4), cave_air above
+        BlockState* caveAir = world::level::block::Blocks::CAVE_AIR ?
+            world::level::block::Blocks::CAVE_AIR->defaultBlockState() : nullptr;
         for (int xx = 0; xx < 16; ++xx) {
             for (int zz = 0; zz < 16; ++zz) {
                 for (int yy = 0; yy < 8; ++yy) {
                     if (grid[(xx * 16 + zz) * 8 + yy]) {
                         core::BlockPos placePos = origin.offset(xx, yy, zz);
                         BlockState* existingBlock = level->getBlockState(placePos);
-                        if (existingBlock && canReplaceBlock(static_cast<BlockState*>(existingBlock))) {
+                        if (existingBlock && canReplaceBlock(existingBlock)) {
                             bool placeAir = yy >= 4;
-                            // Would need to get the fluid state from config.fluid
-                            // For now, we just mark that placement succeeded
+                            level->setBlock(placePos, placeAir ? caveAir : fluid, 2);
                             if (placeAir) {
+                                // Java also schedules a tick for the air block;
+                                // worldgen block output is unaffected.
                                 markAboveForPostProcessing(level, placePos);
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        // Reference: LakeFeature.java lines 99-116
+        // Solidify edges with the barrier state (stone for lava lakes)
+        BlockState* barrier = config.barrier ? config.barrier->getState(random, origin) : nullptr;
+        if (barrier && !barrier->isAir()) {
+            for (int xx = 0; xx < 16; ++xx) {
+                for (int zz = 0; zz < 16; ++zz) {
+                    for (int yy = 0; yy < 8; ++yy) {
+                        bool check = !grid[(xx * 16 + zz) * 8 + yy] &&
+                            (xx < 15 && grid[((xx + 1) * 16 + zz) * 8 + yy] ||
+                             xx > 0 && grid[((xx - 1) * 16 + zz) * 8 + yy] ||
+                             zz < 15 && grid[(xx * 16 + zz + 1) * 8 + yy] ||
+                             zz > 0 && grid[(xx * 16 + (zz - 1)) * 8 + yy] ||
+                             yy < 7 && grid[(xx * 16 + zz) * 8 + yy + 1] ||
+                             yy > 0 && grid[(xx * 16 + zz) * 8 + (yy - 1)]);
+                        // CRITICAL RNG: nextInt(2) is consumed only when
+                        // check && yy >= 4 (Java short-circuit order)
+                        if (check && (yy < 4 || random.nextInt(2) != 0)) {
+                            core::BlockPos barrierPos = origin.offset(xx, yy, zz);
+                            BlockState* blockState = level->getBlockState(barrierPos);
+                            if (blockState && blockState->isSolid() &&
+                                !blockpredicates::matchesBlockTagName(
+                                    blockState, "minecraft:lava_pool_stone_cannot_replace")) {
+                                level->setBlock(barrierPos, barrier, 2);
+                                markAboveForPostProcessing(level, barrierPos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reference: LakeFeature.java lines 118-128
+        // Freeze the surface of water lakes in cold biomes. Overworld vanilla
+        // only registers lava lakes, so this is unreachable with default data.
+        if (fluid->getIdentifier() == "minecraft:water") {
+            for (int xx = 0; xx < 16; ++xx) {
+                for (int zz = 0; zz < 16; ++zz) {
+                    core::BlockPos surfacePos = origin.offset(xx, 4, zz);
+                    const world::biome::Biome* biome = level->getBiome(surfacePos);
+                    BlockState* blockState = level->getBlockState(surfacePos);
+                    bool isWaterSource = blockState &&
+                        blockState->getIdentifier() == "minecraft:water";
+                    // Reference: Biome.shouldFreeze - cold enough and water source
+                    if (biome && biome->coldEnoughToSnow(surfacePos) && isWaterSource &&
+                        blockState && canReplaceBlock(blockState)) {
+                        level->setBlock(surfacePos,
+                            world::level::block::Blocks::ICE->defaultBlockState(), 2);
                     }
                 }
             }
@@ -1320,18 +1384,10 @@ public:
 private:
     /**
      * Check if block can be replaced
-     * Reference: LakeFeature.java canReplaceBlock() lines 133-135
+     * Reference: LakeFeature.java canReplaceBlock() - !state.is(FEATURES_CANNOT_REPLACE)
      */
     static bool canReplaceBlock(BlockState* state) {
-        const std::string& name = state->getIdentifier();
-        // Reference: features_cannot_replace tag
-        if (name == "minecraft:bedrock" ||
-            name == "minecraft:spawner" ||
-            name == "minecraft:chest" ||
-            name == "minecraft:end_portal_frame") {
-            return false;
-        }
-        return true;
+        return !blockpredicates::matchesBlockTagName(state, "minecraft:features_cannot_replace");
     }
 };
 
@@ -1444,6 +1500,8 @@ public:
                 ? placement::PlacedFeature::getLogStream()
                 : nullptr;
         if (traceStream) {
+            *traceStream << "    VEG_PATCH_ORIGIN="
+                         << origin.getX() << "," << origin.getY() << "," << origin.getZ() << "\n";
             *traceStream << "    VEG_PATCH_RADII x=" << xRadius
                          << " z=" << zRadius << "\n";
         }
@@ -1733,16 +1791,28 @@ protected:
  */
 class RuleBasedBlockStateProvider {
 public:
+    struct Rule {
+        std::shared_ptr<blockpredicates::BlockPredicate> ifTrue;
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> then;
+    };
+
     std::shared_ptr<feature::stateproviders::BlockStateProvider> fallback;
-    // Rules would go here for full implementation
+    std::vector<Rule> rules;
 
     explicit RuleBasedBlockStateProvider(
-        std::shared_ptr<feature::stateproviders::BlockStateProvider> fallback
+        std::shared_ptr<feature::stateproviders::BlockStateProvider> fallback,
+        std::vector<Rule> rules = {}
     )
         : fallback(fallback)
+        , rules(std::move(rules))
     {}
 
     BlockState* getState(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& pos) const {
+        for (const Rule& rule : rules) {
+            if (rule.ifTrue && level && rule.ifTrue->test(*level, pos)) {
+                return rule.then ? rule.then->getState(random, pos) : nullptr;
+            }
+        }
         if (fallback) {
             return fallback->getState(random, pos);
         }
@@ -1798,8 +1868,10 @@ public:
         core::BlockPos::MutableBlockPos mutablePos;
 
         // Reference: DiskFeature.java lines 27-33
-        for (int x = origin.getX() - r; x <= origin.getX() + r; ++x) {
-            for (int z = origin.getZ() - r; z <= origin.getZ() + r; ++z) {
+        // Java iterates BlockPos.betweenClosed, which runs X FASTEST (inner),
+        // then Z - column order determines per-column RNG mapping.
+        for (int z = origin.getZ() - r; z <= origin.getZ() + r; ++z) {
+            for (int x = origin.getX() - r; x <= origin.getX() + r; ++x) {
                 int xd = x - origin.getX();
                 int zd = z - origin.getZ();
                 if (xd * xd + zd * zd <= r * r) {
@@ -2053,7 +2125,18 @@ public:
             origin = origin.above(10 + random.nextInt(30));
         }
 
-        // Reference: IceSpikeFeature.java lines 35-58
+        // Reference: IceSpikeFeature.java lines 35-58.
+        // The && chains must short-circuit exactly like Java: the edge
+        // nextFloat() is only drawn when the radius test already passed AND
+        // the cell is on the square's rim.
+        BlockState* packedIce =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:packed_ice");
+        auto isReplaceableBySpike = [this](BlockState* s) {
+            if (!s) return false;
+            const std::string& id = s->getIdentifier();
+            return s->isAir() || isDirt(s) || id == "minecraft:snow_block" || id == "minecraft:ice";
+        };
+
         for (int yOff = 0; yOff < height; ++yOff) {
             float scale = (1.0f - static_cast<float>(yOff) / static_cast<float>(height)) * static_cast<float>(width);
             int newWidth = static_cast<int>(std::ceil(scale));
@@ -2064,35 +2147,18 @@ public:
                 for (int zo = -newWidth; zo <= newWidth; ++zo) {
                     float dz = static_cast<float>(std::abs(zo)) - 0.25f;
 
-                    // Check placement conditions
-                    bool shouldPlace = (xo == 0 && zo == 0) ||
-                        (dx * dx + dz * dz <= scale * scale);
-                    bool notEdgeOrRandom = (xo != -newWidth && xo != newWidth && zo != -newWidth && zo != newWidth) ||
-                        random.nextFloat() <= 0.75f;
-
-                    if (shouldPlace && notEdgeOrRandom) {
+                    if (((xo == 0 && zo == 0) || !(dx * dx + dz * dz > scale * scale)) &&
+                        ((xo != -newWidth && xo != newWidth && zo != -newWidth && zo != newWidth) ||
+                         !(random.nextFloat() > 0.75f))) {
                         core::BlockPos placePos = origin.offset(xo, yOff, zo);
-                        BlockState* targetBlock = level->getBlockState(placePos);
-                        if (targetBlock) {
-                            BlockState* targetState = static_cast<BlockState*>(targetBlock);
-                            if (targetState->isAir() || isDirt(targetState) ||
-                                targetState->getIdentifier() == "minecraft:snow_block" || targetState->getIdentifier() == "minecraft:ice") {
-                                // Place packed ice
-                                // level->setBlockState(...)
-                            }
+                        if (isReplaceableBySpike(level->getBlockState(placePos))) {
+                            setBlock(level, placePos, packedIce);
                         }
 
-                        // Mirror below if applicable
                         if (yOff != 0 && newWidth > 1) {
                             core::BlockPos belowPos = origin.offset(xo, -yOff, zo);
-                            BlockState* belowBlock = level->getBlockState(belowPos);
-                            if (belowBlock) {
-                                BlockState* belowState = static_cast<BlockState*>(belowBlock);
-                                if (belowState->isAir() || isDirt(belowState) ||
-                                    belowState->getIdentifier() == "minecraft:snow_block" || belowState->getIdentifier() == "minecraft:ice") {
-                                    // Place packed ice
-                                    // level->setBlockState(...)
-                                }
+                            if (isReplaceableBySpike(level->getBlockState(belowPos))) {
+                                setBlock(level, belowPos, packedIce);
                             }
                         }
                     }
@@ -2100,9 +2166,13 @@ public:
             }
         }
 
-        // Reference: IceSpikeFeature.java lines 61-91
-        // Place pillar beneath
-        int pillarWidth = std::max(0, std::min(width - 1, 1));
+        // Reference: IceSpikeFeature.java lines 61-91 - pillar beneath
+        int pillarWidth = width - 1;
+        if (pillarWidth < 0) {
+            pillarWidth = 0;
+        } else if (pillarWidth > 1) {
+            pillarWidth = 1;
+        }
 
         for (int xo = -pillarWidth; xo <= pillarWidth; ++xo) {
             for (int zo = -pillarWidth; zo <= pillarWidth; ++zo) {
@@ -2114,18 +2184,17 @@ public:
                 }
 
                 while (iceBlock.getY() > 50) {
-                    BlockState* block = level->getBlockState(iceBlock);
-                    if (!block) break;
-                    BlockState* state = static_cast<BlockState*>(block);
+                    BlockState* state = level->getBlockState(iceBlock);
+                    if (!state) break;
 
+                    const std::string& id = state->getIdentifier();
                     if (!state->isAir() && !isDirt(state) &&
-                        state->getIdentifier() != "minecraft:snow_block" && state->getIdentifier() != "minecraft:ice" &&
-                        state->getIdentifier() != "minecraft:packed_ice") {
+                        id != "minecraft:snow_block" && id != "minecraft:ice" &&
+                        id != "minecraft:packed_ice") {
                         break;
                     }
 
-                    // Place packed ice
-                    // level->setBlockState(...)
+                    setBlock(level, iceBlock, packedIce);
                     iceBlock = iceBlock.below();
                     --runLength;
 
@@ -2905,51 +2974,73 @@ public:
  */
 class BlueIceFeature : public Feature<NoneFeatureConfiguration> {
 public:
+    // Reference: BlueIceFeature.java place() (exact port).
     bool place(FeaturePlaceContext<NoneFeatureConfiguration>& context) override {
         const core::BlockPos& origin = context.origin();
         WorldGenLevel* level = context.level();
         WorldgenRandom& random = context.random();
 
-        // Reference: BlueIceFeature.java lines 21-26
-        // Check position is in packed ice
-        BlockState* block = level->getBlockState(origin);
-        if (!block) return false;
-        BlockState* state = static_cast<BlockState*>(block);
-        if (state->getIdentifier() != "minecraft:packed_ice") {
+        // Java: level.getSeaLevel(); the generator's sea level is the same value.
+        if (origin.getY() > context.chunkGenerator()->getSeaLevel() - 1) {
             return false;
         }
 
-        // Check above is air
-        BlockState* aboveBlock = level->getBlockState(origin.above());
-        if (!aboveBlock) return false;
-        BlockState* aboveState = static_cast<BlockState*>(aboveBlock);
-        if (!aboveState->isAir()) {
+        auto is = [](BlockState* s, const char* name) {
+            return s && s->getIdentifier() == name;
+        };
+
+        if (!is(level->getBlockState(origin), "minecraft:water") &&
+            !is(level->getBlockState(origin.below()), "minecraft:water")) {
             return false;
         }
 
-        // Reference: BlueIceFeature.java lines 28-47
-        // Place blue ice blob
-        int placed = 0;
-        int size = random.nextInt(11) + 10;
+        // Direction.values() order: DOWN, UP, NORTH, SOUTH, WEST, EAST
+        bool foundPackedIce = false;
+        for (int d = 0; d < 6; ++d) {
+            core::Direction direction = static_cast<core::Direction>(d);
+            if (direction != core::Direction::DOWN &&
+                is(level->getBlockState(origin.relative(direction)), "minecraft:packed_ice")) {
+                foundPackedIce = true;
+                break;
+            }
+        }
+        if (!foundPackedIce) {
+            return false;
+        }
 
-        for (int i = 0; i < size; ++i) {
-            int dx = random.nextInt(2);
-            int dy = random.nextInt(2);
-            int dz = random.nextInt(2);
-            core::BlockPos placePos = origin.offset(dx, dy, dz);
+        BlockState* blueIce =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:blue_ice");
+        level->setBlock(origin, blueIce, 2);
 
-            BlockState* targetBlock = level->getBlockState(placePos);
-            if (targetBlock) {
-                BlockState* targetState = static_cast<BlockState*>(targetBlock);
-                if (targetState->getIdentifier() == "minecraft:packed_ice") {
-                    // Place blue ice
-                    // level->setBlockState(...)
-                    ++placed;
+        for (int i = 0; i < 200; ++i) {
+            int yOff = random.nextInt(5) - random.nextInt(6);
+            int xzDiff = 3;
+            if (yOff < 2) {
+                xzDiff += yOff / 2;
+            }
+
+            if (xzDiff >= 1) {
+                core::BlockPos placePos = origin.offset(
+                    random.nextInt(xzDiff) - random.nextInt(xzDiff), yOff,
+                    random.nextInt(xzDiff) - random.nextInt(xzDiff));
+                BlockState* placeState = level->getBlockState(placePos);
+                if (placeState && (placeState->isAir() ||
+                                   is(placeState, "minecraft:water") ||
+                                   is(placeState, "minecraft:packed_ice") ||
+                                   is(placeState, "minecraft:ice"))) {
+                    for (int d = 0; d < 6; ++d) {
+                        core::Direction direction = static_cast<core::Direction>(d);
+                        BlockState* relativeState = level->getBlockState(placePos.relative(direction));
+                        if (is(relativeState, "minecraft:blue_ice")) {
+                            level->setBlock(placePos, blueIce, 2);
+                            break;
+                        }
+                    }
                 }
             }
         }
 
-        return placed > 0;
+        return true;
     }
 };
 
@@ -3087,47 +3178,82 @@ public:
  */
 class BambooFeature : public Feature<ProbabilityFeatureConfiguration> {
 public:
+    // Reference: BambooFeature.java place() - exact port. Return value is
+    // `placed > 0` where placed increments whenever the ORIGIN was empty,
+    // even if the bamboo failed canSurvive.
     bool place(FeaturePlaceContext<ProbabilityFeatureConfiguration>& context) override {
+        namespace blk = world::level::block;
+        using world::level::block::state::properties::BambooLeaves;
+        using world::level::block::state::properties::BlockStateProperties;
+
+        int placed = 0;
         const core::BlockPos& origin = context.origin();
         WorldGenLevel* level = context.level();
         WorldgenRandom& random = context.random();
         const ProbabilityFeatureConfiguration& config = context.config();
 
-        BlockState* originBlock = level->getBlockState(origin);
-        if (!originBlock) return false;
-        BlockState* originState = static_cast<BlockState*>(originBlock);
+        blk::Block* bambooBlock = blk::Blocks::BAMBOO;
+        if (!bambooBlock) return false;
 
-        if (!originState->isAir()) {
-            return false;
-        }
+        // Reference: BambooFeature static states
+        BlockState* trunk = bambooBlock->defaultBlockState()
+            ->setValue(*BlockStateProperties::AGE_1, 1)
+            ->setValue(*BlockStateProperties::BAMBOO_LEAVES, BambooLeaves(BambooLeaves::NONE))
+            ->setValue(*BlockStateProperties::STAGE, 0);
+        BlockState* finalLarge = trunk
+            ->setValue(*BlockStateProperties::BAMBOO_LEAVES, BambooLeaves(BambooLeaves::LARGE))
+            ->setValue(*BlockStateProperties::STAGE, 1);
+        BlockState* topLarge = trunk
+            ->setValue(*BlockStateProperties::BAMBOO_LEAVES, BambooLeaves(BambooLeaves::LARGE));
+        BlockState* topSmall = trunk
+            ->setValue(*BlockStateProperties::BAMBOO_LEAVES, BambooLeaves(BambooLeaves::SMALL));
 
-        int height = random.nextInt(12) + 5;
+        if (level->isEmptyBlock(origin)) {
+            if (bambooBlock->defaultBlockState()->canSurvive(*level, origin)) {
+                int height = random.nextInt(12) + 5;
 
-        if (random.nextFloat() < config.probability) {
-            int r = random.nextInt(4) + 1;
-            int rSq = r * r;
+                if (random.nextFloat() < config.probability) {
+                    int r = random.nextInt(4) + 1;
 
-            for (int xx = origin.getX() - r; xx <= origin.getX() + r; ++xx) {
-                for (int zz = origin.getZ() - r; zz <= origin.getZ() + r; ++zz) {
-                    int xd = xx - origin.getX();
-                    int zd = zz - origin.getZ();
-                    if (xd * xd + zd * zd <= rSq) {
-                        // Would place podzol here
+                    for (int xx = origin.getX() - r; xx <= origin.getX() + r; ++xx) {
+                        for (int zz = origin.getZ() - r; zz <= origin.getZ() + r; ++zz) {
+                            int xd = xx - origin.getX();
+                            int zd = zz - origin.getZ();
+                            if (xd * xd + zd * zd <= r * r) {
+                                core::BlockPos podzolPos(
+                                    xx,
+                                    level->getHeight(Heightmap::Types::WORLD_SURFACE, xx, zz) - 1,
+                                    zz);
+                                BlockState* ground = level->getBlockState(podzolPos);
+                                if (ground && isDirt(ground) && blk::Blocks::PODZOL) {
+                                    level->setBlock(podzolPos,
+                                        blk::Blocks::PODZOL->defaultBlockState(), 2);
+                                }
+                            }
+                        }
                     }
                 }
+
+                core::BlockPos::MutableBlockPos bambooPos(
+                    origin.getX(), origin.getY(), origin.getZ());
+                for (int i = 0; i < height && level->isEmptyBlock(bambooPos); ++i) {
+                    level->setBlock(bambooPos, trunk, 2);
+                    bambooPos.move(0, 1, 0);
+                }
+
+                if (bambooPos.getY() - origin.getY() >= 3) {
+                    level->setBlock(bambooPos, finalLarge, 2);
+                    bambooPos.move(0, -1, 0);
+                    level->setBlock(bambooPos, topLarge, 2);
+                    bambooPos.move(0, -1, 0);
+                    level->setBlock(bambooPos, topSmall, 2);
+                }
             }
+
+            ++placed;
         }
 
-        core::BlockPos::MutableBlockPos bambooPos(origin.getX(), origin.getY(), origin.getZ());
-        for (int i = 0; i < height; ++i) {
-            BlockState* block = level->getBlockState(bambooPos);
-            if (!block) break;
-            BlockState* state = static_cast<BlockState*>(block);
-            if (!state->isAir()) break;
-            bambooPos.move(0, 1, 0);
-        }
-
-        return true;
+        return placed > 0;
     }
 };
 
@@ -3287,15 +3413,28 @@ public:
             BlockState* tallSeagrassState = world::level::block::Blocks::TALL_SEAGRASS ?
                 world::level::block::Blocks::TALL_SEAGRASS->defaultBlockState() : nullptr;
 
+            // Java: state.canSurvive(level, pos) - SeagrassBlock/TallSeagrassBlock
+            // mayPlaceOn: below isFaceSturdy(UP) and not magma.
+            BlockState* below = level->getBlockState(grassPos.below());
+            bool canSurvive = below && !below->isAir() &&
+                below->isFaceSturdy(*level, grassPos.below(), core::Direction::UP) &&
+                below->getIdentifier() != "minecraft:magma_block";
+            if (!canSurvive) {
+                return false;
+            }
+
             if (isTall && tallSeagrassState) {
                 // Place tall seagrass (double plant)
                 core::BlockPos above = grassPos.above();
                 BlockState* aboveBlock = level->getBlockState(above);
                 if (aboveBlock && aboveBlock->getIdentifier() == "minecraft:water") {
-                    // Place lower half
+                    // Reference: SeagrassFeature.java lines 36-40 - lower half is the
+                    // default state, upper half gets HALF=UPPER.
+                    BlockState* upperState = tallSeagrassState->setValue(
+                        *world::level::block::DoublePlantBlock::HALF,
+                        world::level::block::state::properties::DoubleBlockHalf::upper());
                     level->setBlock(grassPos, tallSeagrassState, 2);
-                    // Place upper half (TODO: would need HALF property set to UPPER)
-                    level->setBlock(above, tallSeagrassState, 2);
+                    level->setBlock(above, upperState, 2);
                     return true;
                 }
             } else if (seagrassState) {
@@ -3324,6 +3463,21 @@ public:
      * 1. nextInt(10) for height (1 + result)
      * 2. nextInt(4) + 20 for AGE property (at top or when breaking)
      */
+    // Reference: GrowingPlantBlock.canSurvive for kelp/kelp_plant: the block
+    // below must not be magma (KelpBlock.canAttachTo, body delegates to head)
+    // and must be kelp, kelp_plant, or face-sturdy UP.
+    static bool kelpCanSurvive(WorldGenLevel* level, const core::BlockPos& pos) {
+        core::BlockPos belowPos = pos.below();
+        BlockState* below = level->getBlockState(belowPos);
+        if (!below || below->getIdentifier() == "minecraft:magma_block") {
+            return false;
+        }
+        const std::string& id = below->getIdentifier();
+        return id == "minecraft:kelp" ||
+               id == "minecraft:kelp_plant" ||
+               below->isFaceSturdy(*level, belowPos, core::Direction::UP);
+    }
+
     bool place(FeaturePlaceContext<NoneFeatureConfiguration>& context) override {
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
@@ -3356,13 +3510,17 @@ public:
                 bool currentIsWater = currentBlock && currentBlock->getIdentifier() == "minecraft:water";
                 bool aboveIsWater = aboveBlock && aboveBlock->getIdentifier() == "minecraft:water";
 
-                if (currentIsWater && aboveIsWater && kelpPlantState) {
+                // Reference: KelpFeature.java line 31 - state.canSurvive(level, kelpPos)
+                if (currentIsWater && aboveIsWater && kelpPlantState &&
+                    kelpCanSurvive(level, kelpPos)) {
                     if (h == height) {
-                        // Reference: KelpFeature.java line 33
-                        // CRITICAL: Must consume nextInt(4) for AGE property
+                        // Reference: KelpFeature.java line 33 - top block carries
+                        // AGE = nextInt(4) + 20
                         int age = random.nextInt(4) + 20;
-                        (void)age; // TODO: Set AGE property on kelpTopState
-                        level->setBlock(kelpPos, kelpTopState, 2);
+                        level->setBlock(kelpPos,
+                            kelpTopState->setValue(
+                                *world::level::block::state::properties::BlockStateProperties::AGE_25, age),
+                            2);
                         ++placed;
                     } else {
                         // Place kelp plant (body segment)
@@ -3370,19 +3528,21 @@ public:
                     }
                 } else if (h > 0) {
                     // Reference: KelpFeature.java lines 38-44
-                    // Early termination - place top block below
+                    // Early termination - place top block below:
+                    // stateTop.canSurvive(level, below) && below.below() is not kelp
                     core::BlockPos below = kelpPos.below();
-                    BlockState* belowBlock = level->getBlockState(below);
                     BlockState* belowBelowBlock = level->getBlockState(below.below());
 
-                    bool canPlace = belowBlock && belowBlock->getIdentifier() != "minecraft:kelp";
+                    bool canPlace = kelpCanSurvive(level, below);
                     bool notKelpBelow = belowBelowBlock && belowBelowBlock->getIdentifier() != "minecraft:kelp";
 
                     if (canPlace && notKelpBelow && kelpTopState) {
-                        // CRITICAL: Must consume nextInt(4) for AGE property
+                        // Reference: KelpFeature.java line 41 - AGE = nextInt(4) + 20
                         int age = random.nextInt(4) + 20;
-                        (void)age; // TODO: Set AGE property on kelpTopState
-                        level->setBlock(below, kelpTopState, 2);
+                        level->setBlock(below,
+                            kelpTopState->setValue(
+                                *world::level::block::state::properties::BlockStateProperties::AGE_25, age),
+                            2);
                         ++placed;
                     }
                     break;
@@ -3722,27 +3882,69 @@ protected:
 
 class CoralFeature : public Feature<NoneFeatureConfiguration> {
 protected:
-    // Reference: CoralFeature.java placeCoralBlock() lines 35-66
+    // Reference: CoralFeature.java placeCoralBlock() (exact port, incl. the
+    // else-if second nextFloat draw and Direction.Plane.HORIZONTAL order).
     bool placeCoralBlock(
         WorldGenLevel* level,
         WorldgenRandom& random,
         const core::BlockPos& pos,
         BlockState* state
     ) {
-        core::BlockPos above = pos.above();
-        BlockState* targetBlock = level->getBlockState(pos);
-        BlockState* aboveBlock = level->getBlockState(above);
+        namespace bp = minecraft::levelgen::blockpredicates;
+        using minecraft::world::level::block::Blocks;
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
 
-        if (!targetBlock || !aboveBlock) {
+        core::BlockPos above = pos.above();
+        BlockState* targetState = level->getBlockState(pos);
+        BlockState* aboveState = level->getBlockState(above);
+        if (!targetState || !aboveState) {
             return false;
         }
 
-        BlockState* targetState = static_cast<BlockState*>(targetBlock);
-        BlockState* aboveState = static_cast<BlockState*>(aboveBlock);
+        const bool targetOk = targetState->getIdentifier() == "minecraft:water" ||
+                              bp::matchesBlockTagName(targetState, "minecraft:corals");
+        if (targetOk && aboveState->getIdentifier() == "minecraft:water") {
+            level->setBlock(pos, state, 3);
 
-        if ((targetState->getIdentifier() == "minecraft:water" || targetState->getIdentifier() == "minecraft:coral_block") &&
-            aboveState->getIdentifier() == "minecraft:water") {
-            // Would set coral block here
+            if (random.nextFloat() < 0.25f) {
+                const auto& corals = bp::orderedBlockTagValues("minecraft:corals");
+                if (!corals.empty()) {
+                    BlockState* coral = Blocks::getDefaultState(
+                        corals[random.nextInt(static_cast<int>(corals.size()))]);
+                    if (coral) {
+                        level->setBlock(above, coral, 2);
+                    }
+                }
+            } else if (random.nextFloat() < 0.05f) {
+                BlockState* pickle = Blocks::getDefaultState("minecraft:sea_pickle");
+                if (pickle) {
+                    pickle = pickle->setValue(*BlockStateProperties::PICKLES, random.nextInt(4) + 1);
+                    level->setBlock(above, pickle, 2);
+                }
+            }
+
+            for (int d = 0; d < 4; ++d) {
+                core::Direction direction = core::horizontalPlaneDirection(d);
+                if (random.nextFloat() < 0.2f) {
+                    core::BlockPos relativePos = pos.relative(direction);
+                    BlockState* relState = level->getBlockState(relativePos);
+                    if (relState && relState->getIdentifier() == "minecraft:water") {
+                        const auto& wallCorals = bp::orderedBlockTagValues("minecraft:wall_corals");
+                        if (!wallCorals.empty()) {
+                            BlockState* wallCoral = Blocks::getDefaultState(
+                                wallCorals[random.nextInt(static_cast<int>(wallCorals.size()))]);
+                            if (wallCoral) {
+                                if (wallCoral->hasProperty(BlockStateProperties::HORIZONTAL_FACING)) {
+                                    wallCoral = wallCoral->setValue(
+                                        *BlockStateProperties::HORIZONTAL_FACING, direction);
+                                }
+                                level->setBlock(relativePos, wallCoral, 2);
+                            }
+                        }
+                    }
+                }
+            }
+
             return true;
         }
 
@@ -3757,14 +3959,23 @@ protected:
     ) = 0;
 
 public:
-    // Reference: CoralFeature.java place() lines 25-31
+    // Reference: CoralFeature.java place() - random #coral_blocks pick in tag
+    // file order via Registry.getRandomElementOf.
     bool place(FeaturePlaceContext<NoneFeatureConfiguration>& context) override {
+        namespace bp = minecraft::levelgen::blockpredicates;
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
         WorldgenRandom& random = context.random();
 
-        // Pick a random coral block type
-        BlockState* coralState = static_cast<BlockState*>(minecraft::world::level::block::Blocks::getDefaultState("minecraft:brain_coral_block")); // Simplified
+        const auto& coralBlocks = bp::orderedBlockTagValues("minecraft:coral_blocks");
+        if (coralBlocks.empty()) {
+            return false;
+        }
+        BlockState* coralState = minecraft::world::level::block::Blocks::getDefaultState(
+            coralBlocks[random.nextInt(static_cast<int>(coralBlocks.size()))]);
+        if (!coralState) {
+            return false;
+        }
         return placeFeature(level, random, origin, coralState);
     }
 };
@@ -3787,7 +3998,9 @@ protected:
             return false;
         }
 
-        core::Direction clawDirection = blockpredicates::fromHorizontalIndex(random.nextInt(4));
+        // Java: Direction.Plane.HORIZONTAL.getRandomDirection - plane order
+        // is {NORTH, EAST, SOUTH, WEST}, not the from2DDataValue order.
+        core::Direction clawDirection = core::horizontalPlaneDirection(random.nextInt(4));
         int nBranches = random.nextInt(2) + 2;
 
         // Get shuffled directions
@@ -3914,11 +4127,11 @@ protected:
         core::BlockPos trunkTop(mutPos.getX(), mutPos.getY(), mutPos.getZ());
         int nBranches = random.nextInt(3) + 2;
 
-        // Get shuffled horizontal directions
-        std::vector<core::Direction> directions;
-        for (int i = 0; i < 4; ++i) {
-            directions.push_back(blockpredicates::fromHorizontalIndex(i));
-        }
+        // Reference: Direction.Plane.HORIZONTAL.shuffledCopy(random) - the
+        // pre-shuffle order is N,E,S,W (NOT from2DDataValue order).
+        std::vector<core::Direction> directions = {
+            core::Direction::NORTH, core::Direction::EAST,
+            core::Direction::SOUTH, core::Direction::WEST};
         for (size_t i = directions.size() - 1; i > 0; --i) {
             size_t j = random.nextInt(static_cast<int>(i + 1));
             std::swap(directions[i], directions[j]);
@@ -4286,19 +4499,39 @@ inline void growPointedDripstone(
 
     // Build column from base to tip
     // Reference: DripstoneUtils.java buildBaseToTipColumn() + growPointedDripstone()
-    core::BlockPos::MutableBlockPos pos(startPos.getX(), startPos.getY(), startPos.getZ());
-
-    // Generate thickness values: BASE, MIDDLE..., FRUSTUM, TIP/TIP_MERGE
     // For height >= 3: BASE + (height-3)*MIDDLE + FRUSTUM + TIP
     // For height == 2: FRUSTUM + TIP
-    // For height == 1: TIP
-    for (int i = 0; i < height; ++i) {
-        // Place pointed_dripstone block
-        // Check if position should be waterlogged
-        BlockState* existingState = level->getBlockState(pos);
-        bool isWater = existingState && existingState->getIdentifier() == "minecraft:water";
+    // For height == 1: TIP (or TIP_MERGE when mergedTip)
+    core::BlockPos::MutableBlockPos pos(startPos.getX(), startPos.getY(), startPos.getZ());
+    using world::level::block::state::properties::BlockStateProperties;
+    using world::level::block::state::properties::DripstoneThickness;
 
-        level->setBlock(pos, dripstoneState, 2);
+    std::vector<DripstoneThickness> column;
+    if (height >= 3) {
+        column.emplace_back(DripstoneThickness::BASE);
+        for (int i = 0; i < height - 3; ++i) {
+            column.emplace_back(DripstoneThickness::MIDDLE);
+        }
+    }
+    if (height >= 2) {
+        column.emplace_back(DripstoneThickness::FRUSTUM);
+    }
+    if (height >= 1) {
+        column.emplace_back(mergedTip ? DripstoneThickness(DripstoneThickness::TIP_MERGE)
+                                      : DripstoneThickness(DripstoneThickness::TIP));
+    }
+
+    for (const DripstoneThickness& thickness : column) {
+        BlockState* state = dripstoneState;
+        if (state->hasProperty(BlockStateProperties::VERTICAL_DIRECTION)) {
+            state = state->setValue(*BlockStateProperties::VERTICAL_DIRECTION, tipDirection);
+            state = state->setValue(*BlockStateProperties::DRIPSTONE_THICKNESS, thickness);
+            BlockState* existingState = level->getBlockState(pos);
+            bool isWater = existingState && existingState->isFluid() &&
+                           existingState->getIdentifier() == "minecraft:water";
+            state = state->setValue(*BlockStateProperties::WATERLOGGED, isWater);
+        }
+        level->setBlock(pos, state, 2);
         pos.move(tipDirection);
     }
 }
@@ -4791,9 +5024,9 @@ private:
         const std::string& id = state->getIdentifier();
         if (id == "minecraft:water" || id == "minecraft:dripstone_block" || id == "minecraft:pointed_dripstone")
             return false;
-        // Check above not water
+        // Check above has no water FLUID (includes waterlogged blocks)
         BlockState* above = level->getBlockState(pos.above());
-        if (above && above->getIdentifier() == "minecraft:water") return false;
+        if (above && hasWaterFluid(above)) return false;
         // Check horizontal neighbors and below
         core::Direction horizontals[] = {
             core::Direction::NORTH, core::Direction::EAST,
@@ -4805,10 +5038,22 @@ private:
         return canBeAdjacentToWater(level, pos.below());
     }
 
+    // Java: getFluidState().is(FluidTags.WATER) - water blocks (any level) OR
+    // waterlogged blocks.
+    static bool hasWaterFluid(BlockState* state) {
+        if (state->getIdentifier() == "minecraft:water") {
+            return true;
+        }
+        using world::level::block::state::properties::BlockStateProperties;
+        return BlockStateProperties::WATERLOGGED &&
+               state->hasProperty(BlockStateProperties::WATERLOGGED) &&
+               state->getValueOrElse(*BlockStateProperties::WATERLOGGED, false);
+    }
+
     bool canBeAdjacentToWater(WorldGenLevel* level, const core::BlockPos& pos) {
         BlockState* state = level->getBlockState(pos);
         if (!state) return false;
-        return DripstoneUtils::isBaseStoneOverworld(state) || state->getIdentifier() == "minecraft:water";
+        return DripstoneUtils::isBaseStoneOverworld(state) || hasWaterFluid(state);
     }
 
     void replaceBlocksWithDripstoneBlocks(WorldGenLevel* level, const core::BlockPos& firstPos,
@@ -4914,6 +5159,9 @@ public:
 struct FossilFeatureConfiguration {
     std::vector<std::string> fossilStructures;
     std::vector<std::string> overlayStructures;
+    float fossilRotIntegrity = 0.9f;    // processor_list fossil_rot
+    float overlayRotIntegrity = 0.1f;   // processor_list fossil_coal / fossil_diamonds
+    bool overlayCoalToDeepslateDiamond = false;  // fossil_diamonds rule processor
     int maxEmptyCornersAllowed = 4;
 
     FossilFeatureConfiguration() = default;
@@ -4921,43 +5169,165 @@ struct FossilFeatureConfiguration {
     FossilFeatureConfiguration(
         const std::vector<std::string>& fossils,
         const std::vector<std::string>& overlays,
+        float fossilIntegrity,
+        float overlayIntegrity,
+        bool coalToDiamond,
         int maxEmptyCorners = 4
     )
         : fossilStructures(fossils)
         , overlayStructures(overlays)
+        , fossilRotIntegrity(fossilIntegrity)
+        , overlayRotIntegrity(overlayIntegrity)
+        , overlayCoalToDeepslateDiamond(coalToDiamond)
         , maxEmptyCornersAllowed(maxEmptyCorners)
     {}
 };
 
 //=============================================================================
 // FossilFeature
-// Reference: FossilFeature.java
+// Reference: FossilFeature.java (exact port over the minimal template loader)
 //=============================================================================
 
 class FossilFeature : public Feature<FossilFeatureConfiguration> {
 public:
-    // Reference: FossilFeature.java place() lines 28-67
     bool place(FeaturePlaceContext<FossilFeatureConfiguration>& context) override {
-        WorldGenLevel* level = context.level();
-        const core::BlockPos& origin = context.origin();
+        namespace fstruct = minecraft::levelgen::structure;
         WorldgenRandom& random = context.random();
+        WorldGenLevel* level = context.level();
+        const core::BlockPos origin = context.origin();
         const FossilFeatureConfiguration& config = context.config();
 
-        if (config.fossilStructures.empty()) {
+        // Rotation.getRandom: values order NONE, CW90, CW180, CCW90.
+        const int rotation = random.nextInt(4);
+        const int fossilIndex = random.nextInt(static_cast<int>(config.fossilStructures.size()));
+
+        const fstruct::FossilTemplate& base =
+            fstruct::getFossilTemplate(config.fossilStructures[fossilIndex]);
+        const fstruct::FossilTemplate& overlay =
+            fstruct::getFossilTemplate(config.overlayStructures[fossilIndex]);
+
+        const bool swapXZ = (rotation == 1 || rotation == 3);
+        const int sizeX = swapXZ ? base.sizeZ : base.sizeX;
+        const int sizeZ = swapXZ ? base.sizeX : base.sizeZ;
+
+        core::BlockPos lowCorner = origin.offset(-sizeX / 2, 0, -sizeZ / 2);
+        int lowestSurfaceY = origin.getY();
+        for (int xscan = 0; xscan < sizeX; ++xscan) {
+            for (int zscan = 0; zscan < sizeZ; ++zscan) {
+                lowestSurfaceY = std::min(lowestSurfaceY,
+                    level->getHeight(Heightmap::Types::OCEAN_FLOOR_WG,
+                                     lowCorner.getX() + xscan, lowCorner.getZ() + zscan));
+            }
+        }
+
+        const int minY = level->getMinY();
+        const int targetY = std::max(lowestSurfaceY - 15 - random.nextInt(10), minY + 10);
+
+        // getZeroPositionWithTransform (mirror NONE): the corner offset that
+        // makes the rotated template occupy the [lowCorner..] box.
+        int offX = 0, offZ = 0;
+        if (rotation == 1) { offX = base.sizeZ - 1; }
+        else if (rotation == 2) { offX = base.sizeX - 1; offZ = base.sizeZ - 1; }
+        else if (rotation == 3) { offZ = base.sizeX - 1; }
+        core::BlockPos targetPos(lowCorner.getX() + offX, targetY, lowCorner.getZ() + offZ);
+
+        // Bounding box of the placed structure (for the empty-corner check):
+        // the rotated template spans [min(corner, corner+rotspan)].
+        auto transformRel = [&](int x, int y, int z) -> core::BlockPos {
+            switch (rotation) {
+                case 1:  return core::BlockPos(targetPos.getX() - z, targetPos.getY() + y, targetPos.getZ() + x);
+                case 2:  return core::BlockPos(targetPos.getX() - x, targetPos.getY() + y, targetPos.getZ() - z);
+                case 3:  return core::BlockPos(targetPos.getX() + z, targetPos.getY() + y, targetPos.getZ() - x);
+                default: return core::BlockPos(targetPos.getX() + x, targetPos.getY() + y, targetPos.getZ() + z);
+            }
+        };
+        core::BlockPos cornerA = transformRel(0, 0, 0);
+        core::BlockPos cornerB = transformRel(base.sizeX - 1, base.sizeY - 1, base.sizeZ - 1);
+        const int minX = std::min(cornerA.getX(), cornerB.getX());
+        const int maxX = std::max(cornerA.getX(), cornerB.getX());
+        const int minBY = std::min(cornerA.getY(), cornerB.getY());
+        const int maxBY = std::max(cornerA.getY(), cornerB.getY());
+        const int minZ = std::min(cornerA.getZ(), cornerB.getZ());
+        const int maxZ = std::max(cornerA.getZ(), cornerB.getZ());
+
+        int emptyCorners = 0;
+        for (int cx : {minX, maxX}) {
+            for (int cy : {minBY, maxBY}) {
+                for (int cz : {minZ, maxZ}) {
+                    BlockState* state = level->getBlockState(core::BlockPos(cx, cy, cz));
+                    if (state && (state->isAir() ||
+                                  state->getIdentifier() == "minecraft:lava" ||
+                                  state->getIdentifier() == "minecraft:water")) {
+                        ++emptyCorners;
+                    }
+                }
+            }
+        }
+        if (emptyCorners > config.maxEmptyCornersAllowed) {
             return false;
         }
 
-        // Get random rotation
-        int rotation = random.nextInt(4);
-
-        // Get random fossil index
-        int fossilIndex = random.nextInt(static_cast<int>(config.fossilStructures.size()));
-
-        // Structure templates would be loaded and placed here
-        // This is a simplified version that just returns true
-        // as structure template handling requires additional infrastructure
-
+        placeTemplate(level, random, base, transformRel, config.fossilRotIntegrity, false);
+        placeTemplate(level, random, overlay, transformRel, config.overlayRotIntegrity,
+                      config.overlayCoalToDeepslateDiamond);
         return true;
+    }
+
+private:
+    template <typename TransformFn>
+    void placeTemplate(WorldGenLevel* level, WorldgenRandom& random,
+                       const minecraft::levelgen::structure::FossilTemplate& tpl,
+                       TransformFn&& transformRel, float integrity, bool coalToDiamond) {
+        namespace bp = minecraft::levelgen::blockpredicates;
+        using minecraft::world::level::block::Blocks;
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
+
+        // StructurePlaceSettings.getRandomPalette ALWAYS draws nextInt(count).
+        random.nextInt(std::max<int>(1, static_cast<int>(tpl.paletteCount)));
+
+        for (const auto& entry : tpl.blocks) {
+            // BlockRotProcessor (integrity < 1): one nextFloat per block, drawn
+            // BEFORE the protected-blocks check.
+            if (integrity < 1.0f && random.nextFloat() > integrity) {
+                continue;
+            }
+
+            const auto& ps = tpl.palette[entry.stateIndex];
+            std::string name = ps.name;
+            if (coalToDiamond && name == "minecraft:coal_ore") {
+                name = "minecraft:deepslate_diamond_ore";
+            }
+
+            core::BlockPos pos = transformRel(entry.x, entry.y, entry.z);
+
+            // ProtectedBlocksProcessor: skip #features_cannot_replace.
+            BlockState* worldState = level->getBlockState(pos);
+            if (worldState && bp::matchesBlockTagName(worldState, "minecraft:features_cannot_replace")) {
+                continue;
+            }
+
+            BlockState* state = Blocks::getDefaultState(name);
+            if (!state) {
+                throw std::runtime_error("FossilFeature: unknown block " + name);
+            }
+            auto axisIt = ps.properties.find("axis");
+            if (axisIt != ps.properties.end() && state->hasProperty(BlockStateProperties::AXIS)) {
+                // Rotated pillar axis: 90-degree rotations swap x<->z. Detect a
+                // swapping rotation from how the transform maps the +x unit.
+                std::string axis = axisIt->second;
+                core::BlockPos o = transformRel(0, 0, 0);
+                core::BlockPos px = transformRel(1, 0, 0);
+                const bool rotSwaps = (px.getX() == o.getX());
+                if (rotSwaps) {
+                    if (axis == "x") axis = "z";
+                    else if (axis == "z") axis = "x";
+                }
+                state = state->setValue(*BlockStateProperties::AXIS,
+                    axis == "x" ? core::Axis::X : (axis == "z" ? core::Axis::Z : core::Axis::Y));
+            }
+
+            level->setBlock(pos, state, 2);
+        }
     }
 };
 
@@ -5443,24 +5813,22 @@ struct BlockStateConfiguration {
 
 class IcebergFeature : public Feature<BlockStateConfiguration> {
 public:
-    // Reference: IcebergFeature.java place() lines 19-70
+    // Reference: IcebergFeature.java place() lines 19-71 (exact port).
+    // NOTE: two loop CONDITIONS below draw random.nextInt(5) every iteration,
+    // exactly like Java evaluates its loop condition each pass.
     bool place(FeaturePlaceContext<BlockStateConfiguration>& context) override {
-        WorldGenLevel* level = context.level();
         core::BlockPos origin = context.origin();
+        WorldGenLevel* level = context.level();
+        origin = core::BlockPos(origin.getX(), context.chunkGenerator()->getSeaLevel(), origin.getZ());
         WorldgenRandom& random = context.random();
-        const BlockStateConfiguration& config = context.config();
-
-        // Set origin Y to sea level
-        // origin = core::BlockPos(origin.getX(), seaLevel, origin.getZ());
 
         bool snowOnTop = random.nextDouble() > 0.7;
+        BlockState* mainBlockState = context.config().state;
         double shapeAngle = random.nextDouble() * 2.0 * M_PI;
         int shapeEllipseA = 11 - random.nextInt(5);
         int shapeEllipseC = 3 + random.nextInt(3);
         bool isEllipse = random.nextDouble() > 0.7;
-        int maxWidthRoundIceberg = 11;
         int overWaterHeight = isEllipse ? random.nextInt(6) + 6 : random.nextInt(15) + 3;
-
         if (!isEllipse && random.nextDouble() > 0.9) {
             overWaterHeight += random.nextInt(19) + 7;
         }
@@ -5469,31 +5837,254 @@ public:
         int width = std::min(overWaterHeight + random.nextInt(7) - random.nextInt(5), 11);
         int a = isEllipse ? shapeEllipseA : 11;
 
-        // Would place iceberg blocks in ellipse/round shape
         for (int xo = -a; xo < a; ++xo) {
             for (int zo = -a; zo < a; ++zo) {
                 for (int yOff = 0; yOff < overWaterHeight; ++yOff) {
-                    // Would generate iceberg block
+                    int radius = isEllipse ? heightDependentRadiusEllipse(yOff, overWaterHeight, width)
+                                           : heightDependentRadiusRound(random, yOff, overWaterHeight, width);
+                    if (isEllipse || xo < radius) {
+                        generateIcebergBlock(level, random, origin, overWaterHeight, xo, yOff, zo,
+                                             radius, a, isEllipse, shapeEllipseC, shapeAngle,
+                                             snowOnTop, mainBlockState);
+                    }
                 }
             }
+        }
+
+        smooth(level, origin, width, overWaterHeight, isEllipse, shapeEllipseA);
+
+        for (int xo = -a; xo < a; ++xo) {
+            for (int zo = -a; zo < a; ++zo) {
+                for (int yOff = -1; yOff > -underWaterHeight; --yOff) {
+                    int newA = isEllipse
+                        ? static_cast<int>(std::ceil(static_cast<float>(a) *
+                              (1.0f - static_cast<float>(std::pow(static_cast<double>(yOff), 2.0)) /
+                                          (static_cast<float>(underWaterHeight) * 8.0f))))
+                        : a;
+                    int radius = heightDependentRadiusSteep(random, -yOff, underWaterHeight, width);
+                    if (xo < radius) {
+                        generateIcebergBlock(level, random, origin, underWaterHeight, xo, yOff, zo,
+                                             radius, newA, isEllipse, shapeEllipseC, shapeAngle,
+                                             snowOnTop, mainBlockState);
+                    }
+                }
+            }
+        }
+
+        bool doCutOut = isEllipse ? random.nextDouble() > 0.1 : random.nextDouble() > 0.7;
+        if (doCutOut) {
+            generateCutOut(random, level, width, overWaterHeight, origin, isEllipse,
+                           shapeEllipseA, shapeAngle, shapeEllipseC);
         }
 
         return true;
     }
 
 private:
+    static BlockState* stateOf(const char* name) {
+        return minecraft::world::level::block::Blocks::getDefaultState(name);
+    }
+
+    static bool isIcebergState(BlockState* state) {
+        if (!state) return false;
+        const std::string& id = state->getIdentifier();
+        return id == "minecraft:packed_ice" || id == "minecraft:snow_block" || id == "minecraft:blue_ice";
+    }
+
+    static bool isBlock(BlockState* state, const char* name) {
+        return state && state->getIdentifier() == name;
+    }
+
+    void generateCutOut(WorldgenRandom& random, WorldGenLevel* level, int width, int height,
+                        const core::BlockPos& globalOrigin, bool isEllipse, int shapeEllipseA,
+                        double shapeAngle, int shapeEllipseC) {
+        int randomSignX = random.nextBoolean() ? -1 : 1;
+        int randomSignZ = random.nextBoolean() ? -1 : 1;
+        int xOff = random.nextInt(std::max(width / 2 - 2, 1));
+        if (random.nextBoolean()) {
+            xOff = width / 2 + 1 - random.nextInt(std::max(width - width / 2 - 1, 1));
+        }
+
+        int zOff = random.nextInt(std::max(width / 2 - 2, 1));
+        if (random.nextBoolean()) {
+            zOff = width / 2 + 1 - random.nextInt(std::max(width - width / 2 - 1, 1));
+        }
+
+        if (isEllipse) {
+            xOff = zOff = random.nextInt(std::max(shapeEllipseA - 5, 1));
+        }
+
+        core::BlockPos localOrigin(randomSignX * xOff, 0, randomSignZ * zOff);
+        double angle = isEllipse ? shapeAngle + (M_PI / 2.0) : random.nextDouble() * 2.0 * M_PI;
+
+        for (int yOff = 0; yOff < height - 3; ++yOff) {
+            int radius = heightDependentRadiusRound(random, yOff, height, width);
+            carve(radius, yOff, globalOrigin, level, false, angle, localOrigin, shapeEllipseA, shapeEllipseC);
+        }
+
+        // Java draws nextInt(5) in the loop CONDITION each iteration.
+        for (int yOff = -1; yOff > -height + random.nextInt(5); --yOff) {
+            int radius = heightDependentRadiusSteep(random, -yOff, height, width);
+            carve(radius, yOff, globalOrigin, level, true, angle, localOrigin, shapeEllipseA, shapeEllipseC);
+        }
+    }
+
+    void carve(int radius, int yOff, const core::BlockPos& globalOrigin, WorldGenLevel* level,
+               bool underWater, double angle, const core::BlockPos& localOrigin,
+               int shapeEllipseA, int shapeEllipseC) {
+        int a = radius + 1 + shapeEllipseA / 3;
+        int c = std::min(radius - 3, 3) + shapeEllipseC / 2 - 1;
+
+        for (int xo = -a; xo < a; ++xo) {
+            for (int zo = -a; zo < a; ++zo) {
+                double signedDist = signedDistanceEllipse(xo, zo, localOrigin, a, c, angle);
+                if (signedDist < 0.0) {
+                    core::BlockPos pos = globalOrigin.offset(xo, yOff, zo);
+                    BlockState* state = level->getBlockState(pos);
+                    if (isIcebergState(state) || isBlock(state, "minecraft:snow_block")) {
+                        if (underWater) {
+                            setBlock(level, pos, stateOf("minecraft:water"));
+                        } else {
+                            setBlock(level, pos, stateOf("minecraft:air"));
+                            removeFloatingSnowLayer(level, pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    void removeFloatingSnowLayer(WorldGenLevel* level, const core::BlockPos& pos) {
+        if (isBlock(level->getBlockState(pos.above()), "minecraft:snow")) {
+            setBlock(level, pos.above(), stateOf("minecraft:air"));
+        }
+    }
+
+    void generateIcebergBlock(WorldGenLevel* level, WorldgenRandom& random, const core::BlockPos& origin,
+                              int height, int xo, int yOff, int zo, int radius, int a, bool isEllipse,
+                              int shapeEllipseC, double shapeAngle, bool snowOnTop, BlockState* mainBlockState) {
+        static const core::BlockPos zeroPos(0, 0, 0);
+        double signedDist = isEllipse
+            ? signedDistanceEllipse(xo, zo, zeroPos, a, getEllipseC(yOff, height, shapeEllipseC), shapeAngle)
+            : signedDistanceCircle(xo, zo, zeroPos, radius, random);
+        if (signedDist < 0.0) {
+            core::BlockPos pos = origin.offset(xo, yOff, zo);
+            double compareVal = isEllipse ? -0.5 : static_cast<double>(-6 - random.nextInt(3));
+            if (signedDist > compareVal && random.nextDouble() > 0.9) {
+                return;
+            }
+
+            setIcebergBlock(pos, level, random, height - yOff, height, isEllipse, snowOnTop, mainBlockState);
+        }
+    }
+
+    void setIcebergBlock(const core::BlockPos& pos, WorldGenLevel* level, WorldgenRandom& random,
+                         int hDiff, int height, bool isEllipse, bool snowOnTop, BlockState* mainBlockState) {
+        BlockState* state = level->getBlockState(pos);
+        if (!state) return;
+        const std::string& id = state->getIdentifier();
+        if (state->isAir() || id == "minecraft:snow_block" || id == "minecraft:ice" || id == "minecraft:water") {
+            bool randomness = !isEllipse || random.nextDouble() > 0.05;
+            int divisor = isEllipse ? 3 : 2;
+            if (snowOnTop && id != "minecraft:water" &&
+                static_cast<double>(hDiff) <= static_cast<double>(random.nextInt(std::max(1, height / divisor))) +
+                                              static_cast<double>(height) * 0.6 &&
+                randomness) {
+                setBlock(level, pos, stateOf("minecraft:snow_block"));
+            } else {
+                setBlock(level, pos, mainBlockState);
+            }
+        }
+    }
+
+    int getEllipseC(int yOff, int height, int shapeEllipseC) {
+        int c = shapeEllipseC;
+        if (yOff > 0 && height - yOff <= 3) {
+            c = shapeEllipseC - (4 - (height - yOff));
+        }
+        return c;
+    }
+
+    double signedDistanceCircle(int xo, int zo, const core::BlockPos& origin, int radius, WorldgenRandom& random) {
+        float off = 10.0f * Mth::clamp(random.nextFloat(), 0.2f, 0.8f) / static_cast<float>(radius);
+        return static_cast<double>(off) +
+               std::pow(static_cast<double>(xo - origin.getX()), 2.0) +
+               std::pow(static_cast<double>(zo - origin.getZ()), 2.0) -
+               std::pow(static_cast<double>(radius), 2.0);
+    }
+
+    double signedDistanceEllipse(int xo, int zo, const core::BlockPos& origin, int a, int c, double angle) {
+        return std::pow((static_cast<double>(xo - origin.getX()) * std::cos(angle) -
+                         static_cast<double>(zo - origin.getZ()) * std::sin(angle)) / static_cast<double>(a), 2.0) +
+               std::pow((static_cast<double>(xo - origin.getX()) * std::sin(angle) +
+                         static_cast<double>(zo - origin.getZ()) * std::cos(angle)) / static_cast<double>(c), 2.0) -
+               1.0;
+    }
+
     int heightDependentRadiusRound(WorldgenRandom& random, int yOff, int height, int width) {
         float k = 3.5f - random.nextFloat();
-        float scale = (1.0f - std::pow(static_cast<float>(yOff), 2.0f) / (static_cast<float>(height) * k)) *
-                      static_cast<float>(width);
+        float scale = (1.0f - static_cast<float>(std::pow(static_cast<double>(yOff), 2.0)) /
+                                  (static_cast<float>(height) * k)) * static_cast<float>(width);
+        if (height > 15 + random.nextInt(5)) {
+            int tempYOff = yOff < 3 + random.nextInt(6) ? yOff / 2 : yOff;
+            scale = (1.0f - static_cast<float>(tempYOff) / (static_cast<float>(height) * k * 0.4f)) *
+                    static_cast<float>(width);
+        }
         return static_cast<int>(std::ceil(scale / 2.0f));
     }
 
     int heightDependentRadiusEllipse(int yOff, int height, int width) {
-        float k = 1.0f;
-        float scale = (1.0f - std::pow(static_cast<float>(yOff), 2.0f) / (static_cast<float>(height) * k)) *
+        float scale = (1.0f - static_cast<float>(std::pow(static_cast<double>(yOff), 2.0)) /
+                                  (static_cast<float>(height) * 1.0f)) * static_cast<float>(width);
+        return static_cast<int>(std::ceil(scale / 2.0f));
+    }
+
+    int heightDependentRadiusSteep(WorldgenRandom& random, int yOff, int height, int width) {
+        float k = 1.0f + random.nextFloat() / 2.0f;
+        float scale = (1.0f - static_cast<float>(yOff) / (static_cast<float>(height) * k)) *
                       static_cast<float>(width);
         return static_cast<int>(std::ceil(scale / 2.0f));
+    }
+
+    bool belowIsAir(WorldGenLevel* level, const core::BlockPos& pos) {
+        BlockState* below = level->getBlockState(pos.below());
+        return below && below->isAir();
+    }
+
+    void smooth(WorldGenLevel* level, const core::BlockPos& origin, int width, int height,
+                bool isEllipse, int shapeEllipseA) {
+        int a = isEllipse ? shapeEllipseA : width / 2;
+
+        for (int x = -a; x <= a; ++x) {
+            for (int z = -a; z <= a; ++z) {
+                for (int yOff = 0; yOff <= height; ++yOff) {
+                    core::BlockPos pos = origin.offset(x, yOff, z);
+                    BlockState* state = level->getBlockState(pos);
+                    if (isIcebergState(state) || isBlock(state, "minecraft:snow")) {
+                        if (belowIsAir(level, pos)) {
+                            setBlock(level, pos, stateOf("minecraft:air"));
+                            setBlock(level, pos.above(), stateOf("minecraft:air"));
+                        } else if (isIcebergState(state)) {
+                            BlockState* sides[4] = {
+                                level->getBlockState(pos.west()),
+                                level->getBlockState(pos.east()),
+                                level->getBlockState(pos.north()),
+                                level->getBlockState(pos.south())
+                            };
+                            int counter = 0;
+                            for (BlockState* side : sides) {
+                                if (!isIcebergState(side)) {
+                                    ++counter;
+                                }
+                            }
+                            if (counter >= 3) {
+                                setBlock(level, pos, stateOf("minecraft:air"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 };
 
@@ -5866,33 +6457,49 @@ struct CountConfiguration {
 
 class SeaPickleFeature : public Feature<CountConfiguration> {
 public:
-    // Reference: SeaPickleFeature.java place() lines 18-38
+    // Reference: SeaPickleFeature.java place() (exact port): y comes from the
+    // LIVE OCEAN_FLOOR heightmap, the pickle count property is drawn before
+    // the water/canSurvive checks, and canSurvive is SeaPickleBlock's
+    // below-face-sturdy-UP test.
     bool place(FeaturePlaceContext<CountConfiguration>& context) override {
+        using minecraft::world::level::block::state::properties::BlockStateProperties;
+        WorldgenRandom& random = context.random();
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
-        WorldgenRandom& random = context.random();
-        const CountConfiguration& config = context.config();
 
         int placed = 0;
-        int count = config.count ? config.count->sample(random) : 20;
+        int count = context.config().count->sample(random);
+
+        BlockState* pickleDefault =
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:sea_pickle");
 
         for (int i = 0; i < count; ++i) {
             int x = random.nextInt(8) - random.nextInt(8);
             int z = random.nextInt(8) - random.nextInt(8);
-            // Would get height from OCEAN_FLOOR heightmap
-            int y = origin.getY();
-
+            int y = level->getHeight(Heightmap::Types::OCEAN_FLOOR, origin.getX() + x, origin.getZ() + z);
             core::BlockPos picklePos(origin.getX() + x, y, origin.getZ() + z);
-            int pickles = random.nextInt(4) + 1;
+            BlockState* pickleState =
+                pickleDefault->setValue(*BlockStateProperties::PICKLES, random.nextInt(4) + 1);
 
-            BlockState* block = level->getBlockState(picklePos);
-            if (block && static_cast<BlockState*>(block)->getIdentifier() == "minecraft:water") {
-                // Would set SEA_PICKLE with count property
+            BlockState* target = level->getBlockState(picklePos);
+            if (target && target->getIdentifier() == "minecraft:water" &&
+                seaPickleCanSurvive(level, picklePos)) {
+                level->setBlock(picklePos, pickleState, 2);
                 ++placed;
             }
         }
 
         return placed > 0;
+    }
+
+private:
+    // Reference: SeaPickleBlock.canSurvive -> mayPlaceOn(below): collision
+    // face UP non-empty or face-sturdy UP; the isFaceSturdy table covers the
+    // seabed blocks worldgen produces.
+    static bool seaPickleCanSurvive(WorldGenLevel* level, const core::BlockPos& pos) {
+        core::BlockPos belowPos = pos.below();
+        BlockState* below = level->getBlockState(belowPos);
+        return below && below->isFaceSturdy(*level, belowPos, core::Direction::UP);
     }
 };
 
@@ -6388,7 +6995,12 @@ private:
             return true;
         }
 
-        if (!state->isAir() && state->getIdentifier() != "minecraft:water") {
+        const bool isSourceWater =
+            state->is(world::level::block::Blocks::WATER) &&
+            (!BlockStateProperties::LEVEL ||
+             !state->hasProperty(BlockStateProperties::LEVEL) ||
+             state->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0);
+        if (!state->isAir() && !isSourceWater) {
             return false;
         }
 
@@ -6753,6 +7365,7 @@ public:
         WorldGenLevel* level = context.level();
         const core::BlockPos& origin = context.origin();
         WorldgenRandom& random = context.random();
+        auto replaceableTag = FeatureHelpers::isReplaceable("minecraft:features_cannot_replace");
 
         // Room dimensions - Reference: lines 37-45
         int xr = random.nextInt(2) + 2;  // 2-3
@@ -6772,7 +7385,7 @@ public:
                     BlockState* state = level->getBlockState(holePos);
                     if (!state) continue;
 
-                    bool solid = !state->isAir();
+                    bool solid = state->isSolid();
 
                     // Floor must be solid
                     if (dy == -1 && !solid) return false;
@@ -6781,11 +7394,8 @@ public:
 
                     // Count entrance holes (walls at y=0 with empty above)
                     if ((dx == minX || dx == maxX || dz == minZ || dz == maxZ) && dy == 0) {
-                        if (state->isAir()) {
-                            BlockState* aboveState = level->getBlockState(holePos.above());
-                            if (aboveState && aboveState->isAir()) {
-                                ++holeCount;
-                            }
+                        if (level->isEmptyBlock(holePos) && level->isEmptyBlock(holePos.above())) {
+                            ++holeCount;
                         }
                     }
                 }
@@ -6816,25 +7426,21 @@ public:
                         // Interior: set to cave air (skip if chest or spawner)
                         if (wallState && !wallState->is(world::level::block::Blocks::CHEST) &&
                             !wallState->is(world::level::block::Blocks::SPAWNER)) {
-                            level->setBlock(wallPos, caveAir, 2);
+                            this->safeSetBlock(level, wallPos, caveAir, replaceableTag);
                         }
                     } else {
                         // Wall/floor/ceiling: check if should place cobblestone
                         BlockState* belowState = level->getBlockState(wallPos.below());
-                        if (belowState && !belowState->isAir()) {
-                            // Has solid support
-                            if (wallState && !wallState->isAir() &&
-                                !wallState->is(world::level::block::Blocks::CHEST)) {
-                                // Floor: 75% mossy cobblestone, 25% cobblestone
-                                if (dy == -1 && random.nextInt(4) != 0) {
-                                    level->setBlock(wallPos, mossyCobblestone, 2);
-                                } else {
-                                    level->setBlock(wallPos, cobblestone, 2);
-                                }
-                            }
-                        } else {
-                            // No support below - set to air
+                        if (wallPos.getY() >= level->getMinY() && (!belowState || !belowState->isSolid())) {
                             level->setBlock(wallPos, caveAir, 2);
+                        } else if (wallState && wallState->isSolid() &&
+                                   !wallState->is(world::level::block::Blocks::CHEST)) {
+                            // Floor: 75% mossy cobblestone, 25% cobblestone
+                            if (dy == -1 && random.nextInt(4) != 0) {
+                                this->safeSetBlock(level, wallPos, mossyCobblestone, replaceableTag);
+                            } else {
+                                this->safeSetBlock(level, wallPos, cobblestone, replaceableTag);
+                            }
                         }
                     }
                 }
@@ -6850,24 +7456,66 @@ public:
                 int zc = origin.getZ() + random.nextInt(zr * 2 + 1) - zr;
                 core::BlockPos chestPos(xc, yc, zc);
 
-                BlockState* chestPosState = level->getBlockState(chestPos);
-                if (chestPosState && chestPosState->isAir()) {
+                if (level->isEmptyBlock(chestPos)) {
                     // Count adjacent solid walls
                     int wallCount = 0;
                     for (const core::Direction& dir : {core::Direction::NORTH, core::Direction::SOUTH,
                                                        core::Direction::EAST, core::Direction::WEST}) {
                         core::BlockPos adjPos = chestPos.relative(dir, 1);
                         BlockState* adjState = level->getBlockState(adjPos);
-                        if (adjState && !adjState->isAir()) {
+                        if (adjState && adjState->isSolid()) {
                             ++wallCount;
                         }
                     }
 
                     // Place chest if exactly 1 adjacent wall
                     if (wallCount == 1) {
-                        level->setBlock(chestPos,
-                            world::level::block::Blocks::CHEST->defaultBlockState(), 2);
-                        // Note: Loot table would be set on block entity in full implementation
+                        // Java: StructurePiece.reorient(level, pos, chest default)
+                        // - face AWAY from the unique solid-render neighbour.
+                        BlockState* chestState = world::level::block::Blocks::CHEST->defaultBlockState();
+                        core::Direction solidNeighbor = core::Direction::NORTH;
+                        bool haveSolid = false, ambiguous = false, adjacentChest = false;
+                        for (core::Direction d : {core::Direction::NORTH, core::Direction::EAST,
+                                                  core::Direction::SOUTH, core::Direction::WEST}) {
+                            BlockState* adj = level->getBlockState(chestPos.relative(d, 1));
+                            if (adj && adj->getIdentifier() == "minecraft:chest") {
+                                adjacentChest = true;
+                                break;
+                            }
+                            if (adj && adj->isSolidRender()) {
+                                if (haveSolid) {
+                                    ambiguous = true;
+                                    break;
+                                }
+                                haveSolid = true;
+                                solidNeighbor = d;
+                            }
+                        }
+                        if (!adjacentChest && chestState &&
+                            BlockStateProperties::HORIZONTAL_FACING &&
+                            chestState->hasProperty(BlockStateProperties::HORIZONTAL_FACING)) {
+                            if (haveSolid && !ambiguous) {
+                                chestState = chestState->setValue(
+                                    *BlockStateProperties::HORIZONTAL_FACING, core::getOpposite(solidNeighbor));
+                            } else {
+                                // Java fallback: start from current facing, flip/rotate
+                                // away from solid-render neighbours.
+                                core::Direction lockDir = core::Direction::NORTH;
+                                auto solidAt = [&](core::Direction dd) {
+                                    BlockState* s = level->getBlockState(chestPos.relative(dd, 1));
+                                    return s && s->isSolidRender();
+                                };
+                                if (solidAt(lockDir)) lockDir = core::getOpposite(lockDir);
+                                if (solidAt(lockDir)) lockDir = core::rotateYClockwise(lockDir);
+                                if (solidAt(lockDir)) lockDir = core::getOpposite(lockDir);
+                                chestState = chestState->setValue(
+                                    *BlockStateProperties::HORIZONTAL_FACING, lockDir);
+                            }
+                        }
+                        this->safeSetBlock(level, chestPos, chestState, replaceableTag);
+                        // RandomizableContainer.setBlockEntityLootTable draws the
+                        // loot-table seed from the worldgen random.
+                        random.nextLong();
                         break;  // Success, move to next iteration
                     }
                 }
@@ -6875,10 +7523,22 @@ public:
         }
 
         // Place spawner at center - Reference: lines 115-122
-        level->setBlock(origin,
-            world::level::block::Blocks::SPAWNER->defaultBlockState(), 2);
-        // Note: Spawner entity mob type would be set here:
-        // randomEntityId = MOBS[random.nextInt(4)]
+        this->safeSetBlock(
+            level,
+            origin,
+            world::level::block::Blocks::SPAWNER->defaultBlockState(),
+            replaceableTag
+        );
+        // Java: if the spawner block entity exists, randomEntityId() draws
+        // nextInt(4) for the mob type. With CountPlacement > 1 the stream is
+        // shared across placements, so the draw MUST be consumed.
+        {
+            BlockState* placedState = level->getBlockState(origin);
+            if (placedState &&
+                placedState->getIdentifier() == "minecraft:spawner") {
+                random.nextInt(4);
+            }
+        }
 
         return true;
     }
@@ -6988,7 +7648,7 @@ public:
         WorldgenRandom& random = context.random();
         const FallenTreeConfiguration& config = context.config();
 
-        placeFallenTree(config, origin, level, random);
+        placeFallenTree(config, origin, level, context.chunkGenerator(), random);
         return true;
     }
 
@@ -6996,13 +7656,15 @@ private:
     // Reference: FallenTreeFeature.java placeFallenTree() lines 35-44
     // CRITICAL: Order of operations must match Java exactly
     void placeFallenTree(const FallenTreeConfiguration& config, const core::BlockPos& origin,
-                         WorldGenLevel* level, WorldgenRandom& random) {
+                         WorldGenLevel* level, ChunkGenerator* generator, WorldgenRandom& random) {
         // Step 1: Place stump FIRST (consumes random for block state + decorators)
         core::BlockPos::MutableBlockPos stumpPos(origin.getX(), origin.getY(), origin.getZ());
-        placeStump(config, level, random, stumpPos);
+        placeStump(config, level, generator, random, stumpPos);
 
         // Step 2: Get random direction - random.nextInt(4)
-        core::Direction direction = blockpredicates::fromHorizontalIndex(random.nextInt(4));
+        // Java: Direction.Plane.HORIZONTAL.getRandomDirection - plane order
+        // is {NORTH, EAST, SOUTH, WEST}, not the from2DDataValue order.
+        core::Direction direction = core::horizontalPlaneDirection(random.nextInt(4));
 
         // Step 3: Sample log length
         int logLength = config.logLength ? config.logLength->sample(random) - 2 : 3;
@@ -7020,20 +7682,22 @@ private:
 
         // Step 5: Check and place fallen log (consumes random for block states + decorators)
         if (canPlaceEntireFallenLog(level, logLength, logStartPos, direction)) {
-            placeFallenLog(config, level, random, logLength, logStartPos, direction);
+            placeFallenLog(config, level, generator, random, logLength, logStartPos, direction);
         }
     }
 
     // Reference: FallenTreeFeature.java placeStump() lines 60-63
     void placeStump(const FallenTreeConfiguration& config, WorldGenLevel* level,
-                    WorldgenRandom& random, core::BlockPos::MutableBlockPos& stumpPos) {
+                    ChunkGenerator* generator, WorldgenRandom& random, core::BlockPos::MutableBlockPos& stumpPos) {
         // Place single stump log block (upright, no axis modification)
         core::BlockPos stump = placeLogBlock(config, level, random, stumpPos,
             [](BlockState* s) { return s; }  // identity - no axis change for stump
         );
 
         // Decorate stump
-        decorateLogs(level, random, {stump}, config.stumpDecorators);
+        util::JavaHashSet<core::BlockPos> stumpSet;
+        stumpSet.add(stump);
+        decorateLogs(level, generator, random, stumpSet, config.stumpDecorators);
     }
 
     // Reference: FallenTreeFeature.java placeLogBlock() lines 108-112
@@ -7056,15 +7720,18 @@ private:
     }
 
     // Reference: FallenTreeFeature.java decorateLogs() lines 114-119
-    void decorateLogs(WorldGenLevel* level, WorldgenRandom& random,
-                      const std::set<core::BlockPos>& logs,
+    void decorateLogs(WorldGenLevel* level, ChunkGenerator* generator, WorldgenRandom& random,
+                      const util::JavaHashSet<core::BlockPos>& logs,
                       const std::vector<std::shared_ptr<feature::treedecorators::TreeDecorator>>& decorators) {
         if (decorators.empty() || logs.empty()) {
             return;
         }
 
-        // Convert set to vector for decorator context
-        std::vector<core::BlockPos> logsVec(logs.begin(), logs.end());
+        // Convert set to vector in Java HashSet iteration order
+        std::vector<core::BlockPos> logsVec;
+        for (const auto& p : logs) {
+            logsVec.push_back(p);
+        }
 
         // Create decoration setter lambda (Reference: FallenTreeFeature.java getDecorationSetter)
         auto decorationSetter = [level](const core::BlockPos& pos, BlockState* state) {
@@ -7090,7 +7757,9 @@ private:
             decorationSetter,
             blockGetter,
             heightGetter,
-            &random
+            &random,
+            level,
+            generator
         );
 
         // Apply each decorator
@@ -7118,11 +7787,13 @@ private:
         int gapInGround = 0;
 
         for (int i = 0; i < logLength; ++i) {
-            // Check if position is valid for tree (uses TreeFeature.validTreePos logic)
+            // TreeFeature.validTreePos: air OR in the replaceable_by_trees tag
             BlockState* block = level->getBlockState(pos);
             if (!block) return false;
 
-            if (!block->isAir() && !block->isLeaves()) {
+            if (!block->isAir() &&
+                !::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                    block, "minecraft:replaceable_by_trees")) {
                 return false;
             }
 
@@ -7146,9 +7817,11 @@ private:
 
     // Reference: FallenTreeFeature.java placeFallenLog() lines 89-98
     void placeFallenLog(const FallenTreeConfiguration& config, WorldGenLevel* level,
-                        WorldgenRandom& random, int logLength,
+                        ChunkGenerator* generator, WorldgenRandom& random, int logLength,
                         core::BlockPos::MutableBlockPos& pos, core::Direction direction) {
-        std::set<core::BlockPos> fallenLog;
+        // Java collects into a HashSet; the decorator context iterates it in
+        // spread-hash order, which feeds the shuffle. std::set order diverges.
+        util::JavaHashSet<core::BlockPos> fallenLog;
 
         // Create state modifier that sets AXIS based on direction
         auto sidewaysModifier = getSidewaysStateModifier(direction);
@@ -7156,12 +7829,12 @@ private:
         for (int i = 0; i < logLength; ++i) {
             // Place log block with horizontal axis
             core::BlockPos placed = placeLogBlock(config, level, random, pos, sidewaysModifier);
-            fallenLog.insert(placed);
+            fallenLog.add(placed);
             pos.move(direction);
         }
 
         // Decorate fallen log
-        decorateLogs(level, random, fallenLog, config.logDecorators);
+        decorateLogs(level, generator, random, fallenLog, config.logDecorators);
     }
 
     // Reference: FallenTreeFeature.java getSidewaysStateModifier() lines 126-128
@@ -7187,8 +7860,10 @@ private:
         BlockState* block = level->getBlockState(pos);
         if (!block) return false;
 
-        // validTreePos: must be air or leaves
-        if (!block->isAir() && !block->isLeaves()) {
+        // TreeFeature.validTreePos: air OR in the replaceable_by_trees tag
+        if (!block->isAir() &&
+            !::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                block, "minecraft:replaceable_by_trees")) {
             return false;
         }
 
@@ -7199,8 +7874,7 @@ private:
     bool isOverSolidGround(WorldGenLevel* level, const core::BlockPos& pos) {
         BlockState* belowBlock = level->getBlockState(pos.below());
         if (!belowBlock) return false;
-        // isFaceSturdy check - simplified to !isAir for now
-        return !belowBlock->isAir();
+        return belowBlock->isFaceSturdy(*level, pos, core::Direction::UP);
     }
 
     // Reference: Feature.java markAboveForPostProcessing() lines 187-199
@@ -7271,7 +7945,38 @@ public:
                     BlockState* topState = level->getBlockState(topPos);
                     BlockState* belowState = level->getBlockState(belowPos);
 
-                    if (topState && topState->isAir()) {
+                    // Java Biome.shouldSnow: (isAir || is SNOW) && Blocks.SNOW
+                    // .defaultBlockState().canSurvive(level, pos):
+                    //   below in snow_layer_cannot_survive_on (ice/packed_ice/
+                    //   barrier) -> false; in snow_layer_can_survive_on
+                    //   (honey_block/soul_sand/mud) -> true; else full-collision
+                    //   UP face, or snow with layers=8.
+                    bool snowCanSurvive = false;
+                    if (belowState) {
+                        const std::string& belowId = belowState->getIdentifier();
+                        if (belowId == "minecraft:ice" ||
+                            belowId == "minecraft:packed_ice" ||
+                            belowId == "minecraft:barrier") {
+                            snowCanSurvive = false;
+                        } else if (belowId == "minecraft:honey_block" ||
+                                   belowId == "minecraft:soul_sand" ||
+                                   belowId == "minecraft:mud") {
+                            snowCanSurvive = true;
+                        } else if (belowId == "minecraft:snow" &&
+                                   BlockStateProperties::LAYERS &&
+                                   belowState->hasProperty(BlockStateProperties::LAYERS) &&
+                                   belowState->getValueOrElse(*BlockStateProperties::LAYERS, 1) == 8) {
+                            snowCanSurvive = true;
+                        } else if (belowState->isLeaves()) {
+                            // Java: leaves have a FULL collision cube, so
+                            // isFaceFull(collisionShape, UP) is true.
+                            snowCanSurvive = true;
+                        } else {
+                            snowCanSurvive = belowState->isCollisionShapeFullBlock(*level, belowPos);
+                        }
+                    }
+
+                    if (topState && topState->isAir() && snowCanSurvive) {
                         level->setBlock(
                             topPos,
                             static_cast<BlockState*>(world::level::block::Blocks::getDefaultState("minecraft:snow")),
@@ -7318,14 +8023,15 @@ public:
         const BlockStateConfiguration& config = context.config();
 
         // Find valid position - scan down to find ground
-        // Reference: ForestRockFeature.java lines 18-25
+        // Reference: BlockBlobFeature.java lines 21-28 - isDirt/isStone are
+        // the "minecraft:dirt" and "minecraft:base_stone_overworld" TAGS.
         while (origin.getY() > level->getMinY() + 3) {
             BlockState* belowBlock = level->getBlockState(origin.below());
             if (belowBlock && !belowBlock->isAir()) {
-                std::string id = belowBlock->getIdentifier();
-                if (id == "minecraft:dirt" || id == "minecraft:grass_block" ||
-                    id == "minecraft:stone" || id == "minecraft:coarse_dirt" ||
-                    id == "minecraft:podzol" || id == "minecraft:rooted_dirt") {
+                if (::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                        belowBlock, "minecraft:dirt") ||
+                    ::minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                        belowBlock, "minecraft:base_stone_overworld")) {
                     break;
                 }
             }
@@ -7336,34 +8042,34 @@ public:
             return false;
         }
 
-        // Place 3 blob iterations - Reference: ForestRockFeature.java lines 30-42
+        // Place 3 blob iterations - Reference: BlockBlobFeature.java lines 33-46
         for (int c = 0; c < 3; ++c) {
             int xr = random.nextInt(2);
             int yr = random.nextInt(2);
             int zr = random.nextInt(2);
             float tr = static_cast<float>(xr + yr + zr) * 0.333f + 0.5f;
 
-            for (int dx = -xr; dx <= xr; ++dx) {
+            // BlockPos.betweenClosed order: x fastest, then y, then z is the
+            // OUTER... Java iterates y, z, x? Actual order: x varies fastest.
+            for (int dz = -zr; dz <= zr; ++dz) {
                 for (int dy = -yr; dy <= yr; ++dy) {
-                    for (int dz = -zr; dz <= zr; ++dz) {
+                    for (int dx = -xr; dx <= xr; ++dx) {
                         core::BlockPos blockPos = origin.offset(dx, dy, dz);
                         double distSq = static_cast<double>(dx * dx + dy * dy + dz * dz);
                         if (distSq <= static_cast<double>(tr * tr)) {
-                            BlockState* existingBlock = level->getBlockState(blockPos);
-                            if (existingBlock && existingBlock->isAir()) {
-                                level->setBlock(blockPos, config.state, 2);
-                            }
+                            // Java sets unconditionally (flags=3), overwriting
+                            // grass/plants - boulders sink into terrain.
+                            level->setBlock(blockPos, config.state, 3);
                         }
                     }
                 }
             }
 
-            // Move origin for next iteration
-            origin = origin.offset(
-                -(1 + random.nextInt(2)),
-                -random.nextInt(2),
-                -(1 + random.nextInt(2))
-            );
+            // Reference: pos.offset(-1 + nextInt(2), -nextInt(2), -1 + nextInt(2))
+            int ox = -1 + random.nextInt(2);
+            int oy = -random.nextInt(2);
+            int oz = -1 + random.nextInt(2);
+            origin = origin.offset(ox, oy, oz);
         }
 
         return true;

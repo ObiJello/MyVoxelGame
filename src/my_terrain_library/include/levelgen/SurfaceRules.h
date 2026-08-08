@@ -207,7 +207,8 @@ private:
     RandomState* m_randomState;
     ::world::IChunk* m_chunk;
     NoiseChunk* m_noiseChunk;
-    std::function<void*(const ::minecraft::core::BlockPos&)> m_biomeGetter;  // Returns Holder<Biome>*
+    // Reference to the caller-owned getter (outlives this per-chunk Context)
+    const std::function<void*(const ::minecraft::core::BlockPos&)>& m_biomeGetter;  // Returns Holder<Biome>*
     WorldGenerationContext m_context;
 
     // Preliminary surface cache - Reference: lines 154-155
@@ -257,7 +258,7 @@ public:
         RandomState* randomState,
         ::world::IChunk* chunk,
         NoiseChunk* noiseChunk,
-        std::function<void*(const ::minecraft::core::BlockPos&)> biomeGetter,
+        const std::function<void*(const ::minecraft::core::BlockPos&)>& biomeGetter,
         const WorldGenerationContext& genContext
     );
 
@@ -922,9 +923,16 @@ inline RuleSource* state(BlockState* block) {
     return new BlockRuleSource(block);
 }
 
-// Convenience overload that takes a block name
+// Convenience overload that takes a block name.
+// Throws on unknown blocks: a null state here silently turns the rule into a
+// no-op and the sequence falls through to the wrong successor (this is how
+// missing red_sand produced orange_terracotta badlands floors).
 inline RuleSource* state(const std::string& blockName) {
-    return new BlockRuleSource(minecraft::world::level::block::Blocks::getDefaultState(blockName));
+    BlockState* blockState = minecraft::world::level::block::Blocks::getDefaultState(blockName);
+    if (blockState == nullptr) {
+        throw std::runtime_error("SurfaceRules::state: unknown block " + blockName);
+    }
+    return new BlockRuleSource(blockState);
 }
 
 inline RuleSource* bandlands() {

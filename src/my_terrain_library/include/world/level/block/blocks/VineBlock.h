@@ -67,6 +67,18 @@ public:
         return hasFaces(getUpdatedState(state ? state : defaultBlockState(), level, pos));
     }
 
+    // Reference: VineBlock.updateShape (non-DOWN neighbour changes) - prune
+    // unsupported faces; no faces left -> nullptr (caller places air). Used by
+    // the worldgen tree shape-update pass.
+    BlockState* getUpdatedStateForShapeUpdate(
+        BlockState* state,
+        const levelgen::WorldGenLevel& level,
+        const core::BlockPos& pos
+    ) const {
+        BlockState* updated = getUpdatedState(state, level, pos);
+        return hasFaces(updated) ? updated : nullptr;
+    }
+
 protected:
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();

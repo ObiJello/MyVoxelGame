@@ -128,7 +128,16 @@ public:
 
         for (const auto& [feature, _] : edges) {
             if (discovered.find(feature) == discovered.end()) {
-                depthFirstSearch(edges, discovered, currentlyVisiting, sortedFeatures, feature);
+                if (depthFirstSearch(edges, discovered, currentlyVisiting, sortedFeatures, feature)) {
+                    // Reference: FeatureSorter.java throws IllegalStateException on
+                    // cycle. Continuing with a partial topological order would give
+                    // every later feature a wrong global index -> wrong
+                    // setFeatureSeed -> silent whole-world divergence.
+                    throw std::runtime_error(
+                        "Feature order cycle found (step " + std::to_string(feature.step) +
+                        ", index " + std::to_string(feature.featureIndex) +
+                        ") - biome feature registration order is inconsistent");
+                }
             }
         }
 

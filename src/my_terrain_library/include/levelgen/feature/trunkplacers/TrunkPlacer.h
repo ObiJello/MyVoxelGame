@@ -95,6 +95,12 @@ public:
         return m_baseHeight + random.nextInt(m_heightRandA + 1) + random.nextInt(m_heightRandB + 1);
     }
 
+    /**
+     * Check whether a position is free for trunk growth.
+     * Reference: TrunkPlacer.java isFree()
+     */
+    virtual bool isFree(LevelReader& level, const core::BlockPos& pos) const;
+
 protected:
     /**
      * Place a log block
@@ -121,7 +127,7 @@ protected:
      * Check if position is valid for tree
      * Reference: TrunkPlacer.java lines 79-81
      */
-    bool validTreePos(LevelReader& level, const core::BlockPos& pos) const;
+    virtual bool validTreePos(LevelReader& level, const core::BlockPos& pos) const;
 
     /**
      * Set dirt below trunk
@@ -212,7 +218,7 @@ protected:
         int x, int y, int z
     );
 
-    bool isFree(LevelReader& level, const core::BlockPos& pos) const;
+    bool isFree(LevelReader& level, const core::BlockPos& pos) const override;
 };
 
 /**
@@ -308,7 +314,7 @@ private:
     int getSteps(const core::BlockPos& pos) const;
     core::Axis getLogAxis(const core::BlockPos& startPos, const core::BlockPos& blockPos) const;
     bool trimBranches(int height, int localY) const;
-    bool isFree(LevelReader& level, const core::BlockPos& pos) const;
+    bool isFree(LevelReader& level, const core::BlockPos& pos) const override;
 
     void makeBranches(
         LevelReader& level,
@@ -360,6 +366,11 @@ public:
  * Reference: UpwardsBranchingTrunkPlacer.java
  */
 class UpwardsBranchingTrunkPlacer : public TrunkPlacer {
+public:
+    // Reference: UpwardsBranchingTrunkPlacer.java line 93:
+    // validTreePos = super.validTreePos || #mangrove_logs_can_grow_through.
+    bool validTreePos(LevelReader& level, const core::BlockPos& pos) const override;
+
 private:
     std::shared_ptr<carver::IntProvider> m_extraBranchSteps;
     float m_placeBranchPerLogProbability;
@@ -476,7 +487,9 @@ private:
      * Reference: UniformInt.sample()
      */
     int sampleUniform(WorldgenRandom& random, int min, int max) const {
-        if (min >= max) return min;
+        // Java UniformInt.sample = Mth.randomBetweenInclusive = ALWAYS draws
+        // nextInt(max - min + 1), even for a single-value range (bound 1).
+        if (min > max) return min;
         return min + random.nextInt(max - min + 1);
     }
 };

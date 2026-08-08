@@ -69,6 +69,8 @@ static std::deque<HeightRangePlacement> s_heightRangePlacements;
 static std::deque<RarityFilter> s_rarityFilters;
 static std::deque<UniformHeight> s_uniformHeights;
 static std::deque<BlockPredicateFilter> s_blockPredicateFilters;
+static std::deque<RandomOffsetPlacement> s_randomOffsetPlacements;
+static std::deque<levelgen::carver::ConstantInt> s_constantInts;
 static std::deque<levelgen::carver::UniformInt> s_uniformInts;
 static std::deque<EnvironmentScanPlacement> s_envScanPlacements;
 static std::deque<SurfaceRelativeThresholdFilter> s_surfaceFilters;
@@ -120,8 +122,25 @@ void MiscOverworldPlacements::bootstrap() {
             [](const PlacementContext& context, const core::BlockPos& pos) -> bool {
                 BlockState* state = context.getBlockState(pos);
                 if (state == nullptr) return false;
-                // Check if the block is water
-                return state->getIdentifier() == "minecraft:water";
+                // Java: BlockPredicate.matchesFluids(Fluids.WATER) - SOURCE
+                // water only: the water block at level 0, blocks with inherent
+                // source water (seagrass/kelp), or waterlogged=true blocks.
+                const std::string& id = state->getIdentifier();
+                if (id == "minecraft:water") {
+                    using minecraft::world::level::block::state::properties::BlockStateProperties;
+                    return !BlockStateProperties::LEVEL ||
+                           !state->hasProperty(BlockStateProperties::LEVEL) ||
+                           state->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0;
+                }
+                if (id == "minecraft:seagrass" || id == "minecraft:tall_seagrass" ||
+                    id == "minecraft:kelp" || id == "minecraft:kelp_plant" ||
+                    id == "minecraft:bubble_column") {
+                    return true;
+                }
+                using minecraft::world::level::block::state::properties::BlockStateProperties;
+                return BlockStateProperties::WATERLOGGED &&
+                       state->hasProperty(BlockStateProperties::WATERLOGGED) &&
+                       state->getValueOrElse(*BlockStateProperties::WATERLOGGED, false);
             }
         ));
         return &s_blockPredicateFilters.back();
@@ -147,10 +166,17 @@ void MiscOverworldPlacements::bootstrap() {
     // CountPlacement.of(2), InSquarePlacement.spread(), HEIGHTMAP, RandomOffsetPlacement, BlockPredicateFilter, BiomeFilter
     // =========================================================================
     {
+        // ice_patch.json: count(2), in_square, HEIGHTMAP(MOTION_BLOCKING),
+        // random_offset(xz=0, y=-1), block_predicate_filter(snow_block), biome
         s_countPlacements.push_back(CountPlacement::of(2));
+        s_constantInts.push_back(levelgen::carver::ConstantInt::of(-1));
+        s_randomOffsetPlacements.push_back(RandomOffsetPlacement::vertical(&s_constantInts.back()));
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(
+            levelgen::blockpredicates::BlockPredicate::matchesBlocks("minecraft:snow_block")));
         ICE_PATCH = createPlaced(
             MiscOverworldFeatures::ICE_PATCH,
-            { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(), &BiomeFilter::biome() },
+            { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapMotionBlocking(),
+              &s_randomOffsetPlacements.back(), &s_blockPredicateFilters.back(), &BiomeFilter::biome() },
             "ICE_PATCH"
         );
     }
@@ -336,10 +362,17 @@ void MiscOverworldPlacements::bootstrap() {
     // CountPlacement.of(1), InSquarePlacement.spread(), HEIGHTMAP_TOP_SOLID, RandomOffsetPlacement, BlockPredicateFilter(mud), BiomeFilter
     // =========================================================================
     {
+        // disk_grass.json: count(1), in_square, HEIGHTMAP(OCEAN_FLOOR_WG),
+        // random_offset(xz=0, y=-1), block_predicate_filter(mud), biome
         s_countPlacements.push_back(CountPlacement::of(1));
+        s_constantInts.push_back(levelgen::carver::ConstantInt::of(-1));
+        s_randomOffsetPlacements.push_back(RandomOffsetPlacement::vertical(&s_constantInts.back()));
+        s_blockPredicateFilters.push_back(BlockPredicateFilter::forPredicate(
+            levelgen::blockpredicates::BlockPredicate::matchesBlocks("minecraft:mud")));
         DISK_GRASS = createPlaced(
             MiscOverworldFeatures::DISK_GRASS,
-            { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapOceanFloor(), &BiomeFilter::biome() },
+            { &s_countPlacements.back(), &InSquarePlacement::spread(), heightmapOceanFloor(),
+              &s_randomOffsetPlacements.back(), &s_blockPredicateFilters.back(), &BiomeFilter::biome() },
             "DISK_GRASS"
         );
     }
@@ -392,12 +425,14 @@ void MiscOverworldPlacements::bootstrap() {
     // =========================================================================
     {
         s_countPlacements.push_back(CountPlacement::of(20));
-        // VeryBiasedToBottomHeight - using uniform for now
-        s_uniformHeights.push_back(UniformHeight(
+        // Vanilla: very_biased_to_bottom(above_bottom(0), below_top(8), inner=8)
+        static std::deque<levelgen::carver::VeryBiasedToBottomHeight> s_veryBiasedHeights;
+        s_veryBiasedHeights.push_back(levelgen::carver::VeryBiasedToBottomHeight(
             VerticalAnchor::bottom(),
-            VerticalAnchor::belowTop(8)
+            VerticalAnchor::belowTop(8),
+            8
         ));
-        s_heightRangePlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        s_heightRangePlacements.push_back(HeightRangePlacement::of(&s_veryBiasedHeights.back()));
 
         SPRING_LAVA = createPlaced(
             MiscOverworldFeatures::SPRING_LAVA_OVERWORLD,
@@ -413,11 +448,14 @@ void MiscOverworldPlacements::bootstrap() {
     // =========================================================================
     {
         s_countPlacements.push_back(CountPlacement::of(20));
-        s_uniformHeights.push_back(UniformHeight(
+        // Vanilla: very_biased_to_bottom(above_bottom(0), below_top(8), inner=8)
+        static std::deque<levelgen::carver::VeryBiasedToBottomHeight> s_veryBiasedHeightsFrozen;
+        s_veryBiasedHeightsFrozen.push_back(levelgen::carver::VeryBiasedToBottomHeight(
             VerticalAnchor::bottom(),
-            VerticalAnchor::belowTop(8)
+            VerticalAnchor::belowTop(8),
+            8
         ));
-        s_heightRangePlacements.push_back(HeightRangePlacement::of(&s_uniformHeights.back()));
+        s_heightRangePlacements.push_back(HeightRangePlacement::of(&s_veryBiasedHeightsFrozen.back()));
 
         SPRING_LAVA_FROZEN = createPlaced(
             MiscOverworldFeatures::SPRING_LAVA_FROZEN,

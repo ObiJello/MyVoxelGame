@@ -369,10 +369,9 @@ public:
         // context.generator().applyBiomeDecoration(region, chunk, structureManager)
 
         if (context.generator && context.randomState) {
-            // Ensure feature registries are bootstrapped
-            if (!data::worldgen::BiomeFeatureRegistry::isInitialized()) {
-                data::worldgen::BiomeFeatureRegistry::bootstrap();
-            }
+            // Ensure feature registries are bootstrapped before any worker
+            // reads the shared feature ordering cache.
+            data::worldgen::BiomeFeatureRegistry::bootstrap();
 
             // Prime heightmaps
             levelgen::Heightmap::primeHeightmaps(chunk, {
@@ -389,40 +388,32 @@ public:
             // for feature RNG parity - the global index used for seeding depends on
             // the order features are first seen across ALL biomes, not just chunk biomes.
             // =========================================================================
-            static std::vector<levelgen::StepFeatureData> s_cachedFeaturesPerStep;
-            static bool s_featuresPerStepBuilt = false;
-
-            if (!s_featuresPerStepBuilt) {
-                // Get ALL biome keys in bootstrap order (matches Java's biomeSource.possibleBiomes())
-                const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
-
-                // Use FeatureSorter to build global feature order
-                // Reference: FeatureSorter.buildFeaturesPerStep(List.copyOf(biomeSource.possibleBiomes()), ...)
-                s_cachedFeaturesPerStep = levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
-                    allBiomeKeys,
-                    [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
-                        const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
-                        // Convert const PlacedFeature* to PlacedFeature* (FeatureSorter needs non-const)
-                        std::vector<std::vector<levelgen::placement::PlacedFeature*>> result;
-                        result.reserve(features.size());
-                        for (const auto& stepFeatures : features) {
-                            std::vector<levelgen::placement::PlacedFeature*> step;
-                            step.reserve(stepFeatures.size());
-                            for (const auto* f : stepFeatures) {
-                                step.push_back(const_cast<levelgen::placement::PlacedFeature*>(f));
-                            }
-                            result.push_back(std::move(step));
-                        }
-                        return result;
-                    },
-                    true  // tryReducingError
-                );
-
-                s_featuresPerStepBuilt = true;
-            }
-
-            // Use the cached/memoized features for this chunk
-            const std::vector<levelgen::StepFeatureData>& featuresPerStep = s_cachedFeaturesPerStep;
+            const std::vector<levelgen::StepFeatureData>& featuresPerStep =
+                []() -> const std::vector<levelgen::StepFeatureData>& {
+                    static const std::vector<levelgen::StepFeatureData> s_cachedFeaturesPerStep =
+                        []() -> std::vector<levelgen::StepFeatureData> {
+                            const auto& allBiomeKeys = data::worldgen::BiomeFeatureRegistry::getAllBiomeKeys();
+                            return levelgen::FeatureSorter::buildFeaturesPerStep<std::string>(
+                                allBiomeKeys,
+                                [](const std::string& biomeKey) -> std::vector<std::vector<levelgen::placement::PlacedFeature*>> {
+                                    const auto& features = data::worldgen::BiomeFeatureRegistry::getFeaturesForBiome(biomeKey);
+                                    std::vector<std::vector<levelgen::placement::PlacedFeature*>> result;
+                                    result.reserve(features.size());
+                                    for (const auto& stepFeatures : features) {
+                                        std::vector<levelgen::placement::PlacedFeature*> step;
+                                        step.reserve(stepFeatures.size());
+                                        for (const auto* f : stepFeatures) {
+                                            step.push_back(const_cast<levelgen::placement::PlacedFeature*>(f));
+                                        }
+                                        result.push_back(std::move(step));
+                                    }
+                                    return result;
+                                },
+                                true
+                            );
+                        }();
+                    return s_cachedFeaturesPerStep;
+                }();
 
             // Build multi-chunk WorldGenRegion from neighbor chunk grid
             // Reference: ChunkStatusTasks.java generateFeatures() lines 107-109
@@ -487,7 +478,7 @@ public:
             }
 
             // Create WorldGenRegion with multi-chunk access
-            server::level::WorldGenRegion region(*serverLevel, cache2d, step, *chunk);
+            server::level::WorldGenRegion region(*serverLevel, context.randomState, cache2d, step, *chunk);
             levelgen::WorldGenRegionLevel level(&region);
 
             // Apply biome decoration with multi-chunk WorldGenLevel
@@ -573,7 +564,17 @@ public:
     ) {
         // Reference: ChunkStatusTasks.java lines 140-164
         // In Java, this converts ProtoChunk to LevelChunk
-        // For our C++ implementation, we just mark it complete
+        // For our C++ implementation, we just mark it complete.
+        //
+        // Free the cached NoiseChunk (~2 MB: density tree, arena, caches):
+        // nothing reads it after FEATURES — its own generation is finished
+        // and no other chunk's steps ever query a foreign NoiseChunk. In a
+        // long-lived embedding this is the difference between ~2.2 MB and
+        // ~0.1 MB retained per generated chunk; if anything ever does need
+        // it again, getOrCreateNoiseChunk lazily rebuilds it.
+        if (auto* proto = dynamic_cast<::world::ProtoChunk*>(chunk)) {
+            proto->setNoiseChunk(nullptr);
+        }
         return completed(chunk);
     }
 

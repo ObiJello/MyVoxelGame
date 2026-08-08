@@ -2,6 +2,8 @@
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include "world/level/block/Blocks.h"
 #include "core/Direction.h"
+#include "levelgen/blockpredicates/BlockPredicate.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 #include <algorithm>
 
 // Reference: net/minecraft/world/level/levelgen/feature/rootplacers/*.java
@@ -51,10 +53,12 @@ void RootPlacer::placeRoot(
 }
 
 bool RootPlacer::canPlaceRoot(LevelReader& level, const core::BlockPos& pos) const {
-    // Reference: RootPlacer.java canPlaceRoot() lines 41-43
+    // Reference: RootPlacer.java canPlaceRoot() lines 41-43 =
+    // TreeFeature.validTreePos: air OR #replaceable_by_trees.
     return level.isStateAtPosition(pos, [](BlockState* state) {
-        // TODO: Check REPLACEABLE_BY_TREES tag when tags are implemented
-        return state && state->isAir();
+        return state && (state->isAir() ||
+            minecraft::levelgen::blockpredicates::matchesBlockTagName(
+                state, "minecraft:replaceable_by_trees"));
     });
 }
 
@@ -63,9 +67,16 @@ BlockState* RootPlacer::getPotentiallyWaterloggedState(
     const core::BlockPos& pos,
     BlockState* state
 ) const {
-    // Reference: RootPlacer.java getPotentiallyWaterloggedState() lines 59-66
-    // TODO: Implement waterlogged property when property system is complete
-    // For now, return the state as-is
+    // Reference: RootPlacer.java getPotentiallyWaterloggedState() lines 59-66:
+    // if the state has WATERLOGGED, set it from whether water fluid is at pos.
+    using minecraft::world::level::block::state::properties::BlockStateProperties;
+    if (state && BlockStateProperties::WATERLOGGED &&
+        state->hasProperty(BlockStateProperties::WATERLOGGED)) {
+        bool waterlogged = level.isStateAtPosition(pos, [](BlockState* s) {
+            return s && s->hasWaterFluid();
+        });
+        return state->setValue(*BlockStateProperties::WATERLOGGED, waterlogged);
+    }
     return state;
 }
 
@@ -96,9 +107,13 @@ bool MangroveRootPlacer::placeRoots(
     std::vector<core::BlockPos> allRootPositions;
     allRootPositions.push_back(trunkOrigin.below());
 
-    // Simulate roots in each horizontal direction
+    // Reference: Direction.Plane.HORIZONTAL order = N,E,S,W; simulateRoots
+    // draws RNG per direction so the order is stream-visible.
+    static constexpr core::Direction kHorizontal[4] = {
+        core::Direction::NORTH, core::Direction::EAST,
+        core::Direction::SOUTH, core::Direction::WEST};
     for (int dirIdx = 0; dirIdx < 4; ++dirIdx) {
-        core::Direction dir = core::fromHorizontalIndex(dirIdx);
+        core::Direction dir = kHorizontal[dirIdx];
         core::BlockPos pos = trunkOrigin.relative(dir);
         std::vector<core::BlockPos> positionsInDirection;
 
@@ -184,11 +199,12 @@ bool MangroveRootPlacer::canPlaceRoot(LevelReader& level, const core::BlockPos& 
         return true;
     }
 
-    // Then check if can grow through (like mud)
+    // Then the config's canGrowThrough tag (#mangrove_roots_can_grow_through:
+    // mud, muddy_mangrove_roots, mangrove_roots, moss_carpet, vine,
+    // mangrove_propagule, snow).
     return level.isStateAtPosition(pos, [](BlockState* state) {
-        if (!state) return false;
-        std::string name = state->getIdentifier();
-        return name == "minecraft:mud" || name == "minecraft:muddy_mangrove_roots";
+        return state && minecraft::levelgen::blockpredicates::matchesBlockTagName(
+            state, "minecraft:mangrove_roots_can_grow_through");
     });
 }
 
@@ -199,9 +215,13 @@ void MangroveRootPlacer::placeRootAtPos(
     const core::BlockPos& pos,
     std::vector<core::BlockPos>& rootPositions
 ) {
-    // Reference: MangroveRootPlacer.java placeRoot() lines 100-108
+    // Reference: MangroveRootPlacer.java placeRoot() lines 100-108.
+    // muddyRootsIn = {mud, muddy_mangrove_roots}: an existing muddy root from
+    // an earlier tree stays muddy, it must NOT downgrade to plain roots.
     bool isMuddy = level.isStateAtPosition(pos, [](BlockState* state) {
-        return state && state->getIdentifier() == "minecraft:mud";
+        if (!state) return false;
+        const std::string& id = state->getIdentifier();
+        return id == "minecraft:mud" || id == "minecraft:muddy_mangrove_roots";
     });
 
     if (isMuddy) {

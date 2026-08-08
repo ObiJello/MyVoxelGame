@@ -514,9 +514,7 @@ void ChunkGenerationRunner::clearChunkCache() {
     });
 
     // Ensure feature registries are bootstrapped
-    if (!data::worldgen::BiomeFeatureRegistry::isInitialized()) {
-        data::worldgen::BiomeFeatureRegistry::bootstrap();
-    }
+    data::worldgen::BiomeFeatureRegistry::bootstrap();
 
     // =========================================================================
     // BUILD FEATURES PER STEP ONCE FOR ALL BIOMES (MEMOIZED)
@@ -618,7 +616,7 @@ void ChunkGenerationRunner::clearChunkCache() {
         }
 
         // 5. Create WorldGenRegion (Java: line 107)
-        server::level::WorldGenRegion region(*m_serverLevel, cache, *m_featuresStep, *chunk);
+        server::level::WorldGenRegion region(*m_serverLevel, m_randomState, cache, *m_featuresStep, *chunk);
 
         // 6. Create WorldGenRegionLevel adapter
         WorldGenRegionLevel level(&region);

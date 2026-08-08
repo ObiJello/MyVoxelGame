@@ -11,6 +11,7 @@
 #include "data/worldgen/placement/MiscOverworldPlacements.h"
 #include <set>
 #include <iostream>
+#include <mutex>
 
 // Reference: BiomeDefaultFeatures.java and OverworldBiomes.java
 // CRITICAL: Each biome must add ALL its features in the EXACT order Java does,
@@ -27,7 +28,7 @@ using namespace placement;  // For OrePlacements, CavePlacements, MiscOverworldP
 // Static members
 std::unordered_map<std::string, std::vector<std::vector<const PlacedFeature*>>> BiomeFeatureRegistry::s_biomeFeatures;
 std::vector<std::string> BiomeFeatureRegistry::s_biomeKeyOrder;
-bool BiomeFeatureRegistry::s_initialized = false;
+std::atomic<bool> BiomeFeatureRegistry::s_initialized{false};
 
 // Empty vector for missing biomes/steps
 static const std::vector<const PlacedFeature*> s_emptyFeatures;
@@ -35,6 +36,7 @@ static const std::vector<std::vector<const PlacedFeature*>> s_emptyBiomeFeatures
 
 static bool s_debugNullptrFeatures = true;
 static bool s_debugIceFeatures = false;
+static std::once_flag s_bootstrapOnce;
 void BiomeFeatureRegistry::addFeature(const std::string& biomeKey, int step, const PlacedFeature* feature) {
     if (step < 0 || step >= GenerationStep::DECORATION_COUNT) return;
     if (!feature) {
@@ -956,248 +958,248 @@ void BiomeFeatureRegistry::setupMangroveSwamp(const std::string& biomeKey) {
 // =============================================================================
 
 void BiomeFeatureRegistry::bootstrap() {
-    if (s_initialized) return;
+    std::call_once(s_bootstrapOnce, []() {
+        // Initialize feature registries first
+        features::OreFeatures::bootstrap();
+        features::VegetationFeatures::bootstrap();
+        features::TreeFeatures::bootstrap();
+        features::AquaticFeatures::bootstrap();
+        features::CaveFeatures::bootstrap();
+        features::MiscOverworldFeatures::bootstrap();
+        placement::OrePlacements::bootstrap();
+        placement::VegetationPlacements::bootstrap();
+        placement::TreePlacements::bootstrap();
+        placement::AquaticPlacements::bootstrap();
+        placement::CavePlacements::bootstrap();
+        placement::MiscOverworldPlacements::bootstrap();
 
-    // Initialize feature registries first
-    features::OreFeatures::bootstrap();
-    features::VegetationFeatures::bootstrap();
-    features::TreeFeatures::bootstrap();
-    features::AquaticFeatures::bootstrap();
-    features::CaveFeatures::bootstrap();
-    features::MiscOverworldFeatures::bootstrap();
-    placement::OrePlacements::bootstrap();
-    placement::VegetationPlacements::bootstrap();
-    placement::TreePlacements::bootstrap();
-    placement::AquaticPlacements::bootstrap();
-    placement::CavePlacements::bootstrap();
-    placement::MiscOverworldPlacements::bootstrap();
+        // All overworld biomes in EXACT order from Java's biomeSource.possibleBiomes()
+        // Reference: MultiNoiseBiomeSource.createFromPreset(OVERWORLD).possibleBiomes()
+        std::vector<std::string> overworldBiomes = {
+            "minecraft:mushroom_fields",          // 0
+            "minecraft:deep_frozen_ocean",        // 1
+            "minecraft:frozen_ocean",             // 2
+            "minecraft:deep_cold_ocean",          // 3
+            "minecraft:cold_ocean",               // 4
+            "minecraft:deep_ocean",               // 5
+            "minecraft:ocean",                    // 6
+            "minecraft:deep_lukewarm_ocean",      // 7
+            "minecraft:lukewarm_ocean",           // 8
+            "minecraft:warm_ocean",               // 9
+            "minecraft:stony_shore",              // 10
+            "minecraft:swamp",                    // 11
+            "minecraft:mangrove_swamp",           // 12
+            "minecraft:snowy_slopes",             // 13
+            "minecraft:snowy_plains",             // 14
+            "minecraft:snowy_beach",              // 15
+            "minecraft:windswept_gravelly_hills", // 16
+            "minecraft:grove",                    // 17
+            "minecraft:windswept_hills",          // 18
+            "minecraft:snowy_taiga",              // 19
+            "minecraft:windswept_forest",         // 20
+            "minecraft:taiga",                    // 21
+            "minecraft:plains",                   // 22
+            "minecraft:meadow",                   // 23
+            "minecraft:beach",                    // 24
+            "minecraft:forest",                   // 25
+            "minecraft:old_growth_spruce_taiga",  // 26
+            "minecraft:flower_forest",            // 27
+            "minecraft:birch_forest",             // 28
+            "minecraft:dark_forest",              // 29
+            "minecraft:pale_garden",              // 30
+            "minecraft:savanna_plateau",          // 31
+            "minecraft:savanna",                  // 32
+            "minecraft:jungle",                   // 33
+            "minecraft:badlands",                 // 34
+            "minecraft:desert",                   // 35
+            "minecraft:wooded_badlands",          // 36
+            "minecraft:jagged_peaks",             // 37
+            "minecraft:stony_peaks",              // 38
+            "minecraft:frozen_river",             // 39
+            "minecraft:river",                    // 40
+            "minecraft:ice_spikes",               // 41
+            "minecraft:old_growth_pine_taiga",    // 42
+            "minecraft:sunflower_plains",         // 43
+            "minecraft:old_growth_birch_forest",  // 44
+            "minecraft:sparse_jungle",            // 45
+            "minecraft:bamboo_jungle",            // 46
+            "minecraft:eroded_badlands",          // 47
+            "minecraft:windswept_savanna",        // 48
+            "minecraft:cherry_grove",             // 49
+            "minecraft:frozen_peaks",             // 50
+            "minecraft:dripstone_caves",          // 51
+            "minecraft:lush_caves",               // 52
+            "minecraft:deep_dark"                 // 53
+        };
 
-    // All overworld biomes in EXACT order from Java's biomeSource.possibleBiomes()
-    // Reference: MultiNoiseBiomeSource.createFromPreset(OVERWORLD).possibleBiomes()
-    std::vector<std::string> overworldBiomes = {
-        "minecraft:mushroom_fields",          // 0
-        "minecraft:deep_frozen_ocean",        // 1
-        "minecraft:frozen_ocean",             // 2
-        "minecraft:deep_cold_ocean",          // 3
-        "minecraft:cold_ocean",               // 4
-        "minecraft:deep_ocean",               // 5
-        "minecraft:ocean",                    // 6
-        "minecraft:deep_lukewarm_ocean",      // 7
-        "minecraft:lukewarm_ocean",           // 8
-        "minecraft:warm_ocean",               // 9
-        "minecraft:stony_shore",              // 10
-        "minecraft:swamp",                    // 11
-        "minecraft:mangrove_swamp",           // 12
-        "minecraft:snowy_slopes",             // 13
-        "minecraft:snowy_plains",             // 14
-        "minecraft:snowy_beach",              // 15
-        "minecraft:windswept_gravelly_hills", // 16
-        "minecraft:grove",                    // 17
-        "minecraft:windswept_hills",          // 18
-        "minecraft:snowy_taiga",              // 19
-        "minecraft:windswept_forest",         // 20
-        "minecraft:taiga",                    // 21
-        "minecraft:plains",                   // 22
-        "minecraft:meadow",                   // 23
-        "minecraft:beach",                    // 24
-        "minecraft:forest",                   // 25
-        "minecraft:old_growth_spruce_taiga",  // 26
-        "minecraft:flower_forest",            // 27
-        "minecraft:birch_forest",             // 28
-        "minecraft:dark_forest",              // 29
-        "minecraft:pale_garden",              // 30
-        "minecraft:savanna_plateau",          // 31
-        "minecraft:savanna",                  // 32
-        "minecraft:jungle",                   // 33
-        "minecraft:badlands",                 // 34
-        "minecraft:desert",                   // 35
-        "minecraft:wooded_badlands",          // 36
-        "minecraft:jagged_peaks",             // 37
-        "minecraft:stony_peaks",              // 38
-        "minecraft:frozen_river",             // 39
-        "minecraft:river",                    // 40
-        "minecraft:ice_spikes",               // 41
-        "minecraft:old_growth_pine_taiga",    // 42
-        "minecraft:sunflower_plains",         // 43
-        "minecraft:old_growth_birch_forest",  // 44
-        "minecraft:sparse_jungle",            // 45
-        "minecraft:bamboo_jungle",            // 46
-        "minecraft:eroded_badlands",          // 47
-        "minecraft:windswept_savanna",        // 48
-        "minecraft:cherry_grove",             // 49
-        "minecraft:frozen_peaks",             // 50
-        "minecraft:dripstone_caves",          // 51
-        "minecraft:lush_caves",               // 52
-        "minecraft:deep_dark"                 // 53
-    };
+        s_biomeKeyOrder = overworldBiomes;
 
-    s_biomeKeyOrder = overworldBiomes;
+        // Setup each biome individually with its exact feature order
+        // The order of biomes processed matters for FeatureSorter's global index assignment!
 
-    // Setup each biome individually with its exact feature order
-    // The order of biomes processed matters for FeatureSorter's global index assignment!
+        // 0: mushroom_fields
+        setupMushroomFields("minecraft:mushroom_fields");
 
-    // 0: mushroom_fields
-    setupMushroomFields("minecraft:mushroom_fields");
+        // 1-2: frozen oceans
+        setupFrozenOcean("minecraft:deep_frozen_ocean", true);
+        setupFrozenOcean("minecraft:frozen_ocean", false);
 
-    // 1-2: frozen oceans
-    setupFrozenOcean("minecraft:deep_frozen_ocean", true);
-    setupFrozenOcean("minecraft:frozen_ocean", false);
+        // 3-4: cold oceans
+        setupColdOcean("minecraft:deep_cold_ocean", true);
+        setupColdOcean("minecraft:cold_ocean", false);
 
-    // 3-4: cold oceans
-    setupColdOcean("minecraft:deep_cold_ocean", true);
-    setupColdOcean("minecraft:cold_ocean", false);
+        // 5-6: regular oceans
+        setupOcean("minecraft:deep_ocean", true);
+        setupOcean("minecraft:ocean", false);
 
-    // 5-6: regular oceans
-    setupOcean("minecraft:deep_ocean", true);
-    setupOcean("minecraft:ocean", false);
+        // 7-8: lukewarm oceans
+        setupLukewarmOcean("minecraft:deep_lukewarm_ocean", true);
+        setupLukewarmOcean("minecraft:lukewarm_ocean", false);
 
-    // 7-8: lukewarm oceans
-    setupLukewarmOcean("minecraft:deep_lukewarm_ocean", true);
-    setupLukewarmOcean("minecraft:lukewarm_ocean", false);
+        // 9: warm ocean
+        setupWarmOcean("minecraft:warm_ocean");
 
-    // 9: warm ocean
-    setupWarmOcean("minecraft:warm_ocean");
+        // 10: stony shore (uses beach)
+        setupBeach("minecraft:stony_shore", false, true);
 
-    // 10: stony shore (uses beach)
-    setupBeach("minecraft:stony_shore", false, true);
+        // 11: swamp
+        setupSwamp("minecraft:swamp");
 
-    // 11: swamp
-    setupSwamp("minecraft:swamp");
+        // 12: mangrove_swamp
+        setupMangroveSwamp("minecraft:mangrove_swamp");
 
-    // 12: mangrove_swamp
-    setupMangroveSwamp("minecraft:mangrove_swamp");
+        // 13: snowy_slopes
+        setupSnowySlopes("minecraft:snowy_slopes");
 
-    // 13: snowy_slopes
-    setupSnowySlopes("minecraft:snowy_slopes");
+        // 14: snowy_plains
+        setupPlains("minecraft:snowy_plains", false, true, false);
 
-    // 14: snowy_plains
-    setupPlains("minecraft:snowy_plains", false, true, false);
+        // 15: snowy_beach
+        setupBeach("minecraft:snowy_beach", true, false);
 
-    // 15: snowy_beach
-    setupBeach("minecraft:snowy_beach", true, false);
+        // 16: windswept_gravelly_hills (windsweptHills with more trees = false, but it's gravelly)
+        setupWindsweptHills("minecraft:windswept_gravelly_hills", false);
 
-    // 16: windswept_gravelly_hills (windsweptHills with more trees = false, but it's gravelly)
-    setupWindsweptHills("minecraft:windswept_gravelly_hills", false);
+        // 17: grove
+        setupGrove("minecraft:grove");
 
-    // 17: grove
-    setupGrove("minecraft:grove");
+        // 18: windswept_hills
+        setupWindsweptHills("minecraft:windswept_hills", false);
 
-    // 18: windswept_hills
-    setupWindsweptHills("minecraft:windswept_hills", false);
+        // 19: snowy_taiga
+        setupTaiga("minecraft:snowy_taiga", true);
 
-    // 19: snowy_taiga
-    setupTaiga("minecraft:snowy_taiga", true);
+        // 20: windswept_forest
+        setupWindsweptHills("minecraft:windswept_forest", true);
 
-    // 20: windswept_forest
-    setupWindsweptHills("minecraft:windswept_forest", true);
+        // 21: taiga
+        setupTaiga("minecraft:taiga", false);
 
-    // 21: taiga
-    setupTaiga("minecraft:taiga", false);
+        // 22: plains
+        setupPlains("minecraft:plains", false, false, false);
 
-    // 22: plains
-    setupPlains("minecraft:plains", false, false, false);
+        // 23: meadow
+        setupMeadowOrCherryGrove("minecraft:meadow", false);
 
-    // 23: meadow
-    setupMeadowOrCherryGrove("minecraft:meadow", false);
+        // 24: beach
+        setupBeach("minecraft:beach", false, false);
 
-    // 24: beach
-    setupBeach("minecraft:beach", false, false);
+        // 25: forest
+        setupForest("minecraft:forest", false, false, false);
 
-    // 25: forest
-    setupForest("minecraft:forest", false, false, false);
+        // 26: old_growth_spruce_taiga
+        setupOldGrowthTaiga("minecraft:old_growth_spruce_taiga", true);
 
-    // 26: old_growth_spruce_taiga
-    setupOldGrowthTaiga("minecraft:old_growth_spruce_taiga", true);
+        // 27: flower_forest
+        setupForest("minecraft:flower_forest", false, false, true);
 
-    // 27: flower_forest
-    setupForest("minecraft:flower_forest", false, false, true);
+        // 28: birch_forest
+        setupForest("minecraft:birch_forest", true, false, false);
 
-    // 28: birch_forest
-    setupForest("minecraft:birch_forest", true, false, false);
+        // 29: dark_forest
+        setupDarkForest("minecraft:dark_forest", false);
 
-    // 29: dark_forest
-    setupDarkForest("minecraft:dark_forest", false);
+        // 30: pale_garden
+        setupDarkForest("minecraft:pale_garden", true);
 
-    // 30: pale_garden
-    setupDarkForest("minecraft:pale_garden", true);
+        // 31: savanna_plateau
+        setupSavanna("minecraft:savanna_plateau", false, true);
 
-    // 31: savanna_plateau
-    setupSavanna("minecraft:savanna_plateau", false, true);
+        // 32: savanna
+        setupSavanna("minecraft:savanna", false, false);
 
-    // 32: savanna
-    setupSavanna("minecraft:savanna", false, false);
+        // 33: jungle
+        setupJungle("minecraft:jungle", false, false, true);
 
-    // 33: jungle
-    setupJungle("minecraft:jungle", false, false, true);
+        // 34: badlands
+        setupBadlands("minecraft:badlands", false);
 
-    // 34: badlands
-    setupBadlands("minecraft:badlands", false);
+        // 35: desert
+        setupDesert("minecraft:desert");
 
-    // 35: desert
-    setupDesert("minecraft:desert");
+        // 36: wooded_badlands
+        setupBadlands("minecraft:wooded_badlands", true);
 
-    // 36: wooded_badlands
-    setupBadlands("minecraft:wooded_badlands", true);
+        // 37: jagged_peaks
+        setupPeaks("minecraft:jagged_peaks", false);
 
-    // 37: jagged_peaks
-    setupPeaks("minecraft:jagged_peaks", false);
+        // 38: stony_peaks
+        setupPeaks("minecraft:stony_peaks", true);
 
-    // 38: stony_peaks
-    setupPeaks("minecraft:stony_peaks", true);
+        // 39: frozen_river
+        setupRiver("minecraft:frozen_river", true);
 
-    // 39: frozen_river
-    setupRiver("minecraft:frozen_river", true);
+        // 40: river
+        setupRiver("minecraft:river", false);
 
-    // 40: river
-    setupRiver("minecraft:river", false);
+        // 41: ice_spikes
+        setupPlains("minecraft:ice_spikes", false, true, true);
 
-    // 41: ice_spikes
-    setupPlains("minecraft:ice_spikes", false, true, true);
+        // 42: old_growth_pine_taiga
+        setupOldGrowthTaiga("minecraft:old_growth_pine_taiga", false);
 
-    // 42: old_growth_pine_taiga
-    setupOldGrowthTaiga("minecraft:old_growth_pine_taiga", false);
+        // 43: sunflower_plains
+        setupPlains("minecraft:sunflower_plains", true, false, false);
 
-    // 43: sunflower_plains
-    setupPlains("minecraft:sunflower_plains", true, false, false);
+        // 44: old_growth_birch_forest
+        setupForest("minecraft:old_growth_birch_forest", true, true, false);
 
-    // 44: old_growth_birch_forest
-    setupForest("minecraft:old_growth_birch_forest", true, true, false);
+        // 45: sparse_jungle
+        setupJungle("minecraft:sparse_jungle", false, true, false);
 
-    // 45: sparse_jungle
-    setupJungle("minecraft:sparse_jungle", false, true, false);
+        // 46: bamboo_jungle
+        setupJungle("minecraft:bamboo_jungle", true, false, true);
 
-    // 46: bamboo_jungle
-    setupJungle("minecraft:bamboo_jungle", true, false, true);
+        // 47: eroded_badlands (same as regular badlands)
+        setupBadlands("minecraft:eroded_badlands", false);
 
-    // 47: eroded_badlands (same as regular badlands)
-    setupBadlands("minecraft:eroded_badlands", false);
+        // 48: windswept_savanna
+        setupSavanna("minecraft:windswept_savanna", true, false);
 
-    // 48: windswept_savanna
-    setupSavanna("minecraft:windswept_savanna", true, false);
+        // 49: cherry_grove
+        setupMeadowOrCherryGrove("minecraft:cherry_grove", true);
 
-    // 49: cherry_grove
-    setupMeadowOrCherryGrove("minecraft:cherry_grove", true);
+        // 50: frozen_peaks
+        setupPeaks("minecraft:frozen_peaks", false);
 
-    // 50: frozen_peaks
-    setupPeaks("minecraft:frozen_peaks", false);
+        // 51: dripstone_caves
+        setupDripstoneCaves("minecraft:dripstone_caves");
 
-    // 51: dripstone_caves
-    setupDripstoneCaves("minecraft:dripstone_caves");
+        // 52: lush_caves
+        setupLushCaves("minecraft:lush_caves");
 
-    // 52: lush_caves
-    setupLushCaves("minecraft:lush_caves");
+        // 53: deep_dark
+        setupDeepDark("minecraft:deep_dark");
 
-    // 53: deep_dark
-    setupDeepDark("minecraft:deep_dark");
-
-    s_initialized = true;
+        s_initialized.store(true, std::memory_order_release);
+    });
 }
 
 const std::vector<const PlacedFeature*>& BiomeFeatureRegistry::getFeaturesForStep(
     const std::string& biomeKey,
     int step
 ) {
-    if (!s_initialized) {
+    if (!s_initialized.load(std::memory_order_acquire)) {
         bootstrap();
     }
 
@@ -1216,7 +1218,7 @@ const std::vector<const PlacedFeature*>& BiomeFeatureRegistry::getFeaturesForSte
 const std::vector<std::vector<const PlacedFeature*>>& BiomeFeatureRegistry::getFeaturesForBiome(
     const std::string& biomeKey
 ) {
-    if (!s_initialized) {
+    if (!s_initialized.load(std::memory_order_acquire)) {
         bootstrap();
     }
 
@@ -1228,7 +1230,7 @@ const std::vector<std::vector<const PlacedFeature*>>& BiomeFeatureRegistry::getF
 }
 
 bool BiomeFeatureRegistry::hasFeature(const std::string& biomeKey, const PlacedFeature* feature) {
-    if (!s_initialized) {
+    if (!s_initialized.load(std::memory_order_acquire)) {
         bootstrap();
     }
 
@@ -1248,7 +1250,7 @@ bool BiomeFeatureRegistry::hasFeature(const std::string& biomeKey, const PlacedF
 }
 
 const std::vector<std::string>& BiomeFeatureRegistry::getAllBiomeKeys() {
-    if (!s_initialized) {
+    if (!s_initialized.load(std::memory_order_acquire)) {
         bootstrap();
     }
     return s_biomeKeyOrder;

@@ -33,6 +33,8 @@ public:
     }
 
 protected:
+    const Block* getBodyBlock() const override;
+
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         GrowingPlantHeadBlock::createBlockStateDefinition(builder);
         builder.add(BERRIES);
@@ -44,6 +46,14 @@ protected:
 
     bool canGrowInto(BlockState* state) const override {
         return state && state->isAir();
+    }
+
+    BlockState* getGrowIntoState(
+        BlockState* growFromState,
+        minecraft::levelgen::WorldgenRandom& random
+    ) const override {
+        BlockState* grownState = GrowingPlantHeadBlock::getGrowIntoState(growFromState, random);
+        return grownState ? grownState->setValue(*BERRIES, random.nextFloat() < 0.11f) : nullptr;
     }
 
     bool isHeadOrBody(BlockState* state) const override {

@@ -25,10 +25,14 @@ private:
     NoiseChunk* m_owner;
     density::DensityFunction* m_noiseFiller;
 
-    // Two 2D slices - each holds density values for a Y-Z plane
+    // Two 2D slices - each holds density values for a Y-Z plane, stored as
+    // one flat buffer of (cellCountXZ+1) rows × (cellCountY+1) values; row
+    // index is the Z cell. Same logical layout and fill order as Java's
+    // double[][], just contiguous.
     // Java: private double[][] slice0; private double[][] slice1;
-    std::vector<std::vector<double>> m_slice0;
-    std::vector<std::vector<double>> m_slice1;
+    std::vector<double> m_slice0;
+    std::vector<double> m_slice1;
+    int m_sliceYSize = 0;  // cellCountY + 1 (row stride)
 
     // 8 corner values for current cell (Java lines 489-496)
     double m_noise000, m_noise001, m_noise100, m_noise101;
@@ -39,26 +43,16 @@ private:
     double m_valueZ0, m_valueZ1;
     double m_value;
 
-    // Allocate slice arrays (Java lines 514-524)
-    std::vector<std::vector<double>> allocateSlice(int cellCountY, int cellCountZ) {
-        int sizeZ = cellCountZ + 1;
-        int sizeY = cellCountY + 1;
-        std::vector<std::vector<double>> result(sizeZ);
-
-        for (int cellZIndex = 0; cellZIndex < sizeZ; ++cellZIndex) {
-            result[cellZIndex].resize(sizeY, 0.0);
-        }
-
-        return result;
-    }
-
 public:
     NoiseInterpolator(NoiseChunk* owner, density::DensityFunction* noiseFiller)
         : m_owner(owner), m_noiseFiller(noiseFiller)
     {
-        // Java lines 505-512
-        m_slice0 = allocateSlice(owner->m_cellCountY, owner->m_cellCountXZ);
-        m_slice1 = allocateSlice(owner->m_cellCountY, owner->m_cellCountXZ);
+        // Java lines 505-512 (allocateSlice: (cellCountXZ+1) × (cellCountY+1))
+        m_sliceYSize = owner->m_cellCountY + 1;
+        const size_t sliceSize =
+            static_cast<size_t>(owner->m_cellCountXZ + 1) * static_cast<size_t>(m_sliceYSize);
+        m_slice0.assign(sliceSize, 0.0);
+        m_slice1.assign(sliceSize, 0.0);
         m_owner->m_interpolators.push_back(this);
 
         // Initialize corner values
@@ -71,14 +65,18 @@ public:
 
     // Java lines 526-535
     void selectCellYZ(int cellYIndex, int cellZIndex) {
-        m_noise000 = m_slice0[cellZIndex][cellYIndex];
-        m_noise001 = m_slice0[cellZIndex + 1][cellYIndex];
-        m_noise100 = m_slice1[cellZIndex][cellYIndex];
-        m_noise101 = m_slice1[cellZIndex + 1][cellYIndex];
-        m_noise010 = m_slice0[cellZIndex][cellYIndex + 1];
-        m_noise011 = m_slice0[cellZIndex + 1][cellYIndex + 1];
-        m_noise110 = m_slice1[cellZIndex][cellYIndex + 1];
-        m_noise111 = m_slice1[cellZIndex + 1][cellYIndex + 1];
+        const double* s0z0 = m_slice0.data() + static_cast<size_t>(cellZIndex) * m_sliceYSize;
+        const double* s0z1 = s0z0 + m_sliceYSize;
+        const double* s1z0 = m_slice1.data() + static_cast<size_t>(cellZIndex) * m_sliceYSize;
+        const double* s1z1 = s1z0 + m_sliceYSize;
+        m_noise000 = s0z0[cellYIndex];
+        m_noise001 = s0z1[cellYIndex];
+        m_noise100 = s1z0[cellYIndex];
+        m_noise101 = s1z1[cellYIndex];
+        m_noise010 = s0z0[cellYIndex + 1];
+        m_noise011 = s0z1[cellYIndex + 1];
+        m_noise110 = s1z0[cellYIndex + 1];
+        m_noise111 = s1z1[cellYIndex + 1];
     }
 
     // Java lines 537-542
@@ -102,9 +100,13 @@ public:
 
     // Java lines 553-561
     double compute(const density::DensityFunction::FunctionContext& context) const override {
-        const NoiseChunk* chunkContext = dynamic_cast<const NoiseChunk*>(&context);
+        // Identity check against the owner (Java: context == this). A static
+        // upcast pointer compare is equivalent to the old dynamic_cast and
+        // avoids a per-block __dynamic_cast through multiple inheritance.
+        const bool isOwnerContext =
+            &context == static_cast<const density::DensityFunction::FunctionContext*>(m_owner);
 
-        if (chunkContext != m_owner) {
+        if (!isOwnerContext) {
             return m_noiseFiller->compute(context);
         } else if (!m_owner->m_interpolating) {
             throw std::runtime_error("Trying to sample interpolator outside the interpolation loop");
@@ -154,9 +156,13 @@ public:
         return density::DensityFunctions::MarkerOrMarked::Type::Interpolated;
     }
 
-    // Expose slices for fillSlice
-    std::vector<std::vector<double>>& getSlice0() { return m_slice0; }
-    std::vector<std::vector<double>>& getSlice1() { return m_slice1; }
+    // Expose slice rows for fillSlice (row = Z cell index)
+    double* slice0Row(int cellZIndex) {
+        return m_slice0.data() + static_cast<size_t>(cellZIndex) * m_sliceYSize;
+    }
+    double* slice1Row(int cellZIndex) {
+        return m_slice1.data() + static_cast<size_t>(cellZIndex) * m_sliceYSize;
+    }
 };
 
 //==============================================================================
@@ -180,9 +186,10 @@ public:
 
     // Java lines 459-470
     double compute(const density::DensityFunction::FunctionContext& context) const override {
-        const NoiseChunk* chunkContext = dynamic_cast<const NoiseChunk*>(&context);
+        const bool isOwnerContext =
+            &context == static_cast<const density::DensityFunction::FunctionContext*>(m_owner);
 
-        if (chunkContext != m_owner) {
+        if (!isOwnerContext) {
             return m_noiseFiller->compute(context);
         } else if (!m_owner->m_interpolating) {
             throw std::runtime_error("Trying to sample interpolator outside the interpolation loop");
@@ -251,9 +258,10 @@ public:
 
     // Java lines 599-612
     double compute(const density::DensityFunction::FunctionContext& context) const override {
-        const NoiseChunk* chunkContext = dynamic_cast<const NoiseChunk*>(&context);
+        const bool isOwnerContext =
+            &context == static_cast<const density::DensityFunction::FunctionContext*>(m_owner);
 
-        if (chunkContext != m_owner) {
+        if (!isOwnerContext) {
             return m_function->compute(context);
         } else if (!m_lastArray.empty() && m_lastArrayCounter == m_owner->m_arrayInterpolationCounter) {
             return m_lastArray[m_owner->m_arrayIndex];
@@ -591,6 +599,15 @@ public:
     density::DensityFunction* apply(density::DensityFunction* input) override {
         return m_owner->wrap(input);
     }
+
+    void takeOwnership(void* obj, void (*deleter)(void*)) override {
+        m_owner->takeMappedNodeOwnership(obj, deleter);
+    }
+
+    density::DensityFunction* own(density::DensityFunction* node) override {
+        m_owner->takeMappedDensityNodeOwnership(node);
+        return node;
+    }
 };
 
 //==============================================================================
@@ -769,6 +786,7 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     }
 
     m_blockStateRule = new MaterialRuleList(rules);
+    m_blockStateFillers = rules;  // MaterialRuleList doesn't own them; we do
 }
 
 // Static factory method - Java lines 62-67
@@ -867,7 +885,21 @@ NoiseChunk::~NoiseChunk() {
 
     // These are NOT in arena, need actual delete
     delete m_sliceFillingContextProvider;
-    delete m_blockStateRule;  // This also deletes the aquifer inside MaterialRuleList
+    delete m_blockStateRule;  // rule list only; fillers/aquifer deleted below
+    for (BlockStateFiller* filler : m_blockStateFillers) {
+        delete filler;
+    }
+    delete m_aquifer;
+
+    // Interior nodes heap-allocated during mapAll (registered through the
+    // WrapVisitor ownership sink). Deleters are shallow (no child traversal),
+    // so order doesn't matter; reverse insertion order is used anyway.
+    for (auto it = m_ownedMappedNodes.rbegin(); it != m_ownedMappedNodes.rend(); ++it) {
+        it->second(it->first);
+    }
+    for (auto it = m_ownedMappedDensityNodes.rbegin(); it != m_ownedMappedDensityNodes.rend(); ++it) {
+        delete *it;
+    }
 }
 
 // Java lines 202-219
@@ -888,9 +920,9 @@ void NoiseChunk::fillSlice(bool slice0, int cellX) {
         ++m_arrayInterpolationCounter;
 
         for (NoiseInterpolator* noiseInterpolator : m_interpolators) {
-            auto& slice = slice0 ? noiseInterpolator->getSlice0()[cellZIndex] :
-                                   noiseInterpolator->getSlice1()[cellZIndex];
-            noiseInterpolator->fillArray(slice.data(), cellCountY + 1, *m_sliceFillingContextProvider);
+            double* slice = slice0 ? noiseInterpolator->slice0Row(cellZIndex)
+                                   : noiseInterpolator->slice1Row(cellZIndex);
+            noiseInterpolator->fillArray(slice, cellCountY + 1, *m_sliceFillingContextProvider);
         }
     }
 
@@ -930,13 +962,7 @@ density::DensityFunction::FunctionContext* NoiseChunk::forIndex(int cellIndex) {
 
 // Java lines 248-263
 // OPTIMIZATION: Use local variables and restrict pointer
-void NoiseChunk::fillAllDirectly(double*
-#ifdef _MSC_VER
-    __restrict
-#else
-    __restrict__
-#endif
-    output, int count, density::DensityFunction* function) {
+void NoiseChunk::fillAllDirectly(double* __restrict__ output, int count, density::DensityFunction* function) {
     (void)count;  // Unused - we iterate based on cell dimensions
 
     // Cache dimensions in local variables for faster access
@@ -1164,15 +1190,6 @@ density::DensityFunction* NoiseChunk::wrapNew(density::DensityFunction* function
 
     // Java line 383: Return function unchanged (should not reach here with valid WrapType)
     return function;
-}
-
-// Interpolator slice accessors for debug/parity testing
-const std::vector<std::vector<double>>& NoiseChunk::getInterpolatorSlice0(size_t index) const {
-    return m_interpolators[index]->getSlice0();
-}
-
-const std::vector<std::vector<double>>& NoiseChunk::getInterpolatorSlice1(size_t index) const {
-    return m_interpolators[index]->getSlice1();
 }
 
 } // namespace levelgen

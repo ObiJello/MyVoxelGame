@@ -145,8 +145,6 @@ public:
 
     // Interpolator accessors for debug/parity testing
     size_t getInterpolatorCount() const { return m_interpolators.size(); }
-    const std::vector<std::vector<double>>& getInterpolatorSlice0(size_t index) const;
-    const std::vector<std::vector<double>>& getInterpolatorSlice1(size_t index) const;
     density::DensityFunction* getWrappedFinalDensityForDebug() const { return m_wrappedFinalDensityForDebug; }
     density::DensityFunction* getWrappedVeinToggleForDebug() const { return m_wrappedVeinToggleForDebug; }
     density::DensityFunction* getWrappedVeinRidgedForDebug() const { return m_wrappedVeinRidgedForDebug; }
@@ -356,6 +354,26 @@ private:
     // Wrapped density functions (Java line 35 - Map<DensityFunction, DensityFunction>)
     std::unordered_map<density::DensityFunction*, density::DensityFunction*> m_wrapped;
 
+    // Interior nodes heap-allocated during mapAll (new Clamp/Ap2/mapped
+    // splines, ...). Registered via WrapVisitor's ownership sink; deleted in
+    // the destructor (reverse order). Disjoint from arena objects and from
+    // m_wrapped values, so no double-destruction. Density nodes (the vast
+    // majority, ~10k/chunk) are stored bare and deleted via virtual dtor;
+    // the pair vector only carries the few non-DensityFunction spline nodes.
+    std::vector<density::DensityFunction*> m_ownedMappedDensityNodes;
+    std::vector<std::pair<void*, void (*)(void*)>> m_ownedMappedNodes;
+
+public:
+    void takeMappedNodeOwnership(void* obj, void (*deleter)(void*)) {
+        m_ownedMappedNodes.emplace_back(obj, deleter);
+    }
+
+    void takeMappedDensityNodeOwnership(density::DensityFunction* node) {
+        m_ownedMappedDensityNodes.push_back(node);
+    }
+
+private:
+
     //==========================================================================
     // ARENA ALLOCATOR for wrapped objects
     // Eliminates individual malloc calls per chunk
@@ -389,8 +407,12 @@ private:
 
     density::DensityFunction* m_preliminarySurfaceLevel;  // Java line 38
 
-    // Aquifer for fluid generation (Java line 37)
+    // Aquifer for fluid generation (Java line 37); owned, deleted in dtor
     Aquifer* m_aquifer;
+
+    // The fillers handed to m_blockStateRule (AquiferWithDensity,
+    // OreVeinifier). MaterialRuleList does not take ownership; we do.
+    std::vector<BlockStateFiller*> m_blockStateFillers;
 
     // Block state rule for determining block types (Java line 39)
     BlockStateFiller* m_blockStateRule;  // Aquifer + OreVeinifier chain

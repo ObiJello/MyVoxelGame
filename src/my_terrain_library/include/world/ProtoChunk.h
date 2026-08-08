@@ -284,8 +284,11 @@ public:
         LevelChunkSection& section = *m_sections[sectionIndex];
         bool wasEmpty = section.hasOnlyAir();
 
-        // Optimization: skip if already air and setting air
-        if (wasEmpty && state->isAir()) {
+        // Skip only for PLAIN air into an all-air section, exactly like Java
+        // (ProtoChunk.java line 107: state.is(Blocks.AIR)). isAir() is too
+        // broad: cave_air/void_air are real content — a surface lava lake's
+        // cave_air dome above the terrain was silently dropped by that check.
+        if (wasEmpty && state->is(m_airBlock)) {
             return state;
         }
 
@@ -296,18 +299,27 @@ public:
         // Reference: ChunkAccess.java / ProtoChunk.java setBlockState()
         const chunk::status::ChunkStatus* persistedStatus = getPersistedStatus();
         if (persistedStatus != nullptr) {
-            std::set<levelgen::Heightmap::Types> toPrime;
-            for (auto type : persistedStatus->heightmapsAfter()) {
+            const auto& tracked = persistedStatus->heightmapsAfter();
+            bool needPrime = false;
+            for (auto type : tracked) {
                 if (m_heightmaps.find(type) == m_heightmaps.end()) {
-                    toPrime.insert(type);
+                    needPrime = true;
+                    break;
                 }
             }
-
-            if (!toPrime.empty()) {
+            if (needPrime) {
+                // Rare (first write after a status advance); the set is only
+                // materialized here, not on every block write.
+                std::set<levelgen::Heightmap::Types> toPrime;
+                for (auto type : tracked) {
+                    if (m_heightmaps.find(type) == m_heightmaps.end()) {
+                        toPrime.insert(type);
+                    }
+                }
                 levelgen::Heightmap::primeHeightmaps(this, toPrime);
             }
 
-            for (auto type : persistedStatus->heightmapsAfter()) {
+            for (auto type : tracked) {
                 auto it = m_heightmaps.find(type);
                 if (it != m_heightmaps.end()) {
                     it->second->update(localX, y, localZ, state);
@@ -547,13 +559,23 @@ public:
             return biome::Biomes::get(biome::BiomeKeys::PLAINS);
         }
 
-        // Get biome from section (use local quart coords)
-        biome::BiomeKey key = m_sections[sectionIndex]->getNoiseBiome(
+        // Get biome from section (use local quart coords); sections store
+        // interned Biome* directly, no registry lookup needed
+        biome::BiomeHolder holder = m_sections[sectionIndex]->getNoiseBiome(
             quartX & 3,
             clampedQuartY & 3,
             quartZ & 3
         );
-        return biome::Biomes::get(key);
+        if (holder == nullptr) {
+            // Unfilled section (chunk below BIOMES status). The pre-interning
+            // code returned Biomes::get("") — an auto-created placeholder
+            // whose non-nullness matters: carver seeding probes chunks up to
+            // 8 away and skips a source chunk entirely on a null biome.
+            static const biome::BiomeHolder s_unfilledPlaceholder =
+                biome::Biomes::get(biome::BiomeKey());
+            return s_unfilledPlaceholder;
+        }
+        return holder;
     }
 
     /**

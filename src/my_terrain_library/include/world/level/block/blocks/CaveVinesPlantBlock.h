@@ -30,6 +30,8 @@ public:
     }
 
 protected:
+    const Block* getHeadBlock() const override;
+
     void createBlockStateDefinition(typename StateDefinition<Block, BlockState>::Builder& builder) override {
         initializeProperties();
         builder.add(BERRIES);

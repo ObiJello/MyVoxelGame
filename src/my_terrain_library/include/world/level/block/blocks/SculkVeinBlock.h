@@ -185,7 +185,19 @@ public:
         }
 
         if (placementState->hasProperty(WATERLOGGED)) {
-            bool waterlogged = oldState && oldState->hasAnyFluid();
+            // Java: oldState.getFluidState().isSourceOfType(Fluids.WATER) -
+            // true for the source-water block AND for waterlogged blocks.
+            bool waterlogged = false;
+            if (oldState) {
+                if (oldState->getIdentifier() == "minecraft:water") {
+                    waterlogged =
+                        !BlockStateProperties::LEVEL ||
+                        !oldState->hasProperty(BlockStateProperties::LEVEL) ||
+                        oldState->getValueOrElse(*BlockStateProperties::LEVEL, 0) == 0;
+                } else if (oldState->hasProperty(BlockStateProperties::WATERLOGGED)) {
+                    waterlogged = oldState->getValueOrElse(*BlockStateProperties::WATERLOGGED, false);
+                }
+            }
             placementState = placementState->setValue(*WATERLOGGED, waterlogged);
         }
 

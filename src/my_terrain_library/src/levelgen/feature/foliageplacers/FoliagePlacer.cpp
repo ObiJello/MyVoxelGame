@@ -1,5 +1,6 @@
 #include "levelgen/feature/foliageplacers/FoliagePlacer.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
+#include "world/level/block/state/properties/BlockStateProperties.h"
 #include <cmath>
 #include <algorithm>
 
@@ -63,13 +64,31 @@ bool FoliagePlacer::tryPlaceLeaf(
     const core::BlockPos& pos
 ) {
     // Reference: FoliagePlacer.java tryPlaceLeaf() lines 117-130
-    // Check validTreePos before placing, matching Java behavior
-    if (foliageSetter.canPlace(pos)) {
-        BlockState* foliageState = foliageProvider->getState(random, pos);
-        foliageSetter.set(pos, foliageState);
-        return true;
+    using world::level::block::state::properties::BlockStateProperties;
+
+    BlockState* existingState = foliageSetter.getBlockState(pos);
+    const bool isPersistent =
+        BlockStateProperties::PERSISTENT &&
+        existingState &&
+        existingState->hasProperty(BlockStateProperties::PERSISTENT) &&
+        existingState->getValueOrElse(*BlockStateProperties::PERSISTENT, false);
+
+    if (isPersistent || !foliageSetter.canPlace(pos)) {
+        return false;
     }
-    return false;
+
+    BlockState* foliageState = foliageProvider->getState(random, pos);
+    if (foliageState &&
+        BlockStateProperties::WATERLOGGED &&
+        foliageState->hasProperty(BlockStateProperties::WATERLOGGED)) {
+        foliageState = foliageState->setValue(
+            *BlockStateProperties::WATERLOGGED,
+            existingState && existingState->hasWaterFluid()
+        );
+    }
+
+    foliageSetter.set(pos, foliageState);
+    return true;
 }
 
 // Helper: check if direction has positive axis direction
@@ -241,6 +260,32 @@ int PineFoliagePlacer::foliageRadius(WorldgenRandom& random, int trunkHeight) co
 // AcaciaFoliagePlacer
 // Reference: AcaciaFoliagePlacer.java
 // ============================================================================
+
+void FancyFoliagePlacer::createFoliageImpl(
+    FoliageSetter& foliageSetter,
+    WorldgenRandom& random,
+    std::shared_ptr<stateproviders::BlockStateProvider> foliageProvider,
+    int treeHeight,
+    const FoliageAttachment& attachment,
+    int foliageHeight,
+    int leafRadius,
+    int offset
+) {
+    // Reference: FancyFoliagePlacer.java createFoliage()
+    (void)treeHeight;
+    for (int yo = offset; yo >= offset - foliageHeight; --yo) {
+        int currentRadius = leafRadius + ((yo != offset && yo != offset - foliageHeight) ? 1 : 0);
+        placeLeavesRow(
+            foliageSetter,
+            random,
+            foliageProvider,
+            attachment.pos(),
+            currentRadius,
+            yo,
+            attachment.doubleTrunk()
+        );
+    }
+}
 
 void AcaciaFoliagePlacer::createFoliageImpl(
     FoliageSetter& foliageSetter,

@@ -2,13 +2,23 @@
 
 #include "core/BlockPos.h"
 #include "core/Direction.h"
+#include "world/level/block/Blocks.h"
 #include "world/level/block/state/BlockState.h"
+#include "world/level/block/state/properties/BooleanProperty.h"
 #include "levelgen/WorldgenRandom.h"
 #include "levelgen/feature/stateproviders/BlockStateProvider.h"
 #include <vector>
 #include <memory>
 #include <functional>
+#include <string>
 #include <set>
+
+namespace minecraft {
+namespace levelgen {
+class WorldGenLevel;
+class ChunkGenerator;
+}
+}
 
 // Reference: net/minecraft/world/level/levelgen/feature/treedecorators/TreeDecorator.java
 // Reference: net/minecraft/world/level/levelgen/feature/treedecorators/LeaveVineDecorator.java
@@ -41,6 +51,8 @@ private:
     BlockGetter m_blockGetter;
     HeightGetter m_heightGetter;
     WorldgenRandom* m_random;
+    minecraft::levelgen::WorldGenLevel* m_level;
+    minecraft::levelgen::ChunkGenerator* m_chunkGenerator;
 
 public:
     DecoratorContext(
@@ -50,7 +62,9 @@ public:
         BlockSetter blockSetter,
         BlockGetter blockGetter,
         HeightGetter heightGetter,
-        WorldgenRandom* random
+        WorldgenRandom* random,
+        minecraft::levelgen::WorldGenLevel* level = nullptr,
+        minecraft::levelgen::ChunkGenerator* chunkGenerator = nullptr
     )
         : m_logs(logs)
         , m_leaves(leaves)
@@ -59,6 +73,8 @@ public:
         , m_blockGetter(blockGetter)
         , m_heightGetter(heightGetter)
         , m_random(random)
+        , m_level(level)
+        , m_chunkGenerator(chunkGenerator)
     {}
 
     const std::vector<core::BlockPos>& logs() const { return m_logs; }
@@ -71,6 +87,20 @@ public:
         m_blockSetter(pos, blockState);
     }
 
+    void placeVine(
+        const core::BlockPos& pos,
+        const minecraft::world::level::block::state::properties::BooleanProperty& direction
+    ) {
+        BlockState* vineState = static_cast<BlockState*>(
+            minecraft::world::level::block::Blocks::getDefaultState("minecraft:vine")
+        );
+        if (!vineState || !vineState->hasProperty(&direction)) {
+            return;
+        }
+
+        m_blockSetter(pos, vineState->setValue(direction, true));
+    }
+
     BlockState* getBlockState(const core::BlockPos& pos) const {
         return m_blockGetter(pos);
     }
@@ -80,13 +110,31 @@ public:
         return state && state->isAir();
     }
 
+    bool checkBlock(const core::BlockPos& pos, const std::function<bool(BlockState*)>& predicate) const {
+        return predicate(m_blockGetter(pos));
+    }
+
     /**
      * Get heightmap Y for MOTION_BLOCKING_NO_LEAVES at (x, z)
      * Reference: PlaceOnGroundDecorator.java line 68
      * Used to prevent placing leaf litter under tree canopies or in caves
      */
     int getHeightNoLeaves(int x, int z) const {
-        return m_heightGetter(x, z);
+        int result = m_heightGetter(x, z);
+        // Parity-debug: mirrors the Java proxy's getHeightmapPos logging.
+        if (std::FILE* trace = minecraft::levelgen::WorldgenRandom::s_rngTraceFile) {
+            std::fprintf(trace, "CALL getHeightmapPos MOTION_BLOCKING_NO_LEAVES %d,%d=%d\n",
+                         x, z, result);
+        }
+        return result;
+    }
+
+    minecraft::levelgen::WorldGenLevel* level() const {
+        return m_level;
+    }
+
+    minecraft::levelgen::ChunkGenerator* chunkGenerator() const {
+        return m_chunkGenerator;
     }
 };
 

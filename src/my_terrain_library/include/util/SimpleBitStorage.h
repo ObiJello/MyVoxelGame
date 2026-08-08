@@ -2,7 +2,6 @@
 
 #include "util/Palette.h"
 #include <cstdint>
-#include <string>
 #include <vector>
 #include <functional>
 #include <stdexcept>

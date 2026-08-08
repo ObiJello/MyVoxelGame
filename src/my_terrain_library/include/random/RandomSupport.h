@@ -94,7 +94,7 @@ public:
      * Uses current time and a counter to ensure uniqueness.
      * Reference: WorldgenRandom.java lines 24-26
      */
-    static Seed128bit generateUniqueSeed();
+    static int64_t generateUniqueSeed();
 
 private:
     /**

@@ -14,6 +14,8 @@
 #include "core/BlockPos.h"
 #include "math/Mth.h"
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <algorithm>
 #include <iostream>
@@ -50,8 +52,11 @@ std::vector<BlockState*> SurfaceSystem::generateBands(XoroshiroRandomSource& ran
     // Line 263: BlockState[] clayBands = new BlockState[192];
     std::vector<BlockState*> clayBands(192, minecraft::world::level::block::Blocks::TERRACOTTA->defaultBlockState());
 
-    // Lines 266-271: Add orange terracotta bands
-    for (int32_t i = 0; i < static_cast<int32_t>(clayBands.size()); ) {
+    // Lines 266-271: Add orange terracotta bands.
+    // CRITICAL: Java's loop is `for (i = 0; i < len; ++i) { i += nextInt(5)+1; ... }`
+    // — it advances by draw+2 per iteration (loop ++i AND the body +=), which
+    // changes both the band positions and the number of draws consumed.
+    for (int32_t i = 0; i < static_cast<int32_t>(clayBands.size()); ++i) {
         i += random.nextInt(5) + 1;
         if (i < static_cast<int32_t>(clayBands.size())) {
             clayBands[i] = minecraft::world::level::block::Blocks::ORANGE_TERRACOTTA->defaultBlockState();
@@ -156,12 +161,14 @@ double SurfaceSystem::getSurfaceSecondary(int32_t blockX, int32_t blockZ) const 
 // Reference: SurfaceSystem.java lines 309-312
 BlockState* SurfaceSystem::getBand(int32_t worldX, int32_t y, int32_t worldZ) const {
     // int offset = (int)Math.round(this.clayBandsOffsetNoise.getValue((double)worldX, 0.0, (double)worldZ) * 4.0);
-    int32_t offset = static_cast<int32_t>(std::round(
+    // Java Math.round(double) is floor(x + 0.5); std::round rounds half away
+    // from zero and differs for negative half values.
+    int32_t offset = static_cast<int32_t>(std::floor(
         m_clayBandsOffsetNoise->getValue(
             static_cast<double>(worldX),
             0.0,
             static_cast<double>(worldZ)
-        ) * 4.0
+        ) * 4.0 + 0.5
     ));
 
     // return this.clayBands[(y + offset + this.clayBands.length) % this.clayBands.length];
@@ -180,7 +187,7 @@ bool SurfaceSystem::isStone(const BlockState* block) const {
 // Reference: SurfaceSystem.java lines 67-159
 void SurfaceSystem::buildSurface(
     RandomState* randomState,
-    std::function<void*(const ::minecraft::core::BlockPos&)> biomeGetter,
+    const std::function<void*(const ::minecraft::core::BlockPos&)>& biomeGetter,
     bool useLegacyRandom,
     const WorldGenerationContext& generationContext,
     ::world::IChunk* chunk,
@@ -284,10 +291,31 @@ void SurfaceSystem::buildSurface(
                     // Reference: line 143
                     context.updateY(stoneAboveDepth, stoneBelowDepth, waterHeight, blockX, y, blockZ);
 
+                    // Parity-debug: MC_SURF_DEBUG="x,z" logs rule inputs for one column.
+                    static const char* s_surfDbg = std::getenv("MC_SURF_DEBUG");
+                    if (const char* dbg = s_surfDbg) {
+                        int dx, dz;
+                        if (std::sscanf(dbg, "%d,%d", &dx, &dz) == 2 && dx == blockX && dz == blockZ) {
+                            std::fprintf(stderr,
+                                "SURFDBG y=%d sda=%d sdb=%d waterH=%d surfDepth=%d old=%s\n",
+                                y, stoneAboveDepth, stoneBelowDepth, waterHeight,
+                                context.getSurfaceDepth(), oldBlock->getIdentifier().c_str());
+                        }
+                    }
+
                     // Reference: lines 144-149 - apply rule if block is default
                     // Check if current block is the default block (stone)
                     if (oldBlock == m_defaultBlock) {
                         BlockState* newBlock = rule->tryApply(blockX, y, blockZ);
+
+                        static const char* s_surfDbg = std::getenv("MC_SURF_DEBUG");
+                    if (const char* dbg = s_surfDbg) {
+                            int dx, dz;
+                            if (std::sscanf(dbg, "%d,%d", &dx, &dz) == 2 && dx == blockX && dz == blockZ) {
+                                std::fprintf(stderr, "SURFDBG   apply y=%d -> %s\n", y,
+                                    newBlock ? newBlock->getIdentifier().c_str() : "(null)");
+                            }
+                        }
 
                         if (newBlock != nullptr) {
                             chunk->setBlockState(x, y, z, newBlock, false);

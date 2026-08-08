@@ -1,5 +1,7 @@
 #pragma once
 
+#include "random/LegacyRandomSource.h"
+#include "random/RandomSupport.h"
 #include "world/LevelChunkSection.h"
 #include "world/level/block/state/BlockState.h"
 #include <cstdint>
@@ -25,6 +27,7 @@ private:
     BlockState* m_defaultBlock;
     int64_t m_gameTime;
     int64_t m_seed;
+    LegacyRandomSource m_random;
 
 public:
     /**
@@ -46,6 +49,7 @@ public:
         , m_defaultBlock(defaultBlock ? defaultBlock : airBlock)
         , m_gameTime(0)
         , m_seed(seed)
+        , m_random(::minecraft::RandomSupport::generateUniqueSeed())
     {}
 
     // =========================================================================
@@ -122,6 +126,8 @@ public:
      * Reference: ServerLevel.getSeed()
      */
     int64_t getSeed() const { return m_seed; }
+
+    LegacyRandomSource& getRandom() { return m_random; }
 
     /**
      * Set the world seed

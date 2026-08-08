@@ -4,6 +4,7 @@
 #include "world/ChunkPos.h"
 #include <vector>
 #include <unordered_map>
+#include <list>
 #include <functional>
 #include <string>
 #include <sstream>
@@ -29,6 +30,64 @@ namespace level {
  */
 class ChunkTaskPriorityQueue {
 public:
+    class OrderedChunkTaskMap {
+    private:
+        using TaskList = std::vector<std::function<void()>>;
+        using Entry = std::pair<int64_t, TaskList>;
+        using OrderList = std::list<Entry>;
+        using Iterator = typename OrderList::iterator;
+
+        OrderList m_order;
+        std::unordered_map<int64_t, Iterator> m_index;
+
+    public:
+        bool empty() const {
+            return m_order.empty();
+        }
+
+        TaskList* get(int64_t key) {
+            auto it = m_index.find(key);
+            return it == m_index.end() ? nullptr : &it->second->second;
+        }
+
+        TaskList& getOrCreate(int64_t key) {
+            auto it = m_index.find(key);
+            if (it != m_index.end()) {
+                return it->second->second;
+            }
+
+            m_order.emplace_back(key, TaskList{});
+            auto inserted = std::prev(m_order.end());
+            m_index.emplace(key, inserted);
+            return inserted->second;
+        }
+
+        TaskList remove(int64_t key) {
+            auto it = m_index.find(key);
+            if (it == m_index.end()) {
+                return {};
+            }
+
+            TaskList tasks = std::move(it->second->second);
+            m_order.erase(it->second);
+            m_index.erase(it);
+            return tasks;
+        }
+
+        std::optional<std::pair<int64_t, TaskList>> removeFirst() {
+            if (m_order.empty()) {
+                return std::nullopt;
+            }
+
+            auto it = m_order.begin();
+            int64_t key = it->first;
+            TaskList tasks = std::move(it->second);
+            m_index.erase(key);
+            m_order.erase(it);
+            return std::make_optional(std::make_pair(key, std::move(tasks)));
+        }
+    };
+
     /**
      * TasksForChunk - A chunk and its pending tasks
      * Reference: ChunkTaskPriorityQueue.java lines 93-94
@@ -79,7 +138,7 @@ public:
     void submit(std::function<void()> task, int64_t chunkPos, int level) {
         {
             std::lock_guard<std::mutex> lock(m_priorityMutexes[level]);
-            m_queuesPerPriority[level][chunkPos].push_back(std::move(task));
+            m_queuesPerPriority[level].getOrCreate(chunkPos).push_back(std::move(task));
         }
         // Update top priority atomically (lock-free)
         int currentTop = m_topPriorityQueueIndex.load(std::memory_order_relaxed);
@@ -126,18 +185,18 @@ public:
             auto& queue = m_queuesPerPriority[index];
 
             if (!queue.empty()) {
-                // Get the first entry (simulating LinkedHashMap behavior)
-                auto it = queue.begin();
-                int64_t chunkPos = it->first;
-                auto tasks = std::move(it->second);
-                queue.erase(it);
+                auto first = queue.removeFirst();
+                if (!first.has_value()) {
+                    ++index;
+                    continue;
+                }
 
                 // Update top priority if this queue is now empty
                 if (queue.empty()) {
                     updateTopPriorityQueueIndexFrom(index);
                 }
 
-                return TasksForChunk(chunkPos, std::move(tasks));
+                return TasksForChunk(first->first, std::move(first->second));
             }
 
             ++index;
@@ -172,13 +231,7 @@ protected:
 
         if (oldPriority < priorityLevelCount) {
             auto& oldQueue = m_queuesPerPriority[oldPriority];
-            auto it = oldQueue.find(pos);
-
-            std::vector<std::function<void()>> oldTasks;
-            if (it != oldQueue.end()) {
-                oldTasks = std::move(it->second);
-                oldQueue.erase(it);
-            }
+            std::vector<std::function<void()>> oldTasks = oldQueue.remove(pos);
 
             // Update top priority if needed
             if (oldPriority == m_topPriorityQueueIndex.load(std::memory_order_relaxed)) {
@@ -187,8 +240,7 @@ protected:
 
             // Move tasks to new priority
             if (!oldTasks.empty()) {
-                auto& newQueue = m_queuesPerPriority[newPriority];
-                auto& taskList = newQueue[pos];
+                auto& taskList = m_queuesPerPriority[newPriority].getOrCreate(pos);
                 taskList.insert(taskList.end(),
                     std::make_move_iterator(oldTasks.begin()),
                     std::make_move_iterator(oldTasks.end()));
@@ -203,13 +255,13 @@ protected:
 
     void releaseInternal(int64_t pos, bool unschedule) {
         for (auto& queue : m_queuesPerPriority) {
-            auto it = queue.find(pos);
-            if (it != queue.end()) {
+            auto* tasks = queue.get(pos);
+            if (tasks != nullptr) {
                 if (unschedule) {
-                    it->second.clear();
+                    tasks->clear();
                 }
-                if (it->second.empty()) {
-                    queue.erase(it);
+                if (tasks->empty()) {
+                    queue.remove(pos);
                 }
             }
         }
@@ -232,7 +284,7 @@ protected:
 private:
     std::string m_name;
     std::atomic<int> m_topPriorityQueueIndex;
-    std::vector<std::unordered_map<int64_t, std::vector<std::function<void()>>>> m_queuesPerPriority;
+    std::vector<OrderedChunkTaskMap> m_queuesPerPriority;
     std::vector<std::mutex> m_priorityMutexes;  // Per-priority mutexes for submit/pop
     std::mutex m_globalMutex;  // For operations that touch multiple priorities
 };
