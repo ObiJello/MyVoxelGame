@@ -22,6 +22,8 @@
 
 namespace Game {
 
+    struct ContainerClickResult;   // AbstractContainerMenu.hpp — see OnTake
+
     class Slot {
     public:
         Slot(IContainer* container, int containerSlot, int x, int y)
@@ -33,6 +35,14 @@ namespace Game {
         int index = 0;          // menu index — assigned by AbstractContainerMenu::AddSlot
         int x = 0;              // GUI position, panel-image-relative
         int y = 0;
+
+        // MC Slot.getNoItemIcon — the placeholder sprite drawn when this slot
+        // is empty (the armour silhouettes, the shield outline). Null for
+        // ordinary slots. It lives on the SLOT rather than being derived from
+        // the index by the screen, because the same index means different
+        // things in different menus: menu slot 5 is a leggings slot in the
+        // player's menu and the middle of the grid in a crafting table's.
+        const char* noItemIcon = nullptr;
 
         // ── Contents ──────────────────────────────────────────────────────
         const ItemStack& GetItem() const { return container->GetItem(containerSlot); }
@@ -56,10 +66,10 @@ namespace Game {
         // MC Slot.mayPickup — may the contents be taken out?
         virtual bool MayPickup() const { return true; }
 
-        // MC Slot.isActive — is this slot drawn and clickable? The 2x2 crafting
-        // grid and its result exist in the 46-slot layout for MC save
-        // compatibility but are not rendered by our inventory screen, so they
-        // report false and the screen's layout/hit-test skip them.
+        // MC Slot.isActive — is this slot drawn and clickable at all? A screen
+        // skips inactive slots in both its layout and its hit-test. Every slot
+        // in InventoryMenu is active; the creative screen hides the crafting
+        // ones by overriding their position instead, exactly as MC does.
         virtual bool IsActive() const { return true; }
 
         // MC Slot.getMaxStackSize() / getMaxStackSize(ItemStack).
@@ -79,6 +89,16 @@ namespace Game {
         // maxAmount) items and return them, honouring mayPickup. The returned
         // stack keeps this slot's components.
         ItemStack SafeTake(int amount, int maxAmount);
+
+        // MC Slot.onTake — the player has just removed `taken` from this slot.
+        // A crafting result slot uses it to consume one set of ingredients from
+        // its grid; every slot it touches must be recorded on `result` so the
+        // change reaches the client. Called from the four click paths that can
+        // empty a slot (PICKUP, QUICK_MOVE, SWAP, THROW), matching MC.
+        virtual void OnTake(const ItemStack& taken, ContainerClickResult& result) {
+            (void)taken;
+            (void)result;
+        }
     };
 
     // MC ArmorSlot — accepts exactly the piece whose EQUIPPABLE component maps
@@ -90,16 +110,8 @@ namespace Game {
         int  GetMaxStackSize() const override { return 1; }
     };
 
-    // Refuses every insert. Stands in for the 2x2 crafting grid and its result
-    // slot, which exist in the 46-slot layout for MC save compatibility but
-    // have no crafting system behind them yet. Contents can still be taken out
-    // (MC's result slot behaves the same way), so anything already sitting
-    // there from a loaded world can be retrieved.
-    class NoPlaceSlot : public Slot {
-    public:
-        using Slot::Slot;
-        bool MayPlace(const ItemStack& /*stack*/) const override { return false; }
-        bool IsActive() const override { return false; }
-    };
+    // The crafting output square lives in AbstractCraftingMenu.hpp as
+    // CraftingResultSlot — it needs the menu to consume the grid on take, which
+    // this header cannot see.
 
 } // namespace Game

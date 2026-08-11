@@ -1,5 +1,6 @@
 // File: src/client/renderer/gui/screens/OptionsScreens.cpp
 #include "OptionsScreens.hpp"
+#include <GLFW/glfw3.h>
 #include "PanoramaRenderer.hpp"
 #include "WorldSelectScreens.hpp"
 #include "../GuiGraphics.hpp"
@@ -120,11 +121,31 @@ namespace Render {
     // ═══════════════════════════ OptionsSubScreen ═══════════════════════════
 
     void OptionsSubScreen::Init() {
+        m_footerExtraLabel.clear();
+        m_footerExtraAction = nullptr;
+
         m_list = AddWidget(new OptionsList(0, HEADER_H, m_width,
                                            m_height - HEADER_H - FOOTER_H));
         AddOptions();
-        AddWidget(new Button(m_width / 2 - 100, m_height - FOOTER_H / 2 - 10,
-                             200, 20, "Done", [this] { OnClose(); }));
+
+        const int footerY = m_height - FOOTER_H / 2 - 10;
+        if (m_footerExtraLabel.empty()) {
+            AddWidget(new Button(m_width / 2 - 100, footerY, 200, 20, "Done",
+                                 [this] { OnClose(); }));
+        } else {
+            // Two 150-wide buttons with MC's 4px gap, centred as a pair. The
+            // extra button must be positioned HERE rather than by the subclass:
+            // AddOptions runs before Done exists, so a subclass placing its own
+            // button could only guess where Done would land — and did, landing
+            // on top of it.
+            const int w = 150, gap = 4;
+            const int left = m_width / 2 - (w * 2 + gap) / 2;
+            auto action = m_footerExtraAction;
+            AddWidget(new Button(left, footerY, w, 20, m_footerExtraLabel,
+                                 [action] { if (action) action(); }));
+            AddWidget(new Button(left + w + gap, footerY, w, 20, "Done",
+                                 [this] { OnClose(); }));
+        }
     }
 
     void OptionsSubScreen::Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {
@@ -546,39 +567,98 @@ namespace Render {
     // ═══════════════════════════ KeyBindsScreen ═════════════════════════════
 
     void KeyBindsScreen::AddOptions() {
-        // The engine's bindings are currently fixed (Input.cpp reads physical
-        // keys directly). This screen documents them; making them rebindable
-        // needs an input-mapping layer between GLFW and the game actions.
-        m_list->AddHeader("Key bindings are not rebindable yet.");
+        m_rows.clear();
 
-        struct Bind { const char* action; const char* key; };
-        const Bind binds[] = {
-            {"Walk Forward",        "W"},
-            {"Walk Backward",       "S"},
-            {"Strafe Left",         "A"},
-            {"Strafe Right",        "D"},
-            {"Jump",                "Space"},
-            {"Sneak",               "Left Shift"},
-            {"Sprint",              "Left Ctrl"},
-            {"Attack/Destroy",      "Left Button"},
-            {"Use Item/Place Block","Right Button"},
-            {"Pick Block",          "P"},
-            {"Drop Selected Item",  "Q"},
-            {"Open/Close Inventory","E"},
-            {"Open Chat",           "T"},
-            {"Open Command",        "/"},
-            {"Hotbar Slots",        "1 - 9"},
-            {"Toggle Cursor",       "Tab"},
-            {"Toggle Debug Overlay","F3"},
-            {"Toggle Log Console",  "`"},
-            {"Toggle Noclip",       "N"},
-        };
-        for (const auto& b : binds) {
-            auto* label = new StringWidget(0, 0, 150, 20, b.action);
-            auto* key   = new Button(0, 0, 150, 20, b.key, nullptr);
-            key->active = false;
-            m_list->AddSmall(label, key);
+        // Grouped by category in registration order, which is the order MC
+        // lists them in (Movement, Gameplay, Inventory, Multiplayer, Misc).
+        std::string currentCategory;
+        for (Input::KeyMapping* m : Input::AllKeyMappings()) {
+            if (m->category != currentCategory) {
+                currentCategory = m->category;
+                m_list->AddHeader(currentCategory);
+            }
+
+            auto* label = new StringWidget(0, 0, 150, 20, m->label);
+            auto* bind  = new Button(0, 0, 150, 20, "", nullptr);
+            // Arm this row for capture. The button's own OnPress fires on
+            // mouse-up inside it, which is exactly when we want to start
+            // listening — the press that armed it must not also be captured.
+            bind->SetOnPress([this, m, bind] {
+                m_selected = m;
+                RefreshLabels();
+            });
+            m_list->AddSmall(label, bind);
+            m_rows.emplace_back(m, bind);
         }
+
+        // Second footer button beside Done (MC KeyBindsScreen). Init lays the
+        // pair out; see OptionsSubScreen::Init.
+        m_footerExtraLabel  = "Reset Keys";
+        m_footerExtraAction = [this] {
+            Input::ResetAllKeyBindings();
+            m_selected = nullptr;
+            RefreshLabels();
+        };
+
+        RefreshLabels();
+    }
+
+    void KeyBindsScreen::RefreshLabels() {
+        // MC's section sign, as UTF-8. Kept as its own constant because the
+        // format code that follows is a hex digit, and writing it inline as
+        // "\xC2\xA7f" makes the compiler read \xA7f as one (out-of-range) escape.
+        static const std::string SS = "\xC2\xA7";
+        for (auto& [mapping, button] : m_rows) {
+            const std::string name = mapping->key.DisplayName();
+            if (mapping == m_selected) {
+                // MC renders the armed row as "> key <" in yellow.
+                button->SetMessage(SS + "f> " + SS + "e" + name + " " + SS + "f<");
+            } else if (Input::HasBindingConflict(*mapping)) {
+                // MC paints a conflicting binding red.
+                button->SetMessage(SS + "c" + name);
+            } else {
+                button->SetMessage(name);
+            }
+        }
+    }
+
+    bool KeyBindsScreen::KeyPressed(int glfwKey, int glfwMods) {
+        if (!m_selected) return OptionsSubScreen::KeyPressed(glfwKey, glfwMods);
+
+        // ESC clears the binding rather than assigning ESC — vanilla behaviour,
+        // and ESC is not rebindable in MC either.
+        Input::SetKeyBinding(*m_selected,
+                             glfwKey == GLFW_KEY_ESCAPE
+                                 ? Input::BoundKey::Unbound()
+                                 : Input::BoundKey::Keyboard(glfwKey));
+        m_selected = nullptr;
+        RefreshLabels();
+        return true;   // swallow, so ESC doesn't also close the screen
+    }
+
+    bool KeyBindsScreen::MouseClicked(double mx, double my, int button) {
+        if (m_selected) {
+            Input::SetKeyBinding(*m_selected, Input::BoundKey::Mouse(button));
+            m_selected = nullptr;
+            RefreshLabels();
+            return true;   // swallow, or this click would also hit a widget
+        }
+        return OptionsSubScreen::MouseClicked(mx, my, button);
+    }
+
+    void KeyBindsScreen::Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {
+        OptionsSubScreen::Render(g, mouseX, mouseY, partialTick);
+        if (m_selected) {
+            g.DrawCenteredString("Press a key or mouse button, or Esc to clear",
+                                 m_width / 2, HEADER_H - FontRenderer::LINE_HEIGHT - 1,
+                                 0xFFFFFF55);
+        }
+    }
+
+    void KeyBindsScreen::OnClose() {
+        // Persist before the base class writes options.txt.
+        Input::SaveKeyBindings();
+        OptionsSubScreen::OnClose();
     }
 
     // ═══════════════════════════ ChatOptionsScreen ══════════════════════════

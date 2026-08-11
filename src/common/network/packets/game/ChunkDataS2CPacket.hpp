@@ -32,6 +32,16 @@ namespace Network {
             std::vector<uint32_t> palette;      // Block state IDs in palette (optional)
             std::vector<uint64_t> dataArray;    // Packed block indices/IDs
 
+            // Per-voxel block-state indices, 4096 bytes in the same order as
+            // the block data, or EMPTY when every voxel is at its block's
+            // default state. Sent as its own plane rather than widened into the
+            // block encoding on purpose: chunk data is the single largest thing
+            // on the wire, and widening every entry from 16 to 24/32 bits would
+            // cost every chunk 50-100% more for a property that essentially no
+            // terrain block has. A section with states pays a flat 4 KB; one
+            // without pays a single byte.
+            std::vector<uint8_t> states;
+
             bool IsEmpty() const { return blockCount == 0; }
         };
 
@@ -40,6 +50,17 @@ namespace Network {
 
         // Optional biome data (256 bytes for ground-up continuous)
         std::vector<uint8_t> biomeData;
+
+        // Noise biomes: one id per 4x4x4 cell, Chunk::BIOME_COUNT of them, in
+        // the same (qy, qz, qx) order Chunk stores them. Empty means "sender
+        // had none", which the client reads as the fallback biome — so an old
+        // peer just renders plains-coloured grass rather than desyncing.
+        //
+        // 1536 entries = 3 KB per chunk. Sent raw rather than palette-encoded
+        // because a chunk usually spans only one or two biomes and the run
+        // structure is already broken up by the vertical axis; the wire cost is
+        // dwarfed by the 32 KB of block data alongside it.
+        std::vector<uint16_t> biomes;
 
         // Timestamp for tracking
         std::chrono::steady_clock::time_point timestamp;
@@ -57,6 +78,7 @@ namespace Network {
                 size += section.dataArray.size() * sizeof(uint64_t);
             }
             size += biomeData.size();
+            size += biomes.size() * sizeof(uint16_t);
             return size;
         }
     };
@@ -79,6 +101,8 @@ namespace Network {
                 }
                 dataSize += VarInt::GetSize(static_cast<uint32_t>(section.dataArray.size()));
                 dataSize += section.dataArray.size() * sizeof(uint64_t);
+                dataSize += sizeof(uint8_t);            // states-present flag
+                dataSize += section.states.size();
             }
             if (packet.groundUpContinuous) {
                 dataSize += packet.biomeData.size();
@@ -107,6 +131,21 @@ namespace Network {
                 for (uint64_t data : section.dataArray) {
                     buffer.WriteLong(data);
                 }
+                // Block-state plane: one flag byte, then 4096 raw bytes only if
+                // this section actually carries states.
+                if (section.states.empty()) {
+                    buffer.WriteByte(0);
+                } else {
+                    buffer.WriteByte(1);
+                    buffer.WriteBytes(section.states);
+                }
+            }
+
+            // Noise biomes. Length-prefixed and written AFTER the legacy
+            // biomeData block so a reader that stops early still parses.
+            buffer.WriteVarInt(static_cast<uint32_t>(packet.biomes.size()));
+            for (uint16_t biome : packet.biomes) {
+                buffer.WriteShort(biome);
             }
 
             // Biome data (if ground-up continuous)
@@ -154,7 +193,23 @@ namespace Network {
                 for (uint32_t j = 0; j < dataArraySize; ++j) {
                     section.dataArray.push_back(reader.ReadLong());
                 }
+                if (reader.Remaining() >= 1 && reader.ReadByte() != 0) {
+                    section.states = reader.ReadBytes(4096);
+                }
                 packet.sections.push_back(std::move(section));
+            }
+
+            // Noise biomes (see the field comment). Absent on a pre-biome
+            // sender, in which case the count read fails the Remaining() guard
+            // and the chunk simply carries none.
+            if (reader.Remaining() >= 1) {
+                const uint32_t biomeCount = reader.ReadVarInt();
+                if (biomeCount > 0 && reader.Remaining() >= biomeCount * 2) {
+                    packet.biomes.reserve(biomeCount);
+                    for (uint32_t i = 0; i < biomeCount; ++i) {
+                        packet.biomes.push_back(static_cast<uint16_t>(reader.ReadShort()));
+                    }
+                }
             }
 
             // Read biome data if ground-up continuous

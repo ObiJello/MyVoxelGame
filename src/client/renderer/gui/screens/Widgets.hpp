@@ -127,6 +127,9 @@ namespace Render {
               m_onPress(std::move(onPress)) {}
 
         void OnClick(double, double) override { if (m_onPress) m_onPress(); }
+        // Lets a screen attach the handler after construction, when the
+        // callback needs to capture the button itself.
+        void SetOnPress(OnPress onPress) { m_onPress = std::move(onPress); }
         bool KeyPressed(int glfwKey, int glfwMods) override;
 
     protected:

@@ -1,5 +1,6 @@
 // File: src/client/network/ClientConnection.cpp
 #include "ClientConnection.hpp"
+#include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "NetworkClient.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -16,7 +17,7 @@
 #include <functional>
 
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
-static std::function<void(const std::string&)> s_chatCallback;
+static std::function<void(const Network::ChatMessageS2CPacket&)> s_chatCallback;
 static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
 // (gameTime, dayTime, doDaylightCycle) — fires on the network I/O thread.
 static std::function<void(uint64_t, uint64_t, bool)> s_timeUpdateCallback;
@@ -33,7 +34,7 @@ void SetTimeUpdateCallback(std::function<void(uint64_t, uint64_t, bool)> callbac
     s_timeUpdateCallback = std::move(callback);
 }
 
-void SetChatMessageCallback(std::function<void(const std::string&)> callback) {
+void SetChatMessageCallback(std::function<void(const Network::ChatMessageS2CPacket&)> callback) {
     s_chatCallback = std::move(callback);
 }
 
@@ -318,13 +319,15 @@ namespace Client {
     }
 
     void ClientConnection::HandleChatMessage(const std::vector<uint8_t>& payload) {
-        Network::PacketReader reader(payload);
-        uint32_t senderId = static_cast<uint32_t>(reader.ReadInt());
-        std::string message = reader.ReadString();
-        uint8_t position = reader.ReadByte();
+        const auto packet = Network::Serialization::DeserializeChatMessageS2C(payload);
+
+        // Flattened text for logging and for the speech bubble, which has no
+        // room for styling anyway.
+        std::string message;
+        for (const auto& seg : packet.segments) message += seg.text;
 
         const char* positionStr = "";
-        switch (position) {
+        switch (packet.position) {
             case 0: positionStr = "[CHAT]"; break;
             case 1: positionStr = "[SYSTEM]"; break;
             case 2: positionStr = "[ACTION]"; break;
@@ -332,14 +335,14 @@ namespace Client {
 
         Log::Info("%s %s", positionStr, message.c_str());
 
-        // Add to chat HUD
+        // Add to chat HUD, keeping the styled runs intact so click/hover work.
         if (s_chatCallback) {
-            s_chatCallback(message);
+            s_chatCallback(packet);
         }
 
         // Set chat bubble on the remote player (not on self)
-        if (s_chatBubbleCallback && senderId != 0) {
-            s_chatBubbleCallback(senderId, message);
+        if (s_chatBubbleCallback && packet.senderId != 0) {
+            s_chatBubbleCallback(packet.senderId, message);
         }
     }
 
@@ -516,6 +519,11 @@ namespace Client {
             case PacketId::InventorySetCarriedS2C: {
                 auto data = Serialization::DeserializeInventorySetCarriedS2C(payload);
                 return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
+            }
+
+            case PacketId::OpenScreenS2C: {
+                auto data = Serialization::DeserializeOpenScreenS2C(payload);
+                return std::make_unique<OpenScreenS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::SetHealthS2C: {

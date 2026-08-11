@@ -93,6 +93,7 @@ namespace Debug {
     ServerMetricsSnapshot DebugSystem::s_serverSnap;
     NetworkMetricsSnapshot DebugSystem::s_netSnap;
     ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
+    WorldInfoSnapshot DebugSystem::s_worldInfoSnap;
 #ifdef NDEBUG
     bool DebugSystem::s_debugEnabled = false; // Release: hidden until Shift+Tab+D
 #else
@@ -138,13 +139,6 @@ namespace Debug {
     // INITIALIZATION
     // ========================================================================
 
-    // Wrapper key callback that filters Tab (game control) before ImGui sees it
-    static GLFWkeyfun s_prevKeyCallback = nullptr;
-    static void FilteredKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
-        if (key == GLFW_KEY_TAB) return;
-        if (s_prevKeyCallback) s_prevKeyCallback(window, key, scancode, action, mods);
-    }
-
     bool DebugSystem::Initialize(GLFWwindow* window) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
@@ -161,8 +155,13 @@ namespace Debug {
             ImGui_ImplOpenGL3_Init("#version 330 core");
         }
 
-        // Install wrapper callback that blocks Tab from reaching ImGui
-        s_prevKeyCallback = glfwSetKeyCallback(window, FilteredKeyCallback);
+        // No key-callback wrapper here on purpose. This used to install one that
+        // dropped Tab so the debug UI couldn't steal it, back when the game
+        // POLLED Tab. Input is event-driven now, so that filter only managed to
+        // eat Tab before the game's own binding ever saw it. Tab is an ordinary
+        // rebindable KeyMapping like every other key; ImGui's own callback
+        // (installed by ImGuiInit above, chaining down to Input's) handles it
+        // the same way it handles anything else.
 
         // Register log callback
         Log::RegisterCallback([](Log::Level level, const std::string& msg) {
@@ -288,6 +287,14 @@ namespace Debug {
         s_pipelineSnap = snap;
     }
 
+    void DebugSystem::SetWorldInfoSnapshot(const WorldInfoSnapshot& snap) {
+        s_worldInfoSnap = snap;
+    }
+
+    const PanelVisibility& DebugSystem::GetPanelVisibility() {
+        return s_visibility;
+    }
+
     // ========================================================================
     // HELPERS
     // ========================================================================
@@ -351,7 +358,7 @@ namespace Debug {
             s_visibility.f3Overlay = !s_visibility.f3Overlay;
         }
         // Handle tilde for log console
-        if (Input::IsKeyPressed(Input::Key::Tilde)) {
+        if (Input::ConsumeClick(*Input::Binds::LogConsole)) {
             s_visibility.logConsole = !s_visibility.logConsole;
         }
 
@@ -374,6 +381,7 @@ namespace Debug {
         if (s_visibility.logConsole)     DrawLogConsolePanel();
         if (s_visibility.controls)       DrawControlsPanel(cursorEnabled, camera);
         if (s_visibility.chunkPipeline)  DrawChunkPipelinePanel();
+        if (s_visibility.worldInfo)      DrawWorldInfoPanel();
     }
 
     // ========================================================================
@@ -408,6 +416,7 @@ namespace Debug {
         ImGui::Checkbox("Controls",        &s_visibility.controls);
 
         ImGui::Checkbox("Chunk Pipeline",  &s_visibility.chunkPipeline);
+        ImGui::Checkbox("World Info",      &s_visibility.worldInfo);
 
         ImGui::Separator();
         ImGui::TextColored(COL_GRAY, "F3: Overlay | ~: Log | Shift+~+D: Toggle UI");
@@ -1611,6 +1620,90 @@ namespace Debug {
     // ========================================================================
     // CHUNK PIPELINE PANEL
     // ========================================================================
+
+
+    // ========================================================================
+    // WORLD INFO PANEL
+    // ========================================================================
+
+    void DebugSystem::DrawWorldInfoPanel() {
+        ImGui::SetNextWindowSize(ImVec2(420, 560), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("World Info", &s_visibility.worldInfo)) {
+            ImGui::End();
+            return;
+        }
+
+        const WorldInfoSnapshot& w = s_worldInfoSnap;
+
+        // Small helper: draw a colour swatch next to its hex value. Biome tints
+        // are the one thing here that is far easier to judge by eye than by
+        // number.
+        auto swatch = [](const char* label, uint32_t rgb) {
+            const ImVec4 col(((rgb >> 16) & 0xFF) / 255.0f,
+                             ((rgb >> 8) & 0xFF) / 255.0f,
+                             (rgb & 0xFF) / 255.0f, 1.0f);
+            ImGui::ColorButton(label, col,
+                               ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoDragDrop,
+                               ImVec2(18, 18));
+            ImGui::SameLine();
+            ImGui::Text("%-12s #%06X", label, rgb);
+        };
+
+        if (ImGui::CollapsingHeader("Position", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("XYZ      %.3f / %.3f / %.3f", w.posX, w.posY, w.posZ);
+            ImGui::Text("Block    %d %d %d", w.blockX, w.blockY, w.blockZ);
+            ImGui::Text("Chunk    %d %d   (local %d %d, section %d)",
+                        w.chunkX, w.chunkZ, w.localX, w.localZ, w.sectionIndex);
+            ImGui::Text("Facing   %s  (yaw %.1f, pitch %.1f)",
+                        w.facingName.c_str(), w.yawDeg, w.pitchDeg);
+            ImGui::Text("Standing on  %s", w.standingOnName.c_str());
+        }
+
+        if (ImGui::CollapsingHeader("Biome", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Feet     %s", w.biomeStanding.c_str());
+            ImGui::Text("Eye      %s", w.biomeEye.c_str());
+            ImGui::Text("Looking  %s", w.biomeTarget.c_str());
+            ImGui::Separator();
+            ImGui::Text("Temperature %.2f    Downfall %.2f",
+                        w.biomeTemperature, w.biomeDownfall);
+            ImGui::Text("Grass modifier  %s", w.biomeGrassModifier);
+            ImGui::Spacing();
+            ImGui::TextDisabled("Blended tint at this position (post-modifier)");
+            swatch("Grass", w.tintGrass);
+            swatch("Foliage", w.tintFoliage);
+            swatch("Dry foliage", w.tintDryFoliage);
+            swatch("Water", w.tintWater);
+        }
+
+        if (ImGui::CollapsingHeader("Targeted block", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (!w.hasTarget) {
+                ImGui::TextDisabled("(nothing in range)");
+            } else {
+                ImGui::Text("%s", w.targetBlockName.c_str());
+                ImGui::Text("Pos      %d %d %d   (%.2fm away)",
+                            w.targetX, w.targetY, w.targetZ, w.targetDistance);
+                ImGui::Text("Id       %d    state %d", w.targetBlockId, w.targetStateIndex);
+                ImGui::Text("State    %s", w.targetStateProps.c_str());
+                ImGui::Text("Face     %s", w.targetFace.c_str());
+                ImGui::Text("Hardness %.2f    collision %s",
+                            w.targetHardness, w.targetHasCollision ? "yes" : "no");
+                ImGui::Text("Layer    %s", w.targetRenderLayer);
+                ImGui::Text("Shape    [%.3f %.3f %.3f] .. [%.3f %.3f %.3f]",
+                            w.targetShapeMin[0], w.targetShapeMin[1], w.targetShapeMin[2],
+                            w.targetShapeMax[0], w.targetShapeMax[1], w.targetShapeMax[2]);
+            }
+        }
+
+        if (ImGui::CollapsingHeader("World", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Seed     %d", w.seed);
+            ImGui::Text("Time     day %d, %d ticks", w.dayNumber, w.timeOfDayTicks);
+            ImGui::Text("Total    %llu ticks",
+                        static_cast<unsigned long long>(w.worldTimeTicks));
+            ImGui::Text("Chunk    %s", w.targetChunkLoaded ? "loaded" : "NOT loaded");
+        }
+
+        ImGui::End();
+    }
 
     void DebugSystem::DrawChunkPipelinePanel() {
         ImGui::SetNextWindowPos(ImVec2(20, 400), ImGuiCond_FirstUseEver);

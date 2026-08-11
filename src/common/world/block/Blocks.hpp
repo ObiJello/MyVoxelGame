@@ -144,4 +144,26 @@ namespace Game {
         Count // Always keep this as the last entry.
     };
 
+    // A block together with its state index — the engine's answer to MC's
+    // `BlockState`. `state` indexes the block's OWN state list
+    // (BlockRegistry::GetStateDefinition), so it is only meaningful next to the
+    // id it came from; 0 is always the block's default state.
+    //
+    // Used wherever the two must not get separated in transit (change
+    // accumulation, prediction rollback, mesher lookup). Plain fields, trivially
+    // copyable, cheap to pass by value.
+    struct BlockStateRef {
+        BlockID id    = BlockID::Air;
+        uint8_t state = 0;
+
+        constexpr BlockStateRef() = default;
+        constexpr BlockStateRef(BlockID blockId, uint8_t stateIndex = 0)
+            : id(blockId), state(stateIndex) {}
+
+        friend constexpr bool operator==(BlockStateRef a, BlockStateRef b) {
+            return a.id == b.id && a.state == b.state;
+        }
+        friend constexpr bool operator!=(BlockStateRef a, BlockStateRef b) { return !(a == b); }
+    };
+
 } // namespace Game

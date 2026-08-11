@@ -16,6 +16,7 @@
 #include "common/network/packets/LoginStartC2S.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/packets/C2SPackets.hpp"
+#include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "../IntegratedServer.hpp"
 
@@ -317,8 +318,8 @@ namespace Server {
         // Send time update
         SendCurrentTimeUpdate();
 
-        // Send player abilities (survival placeholder — real ones follow at join)
-        SendPlayerAbilitiesDefault();
+        // Send player abilities + the world's game mode
+        SendPlayerAbilitiesForJoin();
 
         // Send spawn position
         Network::PacketBuffer spawnBuffer;
@@ -356,11 +357,12 @@ namespace Server {
     }
 
     void ServerConnection::SendChatMessage(const std::string& message, uint8_t position, uint32_t senderId) {
-        Network::PacketBuffer buffer;
-        buffer.WriteInt(static_cast<int32_t>(senderId)); // Sender player ID (0 = system)
-        buffer.WriteString(message);
-        buffer.WriteByte(position); // 0=chat, 1=system, 2=actionbar
-        SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageS2C), buffer.GetData());
+        SendChatMessage(Network::ChatMessageS2CPacket(message, position, senderId));
+    }
+
+    void ServerConnection::SendChatMessage(const Network::ChatMessageS2CPacket& packet) {
+        auto data = Network::Serialization::Serialize(packet);
+        SendPacket(static_cast<uint8_t>(Network::PacketId::ChatMessageS2C), data);
     }
 
     void ServerConnection::SendKeepAlive(uint64_t id) {
@@ -403,29 +405,58 @@ namespace Server {
         SendTimeUpdate(gameTime, dayTime, doDaylightCycle);
     }
 
-    void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
+    namespace {
         // MC ClientboundPlayerAbilitiesPacket built from the live Abilities
-        // (+ our extra gameMode byte, replacing CHANGE_GAME_MODE).
-        Network::PlayerAbilitiesS2CPacket packet;
-        if (player.getGameMode() == GameMode::CREATIVE ||
-            player.getGameMode() == GameMode::SPECTATOR) {
-            packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
+        // (+ our extra gameMode byte, replacing CHANGE_GAME_MODE). The
+        // mode→flag rules mirror GameType.updatePlayerAbilities
+        // (GameType.java:62-80); keeping them in one place stops the
+        // login-time packet and the post-join packet from disagreeing about
+        // what "creative" means.
+        Network::PlayerAbilitiesS2CPacket BuildAbilitiesPacket(GameMode mode,
+                                                               bool flying, bool canFly) {
+            Network::PlayerAbilitiesS2CPacket packet;
+            if (mode == GameMode::CREATIVE || mode == GameMode::SPECTATOR) {
+                packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INVULNERABLE;
+            }
+            if (flying) packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_FLYING;
+            if (canFly) packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_MAY_FLY;
+            if (mode == GameMode::CREATIVE) {
+                packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INSTABUILD;
+            }
+            packet.gameMode = static_cast<uint8_t>(mode);
+            return packet;
         }
-        if (player.isFlying())  packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_FLYING;
-        if (player.canFly())    packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_MAY_FLY;
-        if (player.getGameMode() == GameMode::CREATIVE) {
-            packet.flags |= Network::PlayerAbilitiesS2CPacket::FLAG_INSTABUILD;
-        }
-        packet.gameMode = static_cast<uint8_t>(player.getGameMode());
-        auto data = Network::Serialization::Serialize(packet);
+    } // namespace
+
+    void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
+        auto data = Network::Serialization::Serialize(
+            BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly()));
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
-    void ServerConnection::SendPlayerAbilitiesDefault() {
-        // Login-time placeholder — the ServerPlayer doesn't exist yet at
-        // sendInitialGameData. Survival defaults; the real abilities follow
-        // from OnPlayerJoined once the world's game mode is applied.
-        auto data = Network::Serialization::Serialize(Network::PlayerAbilitiesS2CPacket{});
+    void ServerConnection::SendPlayerAbilitiesForJoin() {
+        // The ServerPlayer doesn't exist yet here, but the WORLD's game mode
+        // does — so send the real one rather than a survival placeholder.
+        //
+        // MC carries gameType in ClientboundLoginPacket's CommonPlayerSpawnInfo
+        // and applies it inside the same handler that builds the level
+        // (ClientPacketListener.handleLogin:508), so a vanilla client is never
+        // in a state where the world exists but the mode is unknown. This used
+        // to send survival unconditionally, which meant a creative player
+        // joining got hearts and hunger drawn for the whole gap between login
+        // and OnPlayerJoined's real abilities packet.
+        //
+        // Flags follow ServerPlayer::setGameMode, which mirrors the same MC
+        // GameType.updatePlayerAbilities rules: only spectator starts flying.
+        GameMode mode = GameMode::SURVIVAL;
+        if (g_integratedServer) {
+            mode = static_cast<GameMode>(g_integratedServer->GetConfig().defaultGameMode);
+        }
+        const bool canFly = (mode == GameMode::CREATIVE || mode == GameMode::SPECTATOR);
+        const bool flying = (mode == GameMode::SPECTATOR);
+
+        auto data = Network::Serialization::Serialize(
+            BuildAbilitiesPacket(mode, flying, canFly));
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
@@ -495,7 +526,7 @@ namespace Server {
         // Send initial game data
         Log::Debug("[ServerConnection %u] Sending initial game data", GetConnectionId());
         SendCurrentTimeUpdate();
-        SendPlayerAbilitiesDefault(); // Survival placeholder — real ones follow at join
+        SendPlayerAbilitiesForJoin(); // Real game mode — OnPlayerJoined reconfirms
         
         // Send spawn position
         Network::PacketBuffer spawnBuffer;

@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "../../input/Input.hpp"
+#include "../../input/KeyMapping.hpp"
 
 namespace Render {
 
@@ -135,25 +136,25 @@ namespace Render {
 
                 // Horizontal movement (WASD)
                 glm::vec3 horizontalMovement{ 0.0f };
-                if (Input::IsKeyDown(Input::Key::W)) {
+                if (Input::IsDown(*Input::Binds::Forward)) {
                     horizontalMovement += horizontalFront;
                 }
-                if (Input::IsKeyDown(Input::Key::S)) {
+                if (Input::IsDown(*Input::Binds::Back)) {
                     horizontalMovement -= horizontalFront;
                 }
-                if (Input::IsKeyDown(Input::Key::A)) {
+                if (Input::IsDown(*Input::Binds::Left)) {
                     horizontalMovement -= horizontalRight;
                 }
-                if (Input::IsKeyDown(Input::Key::D)) {
+                if (Input::IsDown(*Input::Binds::Right)) {
                     horizontalMovement += horizontalRight;
                 }
 
                 // Vertical movement (Space/Ctrl)
                 glm::vec3 verticalMovement{ 0.0f };
-                if (Input::IsKeyDown(Input::Key::Space)) {
+                if (Input::IsDown(*Input::Binds::Jump)) {
                     verticalMovement += glm::vec3{0.0f, 1.0f, 0.0f};
                 }
-                if (Input::IsKeyDown(Input::Key::LeftShift)) {
+                if (Input::IsDown(*Input::Binds::Sneak)) {
                     verticalMovement -= glm::vec3{0.0f, 1.0f, 0.0f};
                 }
 
@@ -183,24 +184,24 @@ namespace Render {
             glm::vec3 movement{ 0.0f };
 
             // Horizontal movement (WASD)
-            if (Input::IsKeyDown(Input::Key::W)) {
+            if (Input::IsDown(*Input::Binds::Forward)) {
                 movement += horizontalFront;
             }
-            if (Input::IsKeyDown(Input::Key::S)) {
+            if (Input::IsDown(*Input::Binds::Back)) {
                 movement -= horizontalFront;
             }
-            if (Input::IsKeyDown(Input::Key::A)) {
+            if (Input::IsDown(*Input::Binds::Left)) {
                 movement -= horizontalRight;
             }
-            if (Input::IsKeyDown(Input::Key::D)) {
+            if (Input::IsDown(*Input::Binds::Right)) {
                 movement += horizontalRight;
             }
 
             // Vertical movement for noclip mode
-            if (Input::IsKeyDown(Input::Key::Space)) {
+            if (Input::IsDown(*Input::Binds::Jump)) {
                 movement.y += 1.0f;  // Move up
             }
-            if (Input::IsKeyDown(Input::Key::LeftShift)) {
+            if (Input::IsDown(*Input::Binds::Sneak)) {
                 movement.y -= 1.0f;  // Move down
             }
 
@@ -214,17 +215,17 @@ namespace Render {
 
         // Check if jump key is pressed
         bool IsJumpPressed() const {
-            return Input::IsKeyDown(Input::Key::Space);
+            return Input::IsDown(*Input::Binds::Jump);
         }
 
         // Check if sprint key is pressed
         bool IsSprintPressed() const {
-            return Input::IsKeyDown(Input::Key::LeftControl);
+            return Input::IsDown(*Input::Binds::Sprint);
         }
 
         // Check if sneak key is pressed
         bool IsSneakPressed() const {
-            return Input::IsKeyDown(Input::Key::LeftShift);
+            return Input::IsDown(*Input::Binds::Sneak);
         }
     };
 

@@ -1,6 +1,8 @@
 // File: src/client/renderer/texture/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
 #include "TextureAnimator.hpp"
+#include "MipmapGenerator.hpp"
+#include "ConnectedTextures.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include <filesystem>
@@ -8,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <iterator>
 
 // Include stb_image for PNG loading
 #include "../../../ext/stb_image/stb_image.h"
@@ -70,6 +73,11 @@ namespace Render {
             Log::Error("Failed to load texture PNGs");
             return false;
         }
+
+        // Step 3b: Derive the connected-texture variants before packing, so
+        // they are ordinary sources from here on (packed, mipmapped, animated
+        // — all the same machinery).
+        GenerateConnectedTextureVariants(textureSources);
 
         // Step 4: Pack textures into atlas
         std::vector<PackRect> packedRects;
@@ -304,6 +312,10 @@ namespace Render {
             TextureAnimation animation;
             std::vector<std::vector<unsigned char>> animationFrames;
             
+            // The `texture` section is independent of `animation` — a still
+            // sprite can carry a mipmap strategy, and every leaf does.
+            ParseTextureMeta(mcmetaPath, source.mipmapStrategy, source.alphaCutoffBias);
+
             bool hasAnimation = ParseMcMetaFile(mcmetaPath, animation);
             bool isAnimatedTexture = false;
             
@@ -318,6 +330,8 @@ namespace Render {
                     pending.textureKey = source.key;
                     pending.animation = animation;
                     pending.frames = animationFrames;
+                    pending.mipmapStrategy = source.mipmapStrategy;
+                    pending.alphaCutoffBias = source.alphaCutoffBias;
                     pendingAnimations.push_back(pending);
                     
                     //Log::Debug("Found animated texture: %s", source.key.c_str());
@@ -557,6 +571,11 @@ namespace Render {
         }
 
         UpdateTextureParameters();
+        // MC's per-sprite mip chain, replacing the driver's whole-atlas box
+        // filter. Must run after the texture exists and after the filter is
+        // set, and it rewrites level 0 as well as adding the levels above.
+        BuildAndUploadMipChain(sources, packedRects);
+        m_packedRects = packedRects;   // kept for later rebuilds
         Log::Info("Created atlas texture (%dx%d, mipmaps: %s)",
                  atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
 
@@ -573,7 +592,9 @@ namespace Render {
 
                     textureAnimator->RegisterAnimatedTexture(
                         pending.textureKey, pending.animation, pending.frames,
-                        atlasX, atlasY
+                        atlasX, atlasY,
+                        pending.mipmapStrategy, pending.alphaCutoffBias,
+                        (mipmapEnabled ? m_mipmapLevel : 0)
                     );
                 }
             }
@@ -596,6 +617,7 @@ namespace Render {
         mipmapEnabled = enabled;
         if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
+            BuildAndUploadMipChain(textureSources, m_packedRects);
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
         }
     }
@@ -604,6 +626,9 @@ namespace Render {
         m_mipmapLevel = std::max(0, std::min(4, level));
         if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
+            // The chain is CPU-authored, so a new level count means rebuilding
+            // it — the driver is not going to fill the extra levels for us.
+            BuildAndUploadMipChain(textureSources, m_packedRects);
             Log::Info("Set mipmap level to %d", m_mipmapLevel);
         }
     }
@@ -614,7 +639,10 @@ namespace Render {
         if (mipmapEnabled) {
             Render::g_renderBackend->SetTextureFilter(m_atlasTexture,
                 Render::TextureFilter::NearestMipmapLinear, Render::TextureFilter::Nearest);
-            Render::g_renderBackend->GenerateMipmaps(m_atlasTexture);
+            // Deliberately NOT GenerateMipmaps: the driver box-filters raw RGBA
+            // across the whole atlas, which is exactly the behaviour
+            // BuildAndUploadMipChain replaces. Calling it here would overwrite
+            // the CPU-built chain with the wrong one.
         } else {
             Render::g_renderBackend->SetTextureFilter(m_atlasTexture,
                 Render::TextureFilter::Nearest, Render::TextureFilter::Nearest);
@@ -668,6 +696,9 @@ namespace Render {
         mipmapEnabled = useMinecraftStyle;
         m_borderExtrusionEnabled = useMinecraftStyle;
         UpdateTextureParameters();
+        // Fresh texture object, so its levels above 0 start undefined — the
+        // CPU chain has to be re-uploaded onto it.
+        BuildAndUploadMipChain(textureSources, m_packedRects);
 
         // Update TextureAnimator with the new atlas handle
         if (textureAnimator) {
@@ -676,6 +707,156 @@ namespace Render {
 
         Log::Info("Atlas rebuilt with %s rendering mode",
                   useMinecraftStyle ? "Minecraft-style" : "Classic");
+    }
+
+    void AtlasBuilder::BuildAndUploadMipChain(const std::vector<TextureSource>& sources,
+                                              const std::vector<PackRect>& packedRects) {
+        if (m_atlasTexture == Render::INVALID_TEXTURE || !Render::g_renderBackend) return;
+        if (!mipmapEnabled || m_mipmapLevel <= 0) return;
+        if (packedRects.empty() || sources.empty()) return;
+
+        // Level 0 is written back in here, so the CPU buffer has to exist. It
+        // is released after the initial build to save the RAM, which means a
+        // later rebuild (debug UI mipmap toggle) arrives with it empty.
+        const size_t expected = static_cast<size_t>(atlasWidth) *
+                                static_cast<size_t>(atlasHeight) * 4u;
+        if (atlasData.size() != expected) {
+            if (originalAtlasData.size() == expected) {
+                atlasData = originalAtlasData;
+            } else {
+                Log::Warning("Mip chain skipped: no CPU atlas copy to rebuild from");
+                return;
+            }
+        }
+
+        // Every sprite in this atlas is a multiple of 16 in both axes and the
+        // packer splits on exact rect boundaries from (0,0), so positions stay
+        // 16-aligned and `>> level` is exact for all 4 levels. A sprite that
+        // ever breaks that would land on a half-texel, so it is checked rather
+        // than assumed.
+        const int levels = m_mipmapLevel;
+        const int align = 1 << levels;
+
+        // One image buffer per level above 0. Level k is the atlas at half
+        // dimensions k times over.
+        std::vector<std::vector<unsigned char>> levelData(static_cast<size_t>(levels) + 1);
+        std::vector<int> levelW(static_cast<size_t>(levels) + 1);
+        std::vector<int> levelH(static_cast<size_t>(levels) + 1);
+        for (int k = 1; k <= levels; ++k) {
+            levelW[static_cast<size_t>(k)] = atlasWidth >> k;
+            levelH[static_cast<size_t>(k)] = atlasHeight >> k;
+            levelData[static_cast<size_t>(k)].assign(
+                static_cast<size_t>(levelW[static_cast<size_t>(k)]) *
+                static_cast<size_t>(levelH[static_cast<size_t>(k)]) * 4u, 0);
+        }
+
+        // Blit one sprite mip into a level buffer.
+        auto blit = [](std::vector<unsigned char>& dst, int dstW,
+                       const Mipmap::Image& src, int dstX, int dstY) {
+            for (int y = 0; y < src.height; ++y) {
+                const size_t srcRow = static_cast<size_t>(y) * src.width * 4u;
+                const size_t dstRow = (static_cast<size_t>(dstY + y) * dstW + dstX) * 4u;
+                std::memcpy(dst.data() + dstRow, src.pixels.data() + srcRow,
+                            static_cast<size_t>(src.width) * 4u);
+            }
+        };
+
+        // Clamp-to-edge extrusion into the padding ring, per level. With
+        // NEAREST_MIPMAP_LINEAR nothing interpolates inside a level, so this is
+        // belt-and-braces — but it keeps the padding meaningful if the filter
+        // is ever widened to linear or anisotropic.
+        auto extrude = [](std::vector<unsigned char>& buf, int bufW, int bufH,
+                          int x0, int y0, int w, int h, int pad) {
+            if (w <= 0 || h <= 0) return;
+            auto px = [&](int x, int y) -> unsigned char* {
+                return buf.data() + (static_cast<size_t>(y) * bufW + x) * 4u;
+            };
+            for (int p = 1; p <= pad; ++p) {
+                const int up = y0 - p, dn = y0 + h - 1 + p;
+                for (int x = x0; x < x0 + w; ++x) {
+                    if (up >= 0)   std::memcpy(px(x, up), px(x, y0), 4);
+                    if (dn < bufH) std::memcpy(px(x, dn), px(x, y0 + h - 1), 4);
+                }
+            }
+            for (int p = 1; p <= pad; ++p) {
+                const int lf = x0 - p, rt = x0 + w - 1 + p;
+                const int yStart = std::max(0, y0 - pad);
+                const int yEnd   = std::min(bufH, y0 + h + pad);
+                for (int y = yStart; y < yEnd; ++y) {
+                    if (lf >= 0)   std::memcpy(px(lf, y), px(x0, y), 4);
+                    if (rt < bufW) std::memcpy(px(rt, y), px(x0 + w - 1, y), 4);
+                }
+            }
+        };
+
+        size_t misaligned = 0;
+        for (const auto& rect : packedRects) {
+            if (rect.textureIndex < 0 ||
+                rect.textureIndex >= static_cast<int>(sources.size())) continue;
+            const auto& source = sources[static_cast<size_t>(rect.textureIndex)];
+            if (source.data.empty() || source.width <= 0 || source.height <= 0) continue;
+
+            if ((rect.x % align) || (rect.y % align) ||
+                (source.width % align) || (source.height % align)) {
+                ++misaligned;
+                continue;
+            }
+
+            Mipmap::Image lvl0;
+            lvl0.width  = source.width;
+            lvl0.height = source.height;
+            lvl0.pixels = source.data;
+
+            // MC keys the item exemption off the sprite path, not the atlas.
+            const bool isItem = source.key.rfind("item/", 0) == 0 ||
+                                source.key.find(":item/") != std::string::npos;
+
+            std::vector<Mipmap::Image> chain = Mipmap::GenerateMipLevels(
+                std::move(lvl0), levels,
+                Mipmap::ParseStrategy(source.mipmapStrategy),
+                source.alphaCutoffBias, isItem);
+
+            // Level 0 goes back into the atlas too: the cutout strategies
+            // rewrite the colour under alpha=0, and that rewrite is the whole
+            // point. Alpha is untouched, so what level 0 draws is unchanged.
+            if (!chain.empty()) {
+                blit(atlasData, atlasWidth, chain[0], rect.x, rect.y);
+                extrude(atlasData, atlasWidth, atlasHeight,
+                        rect.x, rect.y, chain[0].width, chain[0].height, MIPMAP_PADDING);
+            }
+            for (size_t k = 1; k < chain.size(); ++k) {
+                const int kk = static_cast<int>(k);
+                blit(levelData[k], levelW[k], chain[k], rect.x >> kk, rect.y >> kk);
+                extrude(levelData[k], levelW[k], levelH[k],
+                        rect.x >> kk, rect.y >> kk,
+                        chain[k].width, chain[k].height, MIPMAP_PADDING >> kk);
+            }
+        }
+
+        if (misaligned > 0) {
+            Log::Warning("Mipmap chain skipped for %zu sprite(s) not aligned to %d px - "
+                         "they will sample level 0 only", misaligned, align);
+        }
+
+        // Reserve first: Vulkan fixes an image's mip count at allocation and
+        // reallocates here, discarding contents. Every level is uploaded below,
+        // level 0 included, so nothing is lost.
+        Render::g_renderBackend->ReserveTextureMipLevels(m_atlasTexture, levels);
+
+        // Level 0 goes up again because the cutout strategies rewrote it.
+        Render::g_renderBackend->UploadTextureMipLevel(
+            m_atlasTexture, 0, atlasWidth, atlasHeight, atlasData.data());
+        for (int k = 1; k <= levels; ++k) {
+            Render::g_renderBackend->UploadTextureMipLevel(
+                m_atlasTexture, k, levelW[static_cast<size_t>(k)],
+                levelH[static_cast<size_t>(k)], levelData[static_cast<size_t>(k)].data());
+        }
+
+        // Keep the retained CPU copy in step with what the GPU now holds, so
+        // RebuildAtlas and the debug dump show the real level 0.
+        originalAtlasData = atlasData;
+
+        Log::Info("Built MC-style mip chain: %d levels, %zu sprites", levels, packedRects.size());
     }
 
     void AtlasBuilder::CopyTextureToAtlas(const TextureSource& source,
@@ -948,6 +1129,112 @@ namespace Render {
         if (textureAnimator && m_atlasTexture != Render::INVALID_TEXTURE) {
             textureAnimator->Initialize(m_atlasTexture);
         }
+    }
+
+    void AtlasBuilder::GenerateConnectedTextureVariants(std::vector<TextureSource>& sources) {
+        // Variants are accumulated separately and appended once at the end.
+        // Pushing into `sources` while iterating it would reallocate the
+        // vector out from under the `base` reference below and read freed
+        // memory on the next mask — which is exactly what it did.
+        const size_t originalCount = sources.size();
+        std::vector<TextureSource> variants;
+
+        for (size_t i = 0; i < originalCount; ++i) {
+            const TextureSource& base = sources[i];
+            if (base.data.empty() || base.width <= 0 || base.height <= 0) continue;
+
+            // Keys look like "block/glass"; match on the trailing name.
+            std::string_view name = base.key;
+            if (const size_t slash = name.rfind('/'); slash != std::string_view::npos) {
+                name.remove_prefix(slash + 1);
+            }
+            if (!CTM::IsConnected(name)) continue;
+
+            const int w = base.width, h = base.height;
+
+            for (int slot = 0; slot < CTM::VariantCount(); ++slot) {
+                const uint8_t mask = CTM::MaskForSlot(slot);
+
+                // Copies key/path/dimensions/pixels AND the mcmeta-derived
+                // mipmap settings, so a variant is mipmapped exactly like the
+                // sprite it came from.
+                TextureSource variant = base;
+                variant.key = CTM::VariantKey(base.key, slot);
+
+                // Erase the 1px frame along every edge that abuts an identical
+                // block. Alpha only — the RGB is left alone so the mipmap
+                // solidify pass still has real colour to flood outward.
+                auto clearPixel = [&](int x, int y) {
+                    variant.data[(static_cast<size_t>(y) * w + x) * 4u + 3u] = 0;
+                };
+
+                const bool l = (mask & CTM::LEFT)   != 0;
+                const bool r = (mask & CTM::RIGHT)  != 0;
+                const bool t = (mask & CTM::TOP)    != 0;
+                const bool b = (mask & CTM::BOTTOM) != 0;
+
+                // Edge INTERIORS only — the four corner pixels are shared
+                // between two edges and are decided separately below. Clearing
+                // a whole column would take the corners with it and punch a
+                // 2px notch out of the perpendicular border wherever two tiles
+                // meet, leaving the group's outline visibly dashed.
+                if (l) for (int y = 1; y < h - 1; ++y) clearPixel(0,     y);
+                if (r) for (int y = 1; y < h - 1; ++y) clearPixel(w - 1, y);
+                if (t) for (int x = 1; x < w - 1; ++x) clearPixel(x, 0);
+                if (b) for (int x = 1; x < w - 1; ++x) clearPixel(x, h - 1);
+
+                // A corner survives unless both edges meeting there are
+                // connected AND the diagonal cell is filled too. Drop the
+                // diagonal test and a concave corner — the inside of an L —
+                // loses the single pixel that closes the outline around the
+                // notch, which is the difference between 16 tiles and 47.
+                if (l && t && (mask & CTM::TL)) clearPixel(0,     0);
+                if (r && t && (mask & CTM::TR)) clearPixel(w - 1, 0);
+                if (l && b && (mask & CTM::BL)) clearPixel(0,     h - 1);
+                if (r && b && (mask & CTM::BR)) clearPixel(w - 1, h - 1);
+
+                variants.push_back(std::move(variant));
+            }
+        }
+
+        if (!variants.empty()) {
+            const size_t blocks = variants.size() / static_cast<size_t>(CTM::VariantCount());
+            Log::Info("Connected textures: derived %zu variant tiles for %zu block(s)",
+                      variants.size(), blocks);
+            sources.insert(sources.end(),
+                           std::make_move_iterator(variants.begin()),
+                           std::make_move_iterator(variants.end()));
+        }
+    }
+
+    bool AtlasBuilder::ParseTextureMeta(const std::string& mcmetaPath,
+                                        std::string& outStrategy, float& outBias) const {
+        if (!std::filesystem::exists(mcmetaPath)) return false;
+
+        std::ifstream file(mcmetaPath);
+        if (!file.is_open()) return false;
+
+        nlohmann::json mcmeta;
+        try {
+            file >> mcmeta;
+        } catch (const nlohmann::json::exception&) {
+            // ParseMcMetaFile logs the same failure a moment later; staying
+            // quiet here avoids a duplicate warning per bad file.
+            return false;
+        }
+
+        if (!mcmeta.contains("texture") || !mcmeta["texture"].is_object()) return false;
+        const auto& tex = mcmeta["texture"];
+
+        // Both fields are optional and independent — cactus_side.png.mcmeta
+        // sets only the bias, dandelion.png.mcmeta only the strategy.
+        if (tex.contains("mipmap_strategy") && tex["mipmap_strategy"].is_string()) {
+            outStrategy = tex["mipmap_strategy"].get<std::string>();
+        }
+        if (tex.contains("alpha_cutoff_bias") && tex["alpha_cutoff_bias"].is_number()) {
+            outBias = tex["alpha_cutoff_bias"].get<float>();
+        }
+        return true;
     }
 
     bool AtlasBuilder::ParseMcMetaFile(const std::string& mcmetaPath, TextureAnimation& animation) {

@@ -9,8 +9,8 @@
 //   ├── VideoSettingsScreen          (display + quality + preferences)
 //   ├── ControlsScreen
 //   │   ├── MouseSettingsScreen
-//   │   └── KeyBindsScreen           (lists current fixed binds; rebinding
-//   │                                 needs the input-mapping refactor)
+//   │   └── KeyBindsScreen           (rebindable; backed by Input::KeyMapping,
+//   │                                 persisted as key_<id> in options.txt)
 //   ├── LanguageSelectScreen
 //   ├── ChatOptionsScreen
 //   ├── AccessibilityOptionsScreen
@@ -25,6 +25,11 @@
 #pragma once
 
 #include "Screen.hpp"
+#include "Widgets.hpp"
+#include "client/input/KeyMapping.hpp"
+#include <functional>
+#include <utility>
+#include <vector>
 
 namespace Render {
 
@@ -52,6 +57,13 @@ namespace Render {
 
         // Subclasses populate m_list here (MC addOptions()).
         virtual void AddOptions() = 0;
+
+        // An optional second footer button placed beside Done, as MC's
+        // KeyBindsScreen does with "Reset Keys". Set from AddOptions; Init
+        // lays the pair out centred so they can't overlap. Leaving the label
+        // empty keeps the single centred Done button.
+        std::string m_footerExtraLabel;
+        std::function<void()> m_footerExtraAction;
 
         // ── Option-row factories (all 150×20, positioned by the list) ──────
         AbstractWidget* OnOff(const std::string& caption,
@@ -136,11 +148,30 @@ namespace Render {
         void AddOptions() override;
     };
 
+    // MC KeyBindsScreen. Rows are grouped by category; clicking a row's button
+    // arms it for capture and the next key or mouse press becomes its binding
+    // (ESC clears it, matching vanilla). Conflicting rows render red.
     class KeyBindsScreen : public OptionsSubScreen {
     public:
         KeyBindsScreen() : OptionsSubScreen("Key Binds") {}
+
+        // Capture hooks — only meaningful while a row is armed.
+        bool KeyPressed(int glfwKey, int glfwMods) override;
+        bool MouseClicked(double mx, double my, int button) override;
+        // ESC is the "clear this binding" gesture while capturing, so it must
+        // not also close the screen.
+        bool ShouldCloseOnEsc() const override { return m_selected == nullptr; }
+        void Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) override;
+        void OnClose() override;
+
     protected:
         void AddOptions() override;
+
+    private:
+        void RefreshLabels();
+
+        Input::KeyMapping* m_selected = nullptr;   // row armed for capture
+        std::vector<std::pair<Input::KeyMapping*, Button*>> m_rows;
     };
 
     class ChatOptionsScreen : public OptionsSubScreen {

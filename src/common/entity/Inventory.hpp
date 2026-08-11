@@ -142,7 +142,8 @@ namespace Game {
     // NOTE: the per-slot placement filter and stack-size cap used to live here
     // as free functions keyed on a raw index. They are now Slot::MayPlace and
     // Slot::GetMaxStackSize (common/inventory/Slot.hpp) — ArmorSlot enforces the
-    // EQUIPPABLE match and a limit of 1, NoPlaceSlot refuses the crafting grid.
-    // Ask the menu's Slot rather than re-deriving policy from an index.
+    // EQUIPPABLE match and a limit of 1, ResultSlot refuses inserts into the
+    // crafting output. Ask the menu's Slot rather than re-deriving policy from
+    // an index.
 
 } // namespace Game

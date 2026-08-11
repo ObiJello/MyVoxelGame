@@ -94,7 +94,12 @@ namespace Game {
 
         // Get/set blocks using world coordinates
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
+        uint8_t GetBlockState(int worldX, int worldY, int worldZ) const override;
+        uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         void SetBlock(int worldX, int worldY, int worldZ, BlockID block);
+        // stateIndex is the index into the block's own state list (MC
+        // BlockState.getId()); 0 = the block's default state.
+        void SetBlock(int worldX, int worldY, int worldZ, BlockID block, uint8_t stateIndex);
 
         // === INEIGHBORPROVIDER IMPLEMENTATION ===
 
@@ -137,8 +142,8 @@ namespace Game {
         void SetMaxLoadedChunks(size_t maxChunks);
         size_t GetMaxLoadedChunks() const;
 
-        void SetGenerationSeed(int32_t seed);
-        int32_t GetGenerationSeed() const;
+        void SetGenerationSeed(int64_t seed);
+        int64_t GetGenerationSeed() const;
 
         // === STATISTICS ===
 

@@ -1,5 +1,6 @@
 // File: src/client/renderer/texture/TextureAnimator.cpp
 #include "TextureAnimator.hpp"
+#include "MipmapGenerator.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -22,13 +23,19 @@ namespace Render {
     void TextureAnimator::RegisterAnimatedTexture(const std::string& textureKey,
                                                 const TextureAnimation& animation,
                                                 const std::vector<std::vector<unsigned char>>& frames,
-                                                int atlasX, int atlasY) {
+                                                int atlasX, int atlasY,
+                                                const std::string& mipmapStrategy,
+                                                float alphaCutoffBias,
+                                                int mipLevels) {
         auto animTex = std::make_unique<AnimatedTexture>();
         animTex->textureKey = textureKey;
         animTex->animation = animation;
         animTex->frameData = frames;
         animTex->atlasX = atlasX;
         animTex->atlasY = atlasY;
+        animTex->mipmapStrategy = mipmapStrategy;
+        animTex->alphaCutoffBias = alphaCutoffBias;
+        animTex->mipLevels = mipLevels;
         animTex->currentFrame = 0;
         animTex->timer = 0.0f;
 
@@ -87,10 +94,37 @@ namespace Render {
         const auto& frameData = animTex.frameData[frameIndex];
         const TextureAnimation& anim = animTex.animation;
 
-        g_renderBackend->UpdateTexture2D(m_atlasTexture,
-            animTex.atlasX, animTex.atlasY,
-            anim.width, anim.height,
-            frameData.data());
+        if (animTex.mipLevels <= 0) {
+            g_renderBackend->UpdateTexture2D(m_atlasTexture,
+                animTex.atlasX, animTex.atlasY,
+                anim.width, anim.height,
+                frameData.data());
+            return;
+        }
+
+        // Regenerate this frame's mip chain, exactly as the atlas build does
+        // for still sprites — MC's SpriteContents.Ticker likewise uploads every
+        // level per frame rather than letting the chain drift. Cheap: the
+        // sprites are 16x16 and only the handful that ticked this frame land
+        // here.
+        Mipmap::Image lvl0;
+        lvl0.width  = anim.width;
+        lvl0.height = anim.height;
+        lvl0.pixels = frameData;
+
+        std::vector<Mipmap::Image> chain = Mipmap::GenerateMipLevels(
+            std::move(lvl0), animTex.mipLevels,
+            Mipmap::ParseStrategy(animTex.mipmapStrategy),
+            animTex.alphaCutoffBias, /*isItemTexture=*/false);
+
+        for (size_t k = 0; k < chain.size(); ++k) {
+            const int kk = static_cast<int>(k);
+            g_renderBackend->UpdateTexture2DLevel(
+                m_atlasTexture, kk,
+                animTex.atlasX >> kk, animTex.atlasY >> kk,
+                chain[k].width, chain[k].height,
+                chain[k].pixels.data());
+        }
     }
 
     bool TextureAnimator::IsAnimated(const std::string& textureKey) const {

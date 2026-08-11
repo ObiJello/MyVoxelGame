@@ -107,8 +107,8 @@ namespace Game {
         // === CONFIGURATION ===
         void SetConfig(const GenerationConfig& config) override;
         GenerationConfig GetConfig() const override;
-        void SetSeed(int32_t seed) override;
-        int32_t GetSeed() const override;
+        void SetSeed(int64_t seed) override;
+        int64_t GetSeed() const override;
         void SetWorldType(const std::string& worldType) override;
         std::string GetWorldType() const override;
 

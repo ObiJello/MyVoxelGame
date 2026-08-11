@@ -2,7 +2,10 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>
+#include <cmath>
 #include "Blocks.hpp"
+#include "Direction.hpp"
 #include "../level/ILevelWrite.hpp"
 #include "../../entity/IUsePlayer.hpp"
 
@@ -125,6 +128,42 @@ namespace Game {
         // Check if placing on a horizontal face (sides)
         bool isPlacingOnSide() const {
             return hitResult.face >= 2 && hitResult.face <= 5;
+        }
+
+        // ── Orientation (MC BlockPlaceContext / UseOnContext) ───────────────
+
+        // The face that was clicked, as a Direction. hitResult.face uses MC's
+        // own numbering (0=bottom, 1=top, 2=north, 3=south, 4=west, 5=east),
+        // which is exactly Direction's ordinal order.
+        // MC: UseOnContext.getClickedFace().
+        Direction getClickedFace() const {
+            return static_cast<Direction>(hitResult.face <= 5 ? hitResult.face : 2);
+        }
+
+        // The horizontal direction the player is facing.
+        // MC: UseOnContext.getHorizontalDirection() == player.getDirection().
+        Direction getHorizontalDirection() const {
+            return HorizontalFromEngineYaw(playerYaw);
+        }
+
+        // The nearest of the six directions to the player's look vector — the
+        // direction they are looking TOWARD, away from themselves.
+        // MC: BlockPlaceContext.getNearestLookingDirection()
+        //     == Direction.orderedByNearest(player)[0].
+        //
+        // MC sorts all three axes by |component| and takes the largest; with a
+        // pitch and a yaw that reduces to "is the pitch steep enough to beat the
+        // horizontal component". |sin(pitch)| > |cos(pitch)| happens at exactly
+        // 45°, which is where MC's ordering flips too.
+        Direction getNearestLookingDirection() const {
+            const float pitchRad = glm::radians(playerPitch);
+            const float vertical = std::fabs(std::sin(pitchRad));
+            const float horizontal = std::fabs(std::cos(pitchRad));
+            if (vertical > horizontal) {
+                // This engine's pitch is positive looking UP.
+                return playerPitch > 0.0f ? Direction::Up : Direction::Down;
+            }
+            return getHorizontalDirection();
         }
     };
     

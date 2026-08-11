@@ -43,6 +43,12 @@ namespace Render {
 
         // Chat history
         std::vector<std::string> m_history;
+    public:
+        // Drops the up-arrow recall history. Paired with ChatComponent::Clear()
+        // by /clearchat so the chat really is back to its just-launched state
+        // rather than just visually empty.
+        void ClearHistory() { m_history.clear(); m_historyIndex = -1; }
+    private:
         int m_historyIndex = -1;
 
         // ── Tab-completion suggestions popup — mirrors MC's

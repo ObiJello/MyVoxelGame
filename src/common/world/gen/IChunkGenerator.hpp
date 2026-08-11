@@ -16,7 +16,11 @@ namespace Game {
     // Configuration for chunk generation
     struct GenerationConfig {
         // World generation settings
-        int32_t seed = 12345;
+        // 64-bit to match MC. WorldOptions.parseSeed does Long.parseLong,
+        // so a real numeric Minecraft seed does not fit in 32 bits —
+        // truncating it silently generates a different world from the one
+        // that seed produces in vanilla.
+        int64_t seed = 12345;
         std::string worldType = "default";  // e.g., "default", "superflat", "amplified"
 
         // Terrain settings
@@ -127,7 +131,7 @@ namespace Game {
         virtual GenerationConfig GetConfig() const = 0;
 
         // Set world seed
-        virtual void SetSeed(int32_t seed) = 0;
+        virtual void SetSeed(int64_t seed) = 0;
 
         // World spawn selection — MC MinecraftServer.setInitialSpawn().
         // Returns the block position (feet) where new players should spawn.
@@ -135,7 +139,7 @@ namespace Game {
         // climate/height support. MyTerrainGenerator overrides with the real
         // MC algorithm (Climate.SpawnFinder + chunk spiral + surface height).
         virtual glm::ivec3 FindSpawnPosition() { return glm::ivec3(0, 67, 0); }
-        virtual int32_t GetSeed() const = 0;
+        virtual int64_t GetSeed() const = 0;
 
         // Set world type (affects generation algorithm)
         virtual void SetWorldType(const std::string& worldType) = 0;

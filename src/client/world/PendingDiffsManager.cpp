@@ -54,6 +54,7 @@ namespace Client {
         chunkDiffs.blockChanges[blockPos] = BlockChange{
             blockPos,
             packet.newBlockId,
+            packet.newBlockState,
             m_currentGeneration.load(),
             std::chrono::steady_clock::now(),
             packet.playSound,
@@ -108,6 +109,7 @@ namespace Client {
             chunkDiffs.blockChanges[blockPos] = BlockChange{
                 blockPos,
                 change.blockId,
+                change.blockState,
                 m_currentGeneration.load(),
                 std::chrono::steady_clock::now(),
                 false,  // Don't play sound for bulk changes

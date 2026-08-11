@@ -29,6 +29,12 @@ namespace Game {
         return BlockID::Air;
     }
 
+    uint8_t Raycast::GetBlockStateAt(int worldX, int worldY, int worldZ) {
+        return g_raycastBlockAccess
+                   ? g_raycastBlockAccess->GetBlockState(worldX, worldY, worldZ)
+                   : 0;
+    }
+
     std::optional<RaycastHit> Raycast::CastRay(
         const glm::vec3& origin,
         const glm::vec3& direction,
@@ -120,7 +126,16 @@ namespace Game {
                 // enters the full unit cell. Without this the player can target
                 // air just above the leaf and break it, and the outline draws
                 // around the entire surrounding cube.
-                const auto& shape = BlockRegistry::GetBlockShape(blockId);
+                // …and against the shape of the block's actual STATE. A
+                // rotated state occupies a different part of the cell (leaf
+                // litter's quarter-plane swings to whichever corner `facing`
+                // points at), so testing the default-state shape makes the
+                // target box sit in the wrong corner — you aim at the visible
+                // clump and hit nothing, then hit it from a corner where
+                // nothing is drawn.
+                const uint8_t stateIndex =
+                    GetBlockStateAt(currentBlock.x, currentBlock.y, currentBlock.z);
+                const auto& shape = BlockRegistry::GetBlockShape(blockId, stateIndex);
                 const glm::vec3 boxMin = glm::vec3(currentBlock) + shape.min;
                 const glm::vec3 boxMax = glm::vec3(currentBlock) + shape.max;
 
@@ -168,6 +183,7 @@ namespace Game {
                         hit.blockPos = currentBlock;
                         hit.adjacentPos = previousBlock;
                         hit.blockId = blockId;
+                        hit.stateIndex = stateIndex;
                         hit.distance = tHit;
                         hit.hitPoint = origin + dir * tHit;
                         hit.cursorPos = hit.hitPoint - glm::vec3(currentBlock);

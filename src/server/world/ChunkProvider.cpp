@@ -1,5 +1,6 @@
 // File: src/server/world/ChunkProvider.cpp
 #include "ChunkProvider.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "storage/MinecraftChunkLoaderImpl.hpp"
@@ -254,7 +255,47 @@ namespace Game {
         return chunk->GetBlock(localX, localY, localZ);
     }
 
+    uint8_t ChunkProvider::GetBlockState(int worldX, int worldY, int worldZ) const {
+        if (!ValidateWorldPosition(worldX, worldY, worldZ)) {
+            return 0;
+        }
+
+        Math::ChunkPos chunkPos;
+        int localX, localY, localZ;
+        WorldToLocalCoords(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
+
+        auto chunk = m_chunkCache ? m_chunkCache->Get(chunkPos) : nullptr;
+        if (!chunk) {
+            return 0;
+        }
+
+        return chunk->GetBlockState(localX, localY, localZ);
+    }
+
+    uint16_t ChunkProvider::GetBiome(int worldX, int worldY, int worldZ) const {
+        if (!ValidateWorldPosition(worldX, worldY, worldZ)) {
+            return kFallbackBiomeId;
+        }
+
+        Math::ChunkPos chunkPos;
+        int localX, localY, localZ;
+        WorldToLocalCoords(worldX, worldY, worldZ, chunkPos, localX, localY, localZ);
+
+        auto chunk = m_chunkCache ? m_chunkCache->Get(chunkPos) : nullptr;
+        if (!chunk) {
+            return kFallbackBiomeId;
+        }
+
+        // Chunk::GetBiome takes a WORLD y (it rebases against MIN_WORLD_Y
+        // itself), unlike the section-local y the block accessors above use.
+        return chunk->GetBiome(localX, worldY, localZ);
+    }
+
     void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block) {
+        SetBlock(worldX, worldY, worldZ, block, 0);
+    }
+
+    void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block, uint8_t stateIndex) {
         if (!ValidateWorldPosition(worldX, worldY, worldZ) || !IsValidBlockID(block)) {
             return;
         }
@@ -269,7 +310,7 @@ namespace Game {
             return;
         }
 
-        chunk->SetBlock(localX, localY, localZ, block);
+        chunk->SetBlock(localX, localY, localZ, block, stateIndex);
 
         // Mark chunk as dirty for saving
         if (m_chunkCache) {
@@ -483,7 +524,7 @@ namespace Game {
         return 2048; // Default
     }
 
-    void ChunkProvider::SetGenerationSeed(int32_t seed) {
+    void ChunkProvider::SetGenerationSeed(int64_t seed) {
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
             m_config.generationConfig.seed = seed;
@@ -494,7 +535,7 @@ namespace Game {
         }
     }
 
-    int32_t ChunkProvider::GetGenerationSeed() const {
+    int64_t ChunkProvider::GetGenerationSeed() const {
         if (m_chunkGenerator) {
             return m_chunkGenerator->GetSeed();
         }

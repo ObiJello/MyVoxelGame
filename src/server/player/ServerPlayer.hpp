@@ -7,6 +7,7 @@
 #include <chrono>
 #include <array>
 #include <vector>
+#include <optional>
 #include <cstdint>
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
@@ -120,16 +121,15 @@ namespace Server {
         // (authority) and on the client (prediction).
         // Routed through the CURRENT menu, not m_inventoryMenu: in MC the cursor
         // belongs to whichever menu is open and is handed over by
-        // transferState when one replaces another. Identical today (the two
-        // always point at the same object) — correct once chests exist.
+        // transferState when one replaces another — see openContainerMenu /
+        // closeContainerMenu, which carry it across the swap.
         Game::InventorySlot&       getCarried()       { return m_containerMenu->getCarried(); }
         const Game::InventorySlot& getCarried() const { return m_containerMenu->getCarried(); }
         void setCarried(const Game::InventorySlot& s) { m_containerMenu->setCarried(s); }
 
         // The menu clicks are dispatched against. Mirrors MC ServerPlayer's
         // inventoryMenu (always present) / containerMenu (the one on top —
-        // swapped when a chest or furnace is opened, restored on close). Only
-        // the inventory menu exists today, so containerMenu always points at it.
+        // swapped when a crafting table is opened, restored on close).
         //
         // `creative` is refreshed on every access rather than once at
         // construction so a game-mode change can never leave it stale.
@@ -138,6 +138,36 @@ namespace Server {
             return *m_containerMenu;
         }
         Game::InventoryMenu& inventoryMenu() { return m_inventoryMenu; }
+        // True while a BLOCK container (not the player's own menu) is open.
+        bool hasOpenContainerMenu() const { return m_openContainerMenu != nullptr; }
+        Game::MenuType openMenuType() const { return m_openMenuType; }
+
+        // Put `menu` on top (MC ServerPlayer.openMenu → containerMenu = ...).
+        // The cursor and the container id ride across, and the id is bumped so
+        // clicks still in flight for the previous menu are rejected.
+        void openContainerMenu(std::unique_ptr<Game::AbstractContainerMenu> menu,
+                               Game::MenuType type);
+        // Back to the player's own menu (MC doCloseContainer). Returns the
+        // outgoing menu's Removed() result so the caller can rebroadcast the
+        // slots it handed back; empty when nothing but the inventory was open.
+        Game::ContainerClickResult closeContainerMenu();
+
+        // ── IUsePlayer: pending menu request ──────────────────────────────
+        // A block asked to open its UI during use dispatch. Recorded rather
+        // than acted on, because opening needs the network connection that
+        // PlayerSession owns — it drains this the moment dispatch returns.
+        struct PendingMenuOpen {
+            Game::MenuType type;
+            glm::ivec3     pos;
+        };
+        void OpenMenu(Game::MenuType type, const glm::ivec3& pos) override {
+            m_pendingMenuOpen = PendingMenuOpen{type, pos};
+        }
+        std::optional<PendingMenuOpen> takePendingMenuOpen() {
+            auto pending = m_pendingMenuOpen;
+            m_pendingMenuOpen.reset();
+            return pending;
+        }
 
         // === HAND SLOTS ===
         // hand 0 = main hand (hotbar 36 + selected), hand 1 = offhand (slot 45).
@@ -325,10 +355,15 @@ namespace Server {
         // on it). Declared AFTER m_inventory so the menu's slots are built over
         // a fully-constructed inventory.
         Game::InventoryMenu m_inventoryMenu{&m_inventory};
-        // The menu on top. MC swaps this to a ChestMenu/FurnaceMenu on open and
-        // restores it on close; with no block containers yet it always aims at
-        // m_inventoryMenu.
+        // The block container currently open, if any (MC swaps containerMenu to
+        // a CraftingMenu/ChestMenu on open and restores it on close). Owned
+        // here because a table's grid exists only while its menu does.
+        std::unique_ptr<Game::AbstractContainerMenu> m_openContainerMenu;
+        Game::MenuType m_openMenuType = Game::MenuType::Inventory;
+        // The menu on top — m_openContainerMenu when one is open, otherwise the
+        // player's own.
         Game::AbstractContainerMenu* m_containerMenu = &m_inventoryMenu;
+        std::optional<PendingMenuOpen> m_pendingMenuOpen;
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;

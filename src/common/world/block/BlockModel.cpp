@@ -1,6 +1,7 @@
 // File: src/common/world/block/BlockModel.cpp
 #include "BlockModel.hpp"
 #include "../../core/Log.hpp"
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -162,8 +163,11 @@ namespace Game {
             //Log::Debug("  Parent: %s -> %s", parentRef.c_str(), parentName.c_str());
             result = ResolveModelRecursive(parentName, depth + 1);
 
-            // **OPTIMIZATION**: Early-out for no-op children that only redirect to parent
-            if (!j.contains("textures") && !j.contains("elements")) {
+            // **OPTIMIZATION**: Early-out for no-op children that only redirect to parent.
+            // `ambientocclusion` counts as content: a child may override nothing but
+            // that flag, and returning the parent verbatim would silently drop it.
+            if (!j.contains("textures") && !j.contains("elements")
+                && !j.contains("ambientocclusion")) {
                 Log::Debug("  No-op child model, returning parent directly");
                 s_models[name] = result;
                 return result;
@@ -234,6 +238,13 @@ namespace Game {
                 result.textures[key] = texPath;
                 //Log::Debug("  Texture: %s -> %s", key.c_str(), texPath.c_str());
             }
+        }
+
+        // MC's `ambientocclusion` is a nullable Boolean: present means override,
+        // absent means keep whatever the parent chain resolved to. `result` is
+        // already the resolved parent at this point, so inheritance is implicit.
+        if (j.contains("ambientocclusion") && j["ambientocclusion"].is_boolean()) {
+            result.ambientOcclusion = j["ambientocclusion"].get<bool>();
         }
 
         // Override elements if this JSON has any (completely replace parent elements)
@@ -423,7 +434,20 @@ namespace Game {
 
                 // Parse cullface (optional)
                 if (faceJson.contains("cullface")) {
-                    faceDef.cullface = faceJson["cullface"].get<std::string>();
+                    faceDef.SetCullface(faceJson["cullface"].get<std::string>());
+                }
+
+                // Per-face texture rotation (optional). MC only accepts
+                // 0/90/180/270 (Quadrant.CODEC rejects anything else), so
+                // normalise and drop garbage rather than emitting a skewed
+                // face. The mesher applies it as a UV-corner permutation.
+                if (faceJson.contains("rotation")) {
+                    const int raw = faceJson["rotation"].get<int>();
+                    if (raw % 90 == 0) {
+                        faceDef.uvRotation = ((raw % 360) + 360) % 360;
+                    } else {
+                        Log::Warning("Model face rotation %d is not a multiple of 90 - ignoring", raw);
+                    }
                 }
 
                 element.faces[dir] = faceDef;
@@ -474,7 +498,7 @@ namespace Game {
             face.uv = glm::vec4(0.0f, 0.0f, 16.0f, 16.0f); // Full face UV
             face.textureRef = "all"; // Clean reference (no '#' prefix)
             face.tintIndex = -1; // No tinting
-            face.cullface = FaceDirToString(dir); // Enable culling for all faces
+            face.SetCullface(FaceDirToString(dir)); // Enable culling for all faces
 
             defaultElement.faces[dir] = face;
         }
@@ -572,6 +596,269 @@ namespace Game {
         s_models.clear();
         s_rawJsons.clear();
         CreateDefaultModel();
+    }
+
+    void BlockModelRegistry::RegisterModel(const std::string& name, BlockModel model) {
+        s_models[name] = std::move(model);
+    }
+
+    // ========================================================================
+    // MODEL ROTATION  (MC BlockModelRotation + FaceBakery, applied at load)
+    // ========================================================================
+
+    namespace {
+
+        // Integer 3-vector rotations, quarter turns only. Deriving both the
+        // geometry and the UV bookkeeping from one shared transform is what
+        // keeps them consistent — hand-tabulating each case is where this kind
+        // of code normally goes wrong.
+        struct IVec3 { int x, y, z; };
+
+        constexpr bool operator==(IVec3 a, IVec3 b) { return a.x==b.x && a.y==b.y && a.z==b.z; }
+
+        // x:90 tips the model so UP→SOUTH, SOUTH→DOWN, DOWN→NORTH, NORTH→UP;
+        // X is fixed. This is the convention MC's blockstates rely on — e.g. a
+        // log's `axis=z` variant is the plain model with `"x": 90`, which must
+        // move the end-grain texture from UP/DOWN onto NORTH/SOUTH.
+        constexpr IVec3 RotX90(IVec3 v) { return { v.x, -v.z, v.y }; }
+
+        // y:90 turns NORTH→EAST→SOUTH→WEST; Y is fixed. A furnace's
+        // `facing=east` variant is the plain (north-facing) model with
+        // `"y": 90`, so this must carry the front face from north to east.
+        constexpr IVec3 RotY90(IVec3 v) { return { -v.z, v.y, v.x }; }
+
+        IVec3 ApplyRot(IVec3 v, int xTurns, int yTurns) {
+            for (int i = 0; i < xTurns; ++i) v = RotX90(v);
+            for (int i = 0; i < yTurns; ++i) v = RotY90(v);
+            return v;
+        }
+
+        IVec3 NormalOf(FaceDir d) {
+            switch (d) {
+                case FaceDir::Up:    return { 0,  1,  0};
+                case FaceDir::Down:  return { 0, -1,  0};
+                case FaceDir::North: return { 0,  0, -1};
+                case FaceDir::South: return { 0,  0,  1};
+                case FaceDir::West:  return {-1,  0,  0};
+                case FaceDir::East:  return { 1,  0,  0};
+            }
+            return {0, 1, 0};
+        }
+
+        FaceDir FaceFromNormal(IVec3 n) {
+            if (n == IVec3{ 0,  1,  0}) return FaceDir::Up;
+            if (n == IVec3{ 0, -1,  0}) return FaceDir::Down;
+            if (n == IVec3{ 0,  0, -1}) return FaceDir::North;
+            if (n == IVec3{ 0,  0,  1}) return FaceDir::South;
+            if (n == IVec3{-1,  0,  0}) return FaceDir::West;
+            return FaceDir::East;
+        }
+
+        // The world-space U and V axes each face's texture runs along, read
+        // straight off Mesher::CreateFaceVertices' corner assignment. If that
+        // winding ever changes, these must change with it or rotated models
+        // will come out with mirrored or 90°-off textures.
+        void FaceUvAxes(FaceDir d, IVec3& u, IVec3& v) {
+            switch (d) {
+                case FaceDir::Up:    u = { 1, 0, 0}; v = {0,  0,  1}; break;
+                case FaceDir::Down:  u = { 1, 0, 0}; v = {0,  0, -1}; break;
+                case FaceDir::South: u = { 1, 0, 0}; v = {0, -1,  0}; break;
+                case FaceDir::North: u = {-1, 0, 0}; v = {0, -1,  0}; break;
+                case FaceDir::East:  u = { 0, 0,-1}; v = {0, -1,  0}; break;
+                case FaceDir::West:  u = { 0, 0, 1}; v = {0, -1,  0}; break;
+            }
+        }
+
+        // One step of the mesher's uvRotation shift, expressed on the face's
+        // (U,V) axis pair. Derived from the corner permutation in
+        // CreateFaceVertices: shift=1 sends (U,V) to (V,-U).
+        void UvShiftOnce(IVec3& u, IVec3& v) {
+            const IVec3 oldU = u;
+            u = v;
+            v = { -oldU.x, -oldU.y, -oldU.z };
+        }
+
+        // How many uvRotation steps the destination face needs so its texture
+        // ends up oriented the way the source face's texture was carried by the
+        // rotation. Solved by search over the four possibilities rather than
+        // tabulated — there are only four, and the search cannot silently
+        // disagree with UvShiftOnce the way a hand-written table can.
+        int SolveUvShift(FaceDir dstFace, IVec3 rotatedU, IVec3 rotatedV) {
+            IVec3 u, v;
+            FaceUvAxes(dstFace, u, v);
+            for (int s = 0; s < 4; ++s) {
+                if (u == rotatedU && v == rotatedV) return s * 90;
+                UvShiftOnce(u, v);
+            }
+            return 0; // unreachable for proper quarter turns
+        }
+
+        // Rotate a point in MC model space (0..16) about the block centre.
+        glm::vec3 RotPoint(const glm::vec3& p, int xTurns, int yTurns) {
+            glm::vec3 c = p - glm::vec3(8.0f);
+            for (int i = 0; i < xTurns; ++i) c = glm::vec3( c.x, -c.z,  c.y);
+            for (int i = 0; i < yTurns; ++i) c = glm::vec3(-c.z,  c.y,  c.x);
+            return c + glm::vec3(8.0f);
+        }
+
+    } // namespace
+
+    BlockModel BlockModelRegistry::RotateModel(const BlockModel& src, int xQuarterTurns,
+                                               int yQuarterTurns) {
+        const int xt = ((xQuarterTurns % 4) + 4) % 4;
+        const int yt = ((yQuarterTurns % 4) + 4) % 4;
+        if (xt == 0 && yt == 0) return src;
+
+        BlockModel out = src;
+        out.elements.clear();
+        out.elements.reserve(src.elements.size());
+
+        for (const Element& e : src.elements) {
+            Element r = e;
+
+            // Geometry: rotate both corners, then re-normalise. Quarter turns
+            // keep an axis-aligned box axis-aligned, but they can swap which
+            // corner is the minimum, and `from` must stay <= `to`.
+            const glm::vec3 a = RotPoint(e.from, xt, yt);
+            const glm::vec3 b = RotPoint(e.to,   xt, yt);
+            r.from = glm::min(a, b);
+            r.to   = glm::max(a, b);
+
+            // Faces move to the direction their normal rotates onto, carrying
+            // their texture — with a uvRotation correction, because the mesher
+            // derives UVs from fixed world-space axes per face rather than from
+            // the vertices (MC gets this for free: its UVs ride the vertices).
+            r.faces.clear();
+            for (const auto& [dir, face] : e.faces) {
+                const IVec3 n  = ApplyRot(NormalOf(dir), xt, yt);
+                const FaceDir dstDir = FaceFromNormal(n);
+
+                IVec3 su, sv;
+                FaceUvAxes(dir, su, sv);
+                // Carry the source face's existing uvRotation through, then add
+                // whatever the geometric rotation demands.
+                for (int s = 0; s < (((face.uvRotation / 90) % 4 + 4) % 4); ++s) UvShiftOnce(su, sv);
+
+                FaceDef f = face;
+                f.uvRotation = SolveUvShift(dstDir, ApplyRot(su, xt, yt), ApplyRot(sv, xt, yt));
+
+                // Cullface is a world direction and must rotate with the face,
+                // or a rotated block stops culling against its neighbours (or
+                // culls against the wrong one and shows holes).
+                if (!f.cullface.empty()) {
+                    const FaceDir cullDir = ParseFaceDir(f.cullface);
+                    f.SetCullface(FaceDirToString(FaceFromNormal(ApplyRot(NormalOf(cullDir), xt, yt))));
+                }
+
+                r.faces[dstDir] = std::move(f);
+            }
+
+            // Per-element rotation (the ±22.5/45 model-space kind). Its origin
+            // rotates with the geometry and its axis maps to whichever axis it
+            // becomes. Rare among the blocks that carry blockstate rotations,
+            // but dropping it silently would deform e.g. a rotated rail.
+            if (r.rotation.axis != 0) {
+                r.rotation.origin = RotPoint(e.rotation.origin, xt, yt);
+                IVec3 axisVec{ e.rotation.axis == 'x' ? 1 : 0,
+                               e.rotation.axis == 'y' ? 1 : 0,
+                               e.rotation.axis == 'z' ? 1 : 0 };
+                const IVec3 ra = ApplyRot(axisVec, xt, yt);
+                if      (ra.x != 0) { r.rotation.axis = 'x'; if (ra.x < 0) r.rotation.angle = -r.rotation.angle; }
+                else if (ra.y != 0) { r.rotation.axis = 'y'; if (ra.y < 0) r.rotation.angle = -r.rotation.angle; }
+                else                { r.rotation.axis = 'z'; if (ra.z < 0) r.rotation.angle = -r.rotation.angle; }
+            }
+
+            out.elements.push_back(std::move(r));
+        }
+
+        return out;
+    }
+
+    glm::vec3 ApplyElementRotation(const glm::vec3& point, const ElementRotation& rot,
+                                   float scale) {
+        if (rot.IsIdentity()) return point;
+
+        const float rad = glm::radians(rot.angle);
+        const float c = std::cos(rad);
+        const float s = std::sin(rad);
+
+        // `rescale` grows the two axes perpendicular to the rotation so the
+        // turned geometry still spans its original bounds — MC computes it as
+        // 1/max|component| of each transformed axis unit vector
+        // (BlockElementRotation.scaleFactorForAxis), which for a single-axis
+        // turn is exactly 1/|cos| off-axis and 1 on-axis. Used by diagonal
+        // rails and stairs; the flowerbed stems leave it off.
+        const float k = (rot.rescale && std::abs(c) > 1e-6f) ? 1.0f / std::abs(c) : 1.0f;
+
+        const glm::vec3 origin = rot.origin * scale;
+        const glm::vec3 v = point - origin;
+
+        glm::vec3 r;
+        switch (rot.axis) {
+            case 'x': r = { v.x,        (v.y * c - v.z * s) * k, (v.y * s + v.z * c) * k }; break;
+            case 'y': r = { (v.x * c + v.z * s) * k, v.y,        (-v.x * s + v.z * c) * k }; break;
+            case 'z': r = { (v.x * c - v.y * s) * k, (v.x * s + v.y * c) * k, v.z        }; break;
+            default:  return point;
+        }
+        return origin + r;
+    }
+
+    BlockModel BlockModelRegistry::MergeModels(const std::vector<const BlockModel*>& parts) {
+        BlockModel out;
+        if (parts.empty()) return out;
+        if (parts.size() == 1) return *parts[0];
+
+        // Inherit presentation from the first part — multipart entries describe
+        // pieces of ONE block, so their display transforms agree.
+        out.guiDisplay = parts[0]->guiDisplay;
+        // Same for AO: MC reads it off `parts.getFirst()` alone
+        // (ModelBlockRenderer.java:42) rather than combining across parts.
+        out.ambientOcclusion = parts[0]->ambientOcclusion;
+
+        // Each part carries its own `textures` map, and the same key ("#texture",
+        // "#flowerbed") routinely means a different sprite in different parts.
+        // Merging the maps would therefore silently repaint quads. Instead every
+        // face reference is resolved against ITS OWN part first, and the merged
+        // model gets identity entries keyed by the resolved path — after which
+        // ResolveTexture on the merged model is a no-op passthrough and no key
+        // can collide.
+        for (const BlockModel* part : parts) {
+            if (!part) continue;
+
+            for (const Element& e : part->elements) {
+                Element merged = e;
+                merged.faces.clear();
+
+                for (const auto& [dir, face] : e.faces) {
+                    FaceDef f = face;
+                    const std::string resolved = part->ResolveTexture(face.textureRef);
+                    out.textures[resolved] = resolved;      // identity entry
+                    if (part->translucentTextureRefs.count(
+                            face.textureRef.empty() || face.textureRef[0] != '#'
+                                ? face.textureRef
+                                : face.textureRef.substr(1))) {
+                        out.translucentTextureRefs.insert(resolved);
+                    }
+                    f.textureRef = "#" + resolved;
+                    merged.faces[dir] = std::move(f);
+                }
+
+                out.elements.push_back(std::move(merged));
+            }
+        }
+
+        // Particle texture: first part that declares one wins, resolved the
+        // same way so it survives the key rewrite above.
+        for (const BlockModel* part : parts) {
+            if (!part) continue;
+            const std::string particle = part->ResolveTexture("#particle");
+            if (particle != "missingno") {
+                out.textures["particle"] = particle;
+                break;
+            }
+        }
+
+        return out;
     }
 
 } // namespace Game

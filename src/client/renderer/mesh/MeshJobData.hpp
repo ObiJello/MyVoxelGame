@@ -3,7 +3,9 @@
 
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include <array>
+#include <vector>
 #include <atomic>
 #include <memory>
 #include <chrono>
@@ -27,10 +29,54 @@ namespace Render {
         //        4=up(+y, stores y=0), 5=down(-y, stores y=15)
         std::array<std::array<Game::BlockID, 256>, 6> neighbors;
         
+        // Per-voxel block-state indices, in the same [y*256 + z*16 + x] layout
+        // as `blocks`. Left EMPTY when the source section carries no states,
+        // which is the case for essentially all terrain (ChunkSection::states
+        // is lazily allocated for the same reason) — an always-present array
+        // would add 4 KB to every snapshot in flight for nothing.
+        //
+        // No neighbour planes: unlike block ids, states are only read for the
+        // block being meshed. Face culling and AO care about the neighbour's
+        // opacity, which is a property of the block id alone.
+        std::vector<uint8_t> states;
+
+        // Noise biomes covering this section PLUS the margin MC's biome blend
+        // reaches. ClientLevel.calculateBlockTint averages a
+        // (2*biomeBlendRadius+1)^2 square with the vanilla default radius of 2,
+        // so a tint at x needs biomes from x-2 to x+17 — quart cells -1 through
+        // 4, i.e. 6 per horizontal axis. Vertically only the section's own four
+        // quart layers are needed, because the blend samples at a fixed Y.
+        //
+        // 6*4*6 = 144 entries (288 bytes), always present when the chunk has
+        // biome data. Copying it into the snapshot is what keeps mesh workers
+        // off the live chunk map.
+        static constexpr int BIOME_XZ = 6;
+        static constexpr int BIOME_Y  = 4;
+        std::array<uint16_t, BIOME_XZ * BIOME_Y * BIOME_XZ> biomes{};
+        bool hasBiomes = false;
+
+        // `lx`/`lz` are section-local BLOCK coordinates and may run from -2 to
+        // 17; `ly` is 0..15. Out-of-grid asks clamp, which only happens if a
+        // caller reaches further than the blend radius.
+        uint16_t GetBiomeLocal(int lx, int ly, int lz) const {
+            if (!hasBiomes) return Game::kFallbackBiomeId;
+            auto quart = [](int v) {
+                // Floor-divide by 4 then shift into the grid (which starts at
+                // quart cell -1). Arithmetic shift keeps negatives flooring.
+                const int q = (v >> 2) + 1;
+                return q < 0 ? 0 : (q >= BIOME_XZ ? BIOME_XZ - 1 : q);
+            };
+            const int qx = quart(lx);
+            const int qz = quart(lz);
+            int qy = ly >> 2;
+            if (qy < 0) qy = 0; else if (qy >= BIOME_Y) qy = BIOME_Y - 1;
+            return biomes[static_cast<size_t>((qy * BIOME_XZ + qz) * BIOME_XZ + qx)];
+        }
+
         // Metadata
         bool isEmpty = true;
         int sectionY = 0;
-        
+
         // Copy block at local coordinates (0-15)
         void SetBlock(int x, int y, int z, Game::BlockID block) {
             if (x >= 0 && x < 16 && y >= 0 && y < 16 && z >= 0 && z < 16) {
@@ -39,6 +85,21 @@ namespace Render {
                     isEmpty = false;
                 }
             }
+        }
+
+        void SetBlockState(int x, int y, int z, uint8_t stateIndex) {
+            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return;
+            if (states.empty()) {
+                if (stateIndex == 0) return;   // still all-default; stay unallocated
+                states.assign(4096, 0);
+            }
+            states[y * 256 + z * 16 + x] = stateIndex;
+        }
+
+        uint8_t GetBlockState(int x, int y, int z) const {
+            if (states.empty()) return 0;
+            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return 0;
+            return states[y * 256 + z * 16 + x];
         }
         
         // Get block at local coordinates (0-15)

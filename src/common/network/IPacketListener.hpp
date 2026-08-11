@@ -21,6 +21,7 @@ namespace Network {
     struct InventoryFullS2CPacket;
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
+    struct OpenScreenS2CPacket;
     struct SetHealthS2CPacket;
     struct BlockChangedAckS2CPacket;
     struct PlayerAbilitiesS2CPacket;
@@ -82,6 +83,9 @@ namespace Network {
         virtual void onInventoryFullS2C(const InventoryFullS2CPacket& packet) {}
         virtual void onInventorySetSlotS2C(const InventorySetSlotS2CPacket& packet) {}
         virtual void onInventorySetCarriedS2C(const InventorySetCarriedS2CPacket& packet) {}
+
+        // Block container opened (MC ClientboundOpenScreenPacket)
+        virtual void onOpenScreenS2C(const OpenScreenS2CPacket& packet) {}
 
         // Player stats (MC ClientboundSetHealthPacket)
         virtual void onSetHealthS2C(const SetHealthS2CPacket& packet) {}

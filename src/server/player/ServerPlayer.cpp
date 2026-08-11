@@ -33,6 +33,12 @@ namespace Server {
     }
 
     ServerPlayer::~ServerPlayer() {
+        // A player who disconnects with a crafting table open would otherwise
+        // take its grid contents with them — the menu owns that storage and is
+        // about to be destroyed. MC's disconnect path calls doCloseContainer
+        // for the same reason. Safe here: m_openContainerMenu is still fully
+        // alive, and m_inventory outlives it (declared earlier, destroyed later).
+        closeContainerMenu();
         Log::Info("ServerPlayer: Destroyed player %u '%s'", m_playerId, m_name.c_str());
     }
 
@@ -598,6 +604,49 @@ namespace Server {
         
         // Placeholder: all blocks take 1 second
         return 1.0f;
+    }
+
+    // ─── Container menus ─────────────────────────────────────────
+    void ServerPlayer::openContainerMenu(std::unique_ptr<Game::AbstractContainerMenu> menu,
+                                         Game::MenuType type) {
+        if (!menu) return;
+
+        // MC AbstractContainerMenu.transferState — the cursor belongs to the
+        // player, not to the menu that happens to be showing it, so it moves
+        // across. Without this, opening a table while holding a stack would
+        // silently swallow it.
+        const Game::ItemStack carried = m_containerMenu->getCarried();
+        m_containerMenu->setCarried(Game::ItemStack{});
+
+        // A new id means every click still in flight for the old menu is
+        // rejected by PlayerSession's containerId guard instead of landing on
+        // whatever slot now occupies that index.
+        const uint32_t nextId = m_containerMenu->containerId + 1;
+
+        m_openContainerMenu = std::move(menu);
+        m_openMenuType      = type;
+        m_containerMenu     = m_openContainerMenu.get();
+        m_containerMenu->containerId = nextId;
+        m_containerMenu->setCarried(carried);
+    }
+
+    Game::ContainerClickResult ServerPlayer::closeContainerMenu() {
+        Game::ContainerClickResult result;
+        if (!m_openContainerMenu) return result;
+
+        // MC doCloseContainer → menu.removed(player): the table's grid goes
+        // back into the inventory before the menu itself disappears.
+        m_openContainerMenu->Removed(result);
+
+        const Game::ItemStack carried = m_openContainerMenu->getCarried();
+        const uint32_t nextId = m_openContainerMenu->containerId + 1;
+
+        m_openContainerMenu.reset();
+        m_openMenuType  = Game::MenuType::Inventory;
+        m_containerMenu = &m_inventoryMenu;
+        m_containerMenu->containerId = nextId;
+        m_containerMenu->setCarried(carried);
+        return result;
     }
 
     bool ServerPlayer::checkCollision(Game::World* world, const glm::dvec3& pos) const {

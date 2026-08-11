@@ -1,5 +1,6 @@
 // File: src/common/world/chunk/Chunk.cpp
 #include "Chunk.hpp"
+#include "../biome/Biomes.hpp"
 #include "../block/entity/BlockEntity.hpp"
 #include "../../core/Log.hpp"
 #include "../math/WorldCoordinates.hpp"
@@ -42,6 +43,94 @@ namespace Game {
         return section->GetBlockID(localX, sectionY, localZ);
     }
 
+    // MC ChunkAccess.getNoiseBiome — the caller's block coordinates are shifted
+    // right by 2 and clamped into the chunk's quarter grid.
+    uint16_t Chunk::GetBiome(int localX, int worldY, int localZ) const {
+        if (biomes.empty()) return kFallbackBiomeId;
+
+        const int qx = std::clamp(localX >> 2, 0, BIOME_HORIZONTAL - 1);
+        const int qz = std::clamp(localZ >> 2, 0, BIOME_HORIZONTAL - 1);
+        // Y is world-space and starts at MIN_WORLD_Y (-64), so it has to be
+        // rebased before the shift or everything below y=0 lands in cell 0.
+        const int qy = std::clamp(
+            (worldY - Math::WorldCoordinates::MIN_WORLD_Y) >> 2, 0, BIOME_VERTICAL - 1);
+
+        return biomes[static_cast<size_t>((qy * BIOME_HORIZONTAL + qz) * BIOME_HORIZONTAL + qx)];
+    }
+
+    void Chunk::SetBiomeQuart(int qx, int qy, int qz, uint16_t biomeId) {
+        if (qx < 0 || qx >= BIOME_HORIZONTAL || qz < 0 || qz >= BIOME_HORIZONTAL ||
+            qy < 0 || qy >= BIOME_VERTICAL) {
+            return;
+        }
+        if (biomes.empty()) biomes.assign(BIOME_COUNT, 0);
+        biomes[static_cast<size_t>((qy * BIOME_HORIZONTAL + qz) * BIOME_HORIZONTAL + qx)] = biomeId;
+    }
+
+    uint8_t Chunk::GetBlockState(int localX, int worldY, int localZ) const {
+        if (!ValidateCoordinates(localX, worldY, localZ, "GetBlockState")) {
+            return 0;
+        }
+
+        int sectionIndex, sectionY;
+        Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
+
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
+            return 0;
+        }
+
+        const ChunkSection* section = GetSection(sectionIndex);
+        if (!section) {
+            return 0; // Section doesn't exist = all air = default state
+        }
+
+        return section->GetState(localX, sectionY, localZ);
+    }
+
+    void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId, uint8_t stateIndex) {
+        if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
+            Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
+                        localX, worldY, localZ, pos.x, pos.z);
+            return;
+        }
+
+        int sectionIndex, sectionY;
+        Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
+
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) {
+            Log::Warning("Invalid section index %d for world Y %d in chunk (%d, %d)",
+                        sectionIndex, worldY, pos.x, pos.z);
+            return;
+        }
+
+        // Deliberately NOT short-circuiting on "same BlockID" the way the
+        // BlockID-only overload does: re-orienting a block (same id, different
+        // state) is a real change and must still write and dirty the section.
+        const BlockID oldBlockId = GetBlock(localX, worldY, localZ);
+        const uint8_t oldState   = GetBlockState(localX, worldY, localZ);
+        if (oldBlockId == blockId && oldState == stateIndex) {
+            return;
+        }
+
+        if (blockId == BlockID::Air && stateIndex == 0 && !HasSection(sectionIndex)) {
+            return;
+        }
+
+        if (blockId != BlockID::Air) {
+            EnsureSection(sectionIndex);
+        }
+
+        ChunkSection* section = GetSection(sectionIndex);
+        if (section) {
+            section->Set(localX, sectionY, localZ, blockId);
+            section->SetState(localX, sectionY, localZ, stateIndex);
+
+            if (onSectionDirty) {
+                onSectionDirty(sectionIndex);
+            }
+        }
+    }
+
     void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId) {
         if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
@@ -62,7 +151,7 @@ namespace Game {
         // Get the old block to check if we're actually changing anything
         BlockID oldBlockId = GetBlock(localX, worldY, localZ);
         if (oldBlockId == blockId) {
-            return; // No change needed
+            return; // No change needed — leaves any existing state untouched
         }
 
         // If setting air and section doesn't exist, no need to create it
@@ -78,6 +167,14 @@ namespace Game {
         ChunkSection* section = GetSection(sectionIndex);
         if (section) {
             section->Set(localX, sectionY, localZ, blockId);
+
+            // The block genuinely changed, so any state left over from the
+            // previous occupant is meaningless — state indices are relative to
+            // the owning block's own state list. Reset to the new block's
+            // default (MC defaultBlockState()). Without this, mining a
+            // west-facing furnace and placing stone would leave stone carrying
+            // state index 3.
+            section->SetState(localX, sectionY, localZ, 0);
 
             // Mark section as dirty for mesh rebuilding
             if (onSectionDirty) {

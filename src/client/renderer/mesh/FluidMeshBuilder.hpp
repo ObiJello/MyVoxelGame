@@ -7,6 +7,7 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/core/Config.hpp"
 #include <glm/glm.hpp>
+#include <functional>
 
 namespace Render {
 
@@ -38,6 +39,16 @@ namespace Render {
     // Specialized mesh builder for fluid blocks (water, lava)
     class FluidMeshBuilder {
     public:
+        // Biome water colour for a world position, supplied by the Mesher.
+        //
+        // Water is meshed on this separate path and never reaches the
+        // per-block tint dispatch in AddBlockFace, so registering WATER in the
+        // BlockColors table is not enough on its own — without this hook the
+        // fluid keeps whatever fixed `waterTint` the config carries. MC has the
+        // same split (LiquidBlockRenderer does its own getBlockTint call) and
+        // resolves it through the identical WATER_COLOR_RESOLVER.
+        std::function<glm::vec4(int, int, int)> waterTintProvider;
+
         explicit FluidMeshBuilder(const FluidMeshConfig& config = FluidMeshConfig{});
 
         // Build fluid geometry for one block using IBlockAccess
@@ -62,9 +73,22 @@ namespace Render {
         void AddFluidFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
                          float height, const glm::vec4& tint, SectionMesh& mesh);
 
+        // `backwardUpFace` emits a second, reverse-wound copy of the surface so
+        // it stays visible from underneath once the translucent pass
+        // back-face culls. MC does exactly this
+        // (LiquidBlockRenderer.java:174 re-emits the four top vertices in
+        // reverse order when FluidState.shouldRenderBackwardUpFace holds).
         void CreateFluidTopSurface(Game::BlockID fluidType, glm::vec3 blockPos,
                                   float height, FlowDirection flow,
-                                  const glm::vec4& tint, SectionMesh& mesh);
+                                  const glm::vec4& tint, SectionMesh& mesh,
+                                  bool backwardUpFace);
+
+        // MC FluidState.shouldRenderBackwardUpFace: true when any of the 3x3
+        // cells around the block ABOVE is neither the same fluid nor a solid
+        // render block — i.e. the surface could be looked at from below.
+        bool ShouldRenderBackwardUpFace(const Game::IBlockAccess& blocks,
+                                        int worldX, int worldY, int worldZ,
+                                        Game::BlockID fluidType) const;
 
         void CreateFluidSideFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
                                float height, const glm::vec4& tint, SectionMesh& mesh);
@@ -82,7 +106,7 @@ namespace Render {
         std::string GetFluidTextureForFace(Game::BlockID fluidType, BlockFace face) const;
 
 
-        glm::vec4 GetFluidTint(Game::BlockID fluidType) const;
+        glm::vec4 GetFluidTint(Game::BlockID fluidType, int worldX, int worldY, int worldZ) const;
 
         // Geometry creation
         std::vector<Vertex> CreateSlopedSurface(glm::vec3 blockPos, float height,

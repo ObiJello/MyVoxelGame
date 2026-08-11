@@ -138,7 +138,8 @@ namespace {
         if (argIndex == 0) {
             // BARE command names (no '/'), MC-style. The '/' is already
             // in the input field and stays put when applying.
-            candidates = {"tp", "teleport", "kick", "gamemode", "kill", "time", "gamerule"};
+            candidates = {"tp", "teleport", "kick", "gamemode", "kill", "time",
+                          "gamerule", "seed", "clearchat"};
         } else {
             // Command name without the leading '/' for matching.
             std::string cmd = tokens.empty() ? "" : tokens[0];

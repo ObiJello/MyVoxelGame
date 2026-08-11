@@ -12,16 +12,18 @@
 //   36..44  hotbar
 //   45      offhand
 //
-// GUI coordinates are the ones InventoryScreen used to hardcode; the screen now
-// reads Slot::x / Slot::y instead, so layout and click behaviour can no longer
-// drift apart.
+// Slot::x / Slot::y carry MC's SURVIVAL panel coordinates (the 176x166
+// textures/gui/container/inventory.png). Screens read those rather than keeping
+// their own table, so layout and click behaviour can't drift apart.
+// CreativeModeInventoryScreen overrides them for its own 195x136 panel, exactly
+// as MC's CreativeModeInventoryScreen.selectTab re-wraps these slots.
 #pragma once
 
-#include "AbstractContainerMenu.hpp"
+#include "AbstractCraftingMenu.hpp"
 
 namespace Game {
 
-    class InventoryMenu : public AbstractContainerMenu {
+    class InventoryMenu : public AbstractCraftingMenu {
     public:
         explicit InventoryMenu(Inventory* playerInventory);
 

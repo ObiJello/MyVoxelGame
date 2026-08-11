@@ -105,6 +105,15 @@ namespace Render {
         const GPUSectionData* GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const;
         
         // Iterate all active sections under shared lock (zero-copy, zero-alloc)
+        // Re-sorts translucent quads back-to-front for sections whose view has
+        // changed. Call once a frame, before the translucent pass.
+        //
+        // Port of LevelRenderer.scheduleTranslucentSectionResort: every section
+        // within `nearRadius` is considered each frame, plus a round-robin
+        // sweep over the rest, so the cost stays bounded no matter how much
+        // glass or water is in view. See mesh/TranslucentSort.hpp.
+        void ResortTranslucentSections(const glm::vec3& cameraPos, float nearRadius = 32.0f);
+
         // Callback receives (const SectionKey&, const GPUSectionData*)
         // Iterates m_gpuData directly — it only contains sections with geometry
         // (empty sections are erased at upload time), eliminating the old
@@ -277,6 +286,13 @@ namespace Render {
         mutable std::shared_mutex m_gpuDataMutex;
         using GpuDataMap = std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash>;
         GpuDataMap m_gpuData;
+
+        // Round-robin cursor for translucent re-sorting, mirroring MC's
+        // translucencyResortIterationIndex.
+        size_t m_resortCursor = 0;
+        glm::ivec3 m_lastResortCameraBlock{INT32_MIN, INT32_MIN, INT32_MIN};
+        std::vector<uint16_t> m_resortIndexScratch;
+        std::vector<uint32_t> m_resortOrderScratch;
 
         // NOTE: m_activeSections was removed — m_gpuData only contains sections
         // with geometry (empty sections are erased at upload time), so iterating

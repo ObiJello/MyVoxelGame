@@ -11,6 +11,7 @@
 #include "../world/ClientBlockAccess.hpp"
 #include "../world/ClientUsePlayer.hpp"
 #include "common/world/block/BlockInteraction.hpp"
+#include "common/world/block/BlockPlacement.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
 #include "common/entity/Item.hpp"
@@ -99,14 +100,23 @@ namespace Game {
         return BlockID::Air;
     }
 
+    uint8_t ClientPlayerController::ReadBlockState(const glm::ivec3& pos) const {
+        try {
+            if (blockAccess) return blockAccess->GetBlockState(pos.x, pos.y, pos.z);
+            if (world)       return world->GetBlockState(pos.x, pos.y, pos.z);
+        } catch (...) {}
+        return 0;
+    }
+
     void ClientPlayerController::PredictBlock(const glm::ivec3& pos,
                                               BlockID newBlock,
-                                              uint32_t sequence) {
+                                              uint32_t sequence,
+                                              uint8_t stateIndex) {
         // The client's chunk cache is what the renderer meshes from AND what
         // ClientBlockAccess reads for raycast/physics, so a single write here
         // makes the change visible, targetable and solid on the same frame.
         if (Client::g_clientChunkManager) {
-            Client::g_clientChunkManager->PredictBlockChange(pos, newBlock, sequence);
+            Client::g_clientChunkManager->PredictBlockChange(pos, newBlock, sequence, stateIndex);
         }
     }
     
@@ -130,6 +140,9 @@ namespace Game {
         if (tickAccum > 1.0f) tickAccum = 1.0f;
         while (tickAccum >= TICK_DT) {
             tickAccum -= TICK_DT;
+            // MC Minecraft.tick:1803 and :1745 — both counters tick down here.
+            if (missTime > 0)        --missTime;
+            if (rightClickDelay > 0) --rightClickDelay;
             UpdateBreakingTick();
             UpdatePlacingTick();
             UpdateUsingTick();
@@ -274,18 +287,7 @@ namespace Game {
         
         Log::Debug("SendUseItemOn: Building BlockPlaceC2S packet...");
         
-        // Convert hit face to Minecraft direction format
-        // Our format: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
-        // MC format: 0=bottom(-Y), 1=top(+Y), 2=north(-Z), 3=south(+Z), 4=west(-X), 5=east(+X)
-        uint32_t direction = 0;
-        switch (hit.hitFace) {
-            case 0: direction = 5; break;  // +X -> east
-            case 1: direction = 4; break;  // -X -> west
-            case 2: direction = 1; break;  // +Y -> top
-            case 3: direction = 0; break;  // -Y -> bottom
-            case 4: direction = 3; break;  // +Z -> south
-            case 5: direction = 2; break;  // -Z -> north
-        }
+        const uint32_t direction = OurFaceToMcFace(hit.hitFace);
         
         // Build the packet
         Network::UseItemOnC2SPacket packet(
@@ -314,9 +316,27 @@ namespace Game {
         return packet.sequence;
     }
 
+    // Raycast face numbering -> MC's Direction ordinals. Ours is
+    // 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z; MC's is
+    // 0=bottom(-Y), 1=top(+Y), 2=north(-Z), 3=south(+Z), 4=west(-X), 5=east(+X).
+    // Shared by the packet we send and by the local placement prediction, so the
+    // two cannot disagree about which face was clicked.
+    uint32_t ClientPlayerController::OurFaceToMcFace(int ourFace) {
+        switch (ourFace) {
+            case 0: return 5;  // +X -> east
+            case 1: return 4;  // -X -> west
+            case 2: return 1;  // +Y -> top
+            case 3: return 0;  // -Y -> bottom
+            case 4: return 3;  // +Z -> south
+            case 5: return 2;  // -Z -> north
+            default: return 1;
+        }
+    }
+
     bool ClientPlayerController::ComputePredictedPlacement(const RaycastHit& hit,
                                                            glm::ivec3& outPos,
-                                                           BlockID& outBlock) const {
+                                                           BlockID& outBlock,
+                                                           uint8_t& outState) const {
         if (!player) return false;
 
         // --- Only plain block items are predictable ---------------------
@@ -340,39 +360,111 @@ namespace Game {
             if (clicked.useItemOn || clicked.useWithoutItem) return false;
         }
 
-        // --- Resolve the target cell (server: clicked vs getPlacementPos) -
-        const glm::ivec3 target = (clickedId == BlockID::Air) ? hit.blockPos : hit.adjacentPos;
-        if (ReadBlock(target) != BlockID::Air) return false;
+        // --- Resolve the target cell (server: step 6a) -------------------
+        // MC BlockPlaceContext's order: decide whether the CLICKED block is
+        // replaceable, resolve the position from that, then re-ask at the
+        // resolved cell. Clicking the grass under a leaf litter clump lands on
+        // the litter's own cell, which is what lets the growth below see it.
+        const uint8_t clickedState = ReadBlockState(hit.blockPos);
+        const bool replaceClicked =
+            Game::CanBeReplacedByPlacement(clickedId, clickedState, toPlace,
+                                           player->physics.isSneaking);
+
+        const glm::ivec3 target = replaceClicked ? hit.blockPos : hit.adjacentPos;
+        const BlockID targetId    = ReadBlock(target);
+        const uint8_t targetState = ReadBlockState(target);
+        if (!replaceClicked &&
+            !Game::CanBeReplacedByPlacement(targetId, targetState, toPlace,
+                                            player->physics.isSneaking)) {
+            return false;
+        }
+
+        // --- Segmented ground cover grows in place (server: step 6b) ------
+        // MC SegmentableBlock: same item on an existing clump raises its
+        // segment count and KEEPS the facing it already has. Predicting the
+        // grow avoids a round trip in which the clump visibly stays put and
+        // then jumps a segment.
+        BlockID resolved = toPlace;
+        bool grewInPlace = false;
+        {
+            const BlockID base = Game::SegmentedFamilyBase(targetId);
+            if (base != BlockID::Air && base == Game::SegmentedFamilyBase(toPlace)) {
+                const BlockID grown = Game::SegmentedGrowth(targetId);
+                if (grown != BlockID::Air) {
+                    resolved     = grown;
+                    grewInPlace  = true;
+                }
+            }
+        }
 
         // --- Slab half (server: SlabBlock.getStateForPlacement mirror) ---
         // Same inputs (clicked face + cursor Y), so the same answer — without
         // this a slab would predict as bottom and visibly flip on the ack.
-        BlockID resolved = toPlace;
-        const BlockID topVariant = Game::BlockRegistry::SlabTopVariant(toPlace);
-        if (topVariant != BlockID::Air) {
-            bool placeAsTop;
-            switch (hit.hitFace) {
-                case 3:  placeAsTop = true;  break;               // -Y (bottom face)
-                case 2:  placeAsTop = false; break;               // +Y (top face)
-                default: placeAsTop = (hit.cursorPos.y > 0.5f); break;  // sides
+        if (!grewInPlace) {
+            const BlockID topVariant = Game::BlockRegistry::SlabTopVariant(toPlace);
+            if (topVariant != BlockID::Air) {
+                bool placeAsTop;
+                switch (hit.hitFace) {
+                    case 3:  placeAsTop = true;  break;               // -Y (bottom face)
+                    case 2:  placeAsTop = false; break;               // +Y (top face)
+                    default: placeAsTop = (hit.cursorPos.y > 0.5f); break;  // sides
+                }
+                if (placeAsTop) resolved = topVariant;
             }
-            if (placeAsTop) resolved = topVariant;
+        }
+
+        // --- Can the block survive there? (server: step 7) ----------------
+        // Mirrors CanSurviveOn so we never predict a placement the server is
+        // about to reject — e.g. a 4-segment clump resolving to the cell above
+        // itself, where leaf litter has nothing sturdy to sit on.
+        {
+            const glm::ivec3 below{ target.x, target.y - 1, target.z };
+            if (!Game::CanSurviveOn(resolved, ReadBlock(below), ReadBlockState(below))) {
+                return false;
+            }
         }
 
         // --- Would the block land inside the player? ---------------------
         // The server rejects this (and resyncs); predicting it would place a
         // block, trap the player for a round trip, then yank it away.
+        // Skipped for `.noCollision()` blocks, matching the server — MC's
+        // isUnobstructed tests the collision shape, which is empty for flowers
+        // and ground cover, so those place even inside the player.
         const glm::vec3 playerPos = player->physics.position;
         const glm::vec3 blockCenter = glm::vec3(target) + glm::vec3(0.5f);
-        if (std::abs(playerPos.x - blockCenter.x) < 0.8f &&
+        if (BlockRegistry::HasCollision(resolved) &&
+            std::abs(playerPos.x - blockCenter.x) < 0.8f &&
             std::abs(playerPos.z - blockCenter.z) < 0.8f &&
             playerPos.y < target.y + 1.0f &&
             playerPos.y + 1.8f > target.y) {
             return false;
         }
 
+        // --- Orientation (server: Block.getStateForPlacement mirror) -----
+        // Same shared table the server calls, fed the same inputs, so a
+        // furnace predicts facing the right way instead of appearing north-
+        // facing for a round trip and then snapping.
+        Game::UseOnContext ctx;
+        ctx.world  = nullptr;   // the placement rules read no world state
+        ctx.player = nullptr;
+        ctx.hand   = 0;
+        ctx.hitResult.blockPos = hit.blockPos;
+        ctx.hitResult.face     = OurFaceToMcFace(hit.hitFace);
+        ctx.hitResult.hitPoint = glm::vec3(hit.blockPos) + hit.cursorPos;
+        // LookAngles(), not player->yaw/pitch — those are only written on
+        // teleports (mouse-look updates camera.yaw/pitch instead), so reading
+        // them here made every predicted placement use a stale angle. The block
+        // appeared facing the wrong way until the server's authoritative state
+        // arrived a round trip later, which is exactly the flicker prediction
+        // exists to avoid. Same trap SpawnPortalProjectile documents.
+        LookAngles(ctx.playerYaw, ctx.playerPitch);
+
         outPos   = target;
         outBlock = resolved;
+        // Growing a clump keeps the facing it already has (MC's
+        // `state.setValue(segment, n + 1)`); everything else derives its
+        // orientation from how the player is standing.
+        outState = grewInPlace ? targetState : Game::ComputePlacementState(resolved, ctx);
         return true;
     }
 
@@ -685,16 +777,20 @@ namespace Game {
 
     void ClientPlayerController::UpdatePlacingTick() {
         if (!player) return;
-        if (ticksSincePlace < 1000) ++ticksSincePlace;
 
+        // MC handleKeybinds:1996 —
+        //   if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem())
+        //       startUseItem();
+        // The gap between held-RMB re-fires is rightClickDelay, which
+        // StartUseItem resets to 4 and Tick decrements — the same counter the
+        // first click sets, so the edge and the repeats share one cadence
+        // instead of the two separate ones this used to keep.
         if (!placeButtonHeld) return;
         // Mid-use suppression — MC's Minecraft.startUseItem is a no-op while
         // player.isUsingItem() (Minecraft.java:1656), so held-RMB during an
         // eat/block must not spam placements.
         if (player->usingItem) return;
-        // First-click placement already happens on the RMB edge in OnRMB.
-        // Continuous-RMB re-fires every PLACE_REFIRE_TICKS while held.
-        if (ticksSincePlace < PLACE_REFIRE_TICKS) return;
+        if (rightClickDelay > 0) return;
 
         const auto& currentHit = player->lastBlockHit;
         if (!currentHit.has_value()) return;
@@ -706,7 +802,7 @@ namespace Game {
         if (!ItemRegistry::IsBlockItem(held)) return;
 
 #if ENABLE_PORTAL_GUN
-        // PortalGun: continuous-RMB does NOT spam projectiles (its OnRMB edge
+        // PortalGun: continuous-RMB does NOT spam projectiles (its StartUseItem edge
         // already started the projectile + viewmodel anim). Skip.
         if (held == Game::Items::PortalGun) return;
 #endif
@@ -717,16 +813,22 @@ namespace Game {
         // predictor would refuse it.
         glm::ivec3 predictPos{};
         BlockID    predictBlock = BlockID::Air;
-        const bool predictable = ComputePredictedPlacement(*currentHit, predictPos, predictBlock);
+        uint8_t predictState = 0;
+        const bool predictable = ComputePredictedPlacement(*currentHit, predictPos, predictBlock,
+                                                           predictState);
         const uint32_t sequence = SendUseItemOn(*currentHit, 0);
         const bool usedOn = PredictUseItemOn(*currentHit, 0, sequence);
-        if (!usedOn && predictable) PredictBlock(predictPos, predictBlock, sequence);
-        if (player->GetSelectedBlock() != BlockID::Air) {
+        if (!usedOn && predictable) PredictBlock(predictPos, predictBlock, sequence, predictState);
+        // Same two guards as the edge path in StartUseItem: a block that
+        // swallowed the click consumes nothing server-side, and creative never
+        // consumes at all. Without them, holding RMB on a crafting table walks
+        // the held stack down until the server corrects it.
+        if (!usedOn && !player->IsCreative() && player->GetSelectedBlock() != BlockID::Air) {
             player->inventory.ConsumeSelectedBlock();
         }
-        ticksSincePlace = 0;
+        rightClickDelay = PLACE_REFIRE_TICKS;
         // Each repeat-place during held-RMB plays the arm swing, matching
-        // MC. The first place is handled by OnRMB's edge-trigger feeding
+        // MC. The first place is handled by StartUseItem's edge feeding
         // placeEdge in PlatformMain; this covers every subsequent one.
         armSwingPending = true;
     }
@@ -805,10 +907,14 @@ namespace Game {
         Log::Debug("Respawn request (TODO: Implement for multiplayer)");
     }
 
-    void ClientPlayerController::OnLMB(bool pressed) {
+    void ClientPlayerController::StartAttack() {
         if (!player) return;
 
-        if (pressed) {
+        // MC Minecraft.startAttack:1595-1597 — a screen was open recently
+        // enough that this click can't be trusted; swallow it.
+        if (missTime > 0) return;
+
+        {
             breakButtonHeld = true;
 
 #if ENABLE_PORTAL_GUN
@@ -825,7 +931,7 @@ namespace Game {
             // doesn't check destroyDelay. So a fresh click right after a
             // break starts the new dig instantly. (destroyDelay only blocks
             // held-mining continuation; releasing LMB ends the sequence it
-            // belongs to — see OnLMB(false) below.)
+            // belongs to — see ContinueAttack(false) below.)
             digState.destroyDelay = 0;
             const auto& currentHit = player->lastBlockHit;
             if (currentHit.has_value()) {
@@ -863,8 +969,22 @@ namespace Game {
             // No target yet (player aiming at sky / past raycast range) —
             // UpdateBreakingTick will start the dig as soon as a target
             // appears under the crosshair.
-        } else {
-            breakButtonHeld = false;
+        }
+    }
+
+    void ClientPlayerController::ContinueAttack(bool down) {
+        if (!player) return;
+
+        // MC Minecraft.continueAttack:1568-1571 — releasing clears missTime, so
+        // the block a UI frame put in place lifts as soon as the button is up.
+        if (!down) {
+            missTime = 0;
+        }
+
+        if (down == breakButtonHeld) return;   // no transition
+
+        breakButtonHeld = down;
+        if (!down) {
             // Releasing LMB ends the held-mining sequence the destroyDelay
             // belongs to. Without this, the player gets a 5-tick "first
             // click after a break" lag every time they tap LMB.
@@ -873,14 +993,17 @@ namespace Game {
         }
     }
 
-    void ClientPlayerController::OnRMB(bool pressed) {
+    void ClientPlayerController::StartUseItem() {
         if (!player) return;
 
-        if (pressed) {
-            // RMB EDGE — fire one placement / use immediately. While-held
-            // re-fires are handled by UpdatePlacingTick at MC's 4-tick cadence
-            // (no wall-clock throttle).
-            {
+        // MC Minecraft.startUseItem:1656-1658 sets rightClickDelay = 4, which
+        // is what paces a held-RMB strip of blocks.
+        rightClickDelay = PLACE_REFIRE_TICKS;
+
+        // RMB EDGE — fire one placement / use immediately. While-held re-fires
+        // are handled by UpdatePlacingTick at MC's 4-tick cadence (no
+        // wall-clock throttle).
+        {
                 const auto& currentHit = player->lastBlockHit;
 
 #if ENABLE_PORTAL_GUN
@@ -929,7 +1052,7 @@ namespace Game {
                         } else {
                             SpawnPortalProjectile(/*isOrange=*/true);
                         }
-                        ticksSincePlace = 0;
+                        rightClickDelay = PLACE_REFIRE_TICKS;
                         placeButtonHeld = true;
                         return;
                     }
@@ -959,8 +1082,10 @@ namespace Game {
                     // stops being true the moment we write the prediction.
                     glm::ivec3 predictPos{};
                     BlockID    predictBlock = BlockID::Air;
+                    uint8_t    predictState = 0;
                     const bool predictable =
-                        ComputePredictedPlacement(*currentHit, predictPos, predictBlock);
+                        ComputePredictedPlacement(*currentHit, predictPos, predictBlock,
+                                                  predictState);
 
                     const uint32_t sequence = SendUseItemOn(*currentHit, 0);  // 0 = main hand
 
@@ -974,28 +1099,39 @@ namespace Game {
 
                     // The block appears this frame instead of a round trip
                     // later; the server's ack confirms it or rolls it back.
-                    if (!usedOn && predictable) PredictBlock(predictPos, predictBlock, sequence);
+                    if (!usedOn && predictable) {
+                        PredictBlock(predictPos, predictBlock, sequence, predictState);
+                    }
 
-                    // Predictive consumption — ONLY for block placement.
+                    // Predictive consumption — ONLY for block placement, and
+                    // only when the block did NOT swallow the click. A block
+                    // with a use action (a crafting table opening its menu)
+                    // ends the server's dispatch right there: nothing is
+                    // placed and nothing is consumed, so predicting either
+                    // shows the held stack ticking down until the server's
+                    // correction arrives.
+                    //
                     // The server's placement-fallback path consumes one block
                     // from the stack; for non-block items (tools, food, etc.)
                     // it doesn't, so we mustn't predict consumption either.
                     // Server is authoritative — it'll re-sync our inventory
                     // either way. Creative never consumes (MC
                     // ItemStack.consume no-ops with infinite materials).
-                    if (player->GetSelectedBlock() != BlockID::Air) {
-                        if (!player->IsCreative()) {
-                            player->inventory.ConsumeSelectedBlock();
+                    if (!usedOn) {
+                        if (player->GetSelectedBlock() != BlockID::Air) {
+                            if (!player->IsCreative()) {
+                                player->inventory.ConsumeSelectedBlock();
+                            }
+                        } else {
+                            // Non-block item aimed at a block: the server's
+                            // HandleUseItemOn tail step falls through to the
+                            // use-item path — main hand first, then offhand
+                            // (mirroring MC's hand loop in Minecraft.startUseItem).
+                            // Mirror the condition by predicting the same hand.
+                            StartPredictedUse(PickUseHand());
                         }
-                    } else {
-                        // Non-block item aimed at a block: the server's
-                        // HandleUseItemOn tail step falls through to the
-                        // use-item path — main hand first, then offhand
-                        // (mirroring MC's hand loop in Minecraft.startUseItem).
-                        // Mirror the condition by predicting the same hand.
-                        StartPredictedUse(PickUseHand());
                     }
-                    ticksSincePlace = 0;
+                    rightClickDelay = PLACE_REFIRE_TICKS;
                 } else {
                     // No block target — use item in air (food eat, shield
                     // raise, later Bow draw / EnderPearl throw). Server-side
@@ -1009,21 +1145,24 @@ namespace Game {
                     // it locally so the water appears/disappears immediately.
                     PredictUseItem(useHand, useSeq);
                     StartPredictedUse(useHand);
-                    ticksSincePlace = 0;
+                    rightClickDelay = PLACE_REFIRE_TICKS;
                 }
             }
-            placeButtonHeld = true;
-        } else {
-            placeButtonHeld = false;
-            // RELEASE_USE_ITEM — mirrors MC MultiPlayerGameMode.releaseUsingItem
-            // (BlockPos.ZERO / Direction.DOWN, MultiPlayerGameMode.java:485).
-            // The ONLY place the release packet is sent — the cursor-visible
-            // synthetic release in PlatformMain funnels through OnRMB(false)
-            // too, so both edge trackers share this path.
-            if (player->usingItem) {
-                SendPlayerAction(Network::PlayerAction::RELEASE_USE_ITEM);
-                StopPredictedUse();
-            }
+        placeButtonHeld = true;
+    }
+
+    void ClientPlayerController::StopUseItem() {
+        if (!player) return;
+        if (!placeButtonHeld) return;   // no transition
+
+        placeButtonHeld = false;
+        // RELEASE_USE_ITEM — mirrors MC MultiPlayerGameMode.releaseUsingItem
+        // (BlockPos.ZERO / Direction.DOWN, MultiPlayerGameMode.java:485).
+        // The ONLY place the release packet is sent, so every path that stops
+        // using an item (button release, UI opening) funnels through here.
+        if (player->usingItem) {
+            SendPlayerAction(Network::PlayerAction::RELEASE_USE_ITEM);
+            StopPredictedUse();
         }
     }
 
@@ -1076,7 +1215,7 @@ namespace Game {
         if (placementSuccessful) {
             player->stats.blocksPlaced++;
             player->stats.lastPlacedBlockId = static_cast<int>(selectedBlock);
-            ticksSincePlace = 0;
+            rightClickDelay = PLACE_REFIRE_TICKS;
 
             // Remeshing triggered by server's BlockChangeS2C → ProcessBlockChange
             // (handles neighbor boundaries correctly, avoids race conditions).

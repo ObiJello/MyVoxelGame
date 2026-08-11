@@ -20,6 +20,14 @@ namespace Render {
         int atlasX = 0;
         int atlasY = 0;
 
+        // Mipmap inputs for this sprite, carried from the .mcmeta so each
+        // uploaded frame regenerates the same chain the atlas build produced.
+        // Without them an animated sprite keeps the FIRST frame's mips forever
+        // and the mismatch shows as the wrong colour at distance.
+        std::string mipmapStrategy;      // empty = auto
+        float       alphaCutoffBias = 0.0f;
+        int         mipLevels = 0;       // 0 = no chain, upload level 0 only
+
         // Runtime animation state
         int currentFrame = 0;
         float timer = 0.0f;
@@ -37,7 +45,10 @@ namespace Render {
         void RegisterAnimatedTexture(const std::string& textureKey,
                                    const TextureAnimation& animation,
                                    const std::vector<std::vector<unsigned char>>& frames,
-                                   int atlasX, int atlasY);
+                                   int atlasX, int atlasY,
+                                   const std::string& mipmapStrategy = "",
+                                   float alphaCutoffBias = 0.0f,
+                                   int mipLevels = 0);
 
         // Update all animations - call this every frame/tick
         void UpdateAnimations(float deltaTime);

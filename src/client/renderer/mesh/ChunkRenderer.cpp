@@ -71,11 +71,34 @@ namespace Render {
         m_cutoutConfig.frontToBack = true;
 
         // Translucent pass configuration (Minecraft-style)
-        m_translucentConfig.enableDepthWrite = false;  // Read depth but don't write
+        // MC writes depth here too: TRANSLUCENT_TERRAIN overrides neither
+        // writeDepth nor cull, and RenderPipeline.Builder defaults both to true
+        // (RenderPipeline.java:434 — writeDepth.orElse(true)).
+        //
+        // It matters because glass.png's alpha is BINARY, 0 or 255 — the frame
+        // and streaks are fully opaque and the interior is discarded outright
+        // by the 0.01 cutout. With depth writes off those opaque texels
+        // occluded nothing, so a glass block further away could be rasterised
+        // afterwards and paint its streaks straight over the frame of the block
+        // in front. Writing depth makes the frame occlude properly, while the
+        // discarded interior still writes nothing and stays see-through.
+        m_translucentConfig.enableDepthWrite = true;
         m_translucentConfig.enableDepthTest = true;
         m_translucentConfig.enableBlending = true;
         m_translucentConfig.enableAlphaTest = false;
-        m_translucentConfig.enableBackFaceCulling = false;  // Disable culling for translucent blocks like water
+        // MC's TRANSLUCENT_TERRAIN pipeline (RenderPipelines.java:170) builds
+        // on TERRAIN_SNIPPET and overrides neither cull nor depth-write, and
+        // RenderPipeline.Builder defaults BOTH to true — so vanilla back-face
+        // culls translucent terrain just like every other pass.
+        //
+        // With culling off, a glass or ice block drew its FAR faces as well as
+        // its near ones, so every block blended twice and the whole surface
+        // came out roughly twice as tinted and visibly layered.
+        //
+        // Water keeps working because FluidMeshBuilder now emits MC's
+        // backward-up face, the reverse-wound copy of the surface quad that
+        // vanilla adds so the underside stays visible from in the water.
+        m_translucentConfig.enableBackFaceCulling = true;
         m_translucentConfig.blendSrc = BlendFactor::SrcAlpha;
         m_translucentConfig.blendDst = BlendFactor::OneMinusSrcAlpha;
         m_translucentConfig.frontToBack = false;  // Back-to-front for proper blending
@@ -212,6 +235,13 @@ namespace Render {
         }
 
         auto startTime = std::chrono::high_resolution_clock::now();
+
+        // Order this frame's translucent quads back-to-front before drawing
+        // them. Sorting SECTIONS (below) is not enough on its own — quads
+        // WITHIN a section also have to be ordered, or a nearer surface can
+        // write depth first and cut out everything behind it. See
+        // mesh/TranslucentSort.hpp.
+        g_clientMeshManager->ResortTranslucentSections(camera.position);
 
         // Setup render state for translucent pass
         SetupRenderPass(m_translucentConfig);

@@ -66,6 +66,42 @@ namespace Render {
         virtual void SetTextureWrap(TextureHandle handle,
                                    TextureWrap s, TextureWrap t) = 0;
         virtual void GenerateMipmaps(TextureHandle handle) = 0;
+
+        // ── CPU-authored mip chains ─────────────────────────────────────────
+        //
+        // GenerateMipmaps above hands the whole texture to the driver, which
+        // box-filters raw RGBA. That is wrong for a cutout atlas (see
+        // texture/MipmapGenerator.hpp), so the block atlas builds its chain on
+        // the CPU per sprite, the way MC does, and uploads each level here.
+        //
+        // Defaulted to no-ops rather than pure virtual: a backend that has no
+        // mip support at all stays correct by simply sampling level 0, which is
+        // what the Vulkan backend does today (its GenerateMipmaps is a stub and
+        // its images are created with mipLevels = 1).
+
+        // Declares that this texture will carry levels 0..maxLevel, and caps
+        // sampling to them so the sampler cannot walk off the end of a
+        // hand-built chain.
+        //
+        // MUST be called BEFORE uploading any level: Vulkan fixes an image's
+        // mip count at allocation and cannot grow one afterwards, so this is
+        // where it reallocates. For the same reason the texture's CONTENTS ARE
+        // UNDEFINED once this returns — callers upload every level, including
+        // level 0, after reserving.
+        virtual void ReserveTextureMipLevels(TextureHandle /*handle*/, int /*maxLevel*/) {}
+
+        // Replaces the whole of one mip level. `level` 0 is the base image.
+        virtual void UploadTextureMipLevel(TextureHandle /*handle*/, int /*level*/,
+                                           int /*width*/, int /*height*/,
+                                           const void* /*data*/) {}
+
+        // Sub-rectangle update of one mip level, for animated sprites whose
+        // frames change after the atlas is built.
+        virtual void UpdateTexture2DLevel(TextureHandle /*handle*/, int /*level*/,
+                                          int /*x*/, int /*y*/,
+                                          int /*width*/, int /*height*/,
+                                          const void* /*data*/) {}
+
         virtual void DestroyTexture(TextureHandle handle) = 0;
         virtual void BindTexture(TextureHandle handle, uint32_t slot = 0) = 0;
 

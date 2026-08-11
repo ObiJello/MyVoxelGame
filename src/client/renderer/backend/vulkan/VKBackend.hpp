@@ -51,6 +51,11 @@ namespace Render {
         void SetTextureFilter(TextureHandle handle, TextureFilter min, TextureFilter mag) override;
         void SetTextureWrap(TextureHandle handle, TextureWrap s, TextureWrap t) override;
         void GenerateMipmaps(TextureHandle handle) override;
+        void ReserveTextureMipLevels(TextureHandle handle, int maxLevel) override;
+        void UploadTextureMipLevel(TextureHandle handle, int level,
+                                   int width, int height, const void* data) override;
+        void UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
+                                  int width, int height, const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
         uintptr_t GetNativeTextureID(TextureHandle handle) const override;
@@ -199,6 +204,7 @@ namespace Render {
         struct PendingTextureUpdate {
             VkImage image;
             int x, y, width, height;
+            uint32_t mipLevel = 0;
             std::vector<unsigned char> data;
         };
         std::vector<PendingTextureUpdate> m_pendingTextureUpdates;
@@ -284,6 +290,12 @@ namespace Render {
             VkFilter             minFilter = VK_FILTER_NEAREST;
             VkSamplerAddressMode addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             VkSamplerAddressMode addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            // Selected by the *_MIPMAP_* filter modes. Inert while mipLevels
+            // is 1, because the sampler's maxLod is then 0.
+            VkSamplerMipmapMode  mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            // Needed to reallocate the image in ReserveTextureMipLevels; an
+            // image's mip count is fixed at creation in Vulkan.
+            VkFormat             format = VK_FORMAT_R8G8B8A8_UNORM;
         };
         std::unordered_map<uint32_t, VKTextureInfo> m_textures;
 

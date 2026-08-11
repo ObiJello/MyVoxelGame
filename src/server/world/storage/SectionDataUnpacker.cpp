@@ -181,6 +181,24 @@ namespace Game {
             return stateIt->second;
         }
 
+        // Then try each property on its own. The override table is keyed on the
+        // ONE property that selects a different BlockID (`{segment_amount:2}`,
+        // `{half:upper}`, `{snowy:true}`), but a real MC state carries its whole
+        // property set — leaf litter arrives as
+        // `leaf_litter{facing:west,segment_amount:2}`, which the exact-key
+        // lookup above can never match. Without this pass every segmented block
+        // silently collapsed onto its 1-segment BlockID.
+        //
+        // Properties that don't select a variant (a leaf litter's `facing`) are
+        // simply absent from the table and fall through; they're carried by the
+        // state index instead, resolved by the caller.
+        for (const auto& [prop, value] : state.properties) {
+            auto it = s_stateToBlockId.find(state.GetSinglePropertyKey(prop, value));
+            if (it != s_stateToBlockId.end()) {
+                return it->second;
+            }
+        }
+
         // Then try base block name
         std::string normalizedName = NormalizeName(state.name);
         auto nameIt = s_nameToBlockId.find(normalizedName);
@@ -220,6 +238,13 @@ namespace Game {
         state.name = NormalizeName(name);
         state.properties = props;
         state.resolvedId = ResolveBlockState(state);
+        // Vanilla saves the full property map; up to now everything except a
+        // handful of string-keyed special cases was thrown away. Route it
+        // through the block's own state definition so an imported world keeps
+        // its furnace facings, log axes and so on. Properties this block
+        // doesn't model resolve to the default, which is what they should be.
+        state.resolvedState =
+            BlockRegistry::GetStateDefinition(state.resolvedId).IndexOf(props);
         return state;
     }
 
@@ -357,10 +382,12 @@ namespace Game {
             }
 
             // Fill entire section with the single block type
+            const uint8_t singleState = palette[0].resolvedState;
             for (int y = 0; y < ChunkSection::SIZE; ++y) {
                 for (int z = 0; z < ChunkSection::SIZE; ++z) {
                     for (int x = 0; x < ChunkSection::SIZE; ++x) {
                         chunk.sections[sectionIndex]->Set(x, y, z, singleBlock);
+                        chunk.sections[sectionIndex]->SetState(x, y, z, singleState);
                     }
                 }
             }
@@ -520,8 +547,11 @@ namespace Game {
                 int x, y, z;
                 IndexToCoords(blocksProcessed, x, y, z);
 
-                // Set block in section
+                // Set block in section, with the state its saved properties
+                // resolved to (SetState is a no-op while the state stays 0,
+                // so plain terrain never allocates the state plane).
                 section.Set(x, y, z, blockId);
+                section.SetState(x, y, z, palette[paletteIndex].resolvedState);
 
                 // Update statistics
                 blockCounts[blockId]++;

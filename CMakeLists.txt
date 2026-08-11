@@ -8,6 +8,49 @@ project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
 # `glm/glm.hpp`, "C++17 extension" warnings, etc.).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# ── Directory-copy mode for the POST_BUILD asset/shader steps ────────────────
+# `cmake -E copy_directory` rewrites every file unconditionally. For assets/ —
+# 9,650 files — that is ~1.4s added to EVERY build, including one-file
+# rebuilds where nothing under assets/ changed. copy_directory_if_different
+# compares first and writes only what actually differs: measured 1.42s → 0.40s.
+#
+# It needs CMake 3.26; the project's declared minimum is 3.19, so fall back
+# rather than raise the floor for whoever is on an older toolchain.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.26")
+    set(COPY_DIR_CMD copy_directory_if_different)
+else()
+    set(COPY_DIR_CMD copy_directory)
+endif()
+
+# ── Compiler cache ────────────────────────────────────────────────────────────
+# Routes every compile through ccache when it's installed, which turns the
+# expensive-but-repetitive builds — reconfiguring, switching Debug/Release,
+# moving between branches — into cache hits instead of full rebuilds. A cold
+# cache costs a few percent; after that identical TUs are essentially free.
+#
+# Purely opportunistic: no ccache on PATH means these variables stay empty and
+# the build is exactly what it was. Install with `brew install ccache`.
+#
+# PCH note: ccache handles precompiled headers only with `sloppiness` set, so
+# we point it at pch_defines,time_macros below rather than silently missing on
+# every TU that uses src/pch.hpp.
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    # CXX only, deliberately. Our C sources are minizip and crashpad, neither of
+    # which is on the hot path — and crashpad's Mach `mig` step shells out to the
+    # C compiler in a way that does not survive being wrapped (a fresh configure
+    # failed generating child_portUser.c with the launcher on both languages).
+    # This is the case Homebrew's own post-install note warns about.
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    # include_file_mtime/ctime: PCHs embed timestamps that would otherwise make
+    # every entry a miss. pch_defines is required for -include-pch to hit at all.
+    set(ENV{CCACHE_SLOPPINESS} "pch_defines,time_macros,include_file_mtime,include_file_ctime")
+    message(STATUS "ccache: enabled (${CCACHE_PROGRAM})")
+else()
+    message(STATUS "ccache: not found — builds will not be cached "
+                   "(install with `brew install ccache`)")
+endif()
+
 # ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     if(MSVC)
@@ -76,8 +119,20 @@ set(ALSOFT_REQUIRE_NEON OFF CACHE BOOL "Disable ARM NEON requirement" FORCE)
 add_subdirectory(ext/OpenAL)  # static-only OpenAL
 add_subdirectory(ext/stb_image)
 
-# ── Add nlohmann/json library for block model JSON parsing ─────────────────
 include(FetchContent)
+
+# NOTE: do NOT set FETCHCONTENT_UPDATES_DISCONNECTED here.
+#
+# It looks like an easy win — the dependencies below are pinned to fixed tags,
+# so skipping the per-configure `git fetch` should be free. It is not. With it
+# on, FetchContent trusts its stamp files instead of the source tree, so if
+# _deps/<dep>-src is ever disturbed the stamps still claim the dependency is
+# populated and it is never re-cloned. That turns a transient problem into a
+# permanently broken configure, surfacing as `target "sentry::sentry" not
+# found` rather than anything pointing at the real cause. Measured saving was
+# inside the noise of a ~15s configure; not worth that failure mode.
+
+# ── Add nlohmann/json library for block model JSON parsing ─────────────────
 FetchContent_Declare(
         nlohmann_json
         GIT_REPOSITORY https://github.com/nlohmann/json.git
@@ -358,187 +413,22 @@ if(HAS_VULKAN)
 endif()
 
 # 6) The game executable (on macOS, it's a bundle)
-if(APPLE)
-    add_executable(MyVoxelGame MACOSX_BUNDLE
-            src/main.cpp
-            src/platform/PlatformMain.cpp
-            src/platform/Time.cpp
-            src/client/input/Input.cpp
-            src/common/core/Log.cpp
-            src/common/core/JobSystem.cpp
-            src/common/core/ThreadAllocator.cpp
-            src/client/renderer/shader/Shader.cpp
-            src/common/world/block/BlockModel.cpp
-            src/common/world/block/Block.cpp
-            src/server/world/storage/RegionFile.cpp
-            src/server/world/storage/RegionFileCache.cpp
-            src/server/world/storage/NBTParser.cpp
-            src/server/world/storage/RegionDumper.cpp
-            src/common/physics/RayCast.cpp
-            src/common/physics/Physics.cpp
-            src/common/entity/Inventory.cpp
-            src/common/entity/Item.cpp
-            src/common/entity/ItemBehaviors.cpp
-            src/common/entity/ConsumableBehavior.cpp
-            src/common/entity/EquipmentBehavior.cpp
-            src/common/entity/BundleBehavior.cpp
-            src/common/entity/FoodDefs.cpp
-            src/server/player/FoodData.cpp
-            src/common/entity/PortalGunBehavior.cpp  # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/server/portal/PortalRegistry.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/portal/ClientPortalManager.cpp        # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/PortalRenderer.cpp           # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/PortalCameraTransform.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/PortalParticleSystem.cpp     # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/portal/PortalCrosshair.cpp          # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/viewmodel/GltfLoader.cpp            # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/viewmodel/PortalGunViewmodel.cpp    # Features.hpp ENABLE_PORTAL_GUN strips body when off
-            src/client/renderer/viewmodel/HeldItemRenderer.cpp
-            src/client/renderer/viewmodel/HeldItemSpriteMesh.cpp
-            src/common/entity/ItemModelLoader.cpp
-            src/common/entity/ClientItemLoader.cpp
-            src/common/entity/GeneratedItemList.cpp
-            src/common/entity/PlayerColors.cpp
-            src/common/data/DataComponentMap.cpp
-            src/common/data/DataComponents.cpp
-            src/common/world/enchantment/Enchantment.cpp
-            src/common/world/enchantment/ItemEnchantments.cpp
-            src/common/world/enchantment/EnchantmentHelper.cpp
-            src/client/input/PlayerController.cpp
-            src/client/entity/Player.cpp
-            src/client/entity/RemotePlayerManager.cpp
-            src/client/renderer/entity/PlayerRenderer.cpp
-            src/client/renderer/entity/StickFigureGeometry.cpp
-            src/client/renderer/mesh/BlockHighlight.cpp
-            src/client/renderer/mesh/BlockBreakOverlay.cpp
-            src/client/renderer/environment/EnvironmentState.cpp
-            src/client/renderer/environment/SkyRenderer.cpp
-            src/client/renderer/environment/CloudRenderer.cpp
-            src/client/renderer/blockentity/BlockEntityRenderDispatcher.cpp
-            src/client/renderer/blockentity/BlockEntityRenderers.cpp
-            src/client/renderer/blockentity/ChestRenderer.cpp
-            src/client/renderer/mesh/ChunkMegaBuffer.cpp
-            src/client/renderer/mesh/ChunkRenderer.cpp
-            src/client/renderer/mesh/ChunkMeshData.cpp
-            src/client/renderer/mesh/FluidMeshBuilder.cpp
-            src/client/renderer/mesh/Mesher.cpp
-            src/client/renderer/mesh/GPUDataPool.cpp
-            src/client/renderer/culling/VisGraph.cpp
-            src/client/renderer/culling/SectionOcclusionGraph.cpp
-            src/client/renderer/debug/Crosshair.cpp
-            src/client/renderer/gui/GuiAtlas.cpp
-            src/client/renderer/gui/GuiRenderState.cpp
-            src/client/renderer/gui/GuiRenderer.cpp
-            src/client/renderer/gui/GuiGraphics.cpp
-            src/client/renderer/gui/FontRenderer.cpp
-            src/client/renderer/gui/HudRenderer.cpp
-            src/client/renderer/gui/ChatComponent.cpp
-            src/client/renderer/gui/ChatScreen.cpp
-            src/client/renderer/gui/InventoryScreen.cpp
-            src/client/renderer/gui/screens/Widgets.cpp
-            src/client/renderer/gui/screens/Screen.cpp
-            src/client/renderer/gui/screens/PanoramaRenderer.cpp
-            src/client/renderer/gui/screens/TitleScreen.cpp
-            src/client/renderer/gui/screens/OptionsScreens.cpp
-            src/client/renderer/gui/screens/PauseScreen.cpp
-            src/client/renderer/gui/screens/DeathScreen.cpp
-            src/client/renderer/gui/screens/WorldSelectScreens.cpp
-            src/client/renderer/gui/screens/FriendsScreen.cpp
-            src/client/network/FriendsClient.cpp
-            src/client/network/UPnPPortMapper.cpp
-            src/client/renderer/gui/items/ChestItemRenderer.cpp
-            src/client/renderer/gui/items/BedItemRenderer.cpp
-            src/client/renderer/gui/items/ShulkerBoxItemRenderer.cpp
-            src/client/renderer/gui/items/BannerItemRenderer.cpp
-            src/client/renderer/gui/items/HeadItemRenderer.cpp
-            src/client/renderer/gui/items/ShieldItemRenderer.cpp
-            src/client/renderer/gui/items/PlayerInventoryPreview.cpp
-            src/client/renderer/texture/AtlasBuilder.cpp
-            src/client/renderer/texture/TextureAnimator.cpp
-            src/common/world/block/BlockRegistry.cpp
-            src/common/world/block/MiningSpeed.cpp
-            src/common/world/block/entity/BlockEntityTypes.cpp
-            src/server/player/ServerPlayer.cpp
-            src/server/world/storage/SectionDataUnpacker.cpp
-            src/server/world/storage/MinecraftChunkLoader.cpp
-            src/common/world/level/World.cpp
-            src/server/world/ChunkProvider.cpp
-            src/server/world/MyTerrainGenerator.cpp
-            src/common/world/chunk/Chunk.cpp
-            src/server/world/tracking/DirtyTracker.cpp
-            src/server/world/storage/AsyncChunkSaver.cpp
-            src/server/world/storage/AnvilRegionWriter.cpp
-            src/server/world/storage/AnvilChunkSaver.cpp
-            src/server/world/storage/MinecraftChunkLoaderImpl.cpp
-            src/common/world/gen/ProceduralChunkGenerator.cpp
-            src/server/world/cache/ChunkCache.cpp
-            src/platform/GameDirectory.cpp
-            src/common/world/math/WorldCoordinates.cpp
-            # Minecraft Java Edition Architecture files
-            src/server/IntegratedServer.cpp
-            src/server/commands/CommandDispatcher.cpp
-            src/server/commands/TeleportCommand.cpp
-            src/server/commands/KickCommand.cpp
-            src/server/commands/GameModeCommand.cpp
-            src/server/commands/KillCommand.cpp
-            src/server/commands/TimeCommand.cpp
-            src/server/commands/GameRuleCommand.cpp
-            src/common/inventory/Slot.cpp
-            src/common/inventory/AbstractContainerMenu.cpp
-            src/common/inventory/InventoryMenu.cpp
-            src/client/world/ClientChunkManager.cpp
-            src/client/world/ClientBlockAccess.cpp
-            src/client/world/BlockStatePrediction.cpp
-            src/client/world/PendingDiffsManager.cpp
-            src/server/world/ServerWorkerPool.cpp
-            src/client/world/ClientWorkerPool.cpp
-            src/server/world/ignore.cpp
-            src/client/renderer/mesh/ClientMeshManager.cpp
-            # Network layer
-            src/common/network/NetworkConnection.cpp
-            src/server/network/NetworkServer.cpp
-            src/server/network/ServerConnection.cpp
-            src/server/network/listeners/HandshakePacketListener.cpp
-            src/server/network/listeners/LoginPacketListener.cpp
-            src/server/network/listeners/ServerPlayPacketListener.cpp
-            
-            # New session management system
-            src/server/world/ticketing/ChunkTicketManager.cpp
-            src/server/world/watch/ChunkWatchIndex.cpp
-            src/server/world/status/ChunkStatusManager.cpp
-            src/server/world/tracking/SectionChangeAccumulator.cpp
-            src/server/world/tracking/ChunkDeltaBroadcaster.cpp
-            src/server/network/SendScheduler.cpp
-            src/server/session/PlayerSession.cpp
-            src/server/session/PlayerSessionManager.cpp
-            
-            src/common/network/packets/HandshakeC2S.cpp
-            src/common/network/packets/LoginStartC2S.cpp
-            src/common/network/packets/KeepAliveC2S.cpp
-            src/client/network/NetworkClient.cpp
-            src/client/network/ClientConnection.cpp
-            src/client/network/NetworkIOService.cpp
-            src/client/network/ClientPacketHandler.cpp
-
-            # Render backend abstraction
-            src/client/renderer/backend/opengl/GLBackend.cpp
-    )
-    # Add Vulkan backend source if available
-    if(HAS_VULKAN)
-        target_sources(MyVoxelGame PRIVATE
-            src/client/renderer/backend/vulkan/VKBackend.cpp
-        )
-    endif()
-    set_target_properties(MyVoxelGame PROPERTIES
-            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
-    )
-    # Restrict game to arm64-only when using Homebrew Vulkan (arm64-only MoltenVK).
-    # Libraries are still universal so the launcher can link against them.
-    if(GAME_OSX_ARM64_ONLY)
-        set_target_properties(MyVoxelGame PROPERTIES OSX_ARCHITECTURES "arm64")
-    endif()
-else()
-    add_executable(MyVoxelGame
+# ── Game sources ──────────────────────────────────────────────────────────────
+# ONE list, shared by both add_executable() calls below.
+#
+# These used to be two hand-maintained copies, one per platform branch, and they
+# drifted: a file added to only one of them simply wasn't compiled on the other,
+# and the failure surfaced as an undefined symbol at link time pointing at the
+# symbol rather than at the missing source. Add a file here and both platforms
+# get it.
+#
+# Headers are listed alongside their .cpp purely so IDEs group them with the
+# target; CMake ignores them for compilation.
+#
+# NOT here on purpose: src/client/renderer/debug/DebugSystem.cpp, which belongs
+# to the `imgui` target (it needs ImGui's include path and must not see the
+# Boost/Asio-dependent game headers).
+set(GAME_SOURCES
             src/main.cpp
             src/pch.hpp
             src/platform/PlatformMain.cpp
@@ -559,6 +449,7 @@ else()
 
             # Client input
             src/client/input/Input.cpp
+            src/client/input/KeyMapping.cpp
             src/client/input/Input.hpp
             src/client/input/PlayerController.cpp
             src/client/input/PlayerController.hpp
@@ -594,6 +485,7 @@ else()
             src/client/renderer/mesh/BlockBreakOverlay.cpp
             src/client/renderer/mesh/BlockBreakOverlay.hpp
             src/client/renderer/mesh/ChunkMegaBuffer.cpp
+            src/client/renderer/mesh/TranslucentSort.cpp
             src/client/renderer/mesh/ChunkMegaBuffer.hpp
             src/client/renderer/mesh/ChunkMeshData.cpp
             src/client/renderer/mesh/ChunkMeshData.hpp
@@ -632,8 +524,6 @@ else()
             # Client rendering - Debug
             src/client/renderer/debug/Crosshair.cpp
             src/client/renderer/debug/Crosshair.hpp
-            src/client/renderer/debug/DebugSystem.cpp
-            src/client/renderer/debug/DebugSystem.hpp
 
             # Client rendering - GUI
             src/client/renderer/gui/GuiAtlas.hpp
@@ -652,8 +542,14 @@ else()
             src/client/renderer/gui/ChatComponent.cpp
             src/client/renderer/gui/ChatScreen.hpp
             src/client/renderer/gui/ChatScreen.cpp
+            src/client/renderer/gui/AbstractContainerScreen.hpp
+            src/client/renderer/gui/AbstractContainerScreen.cpp
             src/client/renderer/gui/InventoryScreen.hpp
             src/client/renderer/gui/InventoryScreen.cpp
+            src/client/renderer/gui/CreativeModeInventoryScreen.hpp
+            src/client/renderer/gui/CreativeModeInventoryScreen.cpp
+            src/client/renderer/gui/CraftingScreen.hpp
+            src/client/renderer/gui/CraftingScreen.cpp
 
             # Client rendering - Menu screens (title / options tree)
             src/client/renderer/gui/screens/Widgets.hpp
@@ -699,6 +595,7 @@ else()
 
             # Client rendering - Texture
             src/client/renderer/texture/AtlasBuilder.cpp
+            src/client/renderer/texture/MipmapGenerator.cpp
             src/client/renderer/texture/AtlasBuilder.hpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/client/renderer/texture/TextureAnimator.hpp
@@ -734,11 +631,15 @@ else()
 
             # Common world - Block
             src/common/world/block/BlockModel.cpp
+            src/common/world/block/BlockStateModels.cpp
+            src/common/world/block/BlockPlacement.cpp
+            src/common/world/biome/Biomes.cpp
             src/common/world/block/BlockModel.hpp
             src/common/world/block/Block.cpp
             src/common/world/block/Block.hpp
             src/common/world/block/BlockInteraction.hpp
             src/common/world/block/BlockRegistry.cpp
+            src/common/world/block/BlockBehaviors.cpp
             src/common/world/block/BlockRegistry.hpp
             src/common/world/block/Blocks.hpp
             src/common/world/block/MiningSpeed.cpp
@@ -812,6 +713,7 @@ else()
             src/server/commands/TimeCommand.cpp
             src/server/commands/GameRuleCommand.hpp
             src/server/commands/GameRuleCommand.cpp
+            src/server/commands/SeedCommand.cpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp
@@ -834,8 +736,20 @@ else()
             src/common/inventory/Slot.hpp
             src/common/inventory/AbstractContainerMenu.cpp
             src/common/inventory/AbstractContainerMenu.hpp
+            src/common/inventory/AbstractCraftingMenu.cpp
+            src/common/inventory/AbstractCraftingMenu.hpp
+            src/common/inventory/SimpleContainer.hpp
+            src/common/inventory/MenuType.hpp
             src/common/inventory/InventoryMenu.cpp
             src/common/inventory/InventoryMenu.hpp
+            src/common/inventory/CraftingMenu.cpp
+            src/common/inventory/CraftingMenu.hpp
+
+            # Crafting recipes (generated table + matcher)
+            src/common/world/crafting/GeneratedRecipeList.hpp
+            src/common/world/crafting/GeneratedRecipeList.cpp
+            src/common/world/crafting/RecipeManager.hpp
+            src/common/world/crafting/RecipeManager.cpp
 
             # Server world - Cache
             src/server/world/cache/ChunkCache.cpp
@@ -969,7 +883,26 @@ else()
             src/client/renderer/viewmodel/HeldItemRenderer.hpp
             src/client/renderer/viewmodel/HeldItemSpriteMesh.cpp
             src/client/renderer/viewmodel/HeldItemSpriteMesh.hpp
+)
+
+if(APPLE)
+    add_executable(MyVoxelGame MACOSX_BUNDLE ${GAME_SOURCES})
+    # Add Vulkan backend source if available
+    if(HAS_VULKAN)
+        target_sources(MyVoxelGame PRIVATE
+            src/client/renderer/backend/vulkan/VKBackend.cpp
+        )
+    endif()
+    set_target_properties(MyVoxelGame PROPERTIES
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist"
     )
+    # Restrict game to arm64-only when using Homebrew Vulkan (arm64-only MoltenVK).
+    # Libraries are still universal so the launcher can link against them.
+    if(GAME_OSX_ARM64_ONLY)
+        set_target_properties(MyVoxelGame PROPERTIES OSX_ARCHITECTURES "arm64")
+    endif()
+else()
+    add_executable(MyVoxelGame ${GAME_SOURCES})
     # Add Vulkan backend source if available (non-Apple builds)
     if(HAS_VULKAN)
         target_sources(MyVoxelGame PRIVATE
@@ -1178,8 +1111,19 @@ else()
     message(STATUS "Vulkan backend: DISABLED")
 endif()
 
-# ── Generate dSYM and strip binary for Sentry symbolication (Release only) ────
-if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
+# ── Generate dSYM and strip binary for Sentry symbolication ──────────────────
+# DISTRIBUTION builds only (-DJALIN=ON).
+#
+# These used to run on every Apple Release build. dsymutil on the unstripped
+# binary plus strip plus the re-codesign they invalidate dominated the link
+# step, and on a plain Release build the dSYM they produce is never uploaded —
+# it was generated and thrown away on every incremental rebuild. Measured at
+# roughly 20s of a 27s one-file rebuild.
+#
+# This also restores what CLAUDE.md already documents: a Release build without
+# -DJALIN=ON is supposed to be a "normal build, nothing extra".
+option(JALIN "Distribution build: upload debug symbols to Sentry and publish" OFF)
+if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
     add_custom_command(TARGET MyVoxelGame POST_BUILD
         COMMAND dsymutil "$<TARGET_FILE:MyVoxelGame>"
             -o "$<TARGET_BUNDLE_DIR:MyVoxelGame>.dSYM"
@@ -1189,8 +1133,6 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release")
         COMMAND strip -x "$<TARGET_FILE:MyVoxelGame>"
         COMMENT "Stripping debug symbols from release binary"
     )
-    # Upload dSYM to Sentry only when distributing (configure with -DJALIN=ON)
-    option(JALIN "Upload dSYM to Sentry for distribution builds" OFF)
     if(JALIN)
         find_program(SENTRY_CLI sentry-cli)
         if(SENTRY_CLI)
@@ -1235,7 +1177,7 @@ if(APPLE)
     # Step 1: copy the source shaders dir (gets the .vert/.frag GLSL text and
     # any pre-committed .spv fallbacks from when glslc isn't available).
     add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
     )
@@ -1248,13 +1190,13 @@ if(APPLE)
     # dir verbatim.
     if(GLSLC)
         add_custom_command(TARGET MyVoxelGame POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                 "${CMAKE_BINARY_DIR}/shaders"
                 "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
                 COMMENT "Copying freshly-compiled SPIR-V into bundle Resources"
         )
         add_custom_command(TARGET MyVoxelGame POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                 "${CMAKE_BINARY_DIR}/shaders"
                 "${PROJECT_SOURCE_DIR}/shaders"
                 COMMENT "Copying freshly-compiled SPIR-V back into source shaders/ for dev runs"
@@ -1262,19 +1204,19 @@ if(APPLE)
     endif()
     # Copy assets directory for texture atlas and block models
     add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
             "${PROJECT_SOURCE_DIR}/assets"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
     )
 else()
     add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
             "${PROJECT_SOURCE_DIR}/shaders"
             "$<TARGET_FILE_DIR:MyVoxelGame>/shaders"
     )
     # Copy assets directory for texture atlas and block models
     add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
             "${PROJECT_SOURCE_DIR}/assets"
             "$<TARGET_FILE_DIR:MyVoxelGame>/assets"
     )
@@ -1378,11 +1320,22 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         )
 endif()
 
-# ── Re-sign app bundle for Tracy (must be LAST post-build step) ────────────
-# Tracy modifies code pages at runtime, invalidating the code signature.
-# This must run after all other post-build steps (strip, install_name_tool,
-# crashpad_handler copy) that modify binaries in the bundle.
-if(APPLE AND ENABLE_TRACY)
+# ── Re-sign app bundle (must be LAST post-build step) ──────────────────────
+# Every build, not just Tracy ones. Apple Silicon refuses to execute a binary
+# whose signature does not match its pages, and several steps above rewrite the
+# binary after the linker signed it: fix_vulkan_rpath.sh runs install_name_tool
+# (which says so itself — "changes being made to the file will invalidate the
+# code signature"), and the crashpad_handler copy lands inside the bundle.
+#
+# This used to be gated on ENABLE_TRACY and still worked, but only by accident:
+# `strip` ran on every Release build and cctools-port re-signs ad-hoc as a side
+# effect of stripping. Gating strip on JALIN removed that accidental re-sign and
+# the binary started dying in dyld before main with
+# `CODESIGNING, Code 2, Invalid Page` — a crash with no stack in our code at all.
+# Signing explicitly is what should have been holding this up the whole time.
+#
+# Tracy's original reason still applies on top: it mutates code pages at runtime.
+if(APPLE)
     add_custom_command(TARGET MyVoxelGame POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/.sentry-native"
         COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/crashpad_handler"
@@ -1607,7 +1560,7 @@ if(CURL_FOUND)
         # Copy fonts into bundle Resources (Archivo + JetBrains Mono + OFL
         # notices from ext/fonts, Roboto as a last-resort fallback)
         add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                 "${PROJECT_SOURCE_DIR}/ext/fonts"
                 "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/fonts"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1618,7 +1571,7 @@ if(CURL_FOUND)
         # Copy launcher assets if they exist
         if(EXISTS "${PROJECT_SOURCE_DIR}/assets/launcher")
             add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                     "${PROJECT_SOURCE_DIR}/assets/launcher"
                     "$<TARGET_BUNDLE_DIR:ObeyCraftLauncher>/Contents/Resources/launcher"
                 COMMENT "Copying launcher assets"
@@ -1659,7 +1612,7 @@ if(CURL_FOUND)
         # Copy fonts next to executable on Windows (Archivo + JetBrains Mono
         # + OFL notices from ext/fonts, Roboto as a last-resort fallback)
         add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                 "${PROJECT_SOURCE_DIR}/ext/fonts"
                 "$<TARGET_FILE_DIR:ObeyCraftLauncher>/fonts"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -1670,7 +1623,7 @@ if(CURL_FOUND)
         # Copy launcher assets on Windows if they exist
         if(EXISTS "${PROJECT_SOURCE_DIR}/assets/launcher")
             add_custom_command(TARGET ObeyCraftLauncher POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
                     "${PROJECT_SOURCE_DIR}/assets/launcher"
                     "$<TARGET_FILE_DIR:ObeyCraftLauncher>/launcher"
                 COMMENT "Copying launcher assets"

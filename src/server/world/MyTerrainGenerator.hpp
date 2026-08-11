@@ -181,8 +181,8 @@ namespace Game {
 
         void SetConfig(const GenerationConfig& config) override;
         GenerationConfig GetConfig() const override;
-        void SetSeed(int32_t seed) override;
-        int32_t GetSeed() const override;
+        void SetSeed(int64_t seed) override;
+        int64_t GetSeed() const override;
         void SetWorldType(const std::string& worldType) override;
         std::string GetWorldType() const override;
 
@@ -260,7 +260,23 @@ namespace Game {
         // worker's cache resets when the generator epoch advances. Replaces
         // the old mutex-protected member cache, which took ~98k lock/unlock
         // per converted chunk under contention from all worker threads.
-        BlockID MapBlockType(minecraft::world::BlockState* blockState) const;
+        // A generated voxel: the block plus its index into that block's own
+        // state list (BlockRegistry::GetStateDefinition). The state half is
+        // what keeps a generated furnace's facing, a log's axis and a leaf
+        // litter clump's rotation — the library hands us a fully-propertied
+        // BlockState and dropping it collapsed whole families onto their
+        // default state.
+        struct MappedBlock {
+            BlockID id    = BlockID::Air;
+            uint8_t state = 0;
+        };
+
+        MappedBlock MapBlockType(minecraft::world::BlockState* blockState) const;
+
+        // Library Biome* -> our BiomeId, cached per worker thread under the
+        // same bootstrap epoch as MapBlockType (Biome objects are re-created by
+        // the registry on world reload).
+        uint16_t MapBiome(const void* libBiome, const std::string& name) const;
 
         // Shared conversion: terrain-library chunk → game chunk. Iterates
         // section-wise (skipping all-air sections entirely) and writes

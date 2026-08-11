@@ -33,7 +33,11 @@ namespace Game {
         // Physical constants
         static constexpr float WALK_SPEED = 4.317f;        // Walking speed in blocks per second
         static constexpr float SPRINT_SPEED = 5.612f;      // Sprinting speed
-        static constexpr float SNEAK_SPEED = 1.832f;       // Sneaking speed
+        // MC Attributes.SNEAKING_SPEED (default 0.3). Sneaking is an INPUT
+        // scale applied in LocalPlayer.modifyInput — it is NOT a MOVEMENT_SPEED
+        // modifier the way sprinting is, which is why crouching doesn't change
+        // vanilla's FOV. Effective crouch speed = WALK_SPEED * 0.3 ≈ 1.295 b/s.
+        static constexpr float SNEAKING_SPEED = 0.3f;
         static constexpr float JUMP_VELOCITY = 9.04f;      // Velocity for a 1.25-block jump
         static constexpr float GRAVITY = -32.656f;         // Gravity acceleration
         static constexpr float TERMINAL_VELOCITY = -78.4f; // Terminal velocity
@@ -171,6 +175,12 @@ namespace Game {
 
         // Helper methods that use the block access
         BlockID GetBlock(int x, int y, int z) const;
+        // Index into the block's own state list. Needed alongside GetBlock
+        // wherever a collision shape is built: rotation lives in the model, so
+        // a stair or a segmented ground-cover block occupies a different part
+        // of its cell per state. Block-only accessors report 0 (all default),
+        // which is the correct answer for them.
+        uint8_t GetBlockState(int x, int y, int z) const;
         bool IsBlockSolid(int x, int y, int z) const;
         bool IsChunkLoaded(int chunkX, int chunkZ) const;
     };

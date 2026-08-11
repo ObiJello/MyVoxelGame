@@ -6,6 +6,7 @@
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/ProtocolTypes.hpp"
 #include "common/network/IPacketListener.hpp"
+#include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include <memory>
 #include <string>
 #include <atomic>
@@ -83,6 +84,9 @@ namespace Server {
         
         // Send chat message
         void SendChatMessage(const std::string& message, uint8_t position = 0, uint32_t senderId = 0);
+        // Styled form — colours, click-to-copy, hover text. The plain overload
+        // above wraps a single unstyled run, so existing callers are unchanged.
+        void SendChatMessage(const Network::ChatMessageS2CPacket& packet);
         
         // Send keep-alive
         void SendKeepAlive(uint64_t id);
@@ -100,8 +104,10 @@ namespace Server {
         // Send player abilities + game mode built from the live ServerPlayer
         // (MC ClientboundPlayerAbilitiesPacket + CHANGE_GAME_MODE folded).
         void SendPlayerAbilities(const ServerPlayer& player);
-        // Survival-default placeholder for login (ServerPlayer not built yet).
-        void SendPlayerAbilitiesDefault();
+        // Login-time abilities, built from the world's game mode. The
+        // ServerPlayer doesn't exist yet at this point, but the mode does —
+        // see the definition for why this must NOT be a survival placeholder.
+        void SendPlayerAbilitiesForJoin();
 
         // Authoritative teleport (matches MC's ServerGamePacketListenerImpl.teleport overload).
         // Increments awaiting-teleport id, snaps the player's ServerPlayer position, and sends

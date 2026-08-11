@@ -14,6 +14,7 @@
 // this interface.
 #pragma once
 
+#include "../inventory/MenuType.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 
@@ -48,6 +49,21 @@ namespace Game {
         // state is already local and will be corrected by the server's
         // InventorySetSlotS2C if it disagrees.
         virtual void markSlotDirty(int slotIndex) = 0;
+
+        // MC Player.openMenu — a block just asked for its container UI.
+        //
+        // A REQUEST, not the open itself. The server records it and
+        // PlayerSession performs the menu swap + packets the moment the use
+        // dispatch returns; the client, which runs the same dispatch to
+        // predict, does nothing here and waits for OpenScreenS2C. That split is
+        // deliberate: the container id is the server's to assign, so a client
+        // that opened its own menu would be clicking against an id the server
+        // has never heard of. What the client DOES get from the shared dispatch
+        // is the UseResult, which is what stops it predicting a block placement.
+        virtual void OpenMenu(MenuType type, const glm::ivec3& pos) {
+            (void)type;
+            (void)pos;
+        }
     };
 
 } // namespace Game

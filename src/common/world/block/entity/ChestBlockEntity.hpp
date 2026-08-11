@@ -40,18 +40,22 @@ namespace Game {
         // Auto-close lid arrives with Stage 4; nothing to tick yet.
         bool NeedsTicking() const override { return false; }
 
-        // Facing direction, set at placement time from the player's yaw
-        // (see PlayerSession::HandleUseItemOn). Defaults to North if the
-        // BE was created without a placement context (e.g. world-load
-        // before persistence ships).
-        HorizontalDirection facing = HorizontalDirection::North;
-
+        // Facing deliberately does NOT live here. In vanilla, orientation is a
+        // blockstate property and a chest's block entity carries none — the
+        // whole field set is items + openersCounter + chestLidController
+        // (ChestBlockEntity.java:33-35), and ChestRenderer reads the angle off
+        // the block (ChestRenderer.java:67). We match that: the facing is on the
+        // block's state, written at placement by the shared placement table and
+        // replicated with the block itself, so it needs no separate BE sync and
+        // survives a world reload with the chunk rather than alongside it.
+        //
+        // The byte written here keeps the on-wire/on-disk BE payload non-empty
+        // and reserved for the lid/inventory data that follows.
         void Save(Network::PacketBuffer& out) const override {
-            out.WriteByte(static_cast<uint8_t>(facing));
+            out.WriteByte(0);
         }
         void Load(Network::PacketReader& in) override {
-            const uint8_t f = in.ReadByte();
-            facing = (f < 4) ? static_cast<HorizontalDirection>(f) : HorizontalDirection::North;
+            if (in.Remaining() >= 1) (void)in.ReadByte();
         }
     };
 

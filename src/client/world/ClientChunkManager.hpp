@@ -159,7 +159,8 @@ namespace Client {
         // disagrees. `sequence` must be the same sequence carried by the C2S
         // packet for this interaction — that's what the server's
         // BlockChangedAckS2C refers to.
-        void PredictBlockChange(const glm::ivec3& pos, Game::BlockID newBlock, uint32_t sequence);
+        void PredictBlockChange(const glm::ivec3& pos, Game::BlockID newBlock, uint32_t sequence,
+                                uint8_t stateIndex = 0);
 
         // BlockChangedAckS2C arrived: retire predictions up to `sequence`,
         // snapping back anywhere the server disagreed with us.
@@ -168,10 +169,13 @@ namespace Client {
         // Read the live client block state (Air when the chunk isn't loaded).
         Game::BlockID GetBlockAt(const glm::ivec3& pos) const;
 
+        // Block + block-state index together (0 when the chunk isn't loaded).
+        std::pair<Game::BlockID, uint8_t> GetBlockAndStateAt(const glm::ivec3& pos) const;
+
         // Write a block into the client's chunk store and mark the affected
         // sections dirty. This is the shared body behind ProcessBlockChange,
         // predictions and rollbacks.
-        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId);
+        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, uint8_t stateIndex = 0);
         
 
         // Mark individual section dirty for mesh rebuilding
@@ -192,6 +196,9 @@ namespace Client {
 
         // Get client chunk by position
         ClientChunk* GetChunk(Game::Math::ChunkPos chunkPos);
+
+        // Biome id at a world position, across chunk borders. 0 = fallback.
+        uint16_t BiomeAtWorld(int worldX, int worldY, int worldZ);
         const ClientChunk* GetChunk(Game::Math::ChunkPos chunkPos) const;
 
         // Check chunk state

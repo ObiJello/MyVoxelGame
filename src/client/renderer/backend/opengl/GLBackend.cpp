@@ -284,7 +284,8 @@ namespace Render {
 
         size_t memSize = static_cast<size_t>(width) * height * bytesPerPixel;
         uint32_t handle = AllocHandle();
-        m_textures[handle] = {glId, width, height, memSize};
+        m_textures[handle] = {glId, width, height, memSize,
+                              internalFormat, dataFormat, dataType};
 
         m_memStats.textureMemory += memSize;
         m_memStats.totalAllocated += memSize;
@@ -333,6 +334,45 @@ namespace Render {
 
         glBindTexture(GL_TEXTURE_2D, it->second.glId);
         glGenerateMipmap(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void GLBackend::UploadTextureMipLevel(TextureHandle handle, int level,
+                                          int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        // glTexImage2D rather than glTexSubImage2D: level > 0 has no storage
+        // until it is declared, and the atlas hands us a complete level.
+        glTexImage2D(GL_TEXTURE_2D, level,
+                     static_cast<GLint>(it->second.internalFormat),
+                     width, height, 0,
+                     it->second.dataFormat, it->second.dataType, data);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void GLBackend::UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
+                                         int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        glTexSubImage2D(GL_TEXTURE_2D, level, x, y, width, height,
+                        it->second.dataFormat, it->second.dataType, data);
+        glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void GLBackend::ReserveTextureMipLevels(TextureHandle handle, int maxLevel) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+
+        // GL grows a mip chain lazily as levels are declared, so unlike Vulkan
+        // there is nothing to reallocate here — capping the range is enough,
+        // and level 0's contents survive.
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, maxLevel);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 

@@ -11,12 +11,22 @@
 #include "../portal/ClientPortalManager.hpp"
 #endif
 
-// Forward declaration: defined in src/client/renderer/gui/InventoryScreen.cpp.
-// Lets the inventory carried-item update flow without pulling the GUI header here.
+// Forward declaration: defined in
+// src/client/renderer/gui/AbstractContainerScreen.cpp. Lets the inventory
+// carried-item update flow without pulling the GUI header here. All three write
+// the shared player inventory menu, so they land whichever screen is open.
 namespace Render {
     void SetInventoryScreenCarriedItem(const Game::ItemStack& stack);
     void SetInventoryScreenStateId(uint32_t id);
     void SetInventoryScreenContainerId(uint32_t id);
+    // Container contents + menu swapping. Slot indices are MENU indices; see
+    // AbstractContainerScreen.hpp for why they can't be written straight into
+    // the inventory.
+    void ApplyContainerSlot(int menuIndex, const Game::ItemStack& stack);
+    void ApplyContainerFullSync(Game::MenuType menuType, uint32_t containerId,
+                                const std::vector<Game::ItemStack>& slots);
+    void OpenClientContainerScreen(Game::MenuType type, uint32_t containerId,
+                                   const std::string& title);
     // Defined in screens/DeathScreen.cpp — death flow hooks (health<=0 opens,
     // health>0 closes). Same no-GUI-header convention as above.
     void ShowDeathScreen();
@@ -106,11 +116,11 @@ namespace Client {
         }
         
         // Process each packed record
-        for (uint32_t packedRecord : packet.packedRecords) {
-            uint8_t localX, localY, localZ;
+        for (uint64_t packedRecord : packet.packedRecords) {
+            uint8_t localX, localY, localZ, stateIndex;
             uint16_t blockId;
             Network::ClientboundSectionBlocksUpdateS2CPacket::UnpackRecord(
-                packedRecord, localX, localY, localZ, blockId);
+                packedRecord, localX, localY, localZ, blockId, stateIndex);
             
             // Convert section-local to world coordinates
             int worldX = packet.chunkPos.x * 16 + localX;
@@ -123,6 +133,7 @@ namespace Client {
             singleChange.worldY = worldY;
             singleChange.worldZ = worldZ;
             singleChange.newBlockId = static_cast<Game::BlockID>(blockId);
+            singleChange.newBlockState = stateIndex;
             singleChange.playSound = false; // Don't play sound for bulk changes
             singleChange.updateNeighbors = false;
             
@@ -149,6 +160,7 @@ namespace Client {
             singleChange.worldY = change.localY;
             singleChange.worldZ = packet.chunkPos.z * 16 + change.localZ;
             singleChange.newBlockId = change.blockId;
+            singleChange.newBlockState = change.blockState;
             singleChange.playSound = false; // Don't play sound for bulk changes
             singleChange.updateNeighbors = false;
             
@@ -260,7 +272,8 @@ namespace Client {
         m_stats.packetsProcessed++;
         if (!m_player) return;
 
-        m_player->gameMode     = packet.gameMode;
+        m_player->gameMode      = packet.gameMode;
+        m_player->gameModeKnown = true;
         m_player->invulnerable = packet.invulnerable();
         m_player->instabuild   = packet.instabuild();
         m_player->flyingSpeed  = packet.flyingSpeed;
@@ -348,19 +361,24 @@ namespace Client {
 
     void ClientPacketHandler::handleInventoryFull(const Network::InventoryFullS2CPacket& packet) {
         if (!m_player) return;
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            // SetSlotFull, NOT SetSlot — SetSlot rebuilds the stack from
-            // (id, count) and silently drops per-stack DataComponents.
-            m_player->inventory.SetSlotFull(i, packet.slots[i]);
-        }
+        // Slots are MENU indices, so they go through the menu rather than
+        // straight into the inventory: while a crafting table is open, menu
+        // slot 10 is inventory slot 9 and menu slots 0..9 are the table's own
+        // grid. ApplyContainerFullSync also brings the client's menu into
+        // agreement with `menuType` first, so those indices mean the right
+        // thing before anything is written.
+        ::Render::ApplyContainerFullSync(packet.menuType, packet.containerId, packet.slots);
+        // Not a menu concept — the hotbar selection outlives whatever is open.
         m_player->inventory.SetSelectedSlot(packet.selectedHotbarSlot);
         // Remember the revision this snapshot describes so subsequent clicks
         // can be stamped with it (MC ServerboundContainerClickPacket.stateId).
         ::Render::SetInventoryScreenStateId(packet.stateId);
-        // Only the full snapshot carries containerId (it changes on close, and
-        // close always full-syncs), so this is the one place it is learned.
+        // Only the full snapshot carries containerId (it changes whenever a
+        // menu opens or closes, and both full-sync), so this is the one place
+        // it is learned.
         ::Render::SetInventoryScreenContainerId(packet.containerId);
-        Log::Debug("[ClientPacketHandler] Inventory full sync: selected=%d carried=%u(%d)",
+        Log::Debug("[ClientPacketHandler] Container full sync: menu=%u slots=%zu selected=%d carried=%u(%d)",
+                   static_cast<unsigned>(packet.menuType), packet.slots.size(),
                    packet.selectedHotbarSlot, packet.carried.itemId, packet.carried.count);
         // Push the carried portion through the same path so it lands on the screen.
         Network::InventorySetCarriedS2CPacket carried{packet.carried};
@@ -370,14 +388,25 @@ namespace Client {
 
     void ClientPacketHandler::handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet) {
         if (!m_player) return;
-        // SetSlotFull preserves per-stack DataComponents (see handleInventoryFull).
-        m_player->inventory.SetSlotFull(packet.slotIndex, packet.stack);
+        // MENU index — routed through the menu, same as the full sync.
+        ::Render::ApplyContainerSlot(packet.slotIndex, packet.stack);
         ::Render::SetInventoryScreenStateId(packet.stateId);
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleOpenScreen(const Network::OpenScreenS2CPacket& packet) {
+        // Mirrors ClientPacketListener.handleOpenScreen: build the menu the
+        // server named and show its screen. The contents follow immediately in
+        // a full snapshot.
+        ::Render::OpenClientContainerScreen(packet.menuType, packet.containerId, packet.title);
+        Log::Debug("[ClientPacketHandler] Open screen: menu=%u container=%u '%s'",
+                   static_cast<unsigned>(packet.menuType), packet.containerId,
+                   packet.title.c_str());
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet) {
-        // Defined in InventoryScreen.cpp; forward-declared at file scope at the top of this file
+        // Defined in AbstractContainerScreen.cpp; forward-declared at file scope at the top of this file
         // (avoids pulling in the GUI header from the network handler).
         ::Render::SetInventoryScreenCarriedItem(packet.stack);
         ::Render::SetInventoryScreenStateId(packet.stateId);

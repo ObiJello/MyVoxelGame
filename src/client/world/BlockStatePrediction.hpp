@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 
 namespace Client {
 
@@ -46,9 +47,12 @@ namespace Client {
         // Applies an authoritative block state to the live client world.
         // Supplied by the owner (ClientChunkManager) so this class stays free
         // of chunk-storage details.
-        using ApplyFn = std::function<void(const glm::ivec3& pos, Game::BlockID state)>;
+        // `stateIndex` is the block-state index (MC BlockState.getId()); it must
+        // travel with the BlockID everywhere in here, or rolling back a rejected
+        // prediction would restore the right block facing the wrong way.
+        using ApplyFn = std::function<void(const glm::ivec3& pos, Game::BlockID state, uint8_t stateIndex)>;
         // Reads the live client world — used to skip no-op reconciliations.
-        using ReadFn  = std::function<Game::BlockID(const glm::ivec3& pos)>;
+        using ReadFn  = std::function<std::pair<Game::BlockID, uint8_t>(const glm::ivec3& pos)>;
 
         void SetHooks(ApplyFn apply, ReadFn read) {
             m_apply = std::move(apply);
@@ -62,13 +66,14 @@ namespace Client {
         // sequence — the originally retained state is kept, so a burst of
         // predictions on one block still rolls all the way back if the server
         // rejects the whole burst.
-        void Retain(const glm::ivec3& pos, Game::BlockID knownServerState, uint32_t sequence);
+        void Retain(const glm::ivec3& pos, Game::BlockID knownServerState,
+                    uint8_t knownServerStateIndex, uint32_t sequence);
 
         // MC: BlockStatePredictionHandler.updateKnownServerState.
         // Returns true when `pos` has an outstanding prediction — the caller
         // must then NOT write to the live world; the state is filed here and
         // applied (if still needed) when the prediction retires.
-        bool RecordServerState(const glm::ivec3& pos, Game::BlockID state);
+        bool RecordServerState(const glm::ivec3& pos, Game::BlockID state, uint8_t stateIndex);
 
         // MC: BlockStatePredictionHandler.endPredictionsUpTo.
         // Retires every record with sequence <= `sequence`, snapping the world
@@ -86,6 +91,7 @@ namespace Client {
         struct Record {
             uint32_t      sequence = 0;
             Game::BlockID serverState = Game::BlockID::Air;
+            uint8_t       serverStateIndex = 0;
         };
 
         // Block positions pack into a single key the same way MC uses

@@ -91,8 +91,27 @@ The game vendors several MC asset/code snapshots that need to be kept in sync wh
 | Lang file | `assets/lang/en_us.json` | `assets/minecraft/lang/en_us.json` |
 | Items.java decompile | `minecraft_code/decompiled_net/minecraft/world/item/Items.java` | decompiled `net/minecraft/world/item/Items.class` |
 | Terrain library snapshot | `src/my_terrain_library/` | (separate vendored project — see "Terrain Library Patches" below) |
+| Recipes + item tags | `data/minecraft/recipe/`, `data/minecraft/tags/item/` | server jar `data/minecraft/**` |
 
 After overwriting `Items.java`, **regenerate** the item table (see next section). After overwriting `src/my_terrain_library/`, **re-apply patches** (see "Terrain Library Patches").
+
+### Crafting recipes
+
+`data/` is NOT copied into the app bundle (only `assets/` is), so recipes are
+baked into C++ instead of parsed at runtime. After overwriting
+`data/minecraft/recipe/` and `data/minecraft/tags/item/`, regenerate:
+
+```bash
+python3 tools/gen_recipes.py    # → src/common/world/crafting/GeneratedRecipeList.{hpp,cpp}
+```
+
+The generator flattens `#minecraft:*` item tags, shrinks shaped patterns the way
+`ShapedRecipePattern.shrink` does, and interns duplicate ingredient sets. It
+covers `crafting_shaped` / `crafting_shapeless` / `crafting_transmute`; smelting,
+stonecutting, smithing and the code-driven `crafting_special_*` types are skipped
+(no menus for them yet). Slugs resolve to ItemIDs at startup in
+`Game::RecipeManager::Initialize`, so a recipe naming an item we don't have drops
+with a log rather than failing the load — the count is printed at boot.
 
 ### When MC ships new items
 

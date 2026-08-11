@@ -94,29 +94,35 @@ namespace Render {
             f << j.dump(2);
         }
 
-        int32_t ResolveSeed(const std::string& text) {
+        int64_t ResolveSeed(const std::string& text) {
             // Trim whitespace.
             std::string s = text;
             while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
             while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))  s.pop_back();
 
             if (s.empty()) {
-                static std::mt19937 rng(std::random_device{}());
-                return static_cast<int32_t>(rng());
+                static std::mt19937_64 rng(std::random_device{}());
+                return static_cast<int64_t>(rng());
             }
-            // Numeric? (MC: Long.parseLong, else hashCode). Engine seed is int32,
-            // so numeric values truncate to the low 32 bits.
+            // MC WorldOptions.parseSeed: Long.parseLong, falling back to the
+            // string's Java hashCode. The numeric branch is 64-bit — a real
+            // Minecraft seed does not fit in 32 bits, and truncating it
+            // generates a different world from the one that seed makes in
+            // vanilla (different terrain AND different biomes at the same
+            // coordinates).
             char* end = nullptr;
             long long v = std::strtoll(s.c_str(), &end, 10);
             if (end && *end == '\0') {
-                return static_cast<int32_t>(v);
+                return static_cast<int64_t>(v);
             }
-            // Java String.hashCode(): h = 31*h + c over the characters.
+            // Java String.hashCode(): h = 31*h + c over the characters. This
+            // stays 32-bit and is then widened, exactly as Java does — the cast
+            // to long happens after the hash in parseSeed.
             int32_t h = 0;
             for (unsigned char c : s) {
                 h = static_cast<int32_t>(31u * static_cast<uint32_t>(h) + c);
             }
-            return h;
+            return static_cast<int64_t>(h);
         }
 
     } // namespace WorldList

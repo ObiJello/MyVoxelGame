@@ -156,6 +156,27 @@ namespace Render {
         return true;
     }
 
+    bool ChunkMegaBuffer::UpdateSectionIndices(const MegaBufferSectionKey& key,
+                                               const uint16_t* indexData, size_t indexCount) {
+        if (!g_renderBackend || !indexData) return false;
+
+        auto it = m_regions.find(key);
+        if (it == m_regions.end()) return false;
+
+        const Region& region = it->second;
+        // Same-size overwrite only. A re-sort permutes quads, so the count is
+        // invariant; anything else would need a fresh allocation and is a bug
+        // in the caller rather than something to silently accommodate.
+        if (indexCount != region.indexCount) return false;
+        if (region.slabIndex >= m_slabs.size()) return false;
+
+        g_renderBackend->UpdateBuffer(m_slabs[region.slabIndex].ibo,
+                                      region.indexOffset * INDEX_SIZE,
+                                      indexCount * INDEX_SIZE,
+                                      indexData);
+        return true;
+    }
+
     void ChunkMegaBuffer::RemoveSection(const MegaBufferSectionKey& key) {
         auto it = m_regions.find(key);
         if (it == m_regions.end()) return;

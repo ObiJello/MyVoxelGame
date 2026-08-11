@@ -372,6 +372,20 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    class OpenScreenS2CPacketImpl : public IS2CPacket {
+    private:
+        OpenScreenS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit OpenScreenS2CPacketImpl(OpenScreenS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onOpenScreenS2C(m_data); }
+        const OpenScreenS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::OpenScreenS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     // ========================================================================
     // PLAYER STATS
     // ========================================================================

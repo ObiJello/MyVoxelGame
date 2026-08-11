@@ -229,7 +229,7 @@ namespace Game {
         return m_config;
     }
 
-    void ProceduralChunkGenerator::SetSeed(int32_t seed) {
+    void ProceduralChunkGenerator::SetSeed(int64_t seed) {
         {
             std::lock_guard<std::mutex> lock(m_configMutex);
             m_config.seed = seed;
@@ -241,7 +241,7 @@ namespace Game {
         }
     }
 
-    int32_t ProceduralChunkGenerator::GetSeed() const {
+    int64_t ProceduralChunkGenerator::GetSeed() const {
         std::lock_guard<std::mutex> lock(m_configMutex);
         return m_config.seed;
     }

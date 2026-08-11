@@ -15,7 +15,7 @@ namespace Server {
 class SectionChangeAccumulator {
 public:
     // Change record: packed local index -> final block state
-    using ChangeRecord = std::pair<uint16_t, Game::BlockID>;
+    using ChangeRecord = std::pair<uint16_t, Game::BlockStateRef>;
     using SectionChanges = std::vector<ChangeRecord>;
     
     SectionChangeAccumulator();
@@ -25,10 +25,10 @@ public:
     
     // Called by World::SetBlock to record a block change
     // Thread-safe: can be called from multiple threads
-    void accumulate(const Game::Math::SectionPos& sp, uint16_t localIdx, Game::BlockID state);
+    void accumulate(const Game::Math::SectionPos& sp, uint16_t localIdx, Game::BlockStateRef state);
     
     // Convenience overload with unpacked coordinates
-    void accumulate(const Game::Math::SectionPos& sp, uint8_t localX, uint8_t localY, uint8_t localZ, Game::BlockID state);
+    void accumulate(const Game::Math::SectionPos& sp, uint8_t localX, uint8_t localY, uint8_t localZ, Game::BlockStateRef state);
     
     // === FLUSHING ===
     
@@ -72,10 +72,10 @@ private:
     struct DeltaBucket {
         // Map of packed index to final block state
         // If same block is changed multiple times in a tick, keep only the last state
-        std::unordered_map<uint16_t, Game::BlockID> changes;
+        std::unordered_map<uint16_t, Game::BlockStateRef> changes;
         
         // Add or update a change
-        void add(uint16_t idx, Game::BlockID state) {
+        void add(uint16_t idx, Game::BlockStateRef state) {
             changes[idx] = state;  // Overwrites if exists (dedup)
         }
         

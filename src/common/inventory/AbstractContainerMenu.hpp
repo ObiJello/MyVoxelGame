@@ -71,6 +71,14 @@ namespace Game {
         // replaced or closed, and is dropped. Bumped on close.
         uint32_t containerId = 1;
 
+        // MC AbstractContainerMenu.stateId — the revision of the last full sync
+        // the CLIENT received. Stamped onto every outgoing click so the server
+        // can spot one predicted against stale state. Lives on the menu rather
+        // than on a screen because both inventory screens share this menu and
+        // must agree about which snapshot they are clicking against. The server
+        // keeps its own authoritative counter in PlayerSession.
+        uint32_t stateId = 0;
+
         // ── Click dispatch ────────────────────────────────────────────────
         // Apply one click. Same call on both sides: the client runs it to
         // predict, the server to decide.
@@ -79,6 +87,31 @@ namespace Game {
         // MC AbstractContainerMenu.quickMoveStack — where does a shift-click on
         // `slotIndex` send its contents? Menu-specific, hence abstract.
         virtual void QuickMoveStack(int slotIndex, ContainerClickResult& result) = 0;
+
+        // MC AbstractContainerMenu.slotsChanged — this menu's contents moved;
+        // recompute anything derived from them. The crafting menus re-run the
+        // recipe lookup here and rewrite their result square.
+        //
+        // Called once at the end of every DoClick, and again inside the
+        // quick-move repeat loop so a shift-click on a crafting result can
+        // craft over and over exactly as MC's does. Running it on BOTH sides
+        // means the result square updates the instant you place an ingredient,
+        // with no round trip.
+        virtual void SlotsChanged(ContainerClickResult& result) { (void)result; }
+
+        // MC AbstractContainerMenu.removed — the menu is closing. A menu that
+        // owns storage the player cannot otherwise reach (a crafting grid)
+        // hands it back here so nothing is stranded.
+        virtual void Removed(ContainerClickResult& result) { (void)result; }
+
+        // Menu index of a player-inventory slot, or -1 when this menu does not
+        // show it. The identity for InventoryMenu; offset for menus that put
+        // their own container first. Used by anything holding an inventory
+        // index that needs to speak the menu's index space — notably
+        // PlayerSession's remote-slot bookkeeping.
+        virtual int MenuIndexForInventorySlot(int inventoryIndex) const {
+            return IsValidSlotIndex(inventoryIndex) ? inventoryIndex : -1;
+        }
 
     protected:
         explicit AbstractContainerMenu(Inventory* playerInventory)

@@ -34,7 +34,7 @@ namespace Render {
         //                           metadata persists at this stage).
         bool        useMinecraftSave = true;
         std::string worldName;
-        int32_t     seed     = 0;
+        int64_t     seed     = 0;
         int         gameMode = 1;   // 0 = Survival, 1 = Creative
         long long   dayTime  = 6000;          // world time restored from worlds.json (6000 = noon)
         bool        doDaylightCycle = false;  // gamerule restored from worlds.json

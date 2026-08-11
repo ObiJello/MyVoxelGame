@@ -61,12 +61,13 @@ namespace Render {
         FlowDirection flowDir = DetectFlowDirection(blocks, worldX, worldY, worldZ);
 
         // Get fluid tint
-        glm::vec4 tint = GetFluidTint(fluidType);
+        glm::vec4 tint = GetFluidTint(fluidType, worldX, worldY, worldZ);
 
         // Create top surface if exposed to air or different fluid
         Game::BlockID blockAbove = blocks.GetBlock(worldX, worldY + 1, worldZ);
         if (blockAbove == Game::BlockID::Air || !IsSameFluid(blockAbove, fluidType)) {
-            CreateFluidTopSurface(fluidType, worldPos, fluidHeight, flowDir, tint, outMesh);
+            CreateFluidTopSurface(fluidType, worldPos, fluidHeight, flowDir, tint, outMesh,
+                                  ShouldRenderBackwardUpFace(blocks, worldX, worldY, worldZ, fluidType));
         }
 
         // Create side faces for exposed sides
@@ -111,9 +112,27 @@ namespace Render {
         }
     }
 
+    bool FluidMeshBuilder::ShouldRenderBackwardUpFace(const Game::IBlockAccess& blocks,
+                                                      int worldX, int worldY, int worldZ,
+                                                      Game::BlockID fluidType) const {
+        // MC FluidState.java:63-72 — scan the 3x3 centred on the block above.
+        // A neighbour that is neither the same fluid nor a solid render block
+        // means there is a line of sight to the underside of this surface.
+        for (int ox = -1; ox <= 1; ++ox) {
+            for (int oz = -1; oz <= 1; ++oz) {
+                const Game::BlockID id = blocks.GetBlock(worldX + ox, worldY + 1, worldZ + oz);
+                if (IsSameFluid(id, fluidType)) continue;
+                const Game::Block& b = Game::BlockRegistry::Get(id);
+                if (!b.opaque) return true;
+            }
+        }
+        return false;
+    }
+
     void FluidMeshBuilder::CreateFluidTopSurface(Game::BlockID fluidType, glm::vec3 blockPos,
                                                 float height, FlowDirection flow,
-                                                const glm::vec4& tint, SectionMesh& mesh) {
+                                                const glm::vec4& tint, SectionMesh& mesh,
+                                                bool backwardUpFace) {
 
         // **FIXED**: Always use "still" texture for top surface as you requested
         std::string texturePath = GetFluidTextureForFace(fluidType, BlockFace::PositiveY);
@@ -150,6 +169,37 @@ namespace Render {
                 static_cast<uint16_t>(baseIndex + 0), static_cast<uint16_t>(baseIndex + 2),
                 static_cast<uint16_t>(baseIndex + 3)
             });
+
+            // The underside of the surface, for looking up at it from in the
+            // water. The translucent pass back-face culls (as vanilla's does),
+            // so the forward quad alone would vanish from below.
+            //
+            // The four vertices are DUPLICATED rather than re-indexed, exactly
+            // as LiquidBlockRenderer.java:174 re-emits them. Translucent
+            // sorting keys off "quad k occupies vertices 4k..4k+3"; sharing one
+            // vertex block between two quads would break that invariant and
+            // scramble the sort.
+            //
+            // The reversed facing is encoded in the VERTEX order — the same
+            // four vertices walked the other way round the perimeter — and NOT
+            // by reversing the indices. That distinction is load-bearing:
+            // TranslucentSort rebuilds every quad's indices from one forward
+            // template when it re-sorts (MC's MeshData.sortQuads does the same,
+            // which is why LiquidBlockRenderer re-emits vertices rather than
+            // indices). A quad that encoded its facing in the index order was
+            // re-wound forward by the first re-sort and then back-face culled
+            // away — water vanishing chunk by chunk as the sorter reached them.
+            if (backwardUpFace && mesh.translucentVerts.size() + 4 <= 65536) {
+                const uint16_t backBase = static_cast<uint16_t>(mesh.translucentVerts.size());
+                mesh.translucentVerts.insert(mesh.translucentVerts.end(),
+                                             surfaceVerts.rbegin(), surfaceVerts.rend());
+                mesh.translucentIdxs.insert(mesh.translucentIdxs.end(), {
+                    static_cast<uint16_t>(backBase + 0), static_cast<uint16_t>(backBase + 1),
+                    static_cast<uint16_t>(backBase + 2),
+                    static_cast<uint16_t>(backBase + 0), static_cast<uint16_t>(backBase + 2),
+                    static_cast<uint16_t>(backBase + 3)
+                });
+            }
 
             //Log::Debug("Added fluid top surface: %zu vertices, %zu indices", surfaceVerts.size(), 6);
         }
@@ -316,10 +366,21 @@ namespace Render {
         return IsFluid(a) && a == b;
     }
 
-    glm::vec4 FluidMeshBuilder::GetFluidTint(Game::BlockID fluidType) const {
+    glm::vec4 FluidMeshBuilder::GetFluidTint(Game::BlockID fluidType,
+                                            int worldX, int worldY, int worldZ) const {
         switch (fluidType) {
-            case Game::BlockID::Water:
+            case Game::BlockID::Water: {
+                // Biome water colour when the Mesher supplied a resolver. The
+                // config's alpha is kept: MC's water colour carries no alpha of
+                // its own (BiomeColors returns RGB), and transparency here is a
+                // render-layer property rather than a biome one.
+                if (waterTintProvider) {
+                    glm::vec4 c = waterTintProvider(worldX, worldY, worldZ);
+                    c.a = m_config.waterTint.a;
+                    return c;
+                }
                 return m_config.waterTint;
+            }
             case Game::BlockID::Lava:
                 return m_config.lavaTint;
             default:

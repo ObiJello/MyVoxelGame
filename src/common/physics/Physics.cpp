@@ -19,6 +19,10 @@ namespace Game {
         return blockAccess->GetBlock(x, y, z);
     }
 
+    uint8_t PhysicsContext::GetBlockState(int x, int y, int z) const {
+        return blockAccess ? blockAccess->GetBlockState(x, y, z) : 0;
+    }
+
     namespace { PortalPassthroughFn g_portalPassthrough = nullptr; }
     void SetPortalPassthroughFn(PortalPassthroughFn fn) {
         g_portalPassthrough = fn;
@@ -193,13 +197,17 @@ namespace Game {
     }
 
     void UpdateBaseSpeed(PlayerPhysics& physics) {
-        if (physics.isSneaking) {
-            physics.baseSpeed = PlayerPhysics::SNEAK_SPEED;
-        } else if (physics.isSprinting) {
-            physics.baseSpeed = PlayerPhysics::SPRINT_SPEED;
-        } else {
-            physics.baseSpeed = PlayerPhysics::WALK_SPEED;
-        }
+        // Sneaking deliberately does NOT appear here. In MC the two are
+        // different mechanisms: sprinting is a MOVEMENT_SPEED modifier
+        // (SPEED_MODIFIER_SPRINTING, ×1.3 — LivingEntity.java:2162-2170),
+        // while crouching scales the movement INPUT by Attributes.SNEAKING_SPEED
+        // in LocalPlayer.modifyInput and leaves MOVEMENT_SPEED alone. Anything
+        // reading currentSpeed as MC's MOVEMENT_SPEED analogue depends on that
+        // split — notably the speed-driven FOV in PlatformMain, which used to
+        // zoom IN while sneaking because this function folded the two together.
+        // The sneak scale is applied to the movement vector in HandleMovement.
+        physics.baseSpeed = physics.isSprinting ? PlayerPhysics::SPRINT_SPEED
+                                                : PlayerPhysics::WALK_SPEED;
 
         // Reset current speed when changing movement modes
         if (!physics.isSprinting) {
@@ -400,6 +408,23 @@ namespace Game {
                 horizontalMovement = glm::normalize(horizontalMovement) * speed;
             }
 
+            // Sneak: MC LocalPlayer.modifyInput scales the movement input by
+            // Attributes.SNEAKING_SPEED and never touches MOVEMENT_SPEED, so
+            // crouching slows you without widening or narrowing the FOV.
+            //
+            // MC applies it to the raw input vector; this port normalises the
+            // input and multiplies by a speed constant just above, which would
+            // discard any scaling done up front — so the multiply lands here
+            // instead. Same result, since the input direction is unit-length
+            // by the time it gets here.
+            //
+            // isSneaking is already `sneakPressed && !isFlying` (set at the top
+            // of UpdatePlayerPhysics), matching MC's isCrouching requiring
+            // !abilities.flying, so shift-descending in creative is unaffected.
+            if (physics.isSneaking) {
+                horizontalMovement *= PlayerPhysics::SNEAKING_SPEED;
+            }
+
             // Add residual horizontal velocity (set by portal teleports
             // when src=floor/ceiling and dst=wall — the player's vertical
             // fall velocity gets rotated into horizontal exit velocity).
@@ -593,12 +618,22 @@ namespace Game {
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
-                    if (!context.IsBlockSolid(x, y, z)) continue;
-
-                    // Per-block collision: MC's `.noCollision()` blocks
-                    // (flowers, grasses, leaf litter, torches, vines, …)
-                    // get walked straight through, even though IsBlockSolid
-                    // still calls them "solid" for opacity / raycast.
+                    // Per-block collision, and ONLY per-block collision.
+                    // MC has no opacity/render-layer input to collision at
+                    // all — BlockBehaviour.getCollisionShape is the single
+                    // source of truth — so there is deliberately no
+                    // IsBlockSolid pre-filter here. There used to be one,
+                    // and it was the reason a networked client walked
+                    // through leaves while the host didn't: the two sides
+                    // run different IBlockAccess implementations and
+                    // disagreed about "solid" (the client answered with the
+                    // render-layer `opaque` flag, false for every Cutout /
+                    // Translucent block). Reading the registry instead keeps
+                    // host and joiner byte-identical.
+                    //
+                    // `.noCollision()` blocks (flowers, grasses, leaf litter,
+                    // torches, vines, …) plus air and the fluids report
+                    // hasCollision=false and get walked straight through.
                     const BlockID bid = context.GetBlock(x, y, z);
                     if (!BlockRegistry::HasCollision(bid)) continue;
 
@@ -609,7 +644,8 @@ namespace Game {
                     // real shape so the player can stand on a slab without
                     // floating at full-cube height, walk past a fence post
                     // through the gaps, etc.
-                    const auto& shape = BlockRegistry::GetBlockShape(bid);
+                    const auto& shape =
+                        BlockRegistry::GetBlockShape(bid, context.GetBlockState(x, y, z));
                     AABB blockAABB;
                     blockAABB.min = glm::vec3(x, y, z) + shape.min;
                     blockAABB.max = glm::vec3(x, y, z) + shape.max;
@@ -655,17 +691,19 @@ namespace Game {
                 int blockY = static_cast<int>(std::floor(cornerPosition.y));
                 int blockZ = static_cast<int>(std::floor(cornerPosition.z));
 
-                if (!context.IsBlockSolid(blockX, blockY, blockZ)) continue;
-
-                // noCollision blocks don't provide support — you fall through
-                // a flower / leaf-litter pile the same way you walk through it.
+                // Registry collision only — same rule as CheckCollision, and
+                // for the same host/joiner-parity reason. noCollision blocks
+                // don't provide support: you fall through a flower / leaf-
+                // litter pile the same way you walk through it, and air and
+                // the fluids hold nothing up.
                 const BlockID bid = context.GetBlock(blockX, blockY, blockZ);
                 if (!BlockRegistry::HasCollision(bid)) continue;
 
                 // The check point is 0.1 below the foot — confirm it actually
                 // lies inside the block's collision shape (its top surface may
                 // be lower than the cube top for slabs / leaf litter / etc.).
-                const auto& shape = BlockRegistry::GetBlockShape(bid);
+                const auto& shape = BlockRegistry::GetBlockShape(
+                    bid, context.GetBlockState(blockX, blockY, blockZ));
                 const float lx = cornerPosition.x - blockX;
                 const float ly = cornerPosition.y - blockY;
                 const float lz = cornerPosition.z - blockZ;

@@ -104,10 +104,53 @@ namespace Render {
         struct CachedBlockProps {
             bool isOpaque;
             RenderLayer renderLayer;
+            // Whether this block declares any blockstate properties. Lets
+            // ProcessBlock skip the per-voxel state lookup entirely for the
+            // ~99% of blocks that have none.
+            bool hasStates;
+
+            // MC BlockColors.createDefault, flattened. Vanilla dispatches the
+            // tint on the BLOCK and treats tintIndex only as a filter inside
+            // that block's resolver — which is why grass_block (tintindex 0)
+            // takes the GRASS colormap while oak_leaves (also tintindex 0)
+            // takes FOLIAGE. Dispatching on the index alone, as this mesher
+            // used to, cannot express that distinction at all.
+            enum class TintSource : uint8_t {
+                None,      // no resolver registered -> untinted (MC returns -1)
+                Biome,     // blend `tintChannel` over the biome grid
+                Constant,  // fixed colour (spruce / birch leaves)
+                FlowerBed, // tintIndex 0 untinted, otherwise grass
+            };
+            TintSource tintSource = TintSource::None;
+            uint8_t    tintChannel = 0;            // BiomeChannel
+            uint32_t   tintConstant = 0xFFFFFF;
+
+            // MC HalfTransparentBlock.skipRendering: a face touching a
+            // neighbour of the SAME block is dropped. Non-opaque blocks are
+            // invisible to the ordinary occlusion test, so without this every
+            // internal boundary inside a glass wall or an ice sheet is drawn
+            // and blended — which reads as murky, visibly layered glass.
+            //
+            // Identity, not "both translucent": vanilla checks
+            // `neighborState.is(this)`, so glass against stained glass keeps
+            // both faces.
+            bool cullsAgainstSelf = false;
+
+            // Index into s_ctmUVs, or -1 for the great majority of blocks that
+            // have no connected-texture variants. Kept as a slot rather than
+            // 16 inline UV rects because CachedBlockProps is a per-thread array
+            // over every BlockID, and 256 bytes each would cost ~300 KB a
+            // thread to serve eighteen glass types.
+            int16_t ctmSlot = -1;
         };
         static constexpr size_t BLOCK_ID_COUNT = static_cast<size_t>(Game::BlockID::Count);
         static thread_local std::array<CachedBlockProps, BLOCK_ID_COUNT> s_blockPropsCache;
         static thread_local bool s_blockPropsCacheValid;
+        // Atlas rects for a block's connected-texture tiles, indexed by
+        // Render::CTM::SlotFor(). One entry per participating block (see
+        // CachedBlockProps::ctmSlot). Sized to CTM::kMaxVariants (64) so the
+        // header need not pull in ConnectedTextures.hpp; 47 slots are used.
+        static thread_local std::vector<std::array<glm::vec4, 64>> s_ctmUVs;
 
     private:
         MeshConfig m_config;
@@ -127,6 +170,17 @@ namespace Render {
         // Index with [localY+1][localZ+1][localX+1] where local coords are in [-1,16].
         Game::BlockID m_blockCache[18][18][18];
         bool m_opaqueCache[18][18][18];
+        // Interior-only (no halo): a block's own state affects only its own
+        // model. Neighbour lookups are for occlusion and AO, which depend on
+        // the neighbour's block id, not its state.
+        uint8_t m_stateCache[16][16][16];
+        bool    m_stateCacheAllDefault = true;
+        // Biome grid for this section (with the blend margin), or null when
+        // meshing straight off an IBlockAccess. See ResolveBiome.
+        const Client::Render::SectionSnapshot* m_biomeSource = nullptr;
+        // Only set on the direct-access path, where biomes come from the world.
+        const Game::IBlockAccess* m_biomeAccess = nullptr;
+
         int m_sectionBaseWorldX;
         int m_sectionBaseWorldY;
         int m_sectionBaseWorldZ;
@@ -134,6 +188,9 @@ namespace Render {
         void FillBlockCacheFromSnapshot(const Client::Render::SectionSnapshot& snapshot,
                                         Game::Math::ChunkPos chunkPos, int sectionY);
         void DeriveOpaqueCache();
+        uint8_t CachedState(int localX, int sectionLocalY, int localZ) const {
+            return m_stateCacheAllDefault ? 0 : m_stateCache[sectionLocalY][localZ][localX];
+        }
         // Shared meshing body — reads only from m_blockCache/m_opaqueCache
         void BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
         bool GetCachedOpaque(int worldX, int worldY, int worldZ) const;
@@ -147,7 +204,8 @@ namespace Render {
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                          int localX, int localY, int localZ,
-                         int sectionY, Game::BlockID blockId, SectionMesh& mesh);
+                         int sectionY, Game::BlockID blockId, uint8_t stateIndex,
+                         SectionMesh& mesh);
 
         void AddBlockFace(const Game::IBlockAccess& blocks,
                          const Game::BlockModel& model, const Game::Element& element,
@@ -169,6 +227,13 @@ namespace Render {
         bool GetTextureUV(const std::string& texturePath, glm::vec4& uvRect);
 
         // **NEW**: Biome tinting methods for different tint indices
+        // MC BiomeColors' four ColorResolvers.
+        enum class BiomeChannel : uint8_t { Grass, Foliage, DryFoliage, Water };
+
+        uint16_t  ResolveBiome(int worldX, int worldY, int worldZ) const;
+        glm::vec4 BlendedBiomeTint(BiomeChannel channel,
+                                   int worldX, int worldY, int worldZ) const;
+
         glm::vec4 CalculateGrassTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateBiomeTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
@@ -182,7 +247,7 @@ namespace Render {
         std::array<Vertex, 4> CreateFaceVertices(glm::vec3 blockPos, BlockFace face,
                                               const glm::vec4& uvRect, const glm::vec4& tint,
                                               const glm::vec3& elemMin, const glm::vec3& elemMax,
-                                              const glm::vec4& faceUv);
+                                              const glm::vec4& faceUv, int uvRotation);
         glm::vec3 GetFaceNormal(BlockFace face);
 
         // Minecraft-style per-vertex ambient occlusion
@@ -192,6 +257,12 @@ namespace Render {
 
         // Minecraft directional face shading multiplier
         static float GetDirectionalShade(BlockFace face);
+
+        // Which of the four in-plane neighbours of this face are the same
+        // block, as a Render::CTM bitmask in TEXTURE space (left/right/top/
+        // bottom of the sprite, not world axes). Drives connected glass.
+        uint8_t ConnectedTextureMask(Game::BlockID blockId, BlockFace face,
+                                     int worldX, int worldY, int worldZ) const;
 
         // **REMOVED**: WorldYToChunkY() - use Game::Math::WorldCoordinates instead
 

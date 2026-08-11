@@ -12,7 +12,7 @@
 //
 // Seed resolution mirrors MC's WorldOptions.parseSeed():
 //   empty        → random
-//   parses as integer → that value (truncated to the engine's int32 seed)
+//   parses as integer → that value (64-bit, as MC's Long.parseLong)
 //   anything else → Java String.hashCode() of the text
 #pragma once
 
@@ -28,7 +28,7 @@ namespace Render {
     struct WorldEntry {
         std::string name;
         std::string seedText;          // what the user typed ("" = random)
-        int32_t     seed     = 0;      // resolved generator seed
+        int64_t     seed     = 0;      // resolved generator seed
         int         gameMode = 1;      // 0 = Survival, 1 = Creative, 2 = Hardcore
         long long   created    = 0;    // epoch seconds
         long long   lastPlayed = 0;    // epoch seconds
@@ -65,7 +65,7 @@ namespace Render {
         std::vector<WorldEntry> Load();
         void Save(const std::vector<WorldEntry>& worlds);
         // MC seed convention (see file header).
-        int32_t ResolveSeed(const std::string& text);
+        int64_t ResolveSeed(const std::string& text);
     }
 
     // ── Generic yes/no dialog (MC ConfirmScreen) ────────────────────────────

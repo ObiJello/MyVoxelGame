@@ -29,7 +29,43 @@ namespace Game {
         // For now, we won’t actually use it; it’s just a placeholder.
         std::vector<uint16_t> palette;
 
+        // Per-voxel block-state index. This is an index into the OWNING BLOCK's
+        // own state list (BlockRegistry::GetStateDefinition), i.e. exactly MC's
+        // `BlockState.getId()` concept — NOT a bag of raw property bits. Index 0
+        // is always the block's default state (MC `defaultBlockState()`), so a
+        // zero byte is meaningful for every block and needs no interpretation.
+        //
+        // LAZY ON PURPOSE: an empty vector means "every voxel here is at its
+        // default state", which is true for the overwhelming majority of
+        // sections — terrain is stone/dirt/air, none of which have properties.
+        // Allocating eagerly would add 4 KB per section; at render distance 32
+        // that is hundreds of MB of almost entirely zero bytes. The vector is
+        // materialised on the first non-default write and never shrinks back
+        // (a section that had one furnace keeps its 4 KB, which is fine).
+        std::vector<uint8_t> states;
+
         ChunkSection() = default;
+
+        // State index at local (x,y,z). Returns 0 (the block's default state)
+        // when this section has never had a non-default state written.
+        inline uint8_t GetState(int x, int y, int z) const {
+            if (states.empty()) return 0;
+            return states[ static_cast<size_t>(Math::LocalIndex(x, y, z)) ];
+        }
+
+        inline void SetState(int x, int y, int z, uint8_t stateIndex) {
+            if (states.empty()) {
+                // Writing the default into an all-default section is a no-op —
+                // don't pay 4 KB for it.
+                if (stateIndex == 0) return;
+                states.assign(TOTAL, 0);
+            }
+            states[ static_cast<size_t>(Math::LocalIndex(x, y, z)) ] = stateIndex;
+        }
+
+        // True when this section carries no per-voxel state at all. Lets the
+        // chunk serialiser skip the state plane entirely for ordinary terrain.
+        inline bool HasStates() const { return !states.empty(); }
 
         // Retrieve the BlockID at local (x,y,z) ∈ [0..15].
         // Returns a raw uint16_t; you can static_cast<BlockID>(…) when needed.

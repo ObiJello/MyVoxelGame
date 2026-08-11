@@ -1,5 +1,6 @@
 // File: src/client/world/ClientChunkManager.cpp
 #include "ClientChunkManager.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -11,6 +12,8 @@
 #include "../renderer/mesh/ChunkRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include <glad/glad.h>
+#include <unordered_map>
+#include <string>
 #include <algorithm>
 #include <cstring>
 #include <glm/glm.hpp>
@@ -50,8 +53,10 @@ namespace Client {
         // equivalent handler and calls straight into its own setBlock).
         m_prediction.Clear();
         m_prediction.SetHooks(
-            [this](const glm::ivec3& pos, Game::BlockID state) { SetBlockLocal(pos, state); },
-            [this](const glm::ivec3& pos) { return GetBlockAt(pos); });
+            [this](const glm::ivec3& pos, Game::BlockID state, uint8_t stateIndex) {
+                SetBlockLocal(pos, state, stateIndex);
+            },
+            [this](const glm::ivec3& pos) { return GetBlockAndStateAt(pos); });
 
         Log::Info("ClientChunkManager initialized successfully");
     }
@@ -289,6 +294,19 @@ namespace Client {
     // ========================================================================
     // CHUNK ACCESS
     // ========================================================================
+
+    // Biome at an absolute world position, resolved through the chunk map so
+    // it works across chunk borders. Returns 0 (the fallback biome) for a chunk
+    // that is not loaded or carries no biome data.
+    uint16_t ClientChunkManager::BiomeAtWorld(int worldX, int worldY, int worldZ) {
+        const Game::Math::ChunkPos cp =
+            Game::Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        ClientChunk* c = GetChunk(cp);
+        if (!c || !c->chunkData) return Game::kFallbackBiomeId;
+        return c->chunkData->GetBiome(worldX - cp.x * Game::Math::CHUNK_SIZE_X,
+                                      worldY,
+                                      worldZ - cp.z * Game::Math::CHUNK_SIZE_Z);
+    }
 
     ClientChunk* ClientChunkManager::GetChunk(Game::Math::ChunkPos chunkPos) {
         ASSERT_MAIN_THREAD();
@@ -540,7 +558,7 @@ namespace Client {
         // against that prediction instead of being written now. Writing it
         // would undo the player's predicted block for the rest of the round
         // trip — the exact flicker prediction exists to avoid.
-        if (m_prediction.RecordServerState(pos, packet.newBlockId)) {
+        if (m_prediction.RecordServerState(pos, packet.newBlockId, packet.newBlockState)) {
             return;
         }
 
@@ -562,10 +580,11 @@ namespace Client {
             return;
         }
 
-        SetBlockLocal(pos, packet.newBlockId);
+        SetBlockLocal(pos, packet.newBlockId, packet.newBlockState);
     }
 
-    void ClientChunkManager::SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId) {
+    void ClientChunkManager::SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId,
+                                           uint8_t stateIndex) {
         ASSERT_MAIN_THREAD();
         Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
 
@@ -578,7 +597,7 @@ namespace Client {
         int sectionY = (pos.y + 64) >> 4;  // Convert to section index
 
         // Set the block in the chunk
-        chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId);
+        chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId, stateIndex);
 
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY);
@@ -600,9 +619,18 @@ namespace Client {
         return chunk->chunkData->GetBlock(pos.x & 0xF, pos.y, pos.z & 0xF);
     }
 
+    std::pair<Game::BlockID, uint8_t> ClientChunkManager::GetBlockAndStateAt(const glm::ivec3& pos) const {
+        const ClientChunk* chunk = GetChunk({pos.x >> 4, pos.z >> 4});
+        if (!chunk || !chunk->chunkData) return {Game::BlockID::Air, 0};
+        const int lx = pos.x & 0xF, lz = pos.z & 0xF;
+        return { chunk->chunkData->GetBlock(lx, pos.y, lz),
+                 chunk->chunkData->GetBlockState(lx, pos.y, lz) };
+    }
+
     void ClientChunkManager::PredictBlockChange(const glm::ivec3& pos,
                                                 Game::BlockID newBlock,
-                                                uint32_t sequence) {
+                                                uint32_t sequence,
+                                                uint8_t stateIndex) {
         ASSERT_MAIN_THREAD();
         // Only predict into loaded chunks. Predicting into a chunk we don't
         // have would leave a record whose rollback target is a fabricated Air.
@@ -610,9 +638,10 @@ namespace Client {
         if (!chunk || !chunk->chunkData) return;
 
         // Retain BEFORE writing — the retained state is what the server still
-        // believes is there, which is exactly the pre-write block.
-        m_prediction.Retain(pos, GetBlockAt(pos), sequence);
-        SetBlockLocal(pos, newBlock);
+        // believes is there, which is exactly the pre-write block AND its state.
+        const auto [prevBlock, prevState] = GetBlockAndStateAt(pos);
+        m_prediction.Retain(pos, prevBlock, prevState, sequence);
+        SetBlockLocal(pos, newBlock, stateIndex);
     }
 
     void ClientChunkManager::HandleBlockChangedAck(uint32_t sequence) {
@@ -723,6 +752,15 @@ namespace Client {
                             decodedSuccessfully = true;
                         }
                         
+                        // Block-state plane. Absent means every voxel is at its
+                        // block's default state, so drop any stale plane rather
+                        // than leaving one behind from a previous occupant.
+                        if (!sectionData.states.empty() && sectionData.states.size() == 4096) {
+                            section->states = sectionData.states;
+                        } else {
+                            section->states.clear();
+                        }
+
                         if (decodedSuccessfully) {
                             // Initialize section state properly (MC-style)
                             auto& sectionInfo = chunk->sectionInfos[y];
@@ -754,10 +792,41 @@ namespace Client {
             }
         }
         
-        // Copy biome data if groundUp
-        if (packet.groundUpContinuous && !packet.biomeData.empty()) {
-            // TODO: Store biome data in chunk
-            Log::Debug("Applied biome data to chunk (%d, %d)", chunkPos.x, chunkPos.z);
+        // Noise biomes, one id per 4x4x4 cell. Size-checked rather than trusted
+        // so a malformed or version-skewed packet leaves the chunk with no
+        // biome data (every lookup then answers with the fallback) instead of
+        // handing the mesher a short array to index into.
+        if (packet.biomes.size() == static_cast<size_t>(Game::Chunk::BIOME_COUNT)) {
+            chunk->chunkData->biomes = packet.biomes;
+            // One-shot: confirms biomes survive generation -> wire -> client.
+            // Without it a silent break anywhere upstream just looks like
+            // "every chunk is plains", which is indistinguishable from a
+            // colour bug on screen.
+            static bool s_loggedBiomes = false;
+            if (!s_loggedBiomes) {
+                s_loggedBiomes = true;
+                std::unordered_map<uint16_t, int> hist;
+                for (uint16_t b : packet.biomes) hist[b]++;
+                std::string summary;
+                for (const auto& [id, n] : hist) {
+                    summary += " " + std::string(Game::BiomeRegistry::Get(id).name)
+                             + "=" + std::to_string(n);
+                }
+                Log::Info("First chunk with biomes (%d, %d):%s",
+                          chunkPos.x, chunkPos.z, summary.c_str());
+            }
+        } else if (packet.biomes.empty()) {
+            static bool s_loggedNoBiomes = false;
+            if (!s_loggedNoBiomes) {
+                s_loggedNoBiomes = true;
+                Log::Warning("Chunk (%d, %d) arrived with NO biome data - every tint "
+                             "will resolve to the plains fallback",
+                             chunkPos.x, chunkPos.z);
+            }
+        } else if (!packet.biomes.empty()) {
+            Log::Warning("Chunk (%d, %d) carried %zu biome entries, expected %d - ignoring",
+                         chunkPos.x, chunkPos.z, packet.biomes.size(),
+                         Game::Chunk::BIOME_COUNT);
         }
         
         // Transition to LOADED state
@@ -799,7 +868,7 @@ namespace Client {
                 int localZ = blockPos.z & 0xF;
                 int sectionY = (blockPos.y + 64) >> 4;
                 
-                chunk->chunkData->SetBlock(localX, blockPos.y, localZ, change.blockId);
+                chunk->chunkData->SetBlock(localX, blockPos.y, localZ, change.blockId, change.blockState);
                 chunk->dirtySections.insert(sectionY);
                 m_chunksWithDirtySections.insert(chunkPos);
 
@@ -1036,6 +1105,45 @@ namespace Client {
             static const uint16_t kZeroSection[4096] = {};
             outSnapshot->sectionData.isEmpty =
                 std::memcmp(section->blocks.data(), kZeroSection, 4096 * sizeof(uint16_t)) == 0;
+
+            // Block states, only when the section actually has any. Both sides
+            // stay unallocated for ordinary terrain (see ChunkSection::states),
+            // so this costs a branch per snapshot in the common case.
+            if (section->HasStates()) {
+                outSnapshot->sectionData.states = section->states;
+            } else {
+                outSnapshot->sectionData.states.clear();
+            }
+
+            // Biomes for this section plus the blend margin. The margin reaches
+            // into the four neighbouring chunks, so each cell is resolved
+            // through the chunk map rather than off `chunk` alone — a border
+            // section otherwise blends against its own biome on one side and
+            // produces a visible seam the vanilla client does not have.
+            auto& snapBiomes = outSnapshot->sectionData;
+            snapBiomes.hasBiomes = false;
+            if (!chunk->chunkData->biomes.empty()) {
+                using SS = Render::SectionSnapshot;
+                const int baseX = chunkPos.x * Game::Math::CHUNK_SIZE_X;
+                const int baseZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z;
+                const int baseY = Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0);
+
+                for (int qy = 0; qy < SS::BIOME_Y; ++qy) {
+                    for (int qz = 0; qz < SS::BIOME_XZ; ++qz) {
+                        for (int qx = 0; qx < SS::BIOME_XZ; ++qx) {
+                            // Grid cell 0 is quart cell -1, i.e. 4 blocks before
+                            // the section's own origin.
+                            const int wx = baseX + (qx - 1) * 4;
+                            const int wz = baseZ + (qz - 1) * 4;
+                            const int wy = baseY + qy * 4;
+                            snapBiomes.biomes[
+                                static_cast<size_t>((qy * SS::BIOME_XZ + qz) * SS::BIOME_XZ + qx)] =
+                                    BiomeAtWorld(wx, wy, wz);
+                        }
+                    }
+                }
+                snapBiomes.hasBiomes = true;
+            }
         } else {
             outSnapshot->sectionData.isEmpty = true;
             std::memset(outSnapshot->sectionData.blocks.data(), 0, 4096 * sizeof(uint16_t));

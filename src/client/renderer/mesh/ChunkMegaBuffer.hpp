@@ -71,6 +71,14 @@ namespace Render {
                            const float* vertexData, size_t vertexCount,
                            const uint16_t* indexData, size_t indexCount);
 
+        // Rewrites a section's indices in place, leaving its vertices alone.
+        // Used by translucent re-sorting, which reorders quads without
+        // regenerating any geometry. `indexCount` must equal what the section
+        // was uploaded with — the region is not reallocated — otherwise the
+        // call is rejected and the old order stays on the GPU.
+        bool UpdateSectionIndices(const MegaBufferSectionKey& key,
+                                  const uint16_t* indexData, size_t indexCount);
+
         void RemoveSection(const MegaBufferSectionKey& key);
         bool HasSection(const MegaBufferSectionKey& key) const;
 

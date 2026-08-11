@@ -41,6 +41,8 @@ namespace Game {
 
         // IBlockAccess implementation
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
+        uint8_t GetBlockState(int worldX, int worldY, int worldZ) const override;
+        uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
         bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
         bool IsBlockSolid(int worldX, int worldY, int worldZ) const override;
@@ -53,6 +55,12 @@ namespace Game {
         // same code can target the client's predicted world.
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId,
                       uint32_t updateFlags) override;
+        // Full form carrying the block-state index (MC BlockState.getId()).
+        // The two overloads above forward here with stateIndex = 0, i.e. the
+        // block's default state — which is what a caller that doesn't know
+        // about states means.
+        bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId,
+                      uint32_t updateFlags, uint8_t stateIndex);
 
         // Mesh system integration
         void MarkSectionDirty(int worldX, int worldY, int worldZ);
@@ -88,8 +96,8 @@ namespace Game {
         ChunkProviderStats GetChunkProviderStats() const;
 
         // World generation control
-        void SetGenerationSeed(int32_t seed);
-        int32_t GetGenerationSeed() const;
+        void SetGenerationSeed(int64_t seed);
+        int64_t GetGenerationSeed() const;
 
         // Direct access to chunk provider for advanced use cases
         ChunkProvider* GetChunkProvider() const { return m_chunkProvider.get(); }

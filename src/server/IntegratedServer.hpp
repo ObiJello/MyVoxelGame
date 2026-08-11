@@ -46,6 +46,11 @@ namespace Server {
         bool enableChunkCaching = true;        // Keep recently used chunks in memory
         std::string minecraftWorldPath;        // Optional Minecraft world to load (empty by default)
         bool useLocalSaveDirectory = true;     // Automatically use local save directory if available (temporary feature)
+        // True when this world came from an imported Minecraft save rather than
+        // being generated from a seed. level.dat isn't parsed, so such worlds
+        // never get SetGenerationSeed and GetGenerationSeed() reports the
+        // generator default — /seed says so rather than printing a wrong number.
+        bool useMinecraftSave = false;
         int defaultGameMode = 0;               // World game mode applied to joining players (GameMode raw: 0 survival, 1 creative)
         int64_t initialDayTime = 6000;         // World time restored from world metadata (6000 = noon)
         bool doDaylightCycle = false;          // doDaylightCycle gamerule restored from world metadata

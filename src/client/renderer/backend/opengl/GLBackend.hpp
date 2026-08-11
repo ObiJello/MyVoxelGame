@@ -43,6 +43,11 @@ namespace Render {
         void SetTextureFilter(TextureHandle handle, TextureFilter min, TextureFilter mag) override;
         void SetTextureWrap(TextureHandle handle, TextureWrap s, TextureWrap t) override;
         void GenerateMipmaps(TextureHandle handle) override;
+        void ReserveTextureMipLevels(TextureHandle handle, int maxLevel) override;
+        void UploadTextureMipLevel(TextureHandle handle, int level,
+                                   int width, int height, const void* data) override;
+        void UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
+                                  int width, int height, const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
         uintptr_t GetNativeTextureID(TextureHandle handle) const override;
@@ -135,6 +140,12 @@ namespace Render {
             GLuint glId = 0;
             int width = 0, height = 0;
             size_t memorySize = 0;
+            // Kept so an explicit mip-level upload re-declares the level with
+            // the same storage the base was created with — re-uploading level 0
+            // as RGBA8 over an SRGB8_A8 texture would silently drop the decode.
+            GLenum internalFormat = GL_RGBA8;
+            GLenum dataFormat     = GL_RGBA;
+            GLenum dataType       = GL_UNSIGNED_BYTE;
         };
         std::unordered_map<uint32_t, GLTextureInfo> m_textures;
 

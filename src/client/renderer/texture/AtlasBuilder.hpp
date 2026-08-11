@@ -33,6 +33,13 @@ namespace Render {
         int width = 0;
         int height = 0;
         std::vector<unsigned char> data;  // RGBA pixel data
+
+        // From the sibling .mcmeta's `texture` section, feeding MC's mipmap
+        // pipeline (see texture/MipmapGenerator.hpp). Empty strategy = "auto".
+        // These are not cosmetic knobs: this asset set overrides the strategy
+        // on 44 sprites, and every leaf texture asks for "dark_cutout".
+        std::string mipmapStrategy;
+        float       alphaCutoffBias = 0.0f;
     };
 
     // UV coordinates for a texture in the atlas
@@ -144,6 +151,11 @@ namespace Render {
             std::string textureKey;
             TextureAnimation animation;
             std::vector<std::vector<unsigned char>> frames;
+            // Mirrors of the source's .mcmeta texture section, so each frame
+            // upload rebuilds the same chain the still path would. kelp and
+            // kelp_plant are animated AND carry alpha_cutoff_bias 0.1.
+            std::string mipmapStrategy;
+            float       alphaCutoffBias = 0.0f;
         };
         std::vector<PendingAnimation> pendingAnimations;
 
@@ -154,6 +166,10 @@ namespace Render {
         // Atlas pixel data (for debug saving)
         std::vector<unsigned char> atlasData;
         std::vector<unsigned char> originalAtlasData; // Original data without border extrusion
+        // Retained so the mip chain can be rebuilt when the debug UI toggles
+        // mipmaps or changes the level — those paths recreate the texture and
+        // would otherwise leave levels 1..N undefined.
+        std::vector<PackRect> m_packedRects;
 
         // Step 1: Parse the JSON atlas descriptor
         bool ParseAtlasJSON(const std::string& jsonPath,
@@ -207,6 +223,24 @@ namespace Render {
         void CopyTextureToAtlas(const TextureSource& source,
                                int destX, int destY);
         
+        // Builds the 16 edge-variant tiles each connected-texture block needs
+        // and appends them to `sources` as ordinary entries. See
+        // kConnectedTextureKeys and ConnectedTextureKey().
+        void GenerateConnectedTextureVariants(std::vector<TextureSource>& sources);
+
+        // Reads the `texture` section of a .mcmeta (mipmap_strategy /
+        // alpha_cutoff_bias). Separate from ParseMcMetaFile because that one
+        // only answers "is this animated", and the texture section exists on
+        // plenty of still sprites.
+        bool ParseTextureMeta(const std::string& mcmetaPath,
+                              std::string& outStrategy, float& outBias) const;
+
+        // Builds MC's per-sprite mip chain, stitches one atlas image per level
+        // and uploads them. Replaces the driver's glGenerateMipmap for the
+        // block atlas; see texture/MipmapGenerator.hpp for why.
+        void BuildAndUploadMipChain(const std::vector<TextureSource>& sources,
+                                    const std::vector<PackRect>& packedRects);
+
         // Helper: Extrude texture borders to prevent mipmap bleeding
         void ExtrudeTextureBorders(int textureX, int textureY,
                                   int textureWidth, int textureHeight);

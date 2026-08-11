@@ -34,15 +34,18 @@ namespace Server {
     struct SectionDiffs {
         Game::Math::ChunkPos chunkPos;
         int sectionIndex;
-        std::unordered_map<uint32_t, Game::BlockID> changes; // localIndex -> blockId
+        // localIndex -> block + state index (they must not get separated:
+        // re-orienting a block is a real change watchers need to receive).
+        std::unordered_map<uint32_t, Game::BlockStateRef> changes;
         std::chrono::steady_clock::time_point lastUpdate;
         
         uint32_t MakeIndex(uint8_t x, uint8_t y, uint8_t z) const {
             return (y << 8) | (z << 4) | x;
         }
         
-        void AddChange(uint8_t x, uint8_t y, uint8_t z, Game::BlockID blockId) {
-            changes[MakeIndex(x, y, z)] = blockId;
+        void AddChange(uint8_t x, uint8_t y, uint8_t z, Game::BlockID blockId,
+                       uint8_t stateIndex = 0) {
+            changes[MakeIndex(x, y, z)] = Game::BlockStateRef{blockId, stateIndex};
             lastUpdate = std::chrono::steady_clock::now();
         }
     };
@@ -226,7 +229,12 @@ namespace Server {
         
         // Send packets to client
         void SendPositionSync(); // Send authoritative position
-        void SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block);
+        // `stateIndex` is the block's index into its own state list. It is NOT
+        // optional in practice: a resync that omits it tells the client the
+        // block is at its DEFAULT state, so any oriented block the client
+        // already had right — a furnace, a log, a leaf litter clump — visibly
+        // snaps to north/y-axis the moment anything resyncs it.
+        void SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block, uint8_t stateIndex);
         void SendSingleBlockChange(const Network::BlockChangeS2CPacket& packet);
         void SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
         void SendInventoryUpdate(int slot); // TODO: Implement with inventory system
@@ -245,13 +253,24 @@ namespace Server {
         void BroadcastContainerChanges();
         uint32_t ContainerStateId() const { return m_containerStateId; }
 
-        // Force the next BroadcastContainerChanges to resend `index` even
-        // though the authoritative stack has not changed. Needed when the
+        // Force the next BroadcastContainerChanges to resend MENU slot `index`
+        // even though the authoritative stack has not changed. Needed when the
         // CLIENT mutated its copy on a prediction the server rejected: the
         // server's slot still matches m_remoteSlots, so the plain diff would
         // find nothing to correct and the bad prediction would stick.
         // MC's equivalent is RemoteSlot.force with a non-matching value.
+        // Callers holding a player-inventory index must translate first — see
+        // InvalidateRemoteInventorySlot.
         void InvalidateRemoteSlot(int index);
+        // Same, for callers that only know a player-inventory index. No-op when
+        // the open menu does not show that slot (a crafting table hides armour
+        // and the offhand).
+        void InvalidateRemoteInventorySlot(int inventoryIndex);
+
+        // Open the container menu a block asked for during use dispatch (see
+        // IUsePlayer::OpenMenu). Called right after the dispatch returns, so the
+        // screen appears on the same packet round as the interaction ack.
+        void FlushPendingMenuOpen();
 
         // Client block-prediction acknowledgement (MC
         // ServerGamePacketListenerImpl.ackBlockChangesUpTo). Interaction
@@ -402,8 +421,10 @@ namespace Server {
         // prediction cost zero packets while still catching a slot the client
         // wrongly wrote — the client reports that write, so the model shows
         // the disagreement.
-        std::array<Game::ItemStack, 46> m_remoteSlots{};
-        Game::ItemStack                 m_remoteCarried{};
+        // Indexed by MENU slot, so it is resized whenever the open menu changes
+        // (SendInventoryFull re-seeds it wholesale).
+        std::vector<Game::ItemStack> m_remoteSlots{};
+        Game::ItemStack              m_remoteCarried{};
 
         // Last-sent stat triple for the SetHealthS2C dirty-check — mirrors
         // ServerPlayer.lastSentHealth / lastSentFood / lastSaturationLevel.
@@ -433,7 +454,7 @@ namespace Server {
         // Diff coalescing
         void CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                 uint8_t localX, uint8_t localY, uint8_t localZ,
-                                Game::BlockID blockId);
+                                Game::BlockID blockId, uint8_t stateIndex = 0);
         
         // Packet size estimation
         size_t EstimatePacketSize(const Network::ChunkDataS2CPacket& packet) const;

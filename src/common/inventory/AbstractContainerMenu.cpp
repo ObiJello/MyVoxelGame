@@ -199,6 +199,9 @@ namespace Game {
             m_carried = s.SafeTake(amount, amount);
             result.carriedChanged = true;
             MarkChanged(result, slotIndex);
+            // MC doClick: `slot.onTake(player, taken)` right after the pickup.
+            // This is what consumes the grid behind a crafting result.
+            s.OnTake(m_carried, result);
             return result;
         }
 
@@ -251,6 +254,12 @@ namespace Game {
             // Stop as soon as an iteration achieves nothing, otherwise a slot
             // whose contents cannot move anywhere would spin forever.
             if (after.count == before.count && IsSameItemSameComponents(after, before)) break;
+            // MC's quickMoveStack ends with slot.onTake, and its doClick keeps
+            // looping while the slot refills with the same item — which is how
+            // one shift-click on a crafting result crafts the whole stack.
+            // SlotsChanged is what refills it between iterations.
+            GetSlot(slotIndex).OnTake(before, result);
+            SlotsChanged(result);
         }
         return result;
     }
@@ -287,6 +296,9 @@ namespace Game {
             if (!targetSlot.MayPickup()) return result;
             source = target;
             target.Clear();
+            // Hotbar-key take out of a crafting result counts as a craft
+            // (MC ResultSlot.onSwapCraft + onTake).
+            targetSlot.OnTake(source, result);
         } else if (target.IsEmpty()) {
             if (!targetSlot.MayPlace(source)) return result;
             const int maxStack = targetSlot.GetMaxStackSize(source);
@@ -355,6 +367,7 @@ namespace Game {
         result.droppedItem = s.SafeTake(amount, amount);
         if (result.droppedItem.IsEmpty()) return result;
         MarkChanged(result, slotIndex);
+        s.OnTake(result.droppedItem, result);
         return result;
     }
 
@@ -610,36 +623,45 @@ namespace Game {
                 ? click.creativeStack
                 : ItemStack{static_cast<ItemID>(click.creativeItemId), 1};
 
+        ContainerClickResult result;
+
         if (slot == Network::InventorySlotSentinel::CREATIVE_GRID) {
             switch (action) {
                 case Network::ContainerInput::PICKUP:
-                    return HandleCreativePickup(creativeSource, click.button);
+                    result = HandleCreativePickup(creativeSource, click.button); break;
                 case Network::ContainerInput::QUICK_MOVE:
-                    return HandleCreativeQuickMove(creativeSource);
+                    result = HandleCreativeQuickMove(creativeSource); break;
                 case Network::ContainerInput::CLONE:
                     // Middle click on a creative source == left-click pickup.
-                    return HandleCreativePickup(creativeSource, 0);
+                    result = HandleCreativePickup(creativeSource, 0); break;
                 default:
-                    return {};
+                    break;
+            }
+        } else {
+            switch (action) {
+                case Network::ContainerInput::PICKUP:      result = HandlePickup    (slot, click.button); break;
+                case Network::ContainerInput::QUICK_MOVE:  result = HandleQuickMove (slot); break;
+                case Network::ContainerInput::SWAP:        result = HandleSwap      (slot, click.button); break;
+                case Network::ContainerInput::CLONE:       result = HandleClone     (slot); break;
+                case Network::ContainerInput::THROW:       result = HandleThrow     (slot, click.button); break;
+                case Network::ContainerInput::QUICK_CRAFT: result = HandleQuickCraft(slot, click.button); break;
+                case Network::ContainerInput::PICKUP_ALL:  result = HandlePickupAll (slot); break;
+                case Network::ContainerInput::CREATIVE_DESTROY_ALL:
+                    result = HandleCreativeDestroyAll(); break;
+                case Network::ContainerInput::CREATIVE_FILL_SLOT:
+                    result = HandleCreativeFillSlot(slot, creativeSource); break;
+                default:
+                    Log::Warning("[AbstractContainerMenu] Unknown action %u", (unsigned)click.action);
+                    break;
             }
         }
 
-        switch (action) {
-            case Network::ContainerInput::PICKUP:      return HandlePickup    (slot, click.button);
-            case Network::ContainerInput::QUICK_MOVE:  return HandleQuickMove (slot);
-            case Network::ContainerInput::SWAP:        return HandleSwap      (slot, click.button);
-            case Network::ContainerInput::CLONE:       return HandleClone     (slot);
-            case Network::ContainerInput::THROW:       return HandleThrow     (slot, click.button);
-            case Network::ContainerInput::QUICK_CRAFT: return HandleQuickCraft(slot, click.button);
-            case Network::ContainerInput::PICKUP_ALL:  return HandlePickupAll (slot);
-            case Network::ContainerInput::CREATIVE_DESTROY_ALL:
-                return HandleCreativeDestroyAll();
-            case Network::ContainerInput::CREATIVE_FILL_SLOT:
-                return HandleCreativeFillSlot(slot, creativeSource);
-            default:
-                Log::Warning("[AbstractContainerMenu] Unknown action %u", (unsigned)click.action);
-                return {};
-        }
+        // MC calls slotsChanged from Slot.setChanged via the container's
+        // listener list, i.e. after every mutation. One call per click is the
+        // same thing for our purposes and cannot be forgotten in a new handler:
+        // whatever the click did, the derived state is rebuilt from it here.
+        SlotsChanged(result);
+        return result;
     }
 
 } // namespace Game

@@ -1,6 +1,7 @@
 // File: src/server/world/MyTerrainGenerator.cpp
 #include "MyTerrainGenerator.hpp"
 #include "storage/SectionDataUnpacker.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <chrono>
 #include <future>
@@ -31,7 +32,8 @@ namespace Game {
 
     MyTerrainGenerator::MyTerrainGenerator(const GenerationConfig& config)
         : m_config(config) {
-        Log::Info("[MyTerrainGenerator] Created with seed: %d", config.seed);
+        Log::Info("[MyTerrainGenerator] Created with seed: %lld",
+                  static_cast<long long>(config.seed));
     }
 
     MyTerrainGenerator::~MyTerrainGenerator() {
@@ -357,50 +359,84 @@ namespace Game {
         return result;
     }
 
-    BlockID MyTerrainGenerator::MapBlockType(minecraft::world::BlockState* blockState) const {
-        if (!blockState) return BlockID::Stone;
+    MyTerrainGenerator::MappedBlock
+    MyTerrainGenerator::MapBlockType(minecraft::world::BlockState* blockState) const {
+        if (!blockState) return { BlockID::Stone, 0 };
 
-        // Block* pointers are stable within one bootstrap epoch (created once
-        // in Blocks::bootstrap, never moved), so pointer equality suffices.
-        const auto* block = blockState->getBlock();
-        if (!block) return BlockID::Stone;
-
-        // Lock-free per-thread cache + last-block memo. Terrain is dominated
-        // by long runs of the same state (air, stone, deepslate, water), so
-        // the memo alone absorbs the vast majority of calls; the map handles
-        // the rest. No mutex — the old shared cache took ~98k lock/unlock per
-        // converted chunk with every worker contending on it.
+        // Keyed on the BlockState*, not the Block*. Library states are interned
+        // per (block, property tuple) by StateDefinition and, like Block*, are
+        // created once per bootstrap epoch and never moved — so pointer
+        // equality still suffices, but now `leaf_litter{facing=west,
+        // segment_amount=3}` and `leaf_litter{facing=north,segment_amount=1}`
+        // no longer collide. Keying on the Block* is what made every generated
+        // furnace, log and leaf litter clump come out in its default state.
+        //
+        // Lock-free per-thread cache + last-state memo. Terrain is dominated by
+        // long runs of the identical state (air, stone, deepslate, water), so
+        // the memo alone absorbs the vast majority of calls; the map handles the
+        // rest. No mutex — the old shared cache took ~98k lock/unlock per
+        // converted chunk with every worker contending on it. The map is now
+        // bounded by distinct states rather than distinct blocks, which is a
+        // few thousand for a real world instead of ~1150.
         struct ThreadCache {
             uint32_t epoch = 0;
-            const void* lastBlock = nullptr;
-            BlockID lastId = BlockID::Stone;
-            std::unordered_map<const void*, BlockID> map;
+            const void* lastState = nullptr;
+            MappedBlock lastMapped{ BlockID::Stone, 0 };
+            std::unordered_map<const void*, MappedBlock> map;
         };
         thread_local ThreadCache tc;
 
         const uint32_t epoch = s_blockMapEpoch.load(std::memory_order_acquire);
         if (tc.epoch != epoch) {
             tc.map.clear();
-            tc.lastBlock = nullptr;
+            tc.lastState = nullptr;
             tc.epoch = epoch;
         }
 
-        if (block == tc.lastBlock) {
-            return tc.lastId;
+        if (blockState == tc.lastState) {
+            return tc.lastMapped;
         }
 
-        auto it = tc.map.find(block);
+        auto it = tc.map.find(blockState);
         if (it == tc.map.end()) {
             // First encounter on this thread — resolve via string lookup
-            // (slow path, bounded by unique block types, ~1150 total)
+            // (slow path, one hit per distinct state per worker thread).
             Game::BlockStateRegistry::Initialize();
-            Game::BlockState gameState;
-            gameState.name = block->getIdentifier();
-            gameState.resolvedId = Game::BlockStateRegistry::ResolveBlockState(gameState);
-            it = tc.map.emplace(block, gameState.resolvedId).first;
+            Game::BlockState gameState = Game::BlockStateRegistry::CreateBlockState(
+                blockState->getIdentifier(), blockState->getProperties());
+            it = tc.map.emplace(blockState,
+                                MappedBlock{ gameState.resolvedId, gameState.resolvedState }).first;
         }
 
-        tc.lastBlock = block;
+        tc.lastState = blockState;
+        tc.lastMapped = it->second;
+        return it->second;
+    }
+
+    uint16_t MyTerrainGenerator::MapBiome(const void* libBiome, const std::string& name) const {
+        if (!libBiome) return Game::BiomeRegistry::Fallback();
+
+        struct ThreadCache {
+            uint32_t epoch = 0;
+            const void* last = nullptr;
+            uint16_t lastId = 0;
+            std::unordered_map<const void*, uint16_t> map;
+        };
+        thread_local ThreadCache tc;
+
+        const uint32_t epoch = s_blockMapEpoch.load(std::memory_order_acquire);
+        if (tc.epoch != epoch) {
+            tc.map.clear();
+            tc.last = nullptr;
+            tc.epoch = epoch;
+        }
+        if (libBiome == tc.last) return tc.lastId;
+
+        auto it = tc.map.find(libBiome);
+        if (it == tc.map.end()) {
+            it = tc.map.emplace(libBiome, Game::BiomeRegistry::FromName(name)).first;
+        }
+        tc.last = libBiome;
         tc.lastId = it->second;
         return it->second;
     }
@@ -441,11 +477,41 @@ namespace Game {
                 for (int lz = 0; lz < 16; ++lz) {
                     for (int lx = 0; lx < 16; ++lx) {
                         auto* blockState = libSection.getBlockState(lx, ly, lz);
-                        const BlockID id = MapBlockType(blockState);
-                        if (id != BlockID::Air) {
-                            outSection->Set(lx, ly, lz, id);
+                        const MappedBlock mapped = MapBlockType(blockState);
+                        if (mapped.id != BlockID::Air) {
+                            outSection->Set(lx, ly, lz, mapped.id);
+                            // SetState only allocates the section's state plane
+                            // on the first non-default write, so a section of
+                            // plain stone still costs nothing extra.
+                            if (mapped.state != 0) {
+                                outSection->SetState(lx, ly, lz, mapped.state);
+                            }
                             ++blocksSet;
                         }
+                    }
+                }
+            }
+        }
+
+        // ── Biomes ──────────────────────────────────────────────────────────
+        // One entry per 4x4x4 cell, matching MC's noise-biome resolution.
+        // IChunk exposes getBiome(BlockPos), which is ChunkAccess's own
+        // block -> quart conversion (QuartPos::fromBlock, i.e. >> 2) followed by
+        // getNoiseBiome — so feeding it the BLOCK coordinate of each cell's
+        // corner samples exactly the cell we want to store.
+        {
+            const int baseX = position.x * Math::CHUNK_SIZE_X;
+            const int baseZ = position.z * Math::CHUNK_SIZE_Z;
+
+            for (int qy = 0; qy < Chunk::BIOME_VERTICAL; ++qy) {
+                const int blockY = Math::WorldCoordinates::MIN_WORLD_Y + qy * 4;
+                for (int qz = 0; qz < Chunk::BIOME_HORIZONTAL; ++qz) {
+                    for (int qx = 0; qx < Chunk::BIOME_HORIZONTAL; ++qx) {
+                        const auto* biome = chunk->getBiome(minecraft::core::BlockPos(
+                            baseX + qx * 4, blockY, baseZ + qz * 4));
+                        gameChunk->SetBiomeQuart(
+                            qx, qy, qz,
+                            MapBiome(biome, biome ? biome->getName() : std::string{}));
                     }
                 }
             }
@@ -529,8 +595,8 @@ namespace Game {
     }
 
     GenerationConfig MyTerrainGenerator::GetConfig() const { return m_config; }
-    void MyTerrainGenerator::SetSeed(int32_t seed) { m_config.seed = seed; }
-    int32_t MyTerrainGenerator::GetSeed() const { return m_config.seed; }
+    void MyTerrainGenerator::SetSeed(int64_t seed) { m_config.seed = seed; }
+    int64_t MyTerrainGenerator::GetSeed() const { return m_config.seed; }
     void MyTerrainGenerator::SetWorldType(const std::string&) {}
     std::string MyTerrainGenerator::GetWorldType() const { return "overworld"; }
     void MyTerrainGenerator::SetPassEnabled(GenerationPass, bool) {}

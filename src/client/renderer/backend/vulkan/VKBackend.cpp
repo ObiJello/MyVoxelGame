@@ -614,6 +614,9 @@ namespace Render {
         uint32_t handle = AllocHandle();
         m_textures[handle] = {image, imageMemory, imageView, sampler, descriptorSet,
                              width, height, 1, static_cast<size_t>(imageSize)};
+        // Remembered so ReserveTextureMipLevels can rebuild the image later —
+        // Vulkan fixes an image's mip count at creation.
+        m_textures[handle].format = vkFormat;
 
         m_memStats.textureMemory += imageSize;
         m_memStats.totalAllocated += imageSize;
@@ -700,7 +703,10 @@ namespace Render {
             barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barriers[i].image = uniqueImages[i];
-            barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            // All levels, not just 0: an animated sprite now uploads its whole
+            // mip chain, so every level of the atlas is a transfer target here.
+            barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,
+                                            0, VK_REMAINING_MIP_LEVELS, 0, 1};
             barriers[i].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         }
@@ -715,6 +721,7 @@ namespace Render {
             VkBufferImageCopy region{};
             region.bufferOffset = offset;
             region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel   = update.mipLevel;
             region.imageSubresource.layerCount = 1;
             region.imageOffset = {update.x, update.y, 0};
             region.imageExtent = {static_cast<uint32_t>(update.width),
@@ -756,7 +763,12 @@ namespace Render {
         info.borderColor             = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
         info.unnormalizedCoordinates = VK_FALSE;
         info.compareEnable           = VK_FALSE;
-        info.mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        info.mipmapMode              = tex.mipmapMode;
+        // maxLod caps which levels the sampler may reach. It stays 0 for a
+        // single-level image, so a texture without a chain keeps sampling
+        // level 0 exactly as before.
+        info.minLod                  = 0.0f;
+        info.maxLod                  = static_cast<float>(tex.mipLevels - 1);
 
         VkSampler newSampler = VK_NULL_HANDLE;
         if (vkCreateSampler(device, &info, nullptr, &newSampler) != VK_SUCCESS) return;
@@ -788,7 +800,30 @@ namespace Render {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
         vkDeviceWaitIdle(m_device);
-        it->second.minFilter = (min == TextureFilter::Linear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        // Vulkan splits what GL packs into one enum: the *_MIPMAP_* modes carry
+        // BOTH the in-level filter and the between-level one. Collapsing them
+        // to a bare NEAREST — as this did before — silently dropped every
+        // mipmap request, which is why the atlas never got a chain here.
+        switch (min) {
+            case TextureFilter::NearestMipmapNearest:
+                it->second.minFilter  = VK_FILTER_NEAREST;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; break;
+            case TextureFilter::NearestMipmapLinear:
+                it->second.minFilter  = VK_FILTER_NEAREST;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;  break;
+            case TextureFilter::LinearMipmapNearest:
+                it->second.minFilter  = VK_FILTER_LINEAR;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; break;
+            case TextureFilter::LinearMipmapLinear:
+                it->second.minFilter  = VK_FILTER_LINEAR;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;  break;
+            case TextureFilter::Linear:
+                it->second.minFilter  = VK_FILTER_LINEAR;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; break;
+            default:
+                it->second.minFilter  = VK_FILTER_NEAREST;
+                it->second.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST; break;
+        }
         it->second.magFilter = (mag == TextureFilter::Linear) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
         RecreateSamplerFromCache(m_device, it->second);
     }
@@ -802,8 +837,174 @@ namespace Render {
         RecreateSamplerFromCache(m_device, it->second);
     }
 
-    void VKBackend::GenerateMipmaps(TextureHandle handle) {
-        // TODO: Implement mipmap generation with vkCmdBlitImage
+    void VKBackend::GenerateMipmaps(TextureHandle /*handle*/) {
+        // Intentionally unimplemented. The block atlas — the only texture whose
+        // mips affect terrain — authors its chain on the CPU with MC's
+        // algorithm and pushes it through ReserveTextureMipLevels +
+        // UploadTextureMipLevel, so a vkCmdBlitImage chain here would be both
+        // unused and wrong for cutout sprites (see texture/MipmapGenerator.hpp).
+    }
+
+    void VKBackend::ReserveTextureMipLevels(TextureHandle handle, int maxLevel) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end()) return;
+
+        VKTextureInfo& tex = it->second;
+        const uint32_t wanted = static_cast<uint32_t>(std::max(0, maxLevel)) + 1u;
+        if (wanted == tex.mipLevels) return;
+
+        // An image's mip count is baked in at vkCreateImage, so the only way to
+        // change it is to build a new image. Contents are discarded — the
+        // interface documents that every level is uploaded after reserving,
+        // which is what AtlasBuilder does.
+        vkDeviceWaitIdle(m_device);
+
+        VkImage        newImage  = VK_NULL_HANDLE;
+        VkDeviceMemory newMemory = VK_NULL_HANDLE;
+        if (!CreateVkImage(static_cast<uint32_t>(tex.width), static_cast<uint32_t>(tex.height),
+                           wanted, tex.format, VK_IMAGE_TILING_OPTIMAL,
+                           VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, newImage, newMemory)) {
+            Log::Error("Vulkan: failed to reallocate texture for %u mip levels", wanted);
+            return;
+        }
+
+        // Park every level in SHADER_READ_ONLY straight away. Levels that have
+        // not been uploaded yet hold undefined data, but sampling them is legal
+        // and the caller overwrites them immediately; leaving them UNDEFINED
+        // would make the layout wrong instead, which is not.
+        TransitionImageLayout(newImage, tex.format, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, wanted);
+
+        VkImageView newView = CreateImageView(newImage, tex.format,
+                                              VK_IMAGE_ASPECT_COLOR_BIT, wanted);
+        if (newView == VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, newImage, nullptr);
+            vkFreeMemory(m_device, newMemory, nullptr);
+            Log::Error("Vulkan: failed to create mipped image view");
+            return;
+        }
+
+        // Anything queued against the old image would write into freed memory.
+        m_pendingTextureUpdates.erase(
+            std::remove_if(m_pendingTextureUpdates.begin(), m_pendingTextureUpdates.end(),
+                           [&](const PendingTextureUpdate& u) { return u.image == tex.image; }),
+            m_pendingTextureUpdates.end());
+
+        if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, tex.imageView, nullptr);
+        if (tex.image != VK_NULL_HANDLE)     vkDestroyImage(m_device, tex.image, nullptr);
+        if (tex.memory != VK_NULL_HANDLE)    vkFreeMemory(m_device, tex.memory, nullptr);
+
+        tex.image     = newImage;
+        tex.memory    = newMemory;
+        tex.imageView = newView;
+        tex.mipLevels = wanted;
+
+        // Rebuilds the sampler with the new maxLod AND rewrites the descriptor
+        // to point at the new view — both are required, the descriptor most of
+        // all, since it still referenced the destroyed one.
+        RecreateSamplerFromCache(m_device, tex);
+
+        // Sum the levels actually allocated rather than assuming a full chain —
+        // a partial chain is legal and the stats panel should not overstate it.
+        size_t newSize = 0;
+        for (uint32_t lvl = 0; lvl < wanted; ++lvl) {
+            const size_t lw = std::max<size_t>(1u, static_cast<size_t>(tex.width)  >> lvl);
+            const size_t lh = std::max<size_t>(1u, static_cast<size_t>(tex.height) >> lvl);
+            newSize += lw * lh * 4u;
+        }
+        m_memStats.textureMemory  = m_memStats.textureMemory  - tex.memorySize + newSize;
+        m_memStats.totalAllocated = m_memStats.totalAllocated - tex.memorySize + newSize;
+        if (m_memStats.totalAllocated > m_memStats.peakUsage)
+            m_memStats.peakUsage = m_memStats.totalAllocated;
+        tex.memorySize = newSize;
+    }
+
+    void VKBackend::UploadTextureMipLevel(TextureHandle handle, int level,
+                                          int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data) return;
+        VKTextureInfo& tex = it->second;
+        if (level < 0 || static_cast<uint32_t>(level) >= tex.mipLevels) return;
+        if (width <= 0 || height <= 0) return;
+
+        const VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4;
+
+        VkBuffer       staging       = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        CreateVkBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       staging, stagingMemory);
+
+        void* mapped = nullptr;
+        vkMapMemory(m_device, stagingMemory, 0, imageSize, 0, &mapped);
+        std::memcpy(mapped, data, static_cast<size_t>(imageSize));
+        vkUnmapMemory(m_device, stagingMemory);
+
+        // One submit for transition + copy + transition. This runs at load time
+        // (and on the debug UI's mipmap toggle), never per frame, so a
+        // single-time command buffer is the right tool.
+        VkCommandBuffer cmd = BeginSingleTimeCommands();
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = tex.image;
+        barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT,
+                                        static_cast<uint32_t>(level), 1, 0, 1 };
+
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel   = static_cast<uint32_t>(level);
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+        vkCmdCopyBufferToImage(cmd, staging, tex.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+        EndSingleTimeCommands(cmd);
+
+        vkDestroyBuffer(m_device, staging, nullptr);
+        vkFreeMemory(m_device, stagingMemory, nullptr);
+    }
+
+    void VKBackend::UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
+                                         int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data) return;
+        if (level < 0 || static_cast<uint32_t>(level) >= it->second.mipLevels) return;
+
+        // Same deferred path as UpdateTexture2D: animated sprites call this
+        // mid-frame, so the copy has to ride the frame's command buffer rather
+        // than stall the queue.
+        const size_t dataSize = static_cast<size_t>(width) * height * 4;
+        const auto* src = static_cast<const unsigned char*>(data);
+
+        PendingTextureUpdate update;
+        update.image    = it->second.image;
+        update.x        = x;
+        update.y        = y;
+        update.width    = width;
+        update.height   = height;
+        update.mipLevel = static_cast<uint32_t>(level);
+        update.data.assign(src, src + dataSize);
+        m_pendingTextureUpdates.push_back(std::move(update));
     }
 
     void VKBackend::DestroyTexture(TextureHandle handle) {
@@ -811,6 +1012,15 @@ namespace Render {
         if (it == m_textures.end()) return;
 
         vkDeviceWaitIdle(m_device);
+
+        // Drop anything still queued against this image — the next flush would
+        // otherwise record a copy into freed memory. Reachable via
+        // RebuildAtlas, which destroys the atlas mid-session, and now more
+        // easily so: an animated sprite queues one update per mip level.
+        m_pendingTextureUpdates.erase(
+            std::remove_if(m_pendingTextureUpdates.begin(), m_pendingTextureUpdates.end(),
+                           [&](const PendingTextureUpdate& u) { return u.image == it->second.image; }),
+            m_pendingTextureUpdates.end());
         vkDestroySampler(m_device, it->second.sampler, nullptr);
         vkDestroyImageView(m_device, it->second.imageView, nullptr);
         vkDestroyImage(m_device, it->second.image, nullptr);

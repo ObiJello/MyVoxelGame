@@ -100,7 +100,7 @@ void ChunkDeltaBroadcaster::flush() {
 
 void ChunkDeltaBroadcaster::broadcastSingleBlock(const Game::Math::SectionPos& sp,
                                                 uint16_t idx,
-                                                Game::BlockID state,
+                                                Game::BlockStateRef state,
                                                 const std::vector<uint32_t>& watchers) {
     // Unpack the local coordinates
     uint8_t localX, localY, localZ;
@@ -110,19 +110,19 @@ void ChunkDeltaBroadcaster::broadcastSingleBlock(const Game::Math::SectionPos& s
     glm::ivec3 worldPos = sectionCellToWorld(sp, localX, localY, localZ);
     
     // Build the packet
-    Network::BlockChangeS2CPacket packet(worldPos.x, worldPos.y, worldPos.z, state);
+    Network::BlockChangeS2CPacket packet(worldPos.x, worldPos.y, worldPos.z, state.id, state.state);
     
     // Send to all watchers
     sendToAllWatchers(watchers, packet);
     
     if (m_verboseLogging) {
         Log::Debug("ChunkDeltaBroadcaster: Single block at (%d,%d,%d) -> %d sent to %zu watchers",
-                  worldPos.x, worldPos.y, worldPos.z, static_cast<int>(state), watchers.size());
+                  worldPos.x, worldPos.y, worldPos.z, static_cast<int>(state.id), watchers.size());
     }
 }
 
 void ChunkDeltaBroadcaster::broadcastSectionUpdate(const Game::Math::SectionPos& sp,
-                                                  const std::vector<std::pair<uint16_t, Game::BlockID>>& changes,
+                                                  const std::vector<std::pair<uint16_t, Game::BlockStateRef>>& changes,
                                                   const std::vector<uint32_t>& watchers) {
     // Build the section blocks update packet
     Network::ClientboundSectionBlocksUpdateS2CPacket packet(sp.getChunkPos(), sp.sectionY);
@@ -133,7 +133,7 @@ void ChunkDeltaBroadcaster::broadcastSectionUpdate(const Game::Math::SectionPos&
         SectionChangeAccumulator::unpackLocalIndex(idx, localX, localY, localZ);
         
         // Add to packet using its helper method
-        packet.AddChange(localX, localY, localZ, static_cast<uint16_t>(blockId));
+        packet.AddChange(localX, localY, localZ, static_cast<uint16_t>(blockId.id), blockId.state);
     }
     
     // Send to all watchers

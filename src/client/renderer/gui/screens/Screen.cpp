@@ -15,8 +15,9 @@ namespace Render {
 
     // ── Shared menu textures (loaded once, kept for process lifetime) ──────
     // menu_background.png + the header/footer separator strips. These live
-    // outside the sprites atlas so they get their own backend textures,
-    // loaded with the same stb pattern as InventoryScreen::EnsureBackground.
+    // outside the sprites atlas so they get their own backend textures. The
+    // loader below is shared: the inventory screens use it for their container
+    // panels, which are standalone 256x256 sheets for the same reason.
     TextureHandle LoadStandaloneGuiTexture(const char* relPath, int& outW, int& outH) {
             if (!g_renderBackend) return INVALID_TEXTURE;
             const std::string full = PlatformMain::GetAssetPath(relPath);
@@ -342,8 +343,9 @@ namespace Render {
     void ScreenManager::MouseScrolled(double mx, double my, double deltaY) {
         if (Screen* top = Current()) top->MouseScrolled(mx, my, deltaY);
     }
-    void ScreenManager::KeyPressed(int glfwKey, int glfwMods) {
-        if (Screen* top = Current()) top->KeyPressed(glfwKey, glfwMods);
+    bool ScreenManager::KeyPressed(int glfwKey, int glfwMods) {
+        if (Screen* top = Current()) return top->KeyPressed(glfwKey, glfwMods);
+        return false;
     }
     void ScreenManager::CharTyped(unsigned int codepoint) {
         if (Screen* top = Current()) top->CharTyped(codepoint);

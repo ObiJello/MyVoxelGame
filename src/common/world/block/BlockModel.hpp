@@ -53,10 +53,37 @@ namespace Game {
         std::string textureRef;                   // e.g. "#side" → lookup in BlockModel::textures
         int tintIndex = -1;                       // -1 = no tint, 0+ = biome tinting
         std::string cullface;                     // e.g. "north", empty if no culling
+        // Parsed form of `cullface`: the FaceDir whose NEIGHBOUR decides whether
+        // this face is dropped, or -1 for "never cull". MC only culls a quad
+        // that declares a cullface (BlockElementFace.cullForDirection is
+        // @Nullable), and the direction it names need not match the face's own
+        // normal — RotateModel rewrites it precisely because a turned model
+        // points its cullface somewhere else.
+        //
+        // Kept as a parsed enum because the mesher tests it once per face per
+        // block, and a string compare chain there is on the hottest path in the
+        // engine. Always assign through SetCullface() so the two stay in sync.
+        int8_t cullfaceDir = -1;
+
+        void SetCullface(const std::string& cull) {
+            cullface = cull;
+            cullfaceDir = cull.empty()
+                              ? int8_t(-1)
+                              : static_cast<int8_t>(ParseFaceDir(cull));
+        }
+        // MC's per-face `"rotation"` (0/90/180/270), which rotates the texture
+        // on this face only. It is NOT a geometry transform — MC implements it
+        // as a permutation of which UV corner each vertex reads
+        // (BlockElementFace.getU + Quadrant.rotateVertexIndex). Blocks that need
+        // it include every glazed terracotta (template_glazed_terracotta.json
+        // rotates its four sides 90/270/0/180 to make the pattern continuous).
+        int uvRotation = 0;
 
         FaceDef() = default;
-        FaceDef(const glm::vec4& uvCoords, const std::string& texture, int tint = -1, const std::string& cull = "")
-            : uv(uvCoords), textureRef(texture), tintIndex(tint), cullface(cull) {}
+        FaceDef(const glm::vec4& uvCoords, const std::string& texture, int tint = -1,
+                const std::string& cull = "", int rotation = 0)
+            : uv(uvCoords), textureRef(texture), tintIndex(tint)
+            , uvRotation(rotation) { SetCullface(cull); }
     };
 
     // Per-element rotation (MC model JSON `rotation` field). Only one axis at a time.
@@ -71,7 +98,25 @@ namespace Game {
         char      axis    = 0;       // 'x' | 'y' | 'z' | 0
         float     angle   = 0.0f;    // degrees
         bool      rescale = false;
+
+        bool IsIdentity() const { return axis == 0 || angle == 0.0f; }
     };
+
+    // MC FaceBakery.rotateVertexBy + BlockElementRotation.transform: rotate a
+    // point about the element's own origin.
+    //
+    // Unlike the whole-model blockstate rotation (BlockModelRegistry::RotateModel)
+    // this is an ARBITRARY angle, so it cannot be baked back into an
+    // axis-aligned from/to pair — it has to be applied per vertex at mesh time.
+    // Skipping it leaves elements at their pre-rotation coordinates, which for
+    // fanned-out geometry like the flowerbed stems means far outside the block:
+    // `flowerbed_3` authors a stem at x≈17.65 and relies on a -45° turn about
+    // the corner to bring it back in next to its petals.
+    //
+    // `point` and `rot.origin` are both in MC model space (0..16). `scale`
+    // lets callers work in block space instead by passing 1/16.
+    glm::vec3 ApplyElementRotation(const glm::vec3& point, const ElementRotation& rot,
+                                   float scale = 1.0f);
 
     // One cuboid "element" of the model (Minecraft models can have multiple cuboids)
     struct Element {
@@ -112,6 +157,22 @@ namespace Game {
         std::map<std::string, std::string> textures;          // Texture variable definitions
         std::vector<Element> elements;                         // List of cuboid elements
         GuiDisplay guiDisplay;                                 // display.gui transform for inventory rendering
+        // MC BlockModel.hasAmbientOcclusion — a nullable Boolean resolved up the
+        // parent chain, defaulting to true. When false, AO is skipped for the
+        // WHOLE model; it is a model-level flag, unlike `shade` which is
+        // per-element. ModelBlockRenderer.java:42:
+        //   useAO = Minecraft.useAmbientOcclusion()
+        //           && state.getLightEmission() == 0
+        //           && parts.getFirst().useAmbientOcclusion();
+        //
+        // Vanilla turns it off on every cross-shaped plant parent (block/cross,
+        // block/tinted_cross, block/crop, …). Ignoring it darkens a tuft of
+        // grass against the very block it stands on, which vanilla never does.
+        //
+        // The `getLightEmission() == 0` clause is NOT implemented — this engine
+        // carries no per-block light-emission data — so full-bright blocks that
+        // vanilla exempts from AO (glowstone, sea lantern, …) still receive it.
+        bool ambientOcclusion = true;
         // Texture KEYS that MC marked `force_translucent: true` in the modern
         // object-form texture entry: `"all": {"force_translucent": true,
         // "sprite": "minecraft:block/glass"}`. Surfaces that resolve to one of
@@ -205,6 +266,38 @@ namespace Game {
 
         // Clear all loaded models
         static void Clear();
+
+        // Install a model under a name that has no file on disk. Used for the
+        // rotated variants synthesised from blockstate `x`/`y` values, which
+        // MC produces at bake time rather than shipping as separate files.
+        static void RegisterModel(const std::string& name, BlockModel model);
+
+        // Rotate a resolved model by whole quarter turns about X then Y, in
+        // that order — the same composition order MC's BlockModelRotation uses
+        // for a blockstate variant's `"x"` and `"y"` fields.
+        //
+        // Rotation is applied ONCE here (at load), producing a model whose
+        // geometry, face directions, cullfaces and per-face UV rotations are
+        // already in world space. That mirrors MC baking rotated BakedQuads per
+        // blockstate: the mesher stays completely orientation-agnostic, and in
+        // particular neighbour occlusion keeps working because cullfaces come
+        // out as rotated world directions (MC: SimpleUnbakedGeometry rotates
+        // them with Direction.rotate for exactly this reason).
+        static BlockModel RotateModel(const BlockModel& src, int xQuarterTurns, int yQuarterTurns);
+
+        // Concatenate several resolved models into one.
+        //
+        // MC's `multipart` blockstates are ADDITIVE: every entry whose `when`
+        // matches contributes its model's quads to the same block, which is how
+        // a 3-segment leaf litter clump is drawn as leaf_litter_2 (a half) PLUS
+        // leaf_litter_3 (a quarter). Since a state here resolves to exactly one
+        // model name, the matching parts are merged once at load and registered
+        // under a derived name — the same trick already used for rotations.
+        //
+        // Parts must already be rotated; this only unions geometry. Texture
+        // maps are merged with earlier parts winning, and elements are
+        // self-contained after resolution so no reference can dangle.
+        static BlockModel MergeModels(const std::vector<const BlockModel*>& parts);
 
     private:
         static std::unordered_map<std::string, BlockModel> s_models;

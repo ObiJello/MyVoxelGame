@@ -10,6 +10,7 @@
 #include <memory>
 #include <functional>
 #include <unordered_map>
+#include <vector>
 
 namespace Game {
 
@@ -42,6 +43,28 @@ namespace Game {
         // Callback for notifying when a section becomes dirty
         std::function<void(int sectionIndex)> onSectionDirty;
 
+        // === BIOMES ===
+        //
+        // MC stores biomes at QUARTER resolution — one entry per 4x4x4 cell —
+        // and every lookup goes through
+        // `getNoiseBiome(x >> 2, y >> 2, z >> 2)` (ChunkAccess.getNoiseBiome).
+        // Matching that resolution is not an optimisation: the 4-block cells
+        // are visible at biome borders, and sampling per block would give
+        // different colours from vanilla along every edge.
+        //
+        // Flat 4 x 96 x 4 (x, yQuart, z), indexed low-to-high in Y from
+        // Math::MIN_Y. Empty until the chunk is given biome data, in which case
+        // every lookup answers with the fallback biome.
+        static constexpr int BIOME_HORIZONTAL = 4;                 // 16 blocks / 4
+        static constexpr int BIOME_VERTICAL   = Math::SECTIONS_PER_CHUNK * 4;
+        static constexpr int BIOME_COUNT      = BIOME_HORIZONTAL * BIOME_VERTICAL * BIOME_HORIZONTAL;
+        std::vector<uint16_t> biomes;
+
+        // Biome at chunk-local block coordinates with world Y. Quantises the
+        // same way MC does. Returns the fallback when the chunk carries none.
+        uint16_t GetBiome(int localX, int worldY, int localZ) const;
+        void SetBiomeQuart(int qx, int qy, int qz, uint16_t biomeId);
+
         Chunk();
         // Out-of-line: m_blockEntities holds unique_ptr<BlockEntity> with only
         // a forward declaration above. The destructor must be defined where
@@ -55,6 +78,20 @@ namespace Game {
 
         // Set block at local chunk coordinates with world Y
         void SetBlock(int localX, int worldY, int localZ, BlockID blockId);
+
+        // === BLOCK STATE ACCESS ===
+        // The state index is an index into the block's own state list (MC's
+        // BlockState.getId()); 0 is always the default state. Kept as separate
+        // overloads rather than extra parameters on GetBlock/SetBlock so the
+        // several hundred existing call sites that don't care about state stay
+        // untouched.
+
+        uint8_t GetBlockState(int localX, int worldY, int localZ) const;
+
+        // Set block and state together. Unlike SetBlock(...) this proceeds even
+        // when the BlockID is unchanged, so a pure re-orientation still applies
+        // and still dirties the section.
+        void SetBlock(int localX, int worldY, int localZ, BlockID blockId, uint8_t stateIndex);
 
         // === SECTION MANAGEMENT ===
 

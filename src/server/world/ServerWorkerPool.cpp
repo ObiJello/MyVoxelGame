@@ -115,10 +115,10 @@ namespace Threading {
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void ServerWorkerPool::SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
+    bool ServerWorkerPool::SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
         if (!m_running.load()) {
             Log::Warning("Cannot submit chunk loading job - ServerWorkerPool not running");
-            return;
+            return false;
         }
 
         uint64_t generation;
@@ -132,8 +132,23 @@ namespace Threading {
         job.generationId = generation;
         job.task = [this, chunkPos, generation]() { ProcessChunkLoading(chunkPos, generation); };
 
-        EnqueueJob(std::move(job));
+        if (!EnqueueJob(std::move(job))) {
+            // Roll the generation back. The bump above marks every older job
+            // for this chunk stale, and a stale job returns WITHOUT sending a
+            // result (ProcessChunkLoading) — so leaving the bump in place after
+            // a failed enqueue would silently kill an in-flight load and leave
+            // the requester waiting on a result that can never arrive. Only
+            // undo it if nobody else bumped in the meantime.
+            std::lock_guard<std::mutex> lock(m_cancelMutex);
+            auto it = m_chunkGenerations.find(chunkPos);
+            if (it != m_chunkGenerations.end() && it->second == generation) {
+                --it->second;
+            }
+            return false;
+        }
+
         m_stats.jobsSubmitted.fetch_add(1, std::memory_order_relaxed);
+        return true;
     }
 
     void ServerWorkerPool::SubmitChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority) {
@@ -385,18 +400,23 @@ namespace Threading {
         }
     }
 
-    void ServerWorkerPool::EnqueueJob(ServerJob&& job) {
+    bool ServerWorkerPool::EnqueueJob(ServerJob&& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
-        
+
         // Check queue size limit
         if (m_jobQueue.size() >= m_maxQueueSize) {
-            Log::Warning("Server worker queue full, dropping job");
-            return;
+            // Caller MUST handle this. A dropped job produces no result, and
+            // IntegratedServer treats "requested but no result yet" as
+            // permanently in-flight — see RequestChunkLoad.
+            Log::Warning("Server worker queue full (%zu jobs), dropping job for chunk (%d, %d)",
+                         m_jobQueue.size(), job.chunkPos.x, job.chunkPos.z);
+            return false;
         }
 
         m_jobQueue.push(std::move(job));
         lock.unlock();
         m_jobCondition.notify_one();
+        return true;
     }
 
     bool ServerWorkerPool::DequeueJob(ServerJob& job) {
@@ -461,10 +481,11 @@ namespace Threading {
         }
     }
 
-    void SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
-        if (g_serverWorkerPool) {
-            g_serverWorkerPool->SubmitChunkLoading(chunkPos, priority);
+    bool SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority) {
+        if (!g_serverWorkerPool) {
+            return false;
         }
+        return g_serverWorkerPool->SubmitChunkLoading(chunkPos, priority);
     }
 
     void SubmitServerChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority) {

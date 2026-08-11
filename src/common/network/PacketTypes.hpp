@@ -39,6 +39,7 @@
 #include "packets/game/ClientboundPlayerPositionPacket.hpp"
 #include "packets/game/InventoryFullS2CPacket.hpp"
 #include "packets/game/InventorySetSlotS2CPacket.hpp"
+#include "packets/game/OpenScreenS2CPacket.hpp"
 #include "packets/game/InventorySetCarriedS2CPacket.hpp"
 #include "packets/game/BlockEntityDataS2CPacket.hpp"
 #include "packets/game/SetHealthS2CPacket.hpp"

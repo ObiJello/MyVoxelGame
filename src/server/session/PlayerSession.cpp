@@ -13,6 +13,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/BlockPlacement.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
@@ -20,6 +21,7 @@
 #include "common/world/level/World.hpp"
 #include "../IntegratedServer.hpp"
 #include "common/inventory/AbstractContainerMenu.hpp"
+#include "common/inventory/CraftingMenu.hpp"
 #include "common/core/Features.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../portal/PortalRegistry.hpp"
@@ -504,8 +506,19 @@ namespace Server {
                     sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
                 }
 
+                // Block states ride as their own plane, and only when the
+                // section has any — see the note on SectionData::states.
+                if (section->HasStates()) {
+                    sectionData.states = section->states;
+                }
+
                 packet.sections.push_back(std::move(sectionData));
             }
+
+            // Noise biomes ride alongside the blocks — the client needs them to
+            // tint grass, foliage and water, and it has no generator of its own
+            // to derive them from.
+            packet.biomes = cd.chunk->biomes;
 
             auto data = Network::Serialization::Serialize(packet);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
@@ -590,7 +603,8 @@ namespace Server {
         }
         
         for (const auto& change : changes) {
-            CoalesceBlockChange(chunk, section, change.localX, change.localY, change.localZ, change.blockId);
+            CoalesceBlockChange(chunk, section, change.localX, change.localY, change.localZ,
+                                change.blockId, change.blockState);
         }
         
         if (HasSentChunk(chunk)) {
@@ -639,7 +653,8 @@ namespace Server {
                 int worldY = section * 16 + localY - 64;  // Adjust for world height
                 int worldZ = chunk.z * 16 + localZ;
                 
-                Network::BlockChangeS2CPacket packet(worldX, worldY, worldZ, blockId);
+                Network::BlockChangeS2CPacket packet(worldX, worldY, worldZ,
+                                                     blockId.id, blockId.state);
                 SendSingleBlockChange(packet);
                 
                 // Estimate packet size
@@ -653,7 +668,8 @@ namespace Server {
                     uint8_t localX = (packedPos >> 8) & 0xF;
                     uint8_t localY = (packedPos >> 4) & 0xF;
                     uint8_t localZ = packedPos & 0xF;
-                    packet.AddChange(localX, localY, localZ, static_cast<uint16_t>(blockId));
+                    packet.AddChange(localX, localY, localZ,
+                                     static_cast<uint16_t>(blockId.id), blockId.state);
                 }
                 
                 SendSectionBlocksUpdate(packet);
@@ -905,7 +921,7 @@ namespace Server {
     } // namespace
 
     void PlayerSession::InvalidateRemoteSlot(int index) {
-        if (index < 0 || index >= Game::Inventory::TOTAL_SIZE) return;
+        if (index < 0 || index >= static_cast<int>(m_remoteSlots.size())) return;
         // count = -1 is unreachable for a real stack (empty slots are count 0),
         // so ItemStacksMatch is guaranteed to report a difference and the diff
         // will resend this slot.
@@ -913,12 +929,29 @@ namespace Server {
         m_remoteSlots[index].count = -1;
     }
 
+    void PlayerSession::InvalidateRemoteInventorySlot(int inventoryIndex) {
+        if (!m_player) return;
+        InvalidateRemoteSlot(m_player->container().MenuIndexForInventorySlot(inventoryIndex));
+    }
+
     void PlayerSession::BroadcastContainerChanges() {
         if (!m_player || !m_connection) return;
-        const auto& inv = m_player->getInventory();
 
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            const Game::ItemStack& actual = inv.GetSlot(i);
+        // Walk the OPEN MENU's slots, not the inventory's. For the player's own
+        // menu the two are the same list; for a crafting table the menu also
+        // covers the table's grid and output, which the inventory knows nothing
+        // about. Slot::GetItem resolves each index to the right container.
+        auto& menu = m_player->container();
+        const int slotCount = menu.SlotCount();
+        if (static_cast<int>(m_remoteSlots.size()) != slotCount) {
+            // The menu changed under us without a full sync. Re-seed and send
+            // everything rather than diff against a mismatched model.
+            SendInventoryFull();
+            return;
+        }
+
+        for (int i = 0; i < slotCount; ++i) {
+            const Game::ItemStack& actual = menu.GetSlot(i).GetItem();
             if (StacksIdentical(actual, m_remoteSlots[i])) continue;
 
             m_remoteSlots[i] = actual;
@@ -1002,7 +1035,7 @@ namespace Server {
         // any delta scheme and survives as a ghost item.
         if (packet.hasPrediction) {
             for (const auto& [slot, stack] : packet.predictedSlots) {
-                if (slot < Game::Inventory::TOTAL_SIZE) m_remoteSlots[slot] = stack;
+                if (slot < m_remoteSlots.size()) m_remoteSlots[slot] = stack;
             }
             m_remoteCarried = packet.predictedCarried;
         }
@@ -1040,11 +1073,23 @@ namespace Server {
         // player's inventory (matching what the user expects when pressing E
         // without intentionally dropping). Only items that don't fit get
         // silently dropped (acceptable since the inventory is large).
-        // MC's doCloseContainer swaps containerMenu back to inventoryMenu, so
-        // the id the client was clicking against stops being current. Bump ours
-        // for the same effect: any click still in flight for the closed menu is
+        // MC doCloseContainer → menu.removed(player): a menu with its own
+        // storage hands it back before it disappears, and containerMenu drops
+        // to inventoryMenu so the id the client was clicking against stops
+        // being current — any click still in flight for the closed menu is then
         // rejected by the containerId guard in HandleInventoryClick.
-        m_player->container().containerId++;
+        //
+        // closeContainerMenu does both for a block container. With only the
+        // player's own menu open there is nothing to swap, so its 2x2 grid is
+        // emptied and the id bumped here instead — otherwise items parked in
+        // the crafting square would sit there invisibly until next time.
+        if (m_player->hasOpenContainerMenu()) {
+            m_player->closeContainerMenu();
+        } else {
+            Game::ContainerClickResult removal;
+            m_player->container().Removed(removal);
+            m_player->container().containerId++;
+        }
 
         int leftover = 0;
         auto& carried = m_player->getCarried();
@@ -1088,9 +1133,13 @@ namespace Server {
     void PlayerSession::SendInventoryFull() {
         if (!m_player || !m_connection) return;
         const auto& inv = m_player->getInventory();
+        auto& menu = m_player->container();
+
         Network::InventoryFullS2CPacket out;
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) {
-            out.slots[i] = inv.GetSlot(i);  // full stacks — components ride along
+        out.menuType = m_player->openMenuType();
+        out.slots.reserve(static_cast<size_t>(menu.SlotCount()));
+        for (int i = 0; i < menu.SlotCount(); ++i) {
+            out.slots.push_back(menu.GetSlot(i).GetItem());  // components ride along
         }
         out.carried            = m_player->getCarried();
         out.selectedHotbarSlot = static_cast<uint8_t>(inv.GetSelectedSlot());
@@ -1111,9 +1160,46 @@ namespace Server {
         m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryFullS2C), data);
 
         // The client adopts this snapshot verbatim, so our model of its state
-        // is now exactly what we just sent.
-        for (int i = 0; i < Game::Inventory::TOTAL_SIZE; ++i) m_remoteSlots[i] = out.slots[i];
+        // is now exactly what we just sent — including its SIZE, which is how
+        // the model follows a menu swap.
+        m_remoteSlots   = out.slots;
         m_remoteCarried = out.carried;
+    }
+
+    void PlayerSession::FlushPendingMenuOpen() {
+        if (!m_player || !m_connection) return;
+        const auto pending = m_player->takePendingMenuOpen();
+        if (!pending) return;
+
+        std::unique_ptr<Game::AbstractContainerMenu> menu;
+        std::string title;
+        switch (pending->type) {
+            case Game::MenuType::Crafting:
+                menu  = std::make_unique<Game::CraftingMenu>(&m_player->getInventory());
+                title = "Crafting";
+                break;
+            case Game::MenuType::Inventory:
+                // Not a thing a block can ask for — the player menu is always
+                // open behind whatever else is.
+                return;
+        }
+        if (!menu) return;
+
+        m_player->openContainerMenu(std::move(menu), pending->type);
+
+        // MC ServerPlayer.openMenu: ClientboundOpenScreenPacket first (so the
+        // client builds the matching menu), then the contents.
+        Network::OpenScreenS2CPacket open;
+        open.containerId = m_player->container().containerId;
+        open.menuType    = pending->type;
+        open.title       = title;
+        auto data = Network::Serialization::Serialize(open);
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::OpenScreenS2C), data);
+
+        SendInventoryFull();
+        Log::Debug("[PlayerSession %u] Opened menu type %u (container %u)",
+                   m_playerId, static_cast<unsigned>(pending->type),
+                   m_player->container().containerId);
     }
 
     void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
@@ -1395,23 +1481,28 @@ namespace Server {
             return;
         }
         
-        // Calculate target position (where to place the block).
-        // MC's BlockItem.useOn (BlockItem.java:62 → getPlaceContext → getClickedPos)
-        // also probes a "relative" cell when the clicked one isn't replaceable.
-        glm::ivec3 targetPos = clicked;
+        // === 6a. Resolve the placement cell (MC BlockPlaceContext) ===
+        //
+        // Vanilla asks three questions in a fixed order, and the ORDER is what
+        // makes segmented ground cover behave:
+        //
+        //   replaceClicked = clickedState.canBeReplaced(ctx)          // ctor
+        //   getClickedPos() = replaceClicked ? clicked : relativePos
+        //   canPlace()      = replaceClicked
+        //                     || stateAt(getClickedPos()).canBeReplaced(ctx)
+        //
+        // Only after that does getStateForPlacement look at the block sitting
+        // at the resolved position. That is why clicking the GRASS BLOCK under a
+        // leaf litter clump still grows the clump: grass isn't replaceable, so
+        // the position resolves up into the litter's own cell, and the growth
+        // check happens there rather than on whatever the crosshair touched.
+        const Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
+        const uint8_t clickedBlockState = world->GetBlockState(clicked.x, clicked.y, clicked.z);
 
-        // Check if clicked block is replaceable.
-        // TODO: proper canBeReplaced(blockstate) when block behaviours grow;
-        // for now treat only Air as replaceable. (Snow / tall grass / water
-        // should be added here when those become placement-replaceable.)
-        Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
-        bool isReplaceable = (clickedBlockId == Game::BlockID::Air);
+        const bool replaceClicked = Game::CanBeReplacedByPlacement(
+            clickedBlockId, clickedBlockState, blockToPlace, sneaking);
 
-        if (!isReplaceable) {
-            // Place at offset position
-            targetPos = context.getPlacementPos();
-        }
-        // If replaceable (snow, tall grass, etc.), place at clicked position
+        glm::ivec3 targetPos = replaceClicked ? clicked : context.getPlacementPos();
 
         // Validate target position
         if (!world->IsValidPosition(targetPos.x, targetPos.y, targetPos.z)) {
@@ -1420,21 +1511,45 @@ namespace Server {
             return;
         }
 
-        // The cell we resolved to has to be replaceable too — otherwise we'd
-        // silently overwrite the block already sitting there (e.g. clicking a
-        // wall whose +X neighbour already holds a slab would replace that slab
-        // with the new one, consuming an inventory item but appearing to do
-        // nothing). Mirrors MC's BlockItem.useOn second `canBeReplaced` check
-        // on the resolved placement state.
-        Game::BlockID targetBlockId = world->GetBlock(targetPos.x, targetPos.y, targetPos.z);
-        if (targetBlockId != Game::BlockID::Air) {
+        const Game::BlockID targetBlockId = world->GetBlock(targetPos.x, targetPos.y, targetPos.z);
+        const uint8_t targetBlockState = world->GetBlockState(targetPos.x, targetPos.y, targetPos.z);
+
+        // MC BlockPlaceContext.canPlace. Without it we'd silently overwrite the
+        // block already sitting in the resolved cell — clicking a wall whose
+        // +X neighbour holds a slab would replace that slab, consuming an
+        // inventory item while appearing to do nothing.
+        if (!replaceClicked &&
+            !Game::CanBeReplacedByPlacement(targetBlockId, targetBlockState, blockToPlace, sneaking)) {
             Log::Debug("HandleUseItemOn: Target cell already occupied at (%d,%d,%d) by block %u",
                        targetPos.x, targetPos.y, targetPos.z, static_cast<unsigned>(targetBlockId));
             ResyncAndAck(clicked, targetPos, packet.sequence);
             return;
         }
+
+        // === 6b. Segmented ground cover grows in place ===
+        //
+        // MC SegmentableBlock.getStateForPlacement, run against the RESOLVED
+        // cell as vanilla does:
+        //
+        //   BlockState state = level.getBlockState(context.getClickedPos());
+        //   return state.is(block) ? state.setValue(segment, min(4, n + 1)) : …
+        //
+        // The facing is deliberately not recomputed — `state.setValue` mutates
+        // the state already there, so a clump never re-orients as you add to it.
+        bool growInPlace = false;
+        {
+            const Game::BlockID base = Game::SegmentedFamilyBase(targetBlockId);
+            if (base != Game::BlockID::Air &&
+                base == Game::SegmentedFamilyBase(blockToPlace)) {
+                const Game::BlockID grown = Game::SegmentedGrowth(targetBlockId);
+                if (grown != Game::BlockID::Air) {
+                    blockToPlace = grown;
+                    growInPlace  = true;
+                }
+            }
+        }
         
-        // === 6b. Slab orientation (top vs bottom half) ===
+        // === 6c. Slab orientation (top vs bottom half) ===
         // Mirrors MC's SlabBlock.getStateForPlacement (SlabBlock.java:66-90):
         // the slab is placed in the TOP half when the player clicked on the
         // bottom face of a block (face == DOWN), or when they clicked the
@@ -1466,15 +1581,28 @@ namespace Server {
 
         // === 7. Validate placement ===
 
-        // TODO: Check if block can survive at target position when BlockRegistry is fully implemented
-        // For now, assume all blocks can be placed anywhere
-        // Game::Block* blockToPl = Game::BlockRegistry::getInstance().getBlock(blockToPlace);
-        // if (blockToPl && !blockToPl->canSurvive(world, targetPos)) {
-        //     Log::Debug("HandleUseItemOn: Block cannot survive at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
-        //     ResyncAndAck(clicked, targetPos, packet.sequence);
-        //     return;
-        // }
-        
+        // MC BlockItem.canPlace → `stateForPlacement.canSurvive(level, pos)`.
+        // Only the families with a modelled rule are constrained (see
+        // CanSurviveOn); everything else still places anywhere, as before.
+        //
+        // This is what stops leaf litter from stacking on itself. A full
+        // 4-segment clump is no longer replaceable by its own item, so the
+        // position resolves to the cell ABOVE — and there LeafLitterBlock's
+        // canSurvive asks for a sturdy top face below, which a leaf litter's
+        // empty collision shape does not provide.
+        {
+            const Game::BlockID belowId =
+                world->GetBlock(targetPos.x, targetPos.y - 1, targetPos.z);
+            const uint8_t belowState =
+                world->GetBlockState(targetPos.x, targetPos.y - 1, targetPos.z);
+            if (!Game::CanSurviveOn(blockToPlace, belowId, belowState)) {
+                Log::Debug("HandleUseItemOn: Block cannot survive at (%d,%d,%d)",
+                           targetPos.x, targetPos.y, targetPos.z);
+                ResyncAndAck(clicked, targetPos, packet.sequence);
+                return;
+            }
+        }
+
         // === 8. Collision check with entities ===
         
         // Check if any players are in the target block space
@@ -1483,9 +1611,17 @@ namespace Server {
         glm::vec3 playerCollisionPos = glm::vec3(playerPosDouble.x, playerPosDouble.y, playerPosDouble.z);
         glm::vec3 blockCenter = glm::vec3(targetPos) + glm::vec3(0.5f, 0.5f, 0.5f);
         
-        // Simple AABB check - player is 0.6x1.8x0.6, block is 1x1x1
+        // Simple AABB check - player is 0.6x1.8x0.6, block is 1x1x1.
+        //
+        // Skipped entirely for blocks MC declares `.noCollision()`. Vanilla's
+        // gate is `level.isUnobstructed(state, pos, CollisionContext.empty())`
+        // (BlockItem.java), which tests the block's COLLISION shape — empty for
+        // flowers, grass and leaf litter, so those always place. Without this
+        // you can't add a segment to the clump you're standing on, or put a
+        // flower down at your own feet.
         bool playerCollides = false;
-        if (std::abs(playerCollisionPos.x - blockCenter.x) < 0.8f &&
+        if (Game::BlockRegistry::HasCollision(blockToPlace) &&
+            std::abs(playerCollisionPos.x - blockCenter.x) < 0.8f &&
             std::abs(playerCollisionPos.z - blockCenter.z) < 0.8f &&
             playerCollisionPos.y < targetPos.y + 1.0f &&
             playerCollisionPos.y + 1.8f > targetPos.y) {
@@ -1501,11 +1637,23 @@ namespace Server {
         // TODO: Check collision with other entities
         
         // === 9. Mutate the world ===
-        
+
+        // MC Block.getStateForPlacement, applied through one shared table (see
+        // BlockPlacement.cpp). Returns 0 — the block's default state — for
+        // anything with no orientation, so it applies unconditionally. The
+        // client mirrors this exact call when it predicts the placement, so the
+        // block never visibly flips when this authoritative update lands.
+        // Growing a clump carries its existing facing across (see 6b); every
+        // other placement derives orientation from how the player was standing.
+        const uint8_t placedState =
+            growInPlace ? targetBlockState
+                        : Game::ComputePlacementState(blockToPlace, context);
+
         bool changed = world->SetBlock(
             targetPos.x, targetPos.y, targetPos.z,
             blockToPlace,
-            Game::World::UpdateFlags::All
+            Game::World::UpdateFlags::All,
+            placedState
         );
         
         if (!changed) {
@@ -1531,48 +1679,21 @@ namespace Server {
                 if (auto* be = chunk->GetBlockEntity(lx, targetPos.y, lz)) {
                     be->ApplyItemComponents(heldStack.components);
 
-                    // Mirrors MC ChestBlock.getStateForPlacement
-                    // (ChestBlock.java:182):
-                    //   FACING = context.getHorizontalDirection().opposite()
-                    // — the chest's front (lock side) faces back AT the
-                    // player. Player yaw is measured CW from south, range
-                    // [-180, 180]; we bucket it into 4 cardinal directions
-                    // and store on the BE so the renderer can rotate. Same
-                    // pattern will work for furnace/dispenser/etc. once
-                    // they get their own BE types.
-                    if (auto* chestBE = dynamic_cast<Game::ChestBlockEntity*>(be)) {
-                        // OUR yaw convention (see ClientPlayer::UpdateRaycast,
-                        // Player.cpp:69-71):
-                        //   front.x = cos(yaw), front.z = sin(yaw)
-                        // → yaw=0   → +X (east)
-                        // → yaw=90  → +Z (south)
-                        // → yaw=180 → -X (west)
-                        // → yaw=270 → -Z (north)
-                        // We want the chest's FRONT to face the OPPOSITE of
-                        // where the player is looking, so the player ends up
-                        // looking at the lock side.
-                        float y = std::fmod(m_player->getYaw(), 360.0f);
-                        if (y < 0.0f) y += 360.0f;
-                        const int oct = static_cast<int>((y + 45.0f) / 90.0f) & 3;
-                        static const Game::HorizontalDirection kOppositeOfLook[4] = {
-                            Game::HorizontalDirection::West,   // looking east  → face west
-                            Game::HorizontalDirection::North,  // looking south → face north
-                            Game::HorizontalDirection::East,   // looking west  → face east
-                            Game::HorizontalDirection::South,  // looking north → face south
-                        };
-                        chestBE->facing = kOppositeOfLook[oct];
-                    }
+                    // NOTE: chest facing is NOT set here any more. In vanilla,
+                    // orientation is a blockstate property and the block entity
+                    // carries none — ChestBlockEntity's whole field set is
+                    // items + openersCounter + chestLidController
+                    // (ChestBlockEntity.java:33-35), and ChestRenderer reads the
+                    // angle off the BLOCK (ChestRenderer.java:67:
+                    // blockState.getValue(ChestBlock.FACING).toYRot()). Chest is
+                    // in the placement table like every other oriented block, so
+                    // its facing rode in with the SetBlock above.
 
                     // The BE was just CREATED with default state and the
-                    // initial BlockEntityDataS2C went out alongside the
-                    // block change. ApplyItemComponents / facing assignment
-                    // may have mutated state — mark dirty + re-broadcast so
-                    // clients see the updated facing.
+                    // initial BlockEntityDataS2C went out alongside the block
+                    // change. ApplyItemComponents may have mutated it — mark
+                    // dirty + re-broadcast so clients see the updated contents.
                     be->MarkDirty();
-
-                    // Re-broadcast NOW (the initial BlockEntityDataS2C
-                    // already went out with the default North facing; we
-                    // need a follow-up with the placement-derived facing).
                     if (m_connection) {
                         Network::BlockEntityDataS2CPacket pkt(
                             targetPos.x, targetPos.y, targetPos.z,
@@ -1842,14 +1963,21 @@ namespace Server {
             if (server && server->GetWorld()) {
                 Game::World* world = server->GetWorld();
 
-                // Send clicked block
-                Game::BlockID clickedBlock = world->GetBlock(clicked.x, clicked.y, clicked.z);
-                SendBlockUpdate(clicked, clickedBlock);
+                // Send clicked block, WITH its state index. Dropping the state
+                // here is what made a full leaf litter clump spin north every
+                // time a right-click on it was rejected: the resync told the
+                // client "leaf_litter, default state", overwriting the facing
+                // the client had rendered correctly all along. Same applied to
+                // every furnace, chest and log that ever got resynced.
+                SendBlockUpdate(clicked,
+                                world->GetBlock(clicked.x, clicked.y, clicked.z),
+                                world->GetBlockState(clicked.x, clicked.y, clicked.z));
 
                 // Send target block if different
                 if (clicked != target) {
-                    Game::BlockID targetBlock = world->GetBlock(target.x, target.y, target.z);
-                    SendBlockUpdate(target, targetBlock);
+                    SendBlockUpdate(target,
+                                    world->GetBlock(target.x, target.y, target.z),
+                                    world->GetBlockState(target.x, target.y, target.z));
                 }
             }
 
@@ -1868,7 +1996,9 @@ namespace Server {
             if (m_player) {
                 const int sel = Game::Inventory::HOTBAR_BEGIN
                               + m_player->getInventory().GetSelectedSlot();
-                InvalidateRemoteSlot(sel);
+                // Player-inventory index → menu index: they differ whenever a
+                // block container is on top.
+                InvalidateRemoteInventorySlot(sel);
                 BroadcastContainerChanges();
             }
         }
@@ -1907,10 +2037,11 @@ namespace Server {
             static_cast<uint8_t>(Network::PacketId::PlayerUpdateS2C), data);
     }
     
-    void PlayerSession::SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block) {
+    void PlayerSession::SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block,
+                                        uint8_t stateIndex) {
         if (!m_connection) return;
-        
-        Network::BlockChangeS2CPacket packet(pos.x, pos.y, pos.z, block);
+
+        Network::BlockChangeS2CPacket packet(pos.x, pos.y, pos.z, block, stateIndex);
         SendSingleBlockChange(packet);
     }
     
@@ -2078,11 +2209,11 @@ namespace Server {
 
     void PlayerSession::CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                            uint8_t localX, uint8_t localY, uint8_t localZ,
-                                           Game::BlockID blockId) {
+                                           Game::BlockID blockId, uint8_t stateIndex) {
         auto& sectionDiffs = m_pendingDiffs[chunk][section];
         sectionDiffs.chunkPos = chunk;
         sectionDiffs.sectionIndex = section;
-        sectionDiffs.AddChange(localX, localY, localZ, blockId);
+        sectionDiffs.AddChange(localX, localY, localZ, blockId, stateIndex);
     }
 
     size_t PlayerSession::EstimatePacketSize(const Network::ChunkDataS2CPacket& packet) const {

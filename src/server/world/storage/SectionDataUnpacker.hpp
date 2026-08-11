@@ -24,25 +24,50 @@ namespace Game {
         std::string name;                                    // e.g. "minecraft:grass_block"
         std::unordered_map<std::string, std::string> properties; // e.g. {"snowy": "false"}
         BlockID resolvedId;                                  // Our internal block ID
+        // Index into resolvedId's own state list (MC BlockState.getId()),
+        // derived from `properties`. 0 = the block's default state, which is
+        // also what an unmodelled property set resolves to.
+        uint8_t resolvedState = 0;
 
         BlockState() : resolvedId(BlockID::Air) {}
         BlockState(const std::string& blockName, BlockID id = BlockID::Air)
             : name(blockName), resolvedId(id) {}
 
-        // Generate a string key for this block state (for caching/lookup)
+        // Canonical string key for this block state, matching MC's
+        // `BlockState.toString()` shape: `minecraft:<name>{p1:v1,p2:v2}` with
+        // properties sorted by name.
+        //
+        // The sort is load-bearing, not cosmetic: `properties` is an
+        // unordered_map, so iterating it raw emits property order that varies
+        // with hashing and bucket count. Any key built that way is unusable as
+        // a lookup key or a log line.
         std::string GetStateKey() const {
             std::string key = name;
             if (!properties.empty()) {
+                std::vector<const std::pair<const std::string, std::string>*> sorted;
+                sorted.reserve(properties.size());
+                for (const auto& kv : properties) sorted.push_back(&kv);
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const auto* a, const auto* b) { return a->first < b->first; });
+
                 key += "{";
                 bool first = true;
-                for (const auto& [prop, value] : properties) {
+                for (const auto* kv : sorted) {
                     if (!first) key += ",";
-                    key += prop + ":" + value;
+                    key += kv->first + ":" + kv->second;
                     first = false;
                 }
                 key += "}";
             }
             return key;
+        }
+
+        // `name{prop:value}` — the single-property form the override table is
+        // keyed on. A block with several properties can't be looked up by its
+        // full key against those entries, so resolution tries each property in
+        // turn (see BlockStateRegistry::ResolveBlockState).
+        std::string GetSinglePropertyKey(const std::string& prop, const std::string& value) const {
+            return name + "{" + prop + ":" + value + "}";
         }
     };
 

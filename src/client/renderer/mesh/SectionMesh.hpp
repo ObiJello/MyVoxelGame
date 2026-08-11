@@ -4,6 +4,7 @@
 #include "../core/Vertex.hpp"
 #include "../backend/RenderTypes.hpp"
 #include "../culling/VisibilitySet.hpp"
+#include "TranslucentSort.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include <vector>
 #include <cstdint>
@@ -115,6 +116,16 @@ namespace Render {
         CachedDrawCmd opaqueDrawCmd;
         CachedDrawCmd cutoutDrawCmd;
         CachedDrawCmd translucentDrawCmd;
+
+        // Back-to-front ordering state for this section's translucent layer.
+        // Centroids are kept (12 bytes a quad, versus 96 for the vertices) so a
+        // re-sort only has to rewrite the index buffer — the vertex data never
+        // moves. Empty for the overwhelming majority of sections, which carry
+        // no translucent geometry at all.
+        // See mesh/TranslucentSort.hpp for why this is required and not merely
+        // a refinement.
+        std::vector<glm::vec3> translucentCentroids;
+        TranslucentSort::PointOfView translucencyPov;   // invalid until first sort
 
         // Occlusion culling: which face pairs can see through this section
         VisibilitySet visibilitySet;

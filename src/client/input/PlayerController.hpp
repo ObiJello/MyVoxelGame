@@ -78,9 +78,22 @@ namespace Game {
         // Main update tick (call once per frame)
         void Tick(float deltaTime);
 
-        // Input handlers (to be called from main loop based on input)
-        void OnLMB(bool pressed);  // Left mouse button (break)
-        void OnRMB(bool pressed);  // Right mouse button (place)
+        // Input handlers, named and shaped after Minecraft.java's. The caller
+        // drains discrete presses from the input event queue
+        // (`while (Input::ConsumeClick(...)) StartAttack();`) and separately
+        // feeds the held state to ContinueAttack — the same split MC uses in
+        // handleKeybinds (Minecraft.java:1979-1999). Deriving "a click
+        // happened" from a polled level is what let a click that dismissed a
+        // screen break the block under the crosshair.
+        void StartAttack();              // MC Minecraft.startAttack
+        void ContinueAttack(bool down);  // MC Minecraft.continueAttack
+        void StartUseItem();             // MC Minecraft.startUseItem
+        void StopUseItem();              // RMB release
+
+        // MC Minecraft.missTime — set to a large value while a screen is open
+        // and decremented each tick, so an attack can't fire out of a UI frame
+        // even if a click somehow leaked through. Reset by ContinueAttack(false).
+        void SetMissTime(int ticks) { missTime = ticks; }
         
         // Hotbar selection
         void OnHotbarChanged(int slot);
@@ -146,11 +159,16 @@ namespace Game {
 
         // Placing state — tick-based now, no wall-clock throttle (matches MC).
         bool placeButtonHeld = false;
-        int  ticksSincePlace = 1000;       // big-on-startup so first click fires
         bool armSwingPending = false;       // set when continuous mining hits SWING_TICKS
 
         // Fixed-step tick accumulator (MC-style 20 TPS).
         float tickAccum = 0.0f;
+
+        // MC Minecraft.missTime / rightClickDelay. missTime blocks StartAttack
+        // entirely while positive; rightClickDelay is the 4-tick gap between
+        // held-RMB re-fires (MC startUseItem sets it to 4).
+        int missTime = 0;
+        int rightClickDelay = 0;
 
         // Network state (placeholders for future implementation)
         std::chrono::steady_clock::time_point lastMoveSend;
@@ -163,6 +181,9 @@ namespace Game {
         // Read a block from whichever source this session has (see
         // SetBlockAccess). Returns Air for unloaded/invalid positions.
         BlockID ReadBlock(const glm::ivec3& pos) const;
+        // State index at `pos`, from the same source as ReadBlock. 0 for
+        // unloaded/invalid positions and for accessors that don't track state.
+        uint8_t ReadBlockState(const glm::ivec3& pos) const;
         // Live look angles in degrees, derived from lookDir (player->yaw/pitch
         // are stale — see the implementation comment).
         void LookAngles(float& yawDeg, float& pitchDeg) const;
@@ -170,7 +191,8 @@ namespace Game {
         // shows up this frame instead of a round trip later, and register it
         // with ClientChunkManager's prediction handler under `sequence` so the
         // server's ack can confirm or roll it back.
-        void PredictBlock(const glm::ivec3& pos, BlockID newBlock, uint32_t sequence);
+        void PredictBlock(const glm::ivec3& pos, BlockID newBlock, uint32_t sequence,
+                          uint8_t stateIndex = 0);
         void SendMovementIfDue();  // TODO: Implement for networking
         void StartDig(const glm::ivec3& pos, int face);
         void AbortDig();
@@ -184,6 +206,11 @@ namespace Game {
         // nothing was sent) so a matching block prediction can be filed.
         uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false);  // altInteract=true → left-click "use" semantics (PortalGun blue)
 
+        // Raycast face numbering -> MC Direction ordinals. Shared by the
+        // outgoing packet and the local placement prediction, so the two
+        // cannot disagree about which face was clicked.
+        static uint32_t OurFaceToMcFace(int ourFace);
+
         // Work out what a right-click on `hit` will place, if anything — the
         // client-side mirror of the placement half of
         // PlayerSession::HandleUseItemOn. Deliberately conservative: it only
@@ -192,8 +219,13 @@ namespace Game {
         // whose outcome the client can derive exactly. Everything else falls
         // back to the un-predicted (wait-for-server) path rather than risk
         // predicting a block the server won't place.
+        //
+        // `outState` receives the block-state index from the same shared
+        // Game::ComputePlacementState the server uses, so an oriented block
+        // predicts with the correct facing rather than snapping on the ack.
         bool ComputePredictedPlacement(const RaycastHit& hit,
-                                       glm::ivec3& outPos, BlockID& outBlock) const;
+                                       glm::ivec3& outPos, BlockID& outBlock,
+                                       uint8_t& outState) const;
 
         // Run the shared block-use / item-useOn chain locally so its block
         // edits land this frame, exactly as MC does inside

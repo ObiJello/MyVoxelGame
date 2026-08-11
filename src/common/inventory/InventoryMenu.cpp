@@ -7,54 +7,82 @@
 namespace Game {
 
     namespace {
-        // GUI positions, panel-image-relative. These were hardcoded in
-        // InventoryScreen::GetSlotImagePos; they live here now so a slot's
-        // position and its behaviour can never disagree.
         constexpr int SLOT_STEP = 18;
     }
 
     InventoryMenu::InventoryMenu(Inventory* playerInventory)
-        : AbstractContainerMenu(playerInventory) {
+        : AbstractCraftingMenu(playerInventory, 2, 2) {
+
+        // The 2x2 grid and its output live in the player's OWN inventory at
+        // indices 0..4 — unlike MC, where they are a transient container. That
+        // is what keeps menu index == inventory index for this menu, which the
+        // whole slot-sync path is built around.
+        Configure(playerInventory, Inventory::CRAFT_GRID_BEGIN,
+                  playerInventory, Inventory::CRAFT_RESULT_BEGIN,
+                  /*gridMenuBegin=*/Inventory::CRAFT_GRID_BEGIN,
+                  /*resultMenuIndex=*/Inventory::CRAFT_RESULT_BEGIN);
 
         // Slot order must match MC's InventoryMenu exactly — the wire protocol,
         // the save format and PlayerSession's remote-slot diff all assume menu
         // index == Game::Inventory index.
+        //
+        // The GUI coordinates below are MC's, panel-relative to the 176x166
+        // textures/gui/container/inventory.png that Render::InventoryScreen
+        // draws. They used to be the CREATIVE tab's coordinates instead, from
+        // back when the creative picker was the only screen we had. MC keeps
+        // the survival numbers here and lets CreativeModeInventoryScreen
+        // re-position the same slots for its own panel
+        // (CreativeModeInventoryScreen.selectTab, the SlotWrapper loop) — so
+        // that is where our creative overrides live too.
 
-        // 0 — crafting result. Not rendered (IsActive false).
-        AddSlot(std::make_unique<NoPlaceSlot>(playerInventory, 0, -1, -1));
+        // 0 — crafting result (InventoryMenu.java:46 → addResultSlot(154, 28)).
+        AddSlot(std::make_unique<CraftingResultSlot>(
+            this, playerInventory, Inventory::CRAFT_RESULT_BEGIN, 154, 28));
 
-        // 1..4 — 2x2 crafting grid. Not rendered.
+        // 1..4 — 2x2 crafting grid (InventoryMenu.java:47 →
+        // addCraftingGridSlots(98, 18), which walks row-major over a 2x2).
         for (int i = 0; i < Inventory::CRAFT_GRID_SIZE; ++i) {
-            AddSlot(std::make_unique<NoPlaceSlot>(
-                playerInventory, Inventory::CRAFT_GRID_BEGIN + i, -1, -1));
+            const int col = i % 2;
+            const int row = i / 2;
+            AddSlot(std::make_unique<Slot>(
+                playerInventory, Inventory::CRAFT_GRID_BEGIN + i,
+                98 + col * SLOT_STEP, 18 + row * SLOT_STEP));
         }
 
-        // 5..8 — armor (helmet, chest, legs, boots), laid out two columns of two.
+        // 5..8 — armor (helmet, chest, legs, boots) in one column
+        // (InventoryMenu.java:52 → (8, 8 + i * 18)), each carrying the
+        // empty-slot silhouette from InventoryMenu.EMPTY_ARMOR_SLOT_*.
+        static const char* kArmorIcons[Inventory::ARMOR_SIZE] = {
+            "container/slot/helmet",
+            "container/slot/chestplate",
+            "container/slot/leggings",
+            "container/slot/boots",
+        };
         for (int i = 0; i < Inventory::ARMOR_SIZE; ++i) {
-            const int col = i / 2;
-            const int row = i % 2;
             AddSlot(std::make_unique<ArmorSlot>(
-                playerInventory, Inventory::ARMOR_BEGIN + i,
-                54 + col * 54, 6 + row * 27));
+                playerInventory, Inventory::ARMOR_BEGIN + i, 8, 8 + i * SLOT_STEP))
+                .noItemIcon = kArmorIcons[i];
         }
 
-        // 9..35 — main storage, 3 rows of 9.
+        // 9..35 — main storage, 3 rows of 9 (InventoryMenu.java:55 →
+        // addStandardInventorySlots(8, 84)).
         for (int i = 0; i < Inventory::MAIN_SIZE; ++i) {
             AddSlot(std::make_unique<Slot>(
                 playerInventory, Inventory::MAIN_BEGIN + i,
-                9 + (i % 9) * SLOT_STEP, 54 + (i / 9) * SLOT_STEP));
+                8 + (i % 9) * SLOT_STEP, 84 + (i / 9) * SLOT_STEP));
         }
 
-        // 36..44 — hotbar.
+        // 36..44 — hotbar. Same helper, offset 58px below the main rows
+        // (AbstractContainerMenu.addStandardInventorySlots: top + 58).
         for (int i = 0; i < Inventory::HOTBAR_SIZE; ++i) {
             AddSlot(std::make_unique<Slot>(
-                playerInventory, Inventory::HOTBAR_BEGIN + i,
-                9 + i * SLOT_STEP, 112));
+                playerInventory, Inventory::HOTBAR_BEGIN + i, 8 + i * SLOT_STEP, 84 + 58));
         }
 
-        // 45 — offhand. MC: CreativeModeInventoryScreen.selectTab(INVENTORY)
-        // lines 537-539 → (35, 20).
-        AddSlot(std::make_unique<Slot>(playerInventory, Inventory::OFFHAND_BEGIN, 35, 20));
+        // 45 — offhand (InventoryMenu.java:56 → (77, 62)), with
+        // EMPTY_ARMOR_SLOT_SHIELD as its placeholder.
+        AddSlot(std::make_unique<Slot>(playerInventory, Inventory::OFFHAND_BEGIN, 77, 62))
+            .noItemIcon = "container/slot/shield";
     }
 
     // Verbatim port of InventoryMenu.quickMoveStack (InventoryMenu.java:95-153).
@@ -74,7 +102,6 @@ namespace Game {
         constexpr int MAIN_BEGIN   = Inventory::MAIN_BEGIN;                        // 9
         constexpr int HOTBAR_BEGIN = Inventory::HOTBAR_BEGIN;                      // 36
         constexpr int HOTBAR_END   = Inventory::HOTBAR_BEGIN + Inventory::HOTBAR_SIZE; // 45
-        constexpr int STORAGE_END  = Inventory::TOTAL_SIZE;                        // 46 (through offhand)
 
         bool moved = false;
 
@@ -89,11 +116,13 @@ namespace Game {
             }
         }
 
-        if (slotIndex == Inventory::CRAFT_RESULT_BEGIN
-            || Inventory::IsCraftGridSlot(slotIndex)
-            || Inventory::IsArmorSlot(slotIndex)) {
-            // Restricted sources → the whole player storage range at once.
-            moved = MoveItemStackTo(stack, MAIN_BEGIN, STORAGE_END, true, result);
+        if (slotIndex == Inventory::CRAFT_RESULT_BEGIN) {
+            // A crafted stack fills from the BACK (hotbar first) — MC line 104.
+            moved = MoveItemStackTo(stack, MAIN_BEGIN, HOTBAR_END, true, result);
+        } else if (Inventory::IsCraftGridSlot(slotIndex)
+                || Inventory::IsArmorSlot(slotIndex)) {
+            // Restricted sources → main + hotbar, front to back (MC lines 110/114).
+            moved = MoveItemStackTo(stack, MAIN_BEGIN, HOTBAR_END, false, result);
         } else if (equipTarget >= 0) {
             moved = MoveItemStackTo(stack, equipTarget, equipTarget + 1, false, result);
         } else if (Inventory::IsMainSlot(slotIndex)) {

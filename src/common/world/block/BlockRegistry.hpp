@@ -3,9 +3,13 @@
 
 #include "Blocks.hpp"
 #include "BlockModel.hpp"
+#include "Direction.hpp"
 #include "../../entity/MiningTier.hpp"
 #include <array>
 #include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 
 #include <glm/glm.hpp>
 
@@ -106,6 +110,11 @@ namespace Game {
 
         // Get model for a block (returns default if not found)
         static const BlockModel& GetBlockModel(BlockID id);
+        // Model for a specific block STATE — the blockstate JSON may map each
+        // state to a different (possibly rotated) model. MC's equivalent is
+        // BlockModelShaper.getBlockModel(BlockState). Falls back to the plain
+        // model when the block has no blockstate file or no states.
+        static const BlockModel& GetBlockModel(BlockID id, uint8_t stateIndex);
 
         // Combined outline / selection shape for a block, in [0,1] block-local
         // coordinates. Computed once per BlockID by unioning the AABB of every
@@ -116,7 +125,41 @@ namespace Game {
         // produce NaN edges. Returns (0,0,0)-(1,1,1) for full cubes and for
         // blocks whose model couldn't be resolved.
         struct BlockShape { glm::vec3 min{0.0f}; glm::vec3 max{1.0f}; };
+
+        // Shape for a specific block STATE. Rotation lives in the model, so a
+        // block whose blockstate maps facing to a y-rotated model has a
+        // DIFFERENT shape per state — a leaf litter clump occupies a different
+        // quarter of its cell depending on which way it faces. Deriving the
+        // shape from the state's own model is exactly MC's
+        // LeafLitterBlock.getShape → getShapeForEachState(getShapeCalculator(
+        // FACING, AMOUNT)), which builds one VoxelShape per state.
+        //
+        // Querying the state-0 overload for a rotated block gives the shape of
+        // the block as authored (north-facing), which is why the outline and
+        // the raycast used to sit in the wrong corner.
+        static const BlockShape& GetBlockShape(BlockID id, uint8_t stateIndex);
+
+        // Default-state shape. Correct for the ~99% of blocks that have no
+        // state properties at all; prefer the two-argument form anywhere a
+        // state index is available.
         static const BlockShape& GetBlockShape(BlockID id);
+
+        // ── MC BlockBehaviour.OffsetType ────────────────────────────────────
+        //
+        // Flowers, grasses and similar decoration are drawn nudged off the grid
+        // by a hash of their position (BlockBehaviour.Properties.offsetType).
+        // Without it every plant sits dead centre in its cell and a field of
+        // grass reads as a visible lattice rather than scatter.
+        //
+        // NONE = no offset. XZ = horizontal jitter. XYZ = the same plus a
+        // downward sink, which is what stops short grass and ferns from all
+        // standing at exactly the same height.
+        enum class OffsetType : uint8_t { None, XZ, XYZ };
+        static OffsetType GetOffsetType(BlockID id);
+
+        // The offset itself, in block units. Pure function of (x, z) — MC seeds
+        // with y = 0 so a double plant's two halves shift together.
+        static glm::vec3 GetBlockOffset(BlockID id, int worldX, int worldZ);
 
         // Convenience wrapper around Block::hasCollision so call sites in
         // physics / world helpers don't have to fetch the whole Block.
@@ -130,6 +173,57 @@ namespace Game {
         static BlockID SlabTopVariant(BlockID bottom);
         static BlockID SlabBottomVariant(BlockID top);
         static bool    IsSlabTop(BlockID id);
+
+        // ── Block states ────────────────────────────────────────────────────
+        // Port of MC's StateDefinition (createBlockStateDefinition). Each block
+        // declares an ordered list of properties; the cartesian product of
+        // their values is the block's state list, and a voxel stores an index
+        // into it (MC's BlockState.getId()).
+        //
+        // INVARIANT: every property lists its DEFAULT value FIRST, so state
+        // index 0 is always the block's default state (MC defaultBlockState()).
+        // The whole storage layer leans on this — ChunkSection keeps no state
+        // plane at all until something writes a non-zero index, which is only
+        // sound because zero means "default" for every block.
+        //
+        // The index is mixed-radix with the FIRST property most significant.
+        struct BlockStateDefinition {
+            struct Property {
+                std::string              name;    // e.g. "facing"
+                std::vector<std::string> values;  // default first, e.g. north,east,south,west
+            };
+            std::vector<Property> properties;      // empty => the block has exactly one state
+
+            using PropertyMap = std::unordered_map<std::string, std::string>;
+
+            uint16_t StateCount() const {
+                uint16_t n = 1;
+                for (const auto& p : properties) n = static_cast<uint16_t>(n * p.values.size());
+                return n;
+            }
+
+            // Properties not present in `props`, or carrying an unrecognised
+            // value, fall back to that property's default (index 0) — which is
+            // what a caller who doesn't model a property means, and what an
+            // older save that predates it should decode as.
+            uint8_t IndexOf(const PropertyMap& props) const;
+            PropertyMap PropertiesOf(uint8_t stateIndex) const;
+
+            // Value of one property in a given state, or empty if this block
+            // doesn't declare that property.
+            std::string_view ValueOf(uint8_t stateIndex, std::string_view propName) const;
+
+            // Build a state index from a single property, leaving every other
+            // property at its default. The common case for placement rules.
+            uint8_t IndexOfSingle(std::string_view propName, std::string_view value) const;
+        };
+
+        static const BlockStateDefinition& GetStateDefinition(BlockID id);
+        // Populates the per-BlockID state table. Called from Init() after every
+        // block is registered (it classifies from model names).
+        static void InitBlockStates();
+        static uint16_t GetStateCount(BlockID id) { return GetStateDefinition(id).StateCount(); }
+        static bool     HasStates(BlockID id)     { return !GetStateDefinition(id).properties.empty(); }
 
         // Backing storage for all blocks
         static std::array<Block, Size> blockDefinitions;

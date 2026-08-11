@@ -2,6 +2,7 @@
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "client/input/Input.hpp"
+#include "client/input/KeyMapping.hpp"
 #include "common/core/Log.hpp"
 #include <sentry.h>
 #include "common/core/Config.hpp"
@@ -11,6 +12,8 @@
 // Include game headers
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockModel.hpp"
+#include "common/world/block/BlockStateModels.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "client/input/PlayerController.hpp"
 #include "client/entity/Player.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // for Game::Items::Compass etc.
@@ -40,6 +43,7 @@
 #include "client/renderer/viewmodel/HeldItemRenderer.hpp"
 #include "client/renderer/portal/PortalCrosshair.hpp"
 #include "common/entity/Item.hpp"
+#include "common/world/crafting/RecipeManager.hpp"
 #include "client/portal/ClientPortalManager.hpp"
 #endif
 #include "client/renderer/gui/GuiAtlas.hpp"
@@ -49,6 +53,8 @@
 #include "client/renderer/gui/FontRenderer.hpp"
 #include "client/renderer/gui/HudRenderer.hpp"
 #include "client/renderer/gui/ChatComponent.hpp"
+#include <cctype>
+#include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "client/renderer/gui/ChatScreen.hpp"
 #include "client/renderer/gui/screens/Screen.hpp"
 #include "client/renderer/gui/screens/TitleScreen.hpp"
@@ -69,8 +75,9 @@
 #include <sstream>
 #include <unordered_set>
 
+
 // Declared in ClientConnection.cpp
-extern void SetChatMessageCallback(std::function<void(const std::string&)> callback);
+extern void SetChatMessageCallback(std::function<void(const Network::ChatMessageS2CPacket&)> callback);
 extern void SetChatBubbleCallback(std::function<void(uint32_t, const std::string&)> callback);
 extern void SetTimeUpdateCallback(std::function<void(uint64_t, uint64_t, bool)> callback);
 extern void SetTeleportCallback(std::function<void(double, double, double, float, float,
@@ -109,6 +116,18 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include <glm/gtc/matrix_transform.hpp>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+
+// Pointing-hand cursor for clickable chat components (MC swaps the cursor over
+// a click event). Kept at file scope with an explicit reset so closing chat
+// while hovering a link can't leave the hand cursor stuck on.
+static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
+    static GLFWcursor* handCursor = glfwCreateStandardCursor(GLFW_POINTING_HAND_CURSOR);
+    static bool active = false;
+    if (wantHand == active) return;
+    glfwSetCursor(window, wantHand ? handCursor : nullptr);
+    active = wantHand;
+}
+
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -201,7 +220,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Use the block's actual model-shape bounds so partial blocks (leaf
             // litter, slabs, fences, …) outline their real geometry instead of
             // the enclosing full cube.
-            const auto& shape = Game::BlockRegistry::GetBlockShape(hit->blockId);
+            const auto& shape = Game::BlockRegistry::GetBlockShape(hit->blockId, hit->stateIndex);
             Render::g_blockHighlight.Render(hit->blockPos, proj, view, shape.min, shape.max);
         }
     }
@@ -217,7 +236,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Size the crack overlay to the block's actual shape so partial
         // blocks (leaf litter, slabs, …) don't get a full-cube crack
         // floating above / around their geometry.
-        const auto& shape = Game::BlockRegistry::GetBlockShape(pc.GetBreakingBlockId());
+        const auto& shape = Game::BlockRegistry::GetBlockShape(
+            pc.GetBreakingBlockId(), Game::Raycast::GetBlockStateAt(bp.x, bp.y, bp.z));
         Render::g_blockBreakOverlay.SetTarget(bp, stage, shape.min, shape.max);
         Render::g_blockBreakOverlay.Render(proj, view);
     }
@@ -480,36 +500,41 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             player.SetSneakPressed(camera.IsSneakPressed());
         }
 
-        // Block interaction — treat the mouse as released while the
-        // cursor is visible so any in-progress break/place aborts and
-        // no new clicks register. The static "wasDown" trackers will
-        // re-arm naturally when the cursor returns to game mode.
-        static bool leftMouseWasDown = false;
-        bool leftMouseDown = !cursorVisible &&
-                             Input::IsMouseButtonDown(Input::Key::LeftMouse);
-        if (leftMouseDown != leftMouseWasDown) {
-            controller.OnLMB(leftMouseDown);
-            leftMouseWasDown = leftMouseDown;
-        }
-
-        static bool rightMouseWasDown = false;
-        bool rightMouseDown = !cursorVisible &&
-                              Input::IsMouseButtonDown(Input::Key::RightMouse);
-        if (rightMouseDown != rightMouseWasDown) {
-            controller.OnRMB(rightMouseDown);
-            rightMouseWasDown = rightMouseDown;
+        // Block interaction — MC Minecraft.handleKeybinds (Minecraft.java:1979-1999).
+        //
+        //   while (keyAttack.consumeClick()) startAttack();
+        //   while (keyUse.consumeClick())    startUseItem();
+        //   continueAttack(screen == null && keyAttack.isDown() && mouseGrabbed);
+        //
+        // Discrete presses come from the input EVENT queue, held state from
+        // isDown. Nothing here diffs a polled level against last frame, which
+        // is what used to turn a click that dismissed a screen into a fresh
+        // in-world press — Input's callbacks simply never record a press that
+        // belonged to the UI.
+        if (cursorVisible) {
+            // A screen is up: drop anything queued and make sure an in-progress
+            // break/use is torn down. MC does the same via KeyMapping.releaseAll
+            // on setScreen plus missTime.
+            while (Input::ConsumeClick(*Input::Binds::Attack)) {}
+            while (Input::ConsumeClick(*Input::Binds::Use))    {}
+            controller.ContinueAttack(false);
+            controller.StopUseItem();
+        } else {
+            while (Input::ConsumeClick(*Input::Binds::Attack)) {
+                controller.StartAttack();
+            }
+            while (Input::ConsumeClick(*Input::Binds::Use)) {
+                controller.StartUseItem();
+            }
+            controller.ContinueAttack(Input::IsDown(*Input::Binds::Attack));
+            if (!Input::IsDown(*Input::Binds::Use)) controller.StopUseItem();
         }
 
         // Inventory selection
-        if (Input::IsKeyPressed(Input::Key::Alpha1)) controller.OnHotbarChanged(0);
-        if (Input::IsKeyPressed(Input::Key::Alpha2)) controller.OnHotbarChanged(1);
-        if (Input::IsKeyPressed(Input::Key::Alpha3)) controller.OnHotbarChanged(2);
-        if (Input::IsKeyPressed(Input::Key::Alpha4)) controller.OnHotbarChanged(3);
-        if (Input::IsKeyPressed(Input::Key::Alpha5)) controller.OnHotbarChanged(4);
-        if (Input::IsKeyPressed(Input::Key::Alpha6)) controller.OnHotbarChanged(5);
-        if (Input::IsKeyPressed(Input::Key::Alpha7)) controller.OnHotbarChanged(6);
-        if (Input::IsKeyPressed(Input::Key::Alpha8)) controller.OnHotbarChanged(7);
-        if (Input::IsKeyPressed(Input::Key::Alpha9)) controller.OnHotbarChanged(8);
+        // MC handleKeybinds:1897 — `while (keyHotbarSlots[i].consumeClick())`.
+        for (int i = 0; i < 9; ++i) {
+            while (Input::ConsumeClick(*Input::Binds::Hotbar[i])) controller.OnHotbarChanged(i);
+        }
 
         // Pick block (P key) — server-authoritative. The previous flow only
         // mutated the client's local inventory, so the server's view stayed
@@ -517,7 +542,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // failed (with the predictive HUD count drifting down to 0). The
         // controller now both predicts the local change AND sends an
         // InventoryClickC2S {CREATIVE_FILL_SLOT} so the server matches.
-        if (Input::IsKeyPressed(Input::Key::P)) {
+        if (Input::ConsumeClick(*Input::Binds::PickItem)) {
             if (player.lastBlockHit.has_value()) {
                 controller.OnPickBlock(player.lastBlockHit->blockId);
             }
@@ -526,13 +551,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Swap main/off hand (F) — MC's SWAP_ITEM_WITH_OFFHAND player action.
         // Gated on !cursorVisible so typing "f"/"q" into chat or the
         // inventory search box doesn't fire world actions.
-        if (!cursorVisible && Input::IsKeyPressed(Input::Key::F)) {
+        if (!cursorVisible && Input::ConsumeClick(*Input::Binds::SwapOffhand)) {
             controller.SendPlayerAction(Network::PlayerAction::SWAP_ITEM_WITH_OFFHAND);
         }
 
         // Drop held item (Q) — MC's DROP_ITEM player action. No item-entity
         // system yet, so the server just shrinks the stack.
-        if (!cursorVisible && Input::IsKeyPressed(Input::Key::Q)) {
+        if (!cursorVisible && Input::ConsumeClick(*Input::Binds::Drop)) {
             controller.SendPlayerAction(Network::PlayerAction::DROP_ITEM);
         }
 
@@ -545,14 +570,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         // Debug noclip toggle
-        if (Input::IsKeyPressed(Input::Key::N)) {
+        if (Input::ConsumeClick(*Input::Binds::Noclip)) {
             player.ToggleNoclip();
         }
 
         // F5 — cycle camera perspective (MC: first person → third person
         // back → third person front). Works with the cursor visible too,
         // same as MC.
-        if (Input::IsKeyPressed(Input::Key::F5)) {
+        if (Input::ConsumeClick(*Input::Binds::TogglePerspective)) {
             camera.CyclePerspective();
         }
     }
@@ -569,7 +594,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // Ignore Tab while an overlay holds the cursor — otherwise pressing Tab inside chat
         // would flip the manual state and leave the cursor visible after chat closes.
-        if (!overlayWantsCursor && Input::IsKeyPressed(Input::Key::Tab)) {
+        if (!overlayWantsCursor && Input::ConsumeClick(*Input::Binds::ToggleCursor)) {
             s_manualCursorVisible = !s_manualCursorVisible;
             Log::Info(s_manualCursorVisible
                       ? "Manual cursor enabled (Tab)"
@@ -618,6 +643,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         Platform::g_gameSettings.SetFullscreen(s_isFullscreen);
+        Input::SaveKeyBindings();
         Platform::g_gameSettings.Save();
     }
 
@@ -653,15 +679,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 
-        // Edge-detection state (same polled-GLFW pattern as the inventory
-        // overlay branch — Input.cpp registers no key/button callbacks).
-        static constexpr int kMenuKeys[] = {
-            GLFW_KEY_ESCAPE, GLFW_KEY_ENTER, GLFW_KEY_KP_ENTER, GLFW_KEY_TAB,
-            GLFW_KEY_SPACE, GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP,
-            GLFW_KEY_DOWN, GLFW_KEY_BACKSPACE, GLFW_KEY_DELETE, GLFW_KEY_HOME,
-            GLFW_KEY_END,
-        };
-        bool keyHeld[std::size(kMenuKeys)] = {};
         bool lmbHeld = false;
 
         double lastTime  = glfwGetTime();
@@ -672,6 +689,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // time is attributable in captures instead of appearing as
             // unaccounted main-thread time.
             PROFILE_ZONE_N("TitleFrame");
+            // The title screen IS a screen: every key belongs to the UI, so
+            // gameplay bindings must record nothing and key presses must queue
+            // for Screen::KeyPressed. Set before polling so this frame's events
+            // are judged correctly.
+            Input::SetUiActive(true);
             glfwPollEvents();
             Input::UpdateKeyStates();
 
@@ -707,18 +729,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             while (Input::HasCharInput()) screens.CharTyped(Input::PopCharInput());
 
-            int mods = 0;
-            if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) mods |= GLFW_MOD_SHIFT;
-            if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-                glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) mods |= GLFW_MOD_CONTROL;
-            for (size_t i = 0; i < std::size(kMenuKeys); ++i) {
-                const bool down = glfwGetKey(window, kMenuKeys[i]) == GLFW_PRESS;
-                if (down && !keyHeld[i]) screens.KeyPressed(kMenuKeys[i], mods);
-                keyHeld[i] = down;
+            // EVERY key press reaches the screen, straight from the GLFW
+            // callback (MC hands keys to screen.keyPressed the same way). This
+            // used to be a polled whitelist of navigation keys, so a letter
+            // never reached Screen::KeyPressed — the Key Binds screen could
+            // capture a mouse button but not a keyboard key.
+            {
+                int uiKey = 0, uiMods = 0;
+                while (Input::PopUiKeyPress(uiKey, uiMods)) {
+                    const bool consumed = screens.KeyPressed(uiKey, uiMods);
+                    // Fullscreen still works from the menus (MC handles its
+                    // fullscreen bind in KeyboardHandler.keyPress), but only if
+                    // the screen didn't want the key — otherwise the Key Binds
+                    // screen could never capture whatever fullscreen is bound to.
+                    if (!consumed &&
+                        Input::Binds::Fullscreen->key == Input::BoundKey::Keyboard(uiKey)) {
+                        ToggleFullscreen(window);
+                    }
+                }
             }
 
-            if (Input::IsKeyPressed(Input::Key::F11)) ToggleFullscreen(window);
 
             // ── One-shot option applications from the options screens ──────
             const uint32_t applied = screens.ConsumeAppliedSettings();
@@ -841,6 +871,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Initialize item registry AFTER blocks so block-items can copy their display names.
         // (Sprite item textures are preloaded later, AFTER the render backend is up.)
         Game::ItemRegistry::Initialize();
+        // Crafting recipes resolve their baked-in slugs against BOTH registries,
+        // so this has to come last. Runs on the client too — the crafting
+        // screen predicts its result square with the same lookup the server
+        // uses, which is why the output appears the instant you place the last
+        // ingredient rather than a round trip later.
+        Game::RecipeManager::Initialize();
 
         // Use platform-specific asset path function
         std::string modelsPath = GetAssetPath("assets/models/block");
@@ -849,6 +885,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         if (!Game::BlockModelRegistry::LoadModels(modelsPath)) {
             Log::Warning("Failed to load block models from %s, using default models", modelsPath.c_str());
         }
+
+        // Blockstate → model dispatch. MUST run after both BlockRegistry::Init
+        // (needs the per-block state definitions) and LoadModels (it rotates
+        // already-resolved models). A missing directory is fine — every block
+        // just keeps its default model.
+        Game::BlockStateModels::Load(GetAssetPath("assets/blockstates"));
+
+        // Biome colour tables. Must precede the first mesh build — every tint
+        // resolves through them, and until they load the resolvers answer with
+        // vanilla's no-colormap constants.
+        Game::BiomeRegistry::LoadColormaps(GetAssetPath("assets/textures"));
 
         // Initialize texture systems
         if (!InitializeTextureSystem()) {
@@ -947,9 +994,34 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Log::Warning("Failed to initialize GUI renderer");
         }
 
+        // Clipboard, for chat's copy-on-click segments. Installed here because
+        // this is the only place that owns the GLFWwindow; the GUI layer has no
+        // other reason to know about GLFW.
+        Render::SetClipboardHandler([](const std::string& text) {
+            if (GLFWwindow* w = glfwGetCurrentContext()) {
+                glfwSetClipboardString(w, text.c_str());
+            }
+        });
+
         // Set up chat message callback
-        SetChatMessageCallback([](const std::string& msg) {
-            g_chatComponent.AddMessage(msg);
+        SetChatMessageCallback([](const Network::ChatMessageS2CPacket& packet) {
+            // Translate the wire segments into the renderer's own segment type.
+            // Two types rather than one shared struct keeps the GUI free of any
+            // network include, matching how the rest of the client is layered.
+            std::vector<Render::ChatSegment> segments;
+            segments.reserve(packet.segments.size());
+            for (const auto& s : packet.segments) {
+                Render::ChatSegment seg;
+                seg.text  = s.text;
+                seg.color = s.color;
+                seg.click = (s.click == Network::ChatClickAction::CopyToClipboard)
+                          ? Render::ChatClickAction::CopyToClipboard
+                          : Render::ChatClickAction::None;
+                seg.clickValue = s.clickValue;
+                seg.hoverText  = s.hoverText;
+                segments.push_back(std::move(seg));
+            }
+            g_chatComponent.AddMessage(std::move(segments));
         });
         SetChatBubbleCallback([](uint32_t senderId, const std::string& msg) {
             if (Client::g_remotePlayerManager) {
@@ -1235,7 +1307,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Render::g_renderBackend->SetVSync(Platform::g_gameSettings.GetVSync());
         }
 
-        // Initialize input
+        // Initialize input. Bindings are registered BEFORE Input::Init so the
+        // GLFW callbacks it installs already have a table to dispatch into,
+        // then loaded from options.txt (absent entries keep the vanilla
+        // default). Mirrors MC building its KeyMapping set before Options
+        // reads them back in.
+        Input::InitKeyMappings();
+        Input::LoadKeyBindings();
         Input::Init(window);
         glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
@@ -1401,6 +1479,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Server::IntegratedServerConfig serverConfig;
             serverConfig.tickRate = 20;                     // 20 TPS like Minecraft
             serverConfig.enableAsyncChunkLoading = true;     // Async via ServerWorkerPool (non-blocking)
+            serverConfig.useMinecraftSave = titleAction.useMinecraftSave;
 
             // World chosen on the Select World screen: created worlds are
             // procedural-from-seed (metadata only, no save path yet), while
@@ -1478,7 +1557,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         player.color = playerColor; // from --color CLI arg parsed earlier
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
-        Render::GetInventoryScreen().SetPlayer(&player);
+        Render::SetInventoryScreenPlayer(&player);
         if (!isRemoteClient) {
             playerController.SetWorld(world);
             playerController.SetBlockAccess(world);
@@ -1777,7 +1856,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // Escape no longer closes the game — use the window close button instead
 
-            if (Input::IsKeyPressed(Input::Key::F11)) {
+            if (Input::ConsumeClick(*Input::Binds::Fullscreen)) {
                 ToggleFullscreen(window);
             }
 
@@ -1842,19 +1921,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // ESC closes the top screen (shared edge state — see above).
                 if (escPressedThisFrame) screens.KeyPressed(GLFW_KEY_ESCAPE, 0);
 
-                int pMods = 0;
-                if (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
-                    glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS) pMods |= GLFW_MOD_SHIFT;
-                static constexpr int kPauseKeys[] = {
-                    GLFW_KEY_ENTER, GLFW_KEY_KP_ENTER, GLFW_KEY_TAB, GLFW_KEY_SPACE,
-                    GLFW_KEY_LEFT, GLFW_KEY_RIGHT, GLFW_KEY_UP, GLFW_KEY_DOWN,
-                    GLFW_KEY_BACKSPACE, GLFW_KEY_DELETE, GLFW_KEY_HOME, GLFW_KEY_END,
-                };
-                static bool pauseKeyHeld[std::size(kPauseKeys)] = {};
-                for (size_t i = 0; i < std::size(kPauseKeys); ++i) {
-                    const bool down = glfwGetKey(window, kPauseKeys[i]) == GLFW_PRESS;
-                    if (down && !pauseKeyHeld[i]) screens.KeyPressed(kPauseKeys[i], pMods);
-                    pauseKeyHeld[i] = down;
+                // Every key press, from the GLFW callback — see the title
+                // phase for why the old polled whitelist wasn't enough. ESC is
+                // skipped because escPressedThisFrame above already delivered
+                // it through the shared edge, and sending it twice would close
+                // a screen that had just consumed it.
+                {
+                    int uiKey = 0, uiMods = 0;
+                    while (Input::PopUiKeyPress(uiKey, uiMods)) {
+                        if (uiKey == GLFW_KEY_ESCAPE) continue;
+                        screens.KeyPressed(uiKey, uiMods);
+                    }
                 }
 
                 // One-shot option applications (same set as the title phase,
@@ -1919,6 +1996,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
             // Chat system: open on T or /, route input when open
             else if (g_chatScreen.IsOpen()) {
+                // Mouse, so chat lines can be clicked. MC's chat is clickable
+                // (ChatComponent.getClickedComponentStyleAt) and /seed leans on
+                // it; without this the copy-on-click segment is inert.
+                {
+                    int winW2 = 0, winH2 = 0, fbW2 = 0, fbH2 = 0;
+                    glfwGetWindowSize(window, &winW2, &winH2);
+                    glfwGetFramebufferSize(window, &fbW2, &fbH2);
+                    const float gScale = ComputeGuiScale(fbW2, fbH2, winW2);
+                    auto [cmx, cmy] = Input::GetMousePosition();
+                    if (winW2 > 0 && winH2 > 0 && gScale > 0.0f) {
+                        g_chatComponent.SetMousePos(
+                            static_cast<int>(cmx * (static_cast<double>(fbW2) / winW2) / gScale),
+                            static_cast<int>(cmy * (static_cast<double>(fbH2) / winH2) / gScale));
+                    }
+                    static bool chatLmbHeld = false;
+                    const bool chatLmb =
+                        glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+                    if (chatLmb && !chatLmbHeld) g_chatComponent.HandleClick();
+                    chatLmbHeld = chatLmb;
+
+                    // Pointing-hand cursor over a clickable chat component,
+                    // as MC does.
+                    SetChatPointerCursor(window, g_chatComponent.IsHoveringClickable());
+                }
+
                 // Route character input to chat
                 while (Input::HasCharInput()) {
                     g_chatScreen.OnCharInput(Input::PopCharInput());
@@ -1965,6 +2067,38 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                 // Handle submitted message or command
                 std::string submitted = g_chatScreen.ConsumeSubmittedMessage();
+
+                // ── Client-side commands ───────────────────────────────────
+                // /clearchat wipes only THIS player's chat view. It is handled
+                // here rather than in the server dispatcher on purpose:
+                //
+                //  * there is no server state to change — the history lives in
+                //    ChatComponent on the client, so a round trip would only
+                //    buy a new S2C packet to send the answer back;
+                //  * it therefore works when joined to someone else's server,
+                //    which a server-side command could not be relied on to do.
+                //
+                // Vanilla has no equivalent (its closest relative,
+                // ClientboundDeleteChatPacket, removes one specific message for
+                // moderation), so there is no MC behaviour to mirror here.
+                if (!submitted.empty()) {
+                    std::string cmd = submitted;
+                    // Accept "/clearchat" with any trailing whitespace/args.
+                    const size_t sp = cmd.find_first_of(" \t");
+                    if (sp != std::string::npos) cmd = cmd.substr(0, sp);
+                    for (char& c : cmd) c = static_cast<char>(std::tolower(
+                        static_cast<unsigned char>(c)));
+
+                    if (cmd == "/clearchat") {
+                        // "As if the game had just opened": drop the message
+                        // list AND the up-arrow recall history, so nothing is
+                        // left to scroll back to.
+                        g_chatComponent.Clear();
+                        g_chatScreen.ClearHistory();
+                        submitted.clear();   // never reaches the server
+                    }
+                }
+
                 if (!submitted.empty() && networkClient && networkClient->IsConnected()) {
                     auto conn = networkClient->GetConnection();
                     if (conn) {
@@ -2042,6 +2176,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 bool lmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT)   == GLFW_PRESS;
                 bool rmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT)  == GLFW_PRESS;
                 bool mmb = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS;
+                // These latches are stale while no screen is up, so a screen
+                // that opens with a button already down — the right-click that
+                // opened a crafting table — would see the very next diff as a
+                // fresh press and land it on whatever slot is under the cursor.
+                // Adopt the live state instead, delivering nothing.
+                if (inv.ConsumeFreshlyOpened()) { lmbH = lmb; rmbH = rmb; mmbH = mmb; }
                 if (lmb != lmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_LEFT,   lmb ? GLFW_PRESS : GLFW_RELEASE, mods);
                 if (rmb != rmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_RIGHT,  rmb ? GLFW_PRESS : GLFW_RELEASE, mods);
                 if (mmb != mmbH) inv.OnMouseButton(GLFW_MOUSE_BUTTON_MIDDLE, mmb ? GLFW_PRESS : GLFW_RELEASE, mods);
@@ -2073,22 +2213,32 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                 }
             } else {
+                // Chat just lost focus — drop any pointing-hand cursor it left
+                // set, or it would persist into gameplay.
+                SetChatPointerCursor(window, false);
+
                 // Drain char queue when chat is closed (prevent buildup)
                 while (Input::HasCharInput()) Input::PopCharInput();
 
                 // Open chat on T or /
-                if (Input::IsKeyPressed(Input::Key::T)) {
+                if (Input::ConsumeClick(*Input::Binds::Chat)) {
                     g_chatScreen.Open(false);
-                } else if (Input::IsKeyPressed(Input::Key::Slash)) {
+                } else if (Input::ConsumeClick(*Input::Binds::Command)) {
                     g_chatScreen.Open(true);
                 }
 
-                // E opens the inventory (MC default). Uses the SAME static as the inventory
-                // branch so the next-frame edge isn't retriggered there (which would close it).
+                // The inventory binding opens the inventory (MC key.inventory,
+                // default E). The inventory branch still edge-detects the raw
+                // key to CLOSE, so mark that latch held here — otherwise the
+                // same physical press would immediately close what it opened.
                 extern bool s_eKeyHeld;
-                bool eDown = glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS;
-                if (eDown && !s_eKeyHeld) Render::GetInventoryScreen().Open();
-                s_eKeyHeld = eDown;
+                if (Input::ConsumeClick(*Input::Binds::Inventory)) {
+                    // Survival panel or creative picker, depending on game mode
+                    // (MC InventoryScreen.init hands over to
+                    // CreativeModeInventoryScreen for infinite-materials players).
+                    Render::OpenInventoryScreen();
+                    s_eKeyHeld = true;
+                }
 
                 // ESC opens the pause menu (MC Game Menu). Uses the shared
                 // edge computed above so an ESC that just closed chat or the
@@ -2097,18 +2247,83 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     Render::GetScreenManager().Push(std::make_unique<Render::PauseScreen>());
                 }
 
-                // Cursor-visible covers BOTH the Tab manual toggle and
-                // any overlay opened this frame (chat via T/Slash,
-                // inventory via E, pause via ESC). GLFW reflects the manual
-                // toggle's last-frame state; we OR in the just-opened
-                // overlays so the very frame they pop, WASD input is dropped.
-                const bool overlayJustOpened = g_chatScreen.IsOpen() ||
-                                               Render::GetInventoryScreen().IsOpen() ||
-                                               !Render::GetScreenManager().Empty();
-                const bool cursorVisible = overlayJustOpened ||
-                    (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
-                HandlePlayerInput(player, playerController, camera, cursorVisible);
             }
+
+            // ── Screen-state bookkeeping ─────────────────────────────────
+            // OUTSIDE the branch chain above, and it has to stay that way.
+            // MC runs this from Minecraft.tick, not from handleKeybinds, and
+            // for good reason: a screen can open without the gameplay branch
+            // ever running that frame. A crafting table does exactly that — the
+            // SERVER opens it, so the frame it appears the chain takes the
+            // "a screen is open" branch and none of this would run.
+            //
+            // When it lived in the else branch, that left the crafting screen
+            // with uiActive still false and HandlePlayerInput never called, so
+            // held-RMB kept re-firing placements behind the open panel and the
+            // E that closed it was still queued on the inventory binding —
+            // which the gameplay branch then consumed the next frame, popping
+            // the inventory open on top.
+            //
+            // Two DIFFERENT questions, deliberately kept apart.
+            //
+            //  • screenOpen   — MC's `minecraft.screen != null`. A real UI
+            //    owns the keyboard: presses belong to it, not to the world.
+            //  • cursorVisible — that, OR the Tab manual cursor. The world
+            //    is still running and nothing owns the keyboard; the mouse
+            //    is just free so you can poke at debug windows.
+            //
+            // Conflating them is what broke Tab: routing keys to the UI
+            // whenever the cursor was up meant the Tab that RAISED the
+            // cursor turned every later Tab into a UI keypress with no
+            // screen to receive it, so the binding could never fire again
+            // and you were stuck in cursor mode.
+            //
+            // GLFW reflects the manual toggle's last-frame state; the
+            // screen flags are OR'd in so the very frame an overlay pops,
+            // WASD input is already dropped.
+            const bool screenOpen = g_chatScreen.IsOpen() ||
+                                    Render::GetInventoryScreen().IsOpen() ||
+                                    !Render::GetScreenManager().Empty();
+            const bool cursorVisible = screenOpen ||
+                (glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
+
+            // Screen open/close, handled the way MC does it.
+            //
+            //  • OPEN  — Minecraft.setScreen:1123 calls KeyMapping.releaseAll(),
+            //    dropping every queued click and clearing held state, and
+            //    Minecraft.tick:1779 pins missTime to 10000 for as long as a
+            //    screen is up so no attack can fire out of a UI frame.
+            //  • CLOSE — MouseHandler.grabMouse:398 calls KeyMapping.setAll(),
+            //    which restores KEYBOARD state only. Mouse buttons stay up on
+            //    purpose, so the click that dismissed the screen cannot act on
+            //    the world. Input::RestoreKeyboardState mirrors both halves.
+            //
+            // Input::SetUiActive is the `minecraft.screen != null` check that
+            // the GLFW callbacks themselves consult, so a press landing while
+            // a screen is up is never recorded as gameplay input at all.
+            // screenOpen, NOT cursorVisible — the Tab cursor is not a
+            // screen, and MC has no equivalent of it. Gameplay input is
+            // still fully suppressed while it's up, but by
+            // HandlePlayerInput below (which zeroes movement and drains
+            // attack/use), so bindings keep working the whole time.
+            Input::SetUiActive(screenOpen);
+            {
+                static bool s_prevUiActive = false;
+                if (screenOpen && !s_prevUiActive) {
+                    Input::ReleaseAll();
+                } else if (!screenOpen && s_prevUiActive) {
+                    Input::RestoreKeyboardState();
+                }
+                s_prevUiActive = screenOpen;
+            }
+            // MC Minecraft.tick:1778-1780 — refreshed every frame a screen
+            // is open; ContinueAttack(false) clears it once the button is up.
+            if (cursorVisible) playerController.SetMissTime(10000);
+
+            // Drains attack/use and stops an in-progress break/place whenever
+            // the cursor is up, which is what tears down held-RMB when a screen
+            // takes over.
+            HandlePlayerInput(player, playerController, camera, cursorVisible);
 
             // Resolve cursor state AFTER chat/inventory/pause handling so
             // opening/closing this frame takes effect immediately.
@@ -2180,7 +2395,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     movePacket.position = playerPos;
                     movePacket.rotation = glm::vec2(camera.yaw, camera.pitch);
                     movePacket.onGround = player.physics.isOnGround;
-                    movePacket.isCrouching = Input::IsKeyDown(Input::Key::LeftShift);
+                    movePacket.isCrouching = Input::IsDown(*Input::Binds::Sneak);
                     movePacket.isSprinting = player.physics.isSprinting;
                     movePacket.jumpedThisTick = player.jumpedSinceMoveSend;
                     player.jumpedSinceMoveSend = false;
@@ -2206,17 +2421,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     //     Right-clicking with a tool / food / empty
                     //     hand etc. doesn't swing.
                     //
-                    // The inventory / chat / pause screen open check
-                    // suppresses both and resets the rising-edge latches
-                    // so closing the screen while still holding a button
-                    // doesn't fire a phantom swing on the first post-
-                    // close tick.
-                    const bool screenOpen =
-                        Render::GetInventoryScreen().IsOpen();
-                    const bool lmbHeld = !screenOpen &&
-                        Input::IsMouseButtonDown(Input::Key::LeftMouse);
-                    const bool rmbHeld = !screenOpen &&
-                        Input::IsMouseButtonDown(Input::Key::RightMouse);
+                    // Any open UI suppresses both. The check covers the pause
+                    // menu and chat as well as the inventory — it used to look
+                    // at the inventory alone, so dismissing the pause menu with
+                    // a click threw a phantom swing.
+                    //
+                    // Held state comes from Input's event-driven layer, which
+                    // only records presses that happened with no UI active — so
+                    // a click that dismissed a screen can't produce a swing
+                    // here either. The edge latches stay because the swing is a
+                    // visual pulse rather than an action; the clicks themselves
+                    // were already consumed by the break/place path above.
+                    // The Tab manual cursor counts here as well as real screens.
+                    // Bindings stay live while it's up (that's how Tab itself
+                    // gets you back out), so held state is genuinely set when
+                    // you click an ImGui window — and without this gate that
+                    // would throw a phantom swing. The click itself is already
+                    // harmless: HandlePlayerInput drains attack/use whenever the
+                    // cursor is visible, for either reason.
+                    const bool uiHoldsCursor =
+                        Render::GetInventoryScreen().IsOpen() ||
+                        g_chatScreen.IsOpen() ||
+                        !Render::GetScreenManager().Empty() ||
+                        glfwGetInputMode(window, GLFW_CURSOR) == GLFW_CURSOR_NORMAL;
+                    const bool lmbHeld = !uiHoldsCursor && Input::IsDown(*Input::Binds::Attack);
+                    const bool rmbHeld = !uiHoldsCursor && Input::IsDown(*Input::Binds::Use);
                     const bool lmbEdge = lmbHeld && !s_prevLmbHeld;
                     const bool rmbEdge = rmbHeld && !s_prevRmbHeld;
                     s_prevLmbHeld = lmbHeld;
@@ -2349,6 +2578,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // attribute (walk/sprint plus the consecutive-jump bonus), so
             // dividing by WALK_SPEED reproduces MC's ratio exactly: walking
             // gives 1.0 (no change) and sprinting 1.3 → ×1.15.
+            //
+            // This holds ONLY because sneaking is kept out of currentSpeed.
+            // MC drives sneak through a separate mechanism — an input scale
+            // via Attributes.SNEAKING_SPEED in LocalPlayer.modifyInput, not a
+            // MOVEMENT_SPEED modifier — so vanilla sits at exactly 1.0 while
+            // crouched. Folding sneak back into currentSpeed (UpdateBaseSpeed)
+            // would make this ratio drop below 1 and zoom the FOV *in* while
+            // shifting, which is a bug, not a feature.
             {
                 float target = 1.0f;
                 if (player.physics.isFlying) target *= 1.1f;
@@ -3009,7 +3246,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             g_hudRenderer.SetHealth(player.health);
             g_hudRenderer.SetFood(player.food);
             g_hudRenderer.SetSaturation(player.saturation);
-            g_hudRenderer.SetStatsHidden(player.IsCreative() || player.IsSpectator());
+            // MC Gui gates the survival stat block on gameMode.canHurtPlayer()
+            // (Gui.java:524). The extra !gameModeKnown term covers a window MC
+            // doesn't have: our render loop spins from the moment the socket
+            // connects, so without it a creative joiner gets a frame or two of
+            // hearts and hunger drawn off the survival default before the first
+            // abilities packet lands.
+            g_hudRenderer.SetStatsHidden(!player.gameModeKnown ||
+                                         player.IsCreative() || player.IsSpectator());
             {
                 PROFILE_ZONE_N("HudRender");
                 RenderHUD(window, player.inventory, dt, proj, view);
@@ -3201,6 +3445,121 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Debug::DebugSystem::SetChunkPipelineSnapshot(pipeSnap);
             }
 
+            // ── World Info panel snapshot ──────────────────────────────────
+            // Assembled here because DebugSystem.cpp lives in the `imgui`
+            // target and cannot see the world/registry headers. Only built
+            // while the panel is actually open — the biome tints below run the
+            // same 5x5 blend the mesher does, 25 samples per channel.
+            if (Debug::DebugSystem::GetPanelVisibility().worldInfo) {
+                Debug::WorldInfoSnapshot wi;
+
+                const glm::vec3 p = player.physics.position;
+                wi.posX = p.x; wi.posY = p.y; wi.posZ = p.z;
+                wi.blockX = static_cast<int>(std::floor(p.x));
+                wi.blockY = static_cast<int>(std::floor(p.y));
+                wi.blockZ = static_cast<int>(std::floor(p.z));
+                const auto cpos = Game::Math::WorldCoordinates::WorldToChunkPos(wi.blockX, wi.blockZ);
+                wi.chunkX = cpos.x; wi.chunkZ = cpos.z;
+                wi.localX = wi.blockX - cpos.x * Game::Math::CHUNK_SIZE_X;
+                wi.localZ = wi.blockZ - cpos.z * Game::Math::CHUNK_SIZE_Z;
+                wi.sectionIndex = Game::Math::WorldCoordinates::WorldYToSectionIndex(wi.blockY);
+                wi.yawDeg = camera.yaw;
+                wi.pitchDeg = camera.pitch;
+                // MC's F3 convention: the engine's yaw 0 points +X (east).
+                wi.facingName = std::string(Game::NameOf(
+                    Game::HorizontalFromEngineYaw(camera.yaw)));
+
+                auto biomeName = [](uint16_t id) {
+                    return std::string(Game::BiomeRegistry::Get(id).name);
+                };
+                // Read through the client's own accessor so the panel reports
+                // what the MESHER saw, not what the server thinks.
+                auto biomeAt = [&](int bx, int by, int bz) -> uint16_t {
+                    if (Client::g_clientBlockAccess) {
+                        return Client::g_clientBlockAccess->GetBiome(bx, by, bz);
+                    }
+                    return world ? world->GetBiome(bx, by, bz) : Game::kFallbackBiomeId;
+                };
+
+                const uint16_t feetBiome = biomeAt(wi.blockX, wi.blockY, wi.blockZ);
+                const int eyeY = static_cast<int>(std::floor(p.y + 1.62f));
+                wi.biomeStanding = biomeName(feetBiome);
+                wi.biomeEye      = biomeName(biomeAt(wi.blockX, eyeY, wi.blockZ));
+
+                const Game::BiomeInfo& bi = Game::BiomeRegistry::Get(feetBiome);
+                wi.biomeTemperature = bi.temperature;
+                wi.biomeDownfall    = bi.downfall;
+                switch (bi.grassModifier) {
+                    case Game::GrassColorModifier::DarkForest: wi.biomeGrassModifier = "dark_forest"; break;
+                    case Game::GrassColorModifier::Swamp:      wi.biomeGrassModifier = "swamp"; break;
+                    default:                                   wi.biomeGrassModifier = "none"; break;
+                }
+                wi.tintGrass       = Game::BiomeRegistry::GrassColor(feetBiome, wi.blockX, wi.blockZ);
+                wi.tintFoliage     = Game::BiomeRegistry::FoliageColor(feetBiome);
+                wi.tintDryFoliage  = Game::BiomeRegistry::DryFoliageColor(feetBiome);
+                wi.tintWater       = Game::BiomeRegistry::WaterColor(feetBiome);
+
+                const Game::BlockID below = Client::g_clientBlockAccess
+                    ? Client::g_clientBlockAccess->GetBlock(wi.blockX, wi.blockY - 1, wi.blockZ)
+                    : Game::BlockID::Air;
+                wi.standingOnName = Game::BlockRegistry::Get(below).name;
+
+                if (player.lastBlockHit.has_value()) {
+                    const auto& hit = *player.lastBlockHit;
+                    wi.hasTarget = true;
+                    wi.targetX = hit.blockPos.x;
+                    wi.targetY = hit.blockPos.y;
+                    wi.targetZ = hit.blockPos.z;
+                    wi.targetDistance = hit.distance;
+                    wi.targetBlockId = static_cast<int>(hit.blockId);
+                    wi.targetStateIndex = hit.stateIndex;
+                    wi.biomeTarget = biomeName(biomeAt(hit.blockPos.x, hit.blockPos.y, hit.blockPos.z));
+
+                    const Game::Block& b = Game::BlockRegistry::Get(hit.blockId);
+                    wi.targetBlockName = b.name.empty() ? b.modelName : b.name;
+                    wi.targetHardness = b.destroyTime;
+                    wi.targetHasCollision = Game::BlockRegistry::HasCollision(hit.blockId);
+                    switch (b.renderLayer) {
+                        case Game::RenderLayer::Cutout:      wi.targetRenderLayer = "cutout"; break;
+                        case Game::RenderLayer::Translucent: wi.targetRenderLayer = "translucent"; break;
+                        default:                             wi.targetRenderLayer = "opaque"; break;
+                    }
+
+                    // Decode the state index back into its properties, so a
+                    // furnace reads "facing=east" rather than "state 1".
+                    const auto& def = Game::BlockRegistry::GetStateDefinition(hit.blockId);
+                    if (def.properties.empty()) {
+                        wi.targetStateProps = "-";
+                    } else {
+                        wi.targetStateProps.clear();
+                        for (const auto& [k, v] : def.PropertiesOf(hit.stateIndex)) {
+                            if (!wi.targetStateProps.empty()) wi.targetStateProps += ", ";
+                            wi.targetStateProps += k + "=" + v;
+                        }
+                    }
+
+                    static const char* kFaceNames[] = {
+                        "+X east", "-X west", "+Y up", "-Y down", "+Z south", "-Z north" };
+                    wi.targetFace = (hit.hitFace >= 0 && hit.hitFace < 6)
+                                      ? kFaceNames[hit.hitFace] : "?";
+
+                    const auto& shape =
+                        Game::BlockRegistry::GetBlockShape(hit.blockId, hit.stateIndex);
+                    wi.targetShapeMin[0] = shape.min.x; wi.targetShapeMin[1] = shape.min.y;
+                    wi.targetShapeMin[2] = shape.min.z;
+                    wi.targetShapeMax[0] = shape.max.x; wi.targetShapeMax[1] = shape.max.y;
+                    wi.targetShapeMax[2] = shape.max.z;
+
+                    wi.targetChunkLoaded = Client::g_clientBlockAccess &&
+                        Client::g_clientBlockAccess->IsPositionLoaded(
+                            hit.blockPos.x, hit.blockPos.y, hit.blockPos.z);
+                }
+
+                if (world) wi.seed = world->GetGenerationSeed();
+
+                Debug::DebugSystem::SetWorldInfoSnapshot(wi);
+            }
+
             Debug::DebugSystem::RenderDebugUI(
                 camera, frustum, player, playerController, metrics, cursorEnabled,
                 windowWidth, windowHeight, width, height
@@ -3228,7 +3587,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 }
 
                 // Persist to disk
-                Platform::g_gameSettings.Save();
+                Input::SaveKeyBindings();
+        Platform::g_gameSettings.Save();
             }
 
             // 11. Swap buffers (includes VSync wait)
@@ -3418,6 +3778,9 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // 8a. Session-scoped render resources
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
+        // The inventory screens are singletons but their menu is bound to this
+        // session's ClientPlayer, which is about to go out of scope.
+        Render::SetInventoryScreenPlayer(nullptr);
 
         // 9. Clear world reference (world was shut down by IntegratedServer)
         Game::g_world = nullptr;

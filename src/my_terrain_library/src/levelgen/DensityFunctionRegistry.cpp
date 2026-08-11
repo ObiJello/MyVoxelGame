@@ -62,6 +62,18 @@ bool DensityFunctionRegistry::has(const std::string& name) const {
 
 void DensityFunctionRegistry::clear() {
     for (auto& pair : m_functions) {
+        // PATCH (quit-to-title support): never delete zero(). It is
+        // Constant::ZERO(), a process-lifetime singleton whose static accessor
+        // caches the pointer in Constant::s_zero and hands the SAME object to
+        // every caller. Deleting it here leaves that cache dangling but
+        // non-null, so the next bootstrap() re-registers freed memory and the
+        // first NoiseRouterData::overworld() build segfaults — i.e. loading a
+        // second world in one process (quit to title → join another) crashes.
+        // Everything else in the registry is uniquely owned and safe to free.
+        //
+        // Re-apply this when re-syncing src/my_terrain_library from a newer
+        // snapshot; it is listed under "Terrain Library Patches" in CLAUDE.md.
+        if (pair.second == zero()) continue;
         delete pair.second;
     }
     m_functions.clear();

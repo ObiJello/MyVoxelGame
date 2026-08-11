@@ -68,8 +68,12 @@ namespace Threading {
         // Submit chunk generation job
         void SubmitChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
 
-        // Submit chunk loading job (from disk)
-        void SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
+        // Submit chunk loading job (from disk).
+        // Returns false if the job could not be queued (worker queue full), in
+        // which case NO result will ever be produced for this chunk — callers
+        // that track in-flight loads must not mark it pending. See
+        // IntegratedServer::RequestChunkLoad.
+        bool SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
 
         // Submit chunk saving job
         void SubmitChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority = 0);
@@ -173,8 +177,9 @@ namespace Threading {
         void ProcessChunkLoading(Game::Math::ChunkPos chunkPos, uint64_t generation);
         void ProcessChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk);
 
-        // Job queue management
-        void EnqueueJob(ServerJob&& job);
+        // Job queue management. EnqueueJob returns false when the queue is at
+        // capacity and the job was dropped.
+        bool EnqueueJob(ServerJob&& job);
         bool DequeueJob(ServerJob& job);
 
         // Result handling
@@ -197,7 +202,7 @@ namespace Threading {
     
     // Direct job submission
     void SubmitServerChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
-    void SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
+    bool SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
     void SubmitServerChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority = 0);
 
 } // namespace Threading

@@ -28,7 +28,12 @@
 namespace Network {
 
     struct InventorySetSlotS2CPacket {
-        int16_t         slotIndex = 0; // 0..45 (MC writes a short here too)
+        // MENU slot index — the same index space as InventoryClickC2S and the
+        // full snapshot, NOT a player-inventory index. They coincide for the
+        // player's own menu and diverge as soon as a block container is open;
+        // see InventoryFullS2CPacket for the full note. (MC writes a short here
+        // too.)
+        int16_t         slotIndex = 0;
         Game::ItemStack stack{};
         // Container revision this delta brings the client to (MC
         // ClientboundContainerSetSlotPacket.stateId). Carried on the DELTAS

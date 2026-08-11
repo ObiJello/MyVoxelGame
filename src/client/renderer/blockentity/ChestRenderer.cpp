@@ -13,6 +13,8 @@
 #include "../backend/RenderBackend.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "client/world/ClientBlockAccess.hpp"
 #include "common/core/Log.hpp"
 
 #include "stb_image.h"
@@ -246,12 +248,27 @@ void main() {
         //   4. Scale by 1/16 so the MC-pixel-space [0,16]³ mesh lands in
         //      world block units.
         //
-        // Facing comes from the placement-time HorizontalDirection stored on
-        // the ChestBlockEntity. Falls back to North (0°) for any BE that
-        // isn't actually a ChestBlockEntity (defensive — should never fire).
+        // Facing comes off the BLOCK's state, not the block entity — exactly
+        // what vanilla does (ChestRenderer.java:67:
+        //   state.angle = blockState.getValue(ChestBlock.FACING).toYRot()
+        // with the chest's BE carrying no orientation at all). Reading it here
+        // rather than caching it on the BE means a chest picks up any state
+        // change (placement, /setblock, world load) with no extra sync.
         float yRot = 0.0f;
-        if (const auto* chestBE = dynamic_cast<const Game::ChestBlockEntity*>(&be)) {
-            yRot = Game::ChestFacingToYRot(chestBE->facing);
+        {
+            const glm::ivec3 p = be.GetWorldPos();
+            uint8_t stateIndex = 0;
+            if (Client::g_clientBlockAccess) {
+                stateIndex = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
+            }
+            const auto& def = Game::BlockRegistry::GetStateDefinition(be.GetBlockId());
+            const std::string_view facing = def.ValueOf(stateIndex, "facing");
+            // MC Direction.toYRot() is degrees clockwise from south; our model
+            // is authored with its lock on +Z (south), so south is the zero.
+            if      (facing == "east")  yRot =  1.5707963f;
+            else if (facing == "north") yRot =  3.1415927f;
+            else if (facing == "west")  yRot = -1.5707963f;
+            else                        yRot =  0.0f;   // south / unknown
         }
 
         glm::mat4 model = glm::translate(glm::mat4(1.0f),

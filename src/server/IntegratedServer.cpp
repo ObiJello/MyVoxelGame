@@ -6,6 +6,7 @@
 #include "commands/KillCommand.hpp"
 #include "commands/TimeCommand.hpp"
 #include "commands/GameRuleCommand.hpp"
+#include "commands/SeedCommand.hpp"
 #include "network/NetworkServer.hpp"
 #include "network/ServerConnection.hpp"
 #include "network/SendScheduler.hpp"
@@ -132,6 +133,7 @@ namespace Server {
         KillCommand::Register(m_commandDispatcher);
         TimeCommand::Register(m_commandDispatcher);
         GameRuleCommand::Register(m_commandDispatcher);
+        SeedCommand::Register(m_commandDispatcher);
         Log::Info("Server commands registered");
 
         // Wire disconnect callback so we broadcast entity removal to other clients
@@ -562,15 +564,33 @@ namespace Server {
             return;
         }
 
-        // Mark as pending
-        m_pendingChunkLoads.insert(chunkPos);
-
+        // m_pendingChunkLoads is the "already in flight, don't submit again"
+        // guard ProcessWatchSetChanges consults, and the ONLY thing that clears
+        // an entry is a result arriving in ProcessAsyncChunkResults. So a chunk
+        // may be marked pending only once a job that is guaranteed to produce a
+        // result actually exists — otherwise the entry never clears, the guard
+        // suppresses every future request, and that chunk never loads again for
+        // the rest of the session. (Symptom: a world loads its spawn chunks and
+        // then stops, with new chunks streaming normally once you walk into
+        // positions that weren't poisoned.) Genuine load FAILURES are fine —
+        // those post a result with success=false, which clears the entry and
+        // lets the next tick retry.
         if (m_config.enableAsyncChunkLoading) {
-            // Use ServerWorkerPool for async loading
-            Threading::SubmitServerChunkLoading(chunkPos, priority);
+            if (!Threading::SubmitServerChunkLoading(chunkPos, priority)) {
+                // Worker queue is saturated — the job was dropped and no result
+                // is coming. Leave the chunk unmarked so the next tick retries
+                // once the queue drains.
+                Log::Debug("Chunk (%d, %d) load request deferred - worker queue full",
+                           chunkPos.x, chunkPos.z);
+                return;
+            }
+            m_pendingChunkLoads.insert(chunkPos);
             Log::Debug("Requested async chunk loading for (%d, %d)", chunkPos.x, chunkPos.z);
         } else {
-            // Load synchronously via ChunkProvider
+            // Sync path: the chunk is in the cache by the time this returns, so
+            // the next ProcessWatchSetChanges scan sees it loaded. Deliberately
+            // NOT marked pending — ProcessAsyncChunkResults is the only place
+            // that erases and it early-outs entirely when async loading is off.
             if (m_world) {
                 m_world->GetChunk(chunkPos.x, chunkPos.z); // Sync load into cache
             }
@@ -923,10 +943,12 @@ namespace Server {
             Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
                       playerName.c_str(), playerId, connection->GetConnectionId());
 
-            // Apply the world's game mode and sync abilities (replaces the
-            // survival placeholder sent during login). Mirrors MC
+            // Apply the world's game mode and sync abilities. Mirrors MC
             // PlayerList.placeNewPlayer applying the level's default game
-            // type to every joiner.
+            // type to every joiner. The login-time packet
+            // (SendPlayerAbilitiesForJoin) already carried this same mode, so
+            // this is a reconfirmation against the live ServerPlayer rather
+            // than a correction — the client is never told "survival" first.
             playerPtr->setGameMode(static_cast<GameMode>(m_config.defaultGameMode));
             connection->SendPlayerAbilities(*playerPtr);
 
@@ -1342,10 +1364,12 @@ namespace Server {
             }
             data.push_back(recordCount & 0x7F);
             
-            // Write packed records
-            for (uint32_t record : packet.packedRecords) {
-                // Write as VarInt
-                uint32_t val = record;
+            // Write packed records. 64-bit VarInt — the record carries block id
+            // + state index + position and no longer fits in 32 bits (see
+            // ClientboundSectionBlocksUpdateS2CPacket). MC writes these as longs
+            // for the same reason.
+            for (uint64_t record : packet.packedRecords) {
+                uint64_t val = record;
                 while (val > 127) {
                     data.push_back((val & 0x7F) | 0x80);
                     val >>= 7;

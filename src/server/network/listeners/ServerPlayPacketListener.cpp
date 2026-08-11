@@ -45,6 +45,11 @@ namespace Server {
         
         // Session handles the packet with correct Minecraft semantics
         m_session.HandleUseItemOn(packet);
+        // A block may have asked for its container UI during that dispatch
+        // (IUsePlayer::OpenMenu). Doing it here rather than inside the dispatch
+        // keeps the request out of the many early-return paths, and still puts
+        // the screen up on the same round trip as the interaction ack.
+        m_session.FlushPendingMenuOpen();
     }
     
     void ServerPlayPacketListener::handleUseItem(const Network::UseItemC2SPacket& packet) {

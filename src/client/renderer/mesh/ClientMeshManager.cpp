@@ -185,6 +185,64 @@ namespace Render {
     // PLAYER POSITION UPDATES
     // ========================================================================
 
+    void ClientMeshManager::ResortTranslucentSections(const glm::vec3& cameraPos, float nearRadius) {
+        if (m_gpuData.empty()) return;
+
+        const glm::ivec3 cameraBlock(static_cast<int>(std::floor(cameraPos.x)),
+                                     static_cast<int>(std::floor(cameraPos.y)),
+                                     static_cast<int>(std::floor(cameraPos.z)));
+        const bool blockPosChanged = cameraBlock != m_lastResortCameraBlock;
+        m_lastResortCameraBlock = cameraBlock;
+
+        const float nearRadiusSq = nearRadius * nearRadius;
+
+        // MC visits every nearby section each frame and only a slice of the
+        // rest: max(visible/8, 15). Same shape here, so the cost stays bounded
+        // however much glass or water is in view.
+        const size_t total = m_gpuData.size();
+        size_t sweepRemaining = std::max<size_t>(total / 8, 15);
+
+        for (auto& entry : m_gpuData) {
+            const SectionKey& key = entry.first;
+            GPUSectionData& gpuData = entry.second;
+            if (gpuData.translucentCentroids.empty()) continue;
+            if (!gpuData.translucentDrawCmd.valid) continue;
+
+            const glm::ivec3 origin(
+                key.chunkPos.x * 16,
+                Game::Math::WorldCoordinates::SectionCoordsToWorldY(key.sectionY, 0),
+                key.chunkPos.z * 16);
+            const glm::vec3 centre = glm::vec3(origin) + glm::vec3(8.0f);
+            const glm::vec3 toCentre = centre - cameraPos;
+            const bool isNearby = glm::dot(toCentre, toCentre) < nearRadiusSq;
+
+            // Distant sections only get looked at on their turn in the sweep.
+            if (!isNearby) {
+                if (sweepRemaining == 0) continue;
+                --sweepRemaining;
+            }
+
+            const auto pov = TranslucentSort::MakePointOfView(cameraPos, origin);
+            const bool povChanged = pov != gpuData.translucencyPov;
+            // MC: a one-block camera move only forces a re-sort when the view
+            // is axis-aligned (where a single step can reorder quads) or the
+            // section is close enough for the error to show.
+            const bool blockMoveForces = blockPosChanged && (pov.IsAxisAligned() || isNearby);
+            if (!povChanged && !blockMoveForces) continue;
+
+            TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
+                                                m_resortIndexScratch, m_resortOrderScratch);
+            if (m_resortIndexScratch.empty()) continue;
+
+            const MegaBufferSectionKey megaKey{key.chunkPos, key.sectionY};
+            if (m_translucentMegaBuffer.UpdateSectionIndices(megaKey,
+                                                             m_resortIndexScratch.data(),
+                                                             m_resortIndexScratch.size())) {
+                gpuData.translucencyPov = pov;
+            }
+        }
+    }
+
     void ClientMeshManager::SetPlayerPosition(const glm::vec3& position) {
         {
             std::lock_guard<std::mutex> lock(m_playerMutex);
@@ -680,6 +738,57 @@ namespace Render {
             if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
                                               cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
+            }
+
+            // Quad centroids for back-to-front re-sorting. MC takes the
+            // midpoint of vertices 0 and 2 — the quad's diagonal
+            // (MeshData.unpackQuadCentroids) — and quad k owns vertices
+            // 4k..4k+3, which is what GenerateQuad and FluidMeshBuilder emit.
+            // Positions are the first three floats of each vertex.
+            {
+                const float* v = meshData.translucentVertices.data();
+                // 24-byte vertex (vec3 pos + vec2 uv + packed RGBA8) = 6 floats.
+                static_assert(sizeof(Render::Vertex) == 24,
+                              "translucent centroid extraction assumes the 24-byte vertex");
+                constexpr size_t floatsPerVertex = sizeof(Render::Vertex) / sizeof(float);
+                const size_t quads = meshData.translucentVertexCount / 4;
+                gpuData.translucentCentroids.clear();
+                gpuData.translucentCentroids.reserve(quads);
+                for (size_t q = 0; q < quads; ++q) {
+                    const float* p0 = v + (q * 4 + 0) * floatsPerVertex;
+                    const float* p2 = v + (q * 4 + 2) * floatsPerVertex;
+                    gpuData.translucentCentroids.emplace_back(
+                        (p0[0] + p2[0]) * 0.5f,
+                        (p0[1] + p2[1]) * 0.5f,
+                        (p0[2] + p2[2]) * 0.5f);
+                }
+                // Sort NOW, not on some later frame. MC sorts at compile time
+                // (SectionCompiler → MeshData.sortQuads with the camera
+                // position), so a section is never drawn in raw mesher order.
+                // Ours used to defer to ResortTranslucentSections, which is
+                // throttled to the nearby sections plus a slice of the rest —
+                // a newly streamed distant chunk could wait many frames, and
+                // since the translucent pass writes depth, unsorted quads
+                // occlude each other instead of blending.
+                //
+                // An empty result means the quad count overflowed the 16-bit
+                // index space; UpdateSectionIndices then rejects the size
+                // mismatch and the mesher order stands. Leaving the point of
+                // view invalid in either case just asks the sweep to try again.
+                const glm::vec3 cameraPos = GetPlayerPosition();
+                gpuData.translucencyPov = TranslucentSort::PointOfView{};
+                TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
+                                                    m_resortIndexScratch, m_resortOrderScratch);
+                if (!m_resortIndexScratch.empty()
+                    && m_translucentMegaBuffer.UpdateSectionIndices(
+                           megaKey, m_resortIndexScratch.data(), m_resortIndexScratch.size())) {
+                    const glm::ivec3 origin(
+                        chunkPos.x * 16,
+                        Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
+                        chunkPos.z * 16);
+                    gpuData.translucencyPov =
+                        TranslucentSort::MakePointOfView(cameraPos, origin);
+                }
             }
         }
 

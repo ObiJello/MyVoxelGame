@@ -1,5 +1,6 @@
 // File: src/common/world/level/World.cpp
 #include "World.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "../../core/Log.hpp"
 #include "../../core/Profiling_Tracy.hpp"
 #include "../block/BlockRegistry.hpp"
@@ -124,6 +125,20 @@ namespace Game {
         return m_chunkProvider->GetBlock(worldX, worldY, worldZ);
     }
 
+    uint8_t World::GetBlockState(int worldX, int worldY, int worldZ) const {
+        if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunkProvider) {
+            return 0;
+        }
+        return m_chunkProvider->GetBlockState(worldX, worldY, worldZ);
+    }
+
+    uint16_t World::GetBiome(int worldX, int worldY, int worldZ) const {
+        if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunkProvider) {
+            return kFallbackBiomeId;
+        }
+        return m_chunkProvider->GetBiome(worldX, worldY, worldZ);
+    }
+
     bool World::IsChunkLoaded(int chunkX, int chunkZ) const {
         if (!m_chunkProvider) {
             return false;
@@ -164,10 +179,15 @@ namespace Game {
     // World modification
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId) {
         // Default to all updates for backwards compatibility
-        return SetBlock(worldX, worldY, worldZ, blockId, UpdateFlags::All);
+        return SetBlock(worldX, worldY, worldZ, blockId, UpdateFlags::All, 0);
     }
-    
+
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags) {
+        return SetBlock(worldX, worldY, worldZ, blockId, updateFlags, 0);
+    }
+
+    bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags,
+                         uint8_t stateIndex) {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d)",
                         worldX, worldY, worldZ);
@@ -181,14 +201,16 @@ namespace Game {
 
         // Get the old block for comparison
         BlockID oldBlockId = GetBlock(worldX, worldY, worldZ);
-        
-        // No change needed
-        if (oldBlockId == blockId) {
+        const uint8_t oldState = GetBlockState(worldX, worldY, worldZ);
+
+        // No change needed. The state comparison matters: re-orienting a block
+        // in place (same id, new facing) must not be swallowed here.
+        if (oldBlockId == blockId && oldState == stateIndex) {
             return true;
         }
 
         // Set the block using the chunk provider
-        m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId);
+        m_chunkProvider->SetBlock(worldX, worldY, worldZ, blockId, stateIndex);
 
         // ── BlockEntity lifecycle hook (mirrors MC Level.setBlock's
         //    setBlockEntity call). If the OLD block had a BE, destroy it.
@@ -287,8 +309,11 @@ namespace Game {
                     uint8_t localY = (worldY + 64) & 0xF;  // Adjust for min Y of -64
                     uint8_t localZ = worldZ & 0xF;
                     
-                    // Accumulate the change (will be broadcast at end of tick)
-                    accumulator->accumulate(sp, localX, localY, localZ, blockId);
+                    // Accumulate the change (will be broadcast at end of tick).
+                    // Block and state travel together — a re-orientation is a
+                    // real change that watchers must be told about.
+                    accumulator->accumulate(sp, localX, localY, localZ,
+                                            Game::BlockStateRef{blockId, stateIndex});
                 }
             }
         }
@@ -446,7 +471,7 @@ namespace Game {
         m_chunkProvider->SaveAllDirtyChunks();
     }
 
-    void World::SetGenerationSeed(int32_t seed) {
+    void World::SetGenerationSeed(int64_t seed) {
         if (!m_chunkProvider) {
             return;
         }
@@ -455,7 +480,7 @@ namespace Game {
         Log::Info("Set world generation seed to: %d", seed);
     }
 
-    int32_t World::GetGenerationSeed() const {
+    int64_t World::GetGenerationSeed() const {
         if (!m_chunkProvider) {
             return 0;
         }

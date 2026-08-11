@@ -69,6 +69,14 @@ namespace Game {
         // 3 spectator). physics.mayFly / physics.isFlying carry the flight
         // half so the physics step can read them without reaching back here.
         uint8_t gameMode     = 0;
+        // False until the first PlayerAbilitiesS2C lands. MC can't observe
+        // this window — Minecraft.gameMode is null until handleLogin, and the
+        // Gui needs a level to render, so the mode is always known by the time
+        // anything reads it. Our render loop starts as soon as the socket
+        // connects, so callers that would otherwise act on the survival
+        // default (notably the HUD's hearts/hunger block) must check this
+        // first, or a creative player sees a flash of survival UI on join.
+        bool    gameModeKnown = false;
         bool    invulnerable = false;
         bool    instabuild   = false;
         float   flyingSpeed  = 0.05f;  // MC Abilities.flyingSpeed (per-tick)

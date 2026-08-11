@@ -145,6 +145,11 @@ namespace Threading {
                 }
             }
         }
+
+        // Block states (see ChunkSection::states — normally unallocated)
+        if (section->HasStates()) {
+            snapshot->sectionData.states = section->states;
+        }
         
         // Fill light data with default values
         std::fill(snapshot->sectionData.lightData.begin(), snapshot->sectionData.lightData.end(), 0xFF);

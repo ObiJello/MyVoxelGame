@@ -161,6 +161,64 @@ namespace Debug {
         float connectionUptimeSec = 0.0f;
     };
 
+    // Everything the World Info panel shows about where the player is and what
+    // they're aiming at.
+    //
+    // Built in PlatformMain, which is the only place with the world, the
+    // player, the raycast hit and the biome registry all in scope —
+    // DebugSystem.cpp is compiled into the `imgui` target and deliberately
+    // cannot include the Boost/Asio-dependent server headers.
+    struct WorldInfoSnapshot {
+        // ── Where the player is ────────────────────────────────────────────
+        double posX = 0.0, posY = 0.0, posZ = 0.0;
+        int    blockX = 0, blockY = 0, blockZ = 0;   // floor of the above
+        int    chunkX = 0, chunkZ = 0;
+        int    localX = 0, localZ = 0;               // within the chunk
+        int    sectionIndex = 0;
+        float  yawDeg = 0.0f, pitchDeg = 0.0f;
+        std::string facingName = "?";
+
+        // ── Biomes ─────────────────────────────────────────────────────────
+        // Standing = the block under the feet; Eye = at eye height (they
+        // differ in caves and at biome seams); Target = the block aimed at.
+        std::string biomeStanding = "-";
+        std::string biomeEye      = "-";
+        std::string biomeTarget   = "-";
+        float biomeTemperature = 0.0f;
+        float biomeDownfall    = 0.0f;
+        const char* biomeGrassModifier = "none";
+        // Final in-world colours at the player, AFTER the 5x5 blend and any
+        // GrassColorModifier — i.e. exactly what the mesher fed the vertices.
+        uint32_t tintGrass = 0, tintFoliage = 0, tintDryFoliage = 0, tintWater = 0;
+
+        // ── Block being looked at ──────────────────────────────────────────
+        bool        hasTarget = false;
+        int         targetX = 0, targetY = 0, targetZ = 0;
+        std::string targetBlockName = "-";
+        int         targetBlockId = 0;
+        int         targetStateIndex = 0;
+        std::string targetStateProps = "-";          // "facing=east" or "-"
+        std::string targetFace = "-";
+        float       targetDistance = 0.0f;
+        float       targetHardness = 0.0f;
+        bool        targetHasCollision = false;
+        const char* targetRenderLayer = "-";
+        // Selection box in block-local space, so a wrong shape is visible here
+        // rather than only as a misplaced outline on screen.
+        float targetShapeMin[3] = {0, 0, 0};
+        float targetShapeMax[3] = {1, 1, 1};
+
+        // ── Block underfoot ────────────────────────────────────────────────
+        std::string standingOnName = "-";
+
+        // ── World ──────────────────────────────────────────────────────────
+        int      seed = 0;
+        uint64_t worldTimeTicks = 0;
+        int      dayNumber = 0;
+        int      timeOfDayTicks = 0;                 // 0..23999
+        bool     targetChunkLoaded = false;
+    };
+
     struct ChunkPipelineSnapshot {
         // View Distance
         int viewDistance = 0;
@@ -256,6 +314,7 @@ namespace Debug {
         bool logConsole = false;
         bool controls = false;
         bool chunkPipeline = false;
+        bool worldInfo = false;
     };
 
     // ========================================================================
@@ -285,6 +344,9 @@ namespace Debug {
         static void SetServerSnapshot(const ServerMetricsSnapshot& snap);
         static void SetNetworkSnapshot(const NetworkMetricsSnapshot& snap);
         static void SetChunkPipelineSnapshot(const ChunkPipelineSnapshot& snap);
+        static void SetWorldInfoSnapshot(const WorldInfoSnapshot& snap);
+        // Lets the producer skip building a snapshot nobody is looking at.
+        static const PanelVisibility& GetPanelVisibility();
 
     private:
         // Style
@@ -301,6 +363,7 @@ namespace Debug {
         // Panels
         static void DrawMenuBar();
         static void DrawPerformancePanel(const PerformanceMetrics& metrics);
+        static void DrawWorldInfoPanel();
         static void DrawServerNetworkPanel(const ServerMetricsSnapshot& serverSnap, const NetworkMetricsSnapshot& netSnap);
         static void DrawClientSystemsPanel();
         static void DrawMemoryPanel(const PerformanceMetrics& metrics);
@@ -325,6 +388,7 @@ namespace Debug {
         static ServerMetricsSnapshot s_serverSnap;
         static NetworkMetricsSnapshot s_netSnap;
         static ChunkPipelineSnapshot s_pipelineSnap;
+        static WorldInfoSnapshot s_worldInfoSnap;
         static bool s_debugEnabled;
         static bool s_renderDistanceChanged;
 

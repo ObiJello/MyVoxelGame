@@ -2,6 +2,7 @@
 #pragma once
 
 #include "common/world/math/WorldCoordinates.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world//block/Blocks.hpp"
 #include <vector>
@@ -39,6 +40,19 @@ namespace Game {
 
         // Get block at world coordinates
         virtual BlockID GetBlock(int worldX, int worldY, int worldZ) const = 0;
+
+        // State index within the block's own state list (MC BlockState.getId());
+        // 0 is always the block's default state. Defaulted rather than pure so
+        // providers that only carry block ids stay valid — "no state tracked"
+        // and "everything default" are the same answer.
+        virtual uint8_t GetBlockState(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return 0; }
+
+        // Biome id, quantised to MC's 4x4x4 noise-biome grid by the chunk.
+        // Defaulted for the same reason as GetBlockState: a provider that
+        // carries no biome data answers 0, which is the fallback biome.
+        virtual uint16_t GetBiome(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const {
+            return kFallbackBiomeId;
+        }
 
         // Get detailed block information
         virtual BlockInfo GetBlockInfo(int worldX, int worldY, int worldZ) const {

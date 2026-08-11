@@ -119,7 +119,10 @@ namespace Render {
         void MouseReleased(double mx, double my, int button);
         void MouseDragged(double mx, double my);
         void MouseScrolled(double mx, double my, double deltaY);
-        void KeyPressed(int glfwKey, int glfwMods);
+        // Returns true when the top screen consumed the key. Callers with a
+        // global shortcut on the same key (fullscreen) must defer to it —
+        // otherwise the Key Binds screen could never capture that key.
+        bool KeyPressed(int glfwKey, int glfwMods);
         void CharTyped(unsigned int codepoint);
 
         // ── One-shot "apply this setting now" flags ────────────────────────

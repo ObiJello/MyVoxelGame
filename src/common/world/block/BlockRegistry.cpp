@@ -1,13 +1,20 @@
 // File: src/common/world/block/BlockRegistry.cpp
 #include "BlockRegistry.hpp"
+#include "BlockStateModels.hpp"
 #include "entity/BlockEntityTypes.hpp"
 #include "../../core/Log.hpp"
 #include <string_view>
 #include <atomic>
 #include <limits>
 #include <array>
+#include <memory>
+#include <vector>
 
 namespace Game {
+
+    // Defined in BlockBehaviors.cpp — wires the per-block right-click callbacks
+    // once the table exists. Mirrors ItemRegistry_RegisterBehaviors.
+    void BlockRegistry_RegisterBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
 
     namespace {
 
@@ -30,6 +37,13 @@ namespace Game {
 
         MiningTraits ClassifyByName(const std::string& modelName) {
             const std::string& n = modelName;
+
+            // Blocks.java:1509-1510 — both are .instabreak(). Exact names, for
+            // the same reason as the no-collision table: fire_coral_block and
+            // campfire are ordinary blocks that must keep their hardness.
+            if (n == "fire" || n == "soul_fire") {
+                return {0.0f, ToolType::None, false, MiningTier::Wood};
+            }
 
             // Instant-break: flowers, grasses, saplings, mushrooms, torches,
             // fire, signs, redstone wire/torch, sugar cane, kelp, seagrass,
@@ -557,6 +571,11 @@ namespace Game {
             "tripwire_hook", "string",
         };
         auto noCollisionFor = [](const std::string& n) -> bool {
+            // Exact-match cases that must NOT go in the substring table above:
+            // "fire" as a substring would also catch fire_coral_block (a solid
+            // cube) and campfire, both of which keep their collision.
+            // Blocks.java:1509-1510 — fire and soul_fire are .noCollision().
+            if (n == "fire" || n == "soul_fire") return true;
             for (auto sv : kNoCollisionSubstr) {
                 if (n.find(sv) != std::string::npos) return true;
             }
@@ -573,7 +592,30 @@ namespace Game {
             b.minTier             = t.minTier;
             b.hasCollision        = !noCollisionFor(name);
         }
+
+        // Air and the fluids collide with nothing. MC's AirBlock and
+        // LiquidBlock return Shapes.empty() from getCollisionShape
+        // (LiquidBlock.java:69-73), so the player falls through all three.
+        // The name-substring classifier above can't reach them — "Air",
+        // "water" and "lava" match no vegetation/decoration pattern — and
+        // Block::hasCollision defaults to true, so state it explicitly.
+        // Physics relies on this: CheckCollision/HasSupportBelow consult
+        // HasCollision alone, with no "is this block solid?" pre-filter.
+        // minecraft:cave_air / void_air already alias to BlockID::Air in
+        // SectionDataUnpacker, so these three IDs cover every case.
+        for (BlockID id : { BlockID::Air, BlockID::Water, BlockID::Lava }) {
+            blockDefinitions[static_cast<size_t>(id)].hasCollision = false;
+        }
+
         ApplyExplicitHardnessOverrides(blockDefinitions);
+
+        // Right-click behaviour (crafting table's menu, …). After registration
+        // because it looks blocks up by model name.
+        BlockRegistry_RegisterBehaviors(blockDefinitions);
+
+        // Must run after every block is registered — it classifies from the
+        // registered model names.
+        InitBlockStates();
 
         Log::Info("Block Registry initialization complete - %zu blocks registered",
                  static_cast<size_t>(BlockID::Count));
@@ -601,6 +643,14 @@ namespace Game {
     const BlockModel& BlockRegistry::GetBlockModel(BlockID id) {
         const Block& block = Get(id);
         return BlockModelRegistry::GetModel(block.modelName);
+    }
+
+    const BlockModel& BlockRegistry::GetBlockModel(BlockID id, uint8_t stateIndex) {
+        const std::string& stateModel = BlockStateModels::ModelNameFor(id, stateIndex);
+        if (!stateModel.empty()) {
+            return BlockModelRegistry::GetModel(stateModel);
+        }
+        return GetBlockModel(id);
     }
 
     bool BlockRegistry::HasCollision(BlockID id) {
@@ -663,22 +713,424 @@ namespace Game {
         return SlabBottomVariant(id) != BlockID::Air;
     }
 
-    const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockID id) {
-        // Lazy per-BlockID cache. Computed on first request from the model's
-        // elements; subsequent calls hit the cache. Sized for the full
-        // BlockID enum so lookups are O(1) and lock-free after warm-up.
-        static std::array<BlockShape, Size> s_cache{};
-        static std::array<std::atomic<bool>, Size> s_computed{};
+    // ========================================================================
+    // BLOCK STATES  (MC StateDefinition / createBlockStateDefinition)
+    // ========================================================================
 
+    uint8_t BlockRegistry::BlockStateDefinition::IndexOf(const PropertyMap& props) const {
+        uint32_t index = 0;
+        for (const auto& prop : properties) {
+            index *= static_cast<uint32_t>(prop.values.size());
+            auto it = props.find(prop.name);
+            if (it == props.end()) continue;   // absent => default (value index 0)
+            for (size_t v = 1; v < prop.values.size(); ++v) {
+                if (prop.values[v] == it->second) { index += static_cast<uint32_t>(v); break; }
+            }
+        }
+        return static_cast<uint8_t>(index);
+    }
+
+    BlockRegistry::BlockStateDefinition::PropertyMap
+    BlockRegistry::BlockStateDefinition::PropertiesOf(uint8_t stateIndex) const {
+        PropertyMap out;
+        uint32_t remaining = stateIndex;
+        // Decode least-significant (last) property first, so walk backwards.
+        for (size_t i = properties.size(); i-- > 0; ) {
+            const auto& prop = properties[i];
+            const uint32_t radix = static_cast<uint32_t>(prop.values.size());
+            const uint32_t v = remaining % radix;
+            remaining /= radix;
+            out[prop.name] = prop.values[v];
+        }
+        return out;
+    }
+
+    std::string_view BlockRegistry::BlockStateDefinition::ValueOf(uint8_t stateIndex,
+                                                                 std::string_view propName) const {
+        uint32_t remaining = stateIndex;
+        for (size_t i = properties.size(); i-- > 0; ) {
+            const auto& prop = properties[i];
+            const uint32_t radix = static_cast<uint32_t>(prop.values.size());
+            const uint32_t v = remaining % radix;
+            remaining /= radix;
+            if (prop.name == propName) return prop.values[v];
+        }
+        return {};
+    }
+
+    uint8_t BlockRegistry::BlockStateDefinition::IndexOfSingle(std::string_view propName,
+                                                              std::string_view value) const {
+        uint32_t index = 0;
+        for (const auto& prop : properties) {
+            index *= static_cast<uint32_t>(prop.values.size());
+            if (prop.name != propName) continue;   // other properties stay default
+            for (size_t v = 1; v < prop.values.size(); ++v) {
+                if (prop.values[v] == value) { index += static_cast<uint32_t>(v); break; }
+            }
+        }
+        return static_cast<uint8_t>(index);
+    }
+
+    namespace {
+        // One entry per BlockID; blocks with no properties keep an empty
+        // definition (a single state, index 0). Built once in Init().
+        std::array<BlockRegistry::BlockStateDefinition, BlockRegistry::Size> s_stateDefs{};
+
+        // Property value lists. DEFAULT VALUE FIRST — see the invariant on
+        // BlockStateDefinition. The defaults match MC's registerDefaultState
+        // for each family (north for horizontal facing, north for 6-way facing,
+        // y for pillar axis).
+        const std::vector<std::string> kHorizontalFacingValues{"north", "east", "south", "west"};
+        const std::vector<std::string> kFacingValues{"north", "east", "south", "west", "up", "down"};
+        const std::vector<std::string> kAxisValues{"y", "x", "z"};
+        // "false" first so state index 0 is the all-disconnected default, per
+        // BlockStateDefinition's default-first invariant.
+        const std::vector<std::string> kBoolValues{"false", "true"};
+
+        bool NameHas(const std::string& n, std::string_view sub) {
+            return n.find(sub) != std::string::npos;
+        }
+        bool NameIs(const std::string& n, std::string_view exact) {
+            return n == exact;
+        }
+
+        // Which property set (if any) a block carries, decided from its MC
+        // model name. Name-pattern matching rather than a hand-written BlockID
+        // list, matching how ClassifyByName / kNoCollisionSubstr already work
+        // in this file — new blocks from an MC version bump are picked up
+        // automatically instead of silently defaulting to "no states".
+        enum class StateKind { None, HorizontalFacing, Facing6, PillarAxis, FireConnections };
+
+        StateKind ClassifyStates(const std::string& n) {
+            // ── Fire (MC FireBlock) ─────────────────────────────────────────
+            // All six entries of blockstates/fire.json carry a `when` asking
+            // about north/east/south/west/up. BlockStateModels refuses a
+            // multipart file outright unless it can answer every property the
+            // file mentions, so without these five declared here fire resolves
+            // to the default cube and renders as stone.
+            //
+            // Deliberately NOT `age`, even though FireBlock.java:264 declares
+            // it: the blockstate never dispatches on age, and 16 values would
+            // multiply this to 512 states — past what the uint8_t state index
+            // in ChunkSection can hold.
+            //
+            // soul_fire is excluded on purpose. SoulFireBlock extends
+            // BaseFireBlock and adds no properties, which is exactly why
+            // blockstates/soul_fire.json has no `when` clauses at all and
+            // already resolved fine.
+            //
+            // Exact name, not a substring: "fire" would also catch
+            // fire_coral_block (a solid cube) and campfire.
+            if (NameIs(n, "fire")) {
+                return StateKind::FireConnections;
+            }
+
+            // ── Pillar axis (MC RotatedPillarBlock.getStateForPlacement) ────
+            // Careful with ordering: "_wood" would also match "stripped_*_wood",
+            // which is intended — every one of those is a RotatedPillarBlock.
+            if (NameHas(n, "_log") || NameHas(n, "_wood") || NameHas(n, "_stem") ||
+                NameHas(n, "_hyphae") || NameHas(n, "_pillar") ||
+                NameIs(n, "bone_block") || NameIs(n, "hay_block") ||
+                NameIs(n, "basalt") || NameIs(n, "polished_basalt") ||
+                NameIs(n, "deepslate") || NameIs(n, "muddy_mangrove_roots") ||
+                NameIs(n, "ochre_froglight") || NameIs(n, "verdant_froglight") ||
+                NameIs(n, "pearlescent_froglight")) {
+                return StateKind::PillarAxis;
+            }
+
+            // ── Six-way facing (MC DirectionalBlock) ────────────────────────
+            if (NameIs(n, "dispenser") || NameIs(n, "dropper") || NameIs(n, "observer") ||
+                NameIs(n, "barrel") || NameIs(n, "piston") || NameIs(n, "sticky_piston") ||
+                NameIs(n, "command_block") || NameIs(n, "repeating_command_block") ||
+                NameIs(n, "chain_command_block") || NameHas(n, "shulker_box") ||
+                NameIs(n, "hopper") || NameIs(n, "lightning_rod") ||
+                NameIs(n, "end_rod") || NameHas(n, "amethyst_bud") ||
+                NameIs(n, "amethyst_cluster") || NameIs(n, "crafter")) {
+                return StateKind::Facing6;
+            }
+
+            // ── Horizontal facing (MC HorizontalDirectionalBlock) ───────────
+            if (NameHas(n, "_glazed_terracotta") ||
+                NameIs(n, "furnace") || NameIs(n, "blast_furnace") || NameIs(n, "smoker") ||
+                NameIs(n, "chest") || NameIs(n, "trapped_chest") || NameIs(n, "ender_chest") ||
+                NameIs(n, "carved_pumpkin") || NameIs(n, "jack_o_lantern") ||
+                NameIs(n, "loom") || NameIs(n, "stonecutter") || NameIs(n, "lectern") ||
+                NameIs(n, "chiseled_bookshelf") || NameIs(n, "beehive") || NameIs(n, "bee_nest") ||
+                NameIs(n, "end_portal_frame") || NameIs(n, "vault") ||
+                NameIs(n, "anvil") || NameIs(n, "chipped_anvil") || NameIs(n, "damaged_anvil") ||
+                NameIs(n, "grindstone") || NameIs(n, "campfire") || NameIs(n, "soul_campfire") ||
+                NameIs(n, "decorated_pot") || NameIs(n, "calibrated_sculk_sensor") ||
+                NameIs(n, "big_dripleaf") || NameIs(n, "small_dripleaf") ||
+                NameIs(n, "ladder") || NameIs(n, "cocoa") ||
+                NameIs(n, "repeater") || NameIs(n, "comparator") ||
+                NameHas(n, "_stairs") ||
+                // Segmented ground cover — MC LeafLitterBlock and
+                // FlowerBedBlock (pink_petals, wildflowers), both
+                // SegmentableBlock with HORIZONTAL_FACING defaulting to north
+                // (LeafLitterBlock.java:25, FlowerBedBlock.java:35).
+                //
+                // Matched by substring because the segment count is baked into
+                // the model name here (leaf_litter_1 … leaf_litter_4): this
+                // engine spends a BlockID per `segment_amount` value, so only
+                // `facing` is left to carry as state. Without it every clump in
+                // the world sits in the same corner of its block pointing the
+                // same way, which reads as a repeating grid rather than scatter.
+                NameHas(n, "leaf_litter") || NameHas(n, "wildflowers") ||
+                NameHas(n, "pink_petals")) {
+                return StateKind::HorizontalFacing;
+            }
+
+            return StateKind::None;
+        }
+    } // namespace
+
+    const BlockRegistry::BlockStateDefinition& BlockRegistry::GetStateDefinition(BlockID id) {
+        const size_t idx = static_cast<size_t>(id);
+        if (idx >= Size) {
+            static const BlockStateDefinition kEmpty;
+            return kEmpty;
+        }
+        return s_stateDefs[idx];
+    }
+
+    void BlockRegistry::InitBlockStates() {
+        for (size_t i = 0; i < blockDefinitions.size(); ++i) {
+            const Block& b = blockDefinitions[i];
+            if (b.modelName.empty() && b.name.empty()) continue; // unregistered slot
+            const std::string& name = !b.modelName.empty() ? b.modelName : b.name;
+
+            BlockStateDefinition def;
+            switch (ClassifyStates(name)) {
+                case StateKind::HorizontalFacing:
+                    def.properties.push_back({"facing", kHorizontalFacingValues});
+                    break;
+                case StateKind::Facing6:
+                    def.properties.push_back({"facing", kFacingValues});
+                    break;
+                case StateKind::PillarAxis:
+                    def.properties.push_back({"axis", kAxisValues});
+                    break;
+                case StateKind::FireConnections:
+                    // 2^5 = 32 states; index 0 is all-false, which is the state
+                    // MC itself uses whenever fire sits on a solid or burnable
+                    // block (FireBlock.getStateForPlacement returns
+                    // defaultBlockState() in that case) — i.e. every fire a
+                    // flint and steel lights on the ground.
+                    def.properties.push_back({"north", kBoolValues});
+                    def.properties.push_back({"east",  kBoolValues});
+                    def.properties.push_back({"south", kBoolValues});
+                    def.properties.push_back({"west",  kBoolValues});
+                    def.properties.push_back({"up",    kBoolValues});
+                    break;
+                case StateKind::None:
+                    break;
+            }
+            s_stateDefs[i] = std::move(def);
+        }
+
+        size_t stateful = 0;
+        for (const auto& d : s_stateDefs) if (!d.properties.empty()) ++stateful;
+        Log::Info("Block states initialized - %zu of %zu blocks carry state properties",
+                  stateful, static_cast<size_t>(BlockID::Count));
+    }
+
+    namespace {
+        // Flat (BlockID, stateIndex) → shape cache.
+        //
+        // One slot per STATE, not per block: rotation lives in the model, so
+        // `leaf_litter{facing=east}` and `leaf_litter{facing=north}` occupy
+        // different quarters of their cell and need different shapes. Laid out
+        // as a single flat array with a per-BlockID base offset so a lookup
+        // stays one index and one relaxed atomic load — the mesher and the
+        // physics sweep both call this per voxel from several threads, so a
+        // map + mutex here would reintroduce exactly the contention that was
+        // measured and removed from MyTerrainGenerator::MapBlockType.
+        //
+        // Sized from the state definitions, which are final once
+        // BlockRegistry::Init has run. Total is roughly Size + a few hundred
+        // (only ~1% of blocks carry properties), i.e. tens of KB.
+        struct StateShapeCache {
+            std::array<uint32_t, BlockRegistry::Size> base{};
+            // State count captured AT BUILD TIME. Indices must be clamped
+            // against this, never against a freshly-read StateCount(): the
+            // table is sized once, so if anything queries a shape before
+            // InitBlockStates has run every block is one state wide, and
+            // clamping against the later, larger count would index straight
+            // out of a block's slice and into the next one's.
+            std::array<uint16_t, BlockRegistry::Size> count{};
+            std::vector<BlockRegistry::BlockShape>    shapes;
+            std::unique_ptr<std::atomic<bool>[]>      computed;
+            uint32_t                                  total = 0;
+
+            StateShapeCache() {
+                uint32_t off = 0;
+                for (size_t i = 0; i < BlockRegistry::Size; ++i) {
+                    base[i] = off;
+                    const uint16_t n =
+                        BlockRegistry::GetStateDefinition(static_cast<BlockID>(i)).StateCount();
+                    count[i] = (n > 0 ? n : 1);
+                    off += count[i];
+                }
+                total = off;
+                shapes.assign(off, BlockRegistry::BlockShape{});
+                computed = std::make_unique<std::atomic<bool>[]>(off);
+                for (uint32_t k = 0; k < off; ++k) {
+                    computed[k].store(false, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        // Magic static: thread-safe one-time init, and lazy enough that the
+        // state definitions are already populated by the time anything asks
+        // for a shape.
+        StateShapeCache& StateShapes() {
+            static StateShapeCache c;
+            return c;
+        }
+
+        // Height in MC pixels for blocks whose collision/selection shape is
+        // authored INDEPENDENTLY of their model, or 0 for "derive from model".
+        //
+        // MC's SegmentableBlock builds its shape as
+        // `Block.box(0, 0, 0, 8, getShapeHeight(), 8)` rotated per facing
+        // (SegmentableBlock.java) — anchored on the ground, with a real
+        // thickness. The MODEL meanwhile is a zero-thickness plane hovering at
+        // y=0.25px. Deriving the shape from that geometry gives a sliver about
+        // 1/16 as tall as MC's box, floating just off the floor: it renders
+        // fine but is close to impossible to put a crosshair on, which reads as
+        // "the hitbox isn't where the block is".
+        //
+        // Only Y is overridden — X and Z still come from the model, so they
+        // keep following the state's rotation and segment count.
+        float AuthoredShapeHeightPx(const std::string& modelName) {
+            auto has = [&](std::string_view s) {
+                return modelName.find(s) != std::string::npos;
+            };
+            // LeafLitterBlock inherits SegmentableBlock's default 1.0.
+            if (has("leaf_litter")) return 1.0f;
+            // FlowerBedBlock (pink_petals, wildflowers) overrides to 3.0
+            // (FlowerBedBlock.java:59).
+            if (has("wildflowers") || has("pink_petals")) return 3.0f;
+            return 0.0f;
+        }
+    } // namespace
+
+    namespace {
+        // MC Blocks.java `.offsetType(...)` declarations, extracted verbatim.
+        // XYZ additionally sinks the block, which is what breaks up the flat
+        // top line of a grass field.
+        constexpr std::string_view kOffsetXYZ[] = {
+            "fern", "short_grass", "short_dry_grass", "tall_dry_grass",
+            "small_dripleaf",
+        };
+        constexpr std::string_view kOffsetXZ[] = {
+            "allium", "azure_bluet", "bamboo", "bamboo_sapling", "blue_orchid",
+            "closed_eyeblossom", "cornflower", "crimson_roots", "dandelion",
+            "hanging_roots", "large_fern", "lilac", "lily_of_the_valley",
+            "mangrove_propagule", "nether_sprouts", "open_eyeblossom",
+            "orange_tulip", "oxeye_daisy", "peony", "pink_tulip",
+            "pitcher_plant", "pointed_dripstone", "poppy", "red_tulip",
+            "rose_bush", "sunflower", "tall_grass", "tall_seagrass",
+            "torchflower", "warped_roots", "white_tulip", "wither_rose",
+        };
+
+        // MC Mth.getSeed(x, y, z), verbatim. The overflow is load-bearing —
+        // this is a hash, and Java's wrapping arithmetic is the definition.
+        int64_t MthGetSeed(int x, int y, int z) {
+            uint64_t seed = static_cast<uint64_t>(static_cast<int64_t>(
+                                static_cast<int32_t>(static_cast<uint32_t>(x) * 3129871u)))
+                          ^ (static_cast<uint64_t>(static_cast<int64_t>(z)) * 116129781ull)
+                          ^ static_cast<uint64_t>(static_cast<int64_t>(y));
+            seed = seed * seed * 42317861ull + seed * 11ull;
+            return static_cast<int64_t>(seed) >> 16;
+        }
+    } // namespace
+
+    BlockRegistry::OffsetType BlockRegistry::GetOffsetType(BlockID id) {
+        const size_t idx = static_cast<size_t>(id);
+        if (idx >= Size) return OffsetType::None;
+
+        // Cached per BlockID: this is asked once per rendered block face.
+        static std::array<OffsetType, Size> s_table{};
+        static bool s_built = false;
+        if (!s_built) {
+            for (size_t i = 0; i < Size; ++i) {
+                const std::string& n = blockDefinitions[i].modelName;
+                OffsetType t = OffsetType::None;
+                for (std::string_view s : kOffsetXYZ) if (n == s) { t = OffsetType::XYZ; break; }
+                if (t == OffsetType::None) {
+                    for (std::string_view s : kOffsetXZ) if (n == s) { t = OffsetType::XZ; break; }
+                }
+                // Double plants are split across two BlockIDs here, with
+                // _bottom / _top model names, so the exact matches above miss
+                // the halves of tall_grass / large_fern.
+                if (t == OffsetType::None &&
+                    (n.rfind("tall_grass", 0) == 0 || n.rfind("large_fern", 0) == 0 ||
+                     n.rfind("lilac", 0) == 0 || n.rfind("peony", 0) == 0 ||
+                     n.rfind("rose_bush", 0) == 0 || n.rfind("sunflower", 0) == 0 ||
+                     n.rfind("pitcher_plant", 0) == 0 || n.rfind("tall_seagrass", 0) == 0)) {
+                    t = OffsetType::XZ;
+                }
+                s_table[i] = t;
+            }
+            s_built = true;
+        }
+        return s_table[idx];
+    }
+
+    glm::vec3 BlockRegistry::GetBlockOffset(BlockID id, int worldX, int worldZ) {
+        const OffsetType type = GetOffsetType(id);
+        if (type == OffsetType::None) return glm::vec3(0.0f);
+
+        // MC BlockBehaviour.Properties.offsetType, cases XZ and XYZ:
+        //   long seed = Mth.getSeed(x, 0, z);
+        //   double dx = clamp(((seed & 15) / 15.0f - 0.5) * 0.5, -maxH, maxH);
+        //   double dz = clamp(((seed >> 8 & 15) / 15.0f - 0.5) * 0.5, -maxH, maxH);
+        //   double dy = ((seed >> 4 & 15) / 15.0f - 1.0) * maxV;   // XYZ only
+        // Seeded with y = 0 on purpose, so both halves of a double plant land
+        // on the same offset instead of shearing apart.
+        constexpr float kMaxHorizontal = 0.25f;   // getMaxHorizontalOffset default
+        constexpr float kMaxVertical   = 0.2f;    // getMaxVerticalOffset default
+
+        const int64_t seed = MthGetSeed(worldX, 0, worldZ);
+
+        const float fx = static_cast<float>(seed & 15LL) / 15.0f;
+        const float fz = static_cast<float>((seed >> 8) & 15LL) / 15.0f;
+        const float dx = std::clamp((fx - 0.5f) * 0.5f, -kMaxHorizontal, kMaxHorizontal);
+        const float dz = std::clamp((fz - 0.5f) * 0.5f, -kMaxHorizontal, kMaxHorizontal);
+
+        float dy = 0.0f;
+        if (type == OffsetType::XYZ) {
+            const float fy = static_cast<float>((seed >> 4) & 15LL) / 15.0f;
+            dy = (fy - 1.0f) * kMaxVertical;   // always <= 0: the plant sinks
+        }
+        return glm::vec3(dx, dy, dz);
+    }
+
+    const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockID id) {
+        return GetBlockShape(id, 0);
+    }
+
+    const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockID id, uint8_t stateIndex) {
         const size_t idx = static_cast<size_t>(id);
         if (idx >= Size) {
             static const BlockShape kFull;
             return kFull;
         }
 
+        StateShapeCache& cache = StateShapes();
+        // An out-of-range state index means a save or a peer described a state
+        // this build doesn't model. Fall back to the default state rather than
+        // indexing past the block's slice into the next block's shapes.
+        if (stateIndex >= cache.count[idx]) stateIndex = 0;
+
+        const uint32_t slot = cache.base[idx] + stateIndex;
+        BlockShape* const shapes = cache.shapes.data();
+        std::atomic<bool>* const computed = cache.computed.get();
+
         // Fast-path: SLAB TOP variants ALWAYS resolve to y∈[0.5, 1] regardless
         // of whether the JSON model has loaded yet. Without this hardcode the
-        // mesher's per-thread EnsureBlockPropsCache may populate s_cache with
+        // mesher's per-thread EnsureBlockPropsCache may populate the cache with
         // the default full-cube shape for every SlabTop ID during the first
         // mesh build (before BlockModelRegistry::LoadModels has run, or
         // before the worker thread has imported its tables), permanently
@@ -690,9 +1142,9 @@ namespace Game {
             static const BlockShape kSlabTopShape =
                 BlockShape{ glm::vec3(0.0f, 0.5f, 0.0f), glm::vec3(1.0f) };
             // Still memoise so subsequent lookups skip the IsSlabTop branch.
-            s_cache[idx] = kSlabTopShape;
-            s_computed[idx].store(true, std::memory_order_release);
-            return s_cache[idx];
+            shapes[slot] = kSlabTopShape;
+            computed[slot].store(true, std::memory_order_release);
+            return shapes[slot];
         }
 
         // Fast-path: BlockEntity-rendered blocks whose model JSON is empty
@@ -705,29 +1157,49 @@ namespace Game {
         // MC ChestBlock.java:320 → x,z ∈ [1/16, 15/16], y ∈ [0, 14/16].
         // Future BE renderers (shulker, bed, sign, …) can add their own
         // hardcoded shapes here as they ship.
+        // Fire's model is a set of 22.4-pixel-tall flame quads that lean past
+        // the top of the cell, so deriving the shape from the geometry would
+        // hand the player a selection box 1.4 blocks high. MC keeps the shape
+        // independent of the visual: BaseFireBlock.java:30 is
+        // Block.column(16, 0, 1) — full footprint, one pixel tall.
+        // Collision is already off, so this only governs the outline and the
+        // raycast target.
+        if (id == BlockID::Fire || id == BlockID::SoulFire) {
+            static const BlockShape kFireShape =
+                BlockShape{ glm::vec3(0.0f), glm::vec3(1.0f, 1.0f / 16.0f, 1.0f) };
+            shapes[slot] = kFireShape;
+            computed[slot].store(true, std::memory_order_release);
+            return shapes[slot];
+        }
+
         if (id == BlockID::Chest || id == BlockID::TrappedChest || id == BlockID::EnderChest) {
             static const BlockShape kChestShape =
                 BlockShape{ glm::vec3(1.0f / 16.0f, 0.0f, 1.0f / 16.0f),
                             glm::vec3(15.0f / 16.0f, 14.0f / 16.0f, 15.0f / 16.0f) };
-            s_cache[idx] = kChestShape;
-            s_computed[idx].store(true, std::memory_order_release);
-            return s_cache[idx];
+            shapes[slot] = kChestShape;
+            computed[slot].store(true, std::memory_order_release);
+            return shapes[slot];
         }
 
-        if (s_computed[idx].load(std::memory_order_acquire)) {
-            return s_cache[idx];
+        if (computed[slot].load(std::memory_order_acquire)) {
+            return shapes[slot];
         }
 
         // Build shape by unioning every element's AABB. If the model is
         // empty (either truly empty, OR the model registry hasn't loaded
         // JSONs from disk yet because this is being called extremely early),
-        // we DO NOT cache — leaving `s_computed[idx]` false so the next call
+        // we DO NOT cache — leaving `computed[slot]` false so the next call
         // tries again once models are available. Caching a default full-cube
         // shape here would permanently mis-collide partial blocks (slabs,
         // leaf litter, …) whenever someone happens to query their shape
         // before model JSONs are loaded.
+        //
+        // The STATE's model, not the block's: for a rotated state that model
+        // is the synthesised `<model>__x0_yN`, whose elements are already in
+        // their rotated positions, so the union below lands on the right
+        // quarter of the cell without any extra rotation maths here.
         BlockShape shape;
-        const BlockModel& model = GetBlockModel(id);
+        const BlockModel& model = GetBlockModel(id, stateIndex);
         if (model.elements.empty()) {
             static const BlockShape kFull;
             return kFull;
@@ -736,12 +1208,42 @@ namespace Game {
             glm::vec3 mn(std::numeric_limits<float>::infinity());
             glm::vec3 mx(-std::numeric_limits<float>::infinity());
             for (const auto& e : model.elements) {
+                if (!e.rotation.IsIdentity()) {
+                    // An element with its own rotation is authored at its
+                    // PRE-rotation coordinates, which for fanned geometry sit
+                    // well outside the cell (flowerbed stems reach x≈18).
+                    // Unioning those raw bounds inflated the shape to the whole
+                    // block. Rotate all eight corners the way the mesher rotates
+                    // the vertices so the shape matches what is actually drawn.
+                    for (int corner = 0; corner < 8; ++corner) {
+                        const glm::vec3 p{
+                            (corner & 1) ? e.to.x : e.from.x,
+                            (corner & 2) ? e.to.y : e.from.y,
+                            (corner & 4) ? e.to.z : e.from.z,
+                        };
+                        const glm::vec3 r = ApplyElementRotation(p, e.rotation);
+                        mn = glm::min(mn, r);
+                        mx = glm::max(mx, r);
+                    }
+                    continue;
+                }
                 mn = glm::min(mn, glm::min(e.from, e.to));
                 mx = glm::max(mx, glm::max(e.from, e.to));
             }
             // Convert MC pixel-space [0,16] → block-space [0,1].
             mn *= (1.0f / 16.0f);
             mx *= (1.0f / 16.0f);
+
+            // Blocks whose vertical extent MC authors separately from the
+            // model get it back here, on the ground where MC puts it. X and Z
+            // stay model-derived so rotation and segment count still drive the
+            // footprint.
+            if (const float hPx = AuthoredShapeHeightPx(blockDefinitions[idx].modelName);
+                hPx > 0.0f) {
+                mn.y = 0.0f;
+                mx.y = hPx / 16.0f;
+            }
+
             // Expand degenerate axes (leaf litter's zero-thickness plane,
             // single-quad cross models) by a sub-pixel epsilon. Without
             // this the highlight wireframe shader divides by a zero-length
@@ -759,9 +1261,9 @@ namespace Game {
             shape.max = glm::clamp(mx, glm::vec3(0.0f), glm::vec3(1.0f));
         }
 
-        s_cache[idx] = shape;
-        s_computed[idx].store(true, std::memory_order_release);
-        return s_cache[idx];
+        shapes[slot] = shape;
+        computed[slot].store(true, std::memory_order_release);
+        return shapes[slot];
     }
 
 } // namespace Game
