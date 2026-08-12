@@ -1,12 +1,14 @@
 // File: src/client/world/ClientWorkerPool.cpp
 #include "ClientWorkerPool.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
 #include "../renderer/mesh/Mesher.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
+#include "../renderer/mesh/MeshUploadPermits.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
 #include "../renderer/mesh/SnapshotBuilder.hpp"
 #include "../renderer/mesh/SnapshotBlockAccess.hpp"
@@ -226,10 +228,19 @@ namespace Threading {
     }
 
     void ClientWorkerPool::CancelAllJobs() {
+        size_t discarded = 0;
         {
             std::lock_guard<std::mutex> lock(m_jobQueueMutex);
+            discarded = m_jobQueue.size();
             std::priority_queue<MeshJob> empty;
             std::swap(m_jobQueue, empty);
+        }
+
+        // These jobs are thrown away without ever running, so they will never
+        // reach SendMeshResult and never reach the render thread's drain —
+        // the only two places that would otherwise hand their permits back.
+        for (size_t i = 0; i < discarded; ++i) {
+            ::Render::GetMeshUploadPermits().Release();
         }
 
         {
@@ -295,6 +306,9 @@ namespace Threading {
 
     void ClientWorkerPool::WorkerLoop() {
         PROFILE_THREAD("MeshWorker");
+        // Feeds the frame: a section that finishes late is a hole in the world,
+        // so these outrank terrain generation but still yield to the main thread.
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
         // Log::Debug("WORKER: Client worker thread started");
 
         static std::atomic<uint64_t> jobCounter{0};
@@ -496,7 +510,16 @@ namespace Threading {
 
     void ClientWorkerPool::SendMeshResult(Network::MeshBuildResult&& result) {
         auto& queue = Render::ClientMeshManager::GetMeshResultQueue();
-        queue.try_push(std::move(result));
+        if (!queue.try_push(std::move(result))) {
+            // Queue was full, so the result is gone and the render thread will
+            // never see it — release the permit here or the pipeline loses a
+            // slot permanently. With the permit pool sized below the queue's
+            // capacity this should be unreachable; it is handled anyway
+            // because the failure mode is a slow starvation that would be
+            // very hard to trace back to here.
+            ::Render::GetMeshUploadPermits().Release();
+            return;
+        }
         queue.IncrementProcessed();
     }
 

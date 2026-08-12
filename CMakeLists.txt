@@ -192,6 +192,26 @@ endif()
 # 3b) Tracy profiler (client library only — viewer is a separate download)
 option(ENABLE_TRACY "Enable Tracy profiler integration" OFF)
 
+# Tracy 0.14's Apple system tracing. OFF by default, and deliberately so —
+# it is not a free "more data" switch, it changes what you are measuring:
+#
+#   * It samples at 1000 Hz by SUSPENDING each thread (thread_suspend +
+#     thread_get_state + frame-pointer walk), so it perturbs the very frame
+#     timings we profile. Never compare sampled and unsampled captures.
+#   * It makes the viewer's "Draw ghost zones" option (default ON) live for
+#     the first time on macOS. Ghost zones then REPLACE instrumented zones on
+#     any thread with no zones of its own, and a clickable ghost toggle appears
+#     right next to every thread name — one stray click swaps a thread's real
+#     zones for ghosts. See CLAUDE.md.
+#   * macOS resolves symbols through dladdr (TRACY_HAS_CALLSTACK 4), which only
+#     sees exported symbols. Our internal functions are local, so most ghost
+#     frames read "Unknown frame: 0x...". Sampling is only worth turning on for
+#     questions instrumentation cannot answer (e.g. where a stall is parked).
+#
+# There is NO runtime off-switch on macOS: the Apple path reads no env var
+# (TRACY_NO_SAMPLING is honoured only on the Linux path), so this is the knob.
+option(TRACY_APPLE_SAMPLING "Tracy: enable Apple system tracing / sampling (perturbs timings)" OFF)
+
 # Note: "extra features" toggles (portal gun, future stuff) live in
 # src/common/core/Features.hpp — one header, one place, edit and rebuild.
 # CMake intentionally has no opinion on them; this file just compiles every
@@ -200,11 +220,65 @@ if(ENABLE_TRACY)
     FetchContent_Declare(
         tracy
         GIT_REPOSITORY https://github.com/wolfpld/tracy.git
-        GIT_TAG v0.13.1
+        # MUST match the tracy-profiler UI you run. Tracy checks a protocol
+        # version on connect and refuses with "Protocol mismatch" if the client
+        # library and the viewer come from different releases — bump both together.
+        GIT_TAG v0.14.0
         GIT_SHALLOW TRUE
+        # Drops the root requirement from Tracy 0.14's Apple system tracing.
+        # Upstream itself notes the privilege check is unnecessary for what is
+        # user-mode self-sampling; without this you must run the GAME (not the
+        # viewer) under sudo, which leaves root-owned saves and config behind.
+        # The script is idempotent — PATCH_COMMAND re-runs on reconfigure.
+        PATCH_COMMAND ${CMAKE_COMMAND}
+            -DTRACY_SRC=<SOURCE_DIR>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/PatchTracyAppleSampling.cmake
     )
+    # MUST be set before MakeAvailable. As of 0.14 Tracy's own default flipped
+    # to OFF (tracy CMakeLists: set_option(TRACY_ENABLE "Enable profiling" OFF
+    # TracyClient)); through 0.13.1 it was ON, which is why linking TracyClient
+    # and defining TRACY_ENABLE on our target alone used to be enough.
+    #
+    # It is not enough anymore: that only sets the macro for OUR translation
+    # units, so TracyClient itself would compile with profiling stripped out.
+    # 0.14 also added macro-mismatch detection that turns this into a link
+    # error rather than a silently dead profiler.
+    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(tracy)
     message(STATUS "Tracy profiler enabled")
+
+    # Compiles system tracing out of the client entirely: no sampling thread, no
+    # thread suspension, no ghost zones in the viewer. Applied to TracyClient
+    # only, which is safe — unlike TRACY_ENABLE, this macro is internal to the
+    # client library (TracySysTrace.hpp) and is NOT part of 0.14's
+    # macro-mismatch check, so our TUs do not need to agree on it.
+    #
+    # Flipping this OFF does not require re-fetching the dependency: the source
+    # stays patched, the whole SysTrace path just compiles away.
+    if(NOT TRACY_APPLE_SAMPLING)
+        target_compile_definitions(TracyClient PRIVATE TRACY_NO_SYSTEM_TRACING)
+        message(STATUS "Tracy: system tracing/sampling disabled "
+                       "(-DTRACY_APPLE_SAMPLING=ON to enable)")
+    else()
+        message(STATUS "Tracy: Apple sampling ENABLED — timings are perturbed; "
+                       "expect ghost zones in the viewer")
+    endif()
+
+    # Zones inside GLFW's Cocoa event pump (ext/glfw/src/cocoa_window.m).
+    #
+    # glfwPollEvents is our worst remaining frame stall (median ~4.8us, tail to
+    # 59ms) and it is opaque: the zone wraps one call, our callbacks are trivial,
+    # and macOS sampling symbolicates to [unknown]. Splitting the pump into
+    # NextEvent / SendEvent / pool-drain is the only way left to name it.
+    #
+    # Must come AFTER FetchContent_MakeAvailable(tracy) — add_subdirectory(ext/glfw)
+    # runs earlier in this file, when the TracyClient target does not exist yet.
+    # PRIVATE still propagates a link requirement to anything using glfw (the
+    # launcher), which is fine: ENABLE_TRACY builds are for profiling, not shipping.
+    if(APPLE)
+        target_link_libraries(glfw PRIVATE TracyClient)
+        target_compile_definitions(glfw PRIVATE TRACY_ENABLE)
+    endif()
 endif()
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -282,6 +356,25 @@ target_include_directories(terrain_library PUBLIC
 )
 target_link_libraries(terrain_library PUBLIC zlibstatic)
 target_compile_features(terrain_library PUBLIC cxx_std_20)
+
+# Profiling for the terrain library (include/util/TerrainProfiling.h).
+#
+# Chunk generation is the program's dominant cost and used to be invisible: the
+# game-side TerrainLibGetChunk zone times the CALLER's wait, which off the
+# library's main thread is a dispatch plus a 100us sleep-poll — not work. The
+# work runs on the BackgroundExecutor pool, which had neither zones nor thread
+# names, so it never showed up in a capture.
+#
+# TracyClient is linked (not just its headers) because the zones emit into it,
+# and TRACY_ENABLE must be defined for the macros to expand — 0.14 detects a
+# mismatch between the two at link time rather than silently doing nothing.
+# Deliberately NOT adding ${PROJECT_SOURCE_DIR}/src here: both trees have a
+# top-level server/, so that would risk resolving terrain lib headers to the
+# game's. TerrainProfiling.h depends only on TracyClient for that reason.
+if(ENABLE_TRACY)
+    target_link_libraries(terrain_library PUBLIC TracyClient)
+    target_compile_definitions(terrain_library PRIVATE TRACY_ENABLE)
+endif()
 
 # CRITICAL for Java bit parity: no FP contraction (Java never fuses multiply-add)
 # and Java wrapping signed-overflow semantics. Without these the terrain output
@@ -445,6 +538,8 @@ set(GAME_SOURCES
             src/common/core/JobSystem.hpp
             src/common/core/ThreadAllocator.cpp
             src/common/core/ThreadAllocator.hpp
+            src/common/core/ThreadPriority.cpp
+            src/common/core/ThreadPriority.hpp
             src/common/core/Config.hpp
 
             # Client input
@@ -729,6 +824,8 @@ set(GAME_SOURCES
 
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
+            src/server/level/PlayerSpawnFinder.cpp
+            src/server/level/PlayerSpawnFinder.hpp
 
             # Container menus (shared by client prediction and server authority)
             src/common/inventory/Container.hpp
@@ -1208,6 +1305,17 @@ if(APPLE)
             "${PROJECT_SOURCE_DIR}/assets"
             "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/assets"
     )
+    # Copy data/ too. This is NOT optional: the terrain library reads block
+    # tags (BlockPredicate) and structure NBTs (FossilTemplate) from it at
+    # generation time. Without it in the bundle those lookups fall back to
+    # walking up from the working directory — which finds the repo when run
+    # from an IDE and finds nothing when launched via `open` (cwd "/"), so
+    # every chunk fails to generate and the world comes up empty.
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
+            "${PROJECT_SOURCE_DIR}/data"
+            "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/data"
+    )
 else()
     add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
@@ -1219,6 +1327,12 @@ else()
             COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
             "${PROJECT_SOURCE_DIR}/assets"
             "$<TARGET_FILE_DIR:MyVoxelGame>/assets"
+    )
+    # See the macOS branch above — the terrain library needs data/ at runtime.
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD}
+            "${PROJECT_SOURCE_DIR}/data"
+            "$<TARGET_FILE_DIR:MyVoxelGame>/data"
     )
 endif()
 # ────────────────────────────────────────────────────────────────────────────

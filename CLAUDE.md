@@ -97,8 +97,14 @@ After overwriting `Items.java`, **regenerate** the item table (see next section)
 
 ### Crafting recipes
 
-`data/` is NOT copied into the app bundle (only `assets/` is), so recipes are
-baked into C++ instead of parsed at runtime. After overwriting
+Recipes are baked into C++ rather than parsed at runtime. This dates from when
+`data/` was not shipped in the app bundle at all — it now **is** copied to
+`Contents/Resources/data`, because the terrain library reads block tags
+(`BlockPredicate`) and structure NBTs (`FossilTemplate`) from it during chunk
+generation. Both resolve via `MC_DATA_ROOT`, which `PlatformMain::Run` sets from
+the bundle at startup; without it they walk up from the working directory, which
+silently breaks every launcher-started build (`open` gives the app cwd `/`).
+Do not drop the `data/` copy from CMakeLists. After overwriting
 `data/minecraft/recipe/` and `data/minecraft/tags/item/`, regenerate:
 
 ```bash
@@ -167,10 +173,229 @@ The terrain library uses GCC/Clang-specific features that need MSVC equivalents:
 ### MapBlockType thread safety
 `MyTerrainGenerator::MapBlockType()` is called from multiple server worker threads. It is lock-free by design: each thread keeps a `thread_local` Block*→BlockID cache plus a last-block memo (see MyTerrainGenerator.cpp). The caches are guarded by `s_blockMapEpoch`, bumped in `Initialize()` — `Blocks::bootstrap()` may recreate Block objects on world reload, so stale cached pointers must be invalidated. Do NOT replace this with a shared mutex-protected map: the old design took ~98k lock/unlock per converted chunk with all workers contending (measured 6.66ms/chunk conversion cost).
 
+### Chunk pipeline: the rate ceilings (measured 2026-08)
+
+How fast chunks become visible is set by a chain of rate limits, not by how fast
+anything computes. Measure the rate at EACH handoff before optimising any stage —
+twice now the expensive stage was not the limiting one.
+
+| Stage | Where | Ceiling |
+|---|---|---|
+| Generation | `ServerWorkerPool` size x per-chunk latency | ~116 chunks/s peak |
+| Delivery | `PlayerSession` batch quota (`m_desiredChunksPerTick`) | ~180/s, never binding |
+| **Meshing** | **`permits.Available()` (10) x mesh-schedule passes/s** | **the usual culprit** |
+| Upload | mesh permit pool round-trip, main thread | self-limiting by design |
+
+Meshing bit us twice: `ScheduleClientMeshBuilds` was called from the 20 Hz
+ClientTick (20 x 10 = 200 sections/s, and traces showed *exactly* 200/s), and
+after moving it to a frame phase the internal period was still sized below
+demand. Demand is `chunks/s x sections/chunk (~7.9) x remesh factor (~2.2)`.
+
+The **2.2x remesh factor is MC-faithful** — `ClientPacketListener.enableChunkLight`
+calls `setSectionRangeDirty` over the arriving chunk *and its 8 neighbours*, full
+Y range, exactly like our `MarkNeighborSectionsDirty`. Do not "fix" it by gating
+compiles on neighbour availability: sections would appear later, which is the
+opposite of what is wanted. Budget for it.
+
+Useful commands (needs `cmake-build-tracy/tools/`, see the Tracy section):
+```bash
+# rate at each handoff — the diagnostic that actually finds the bottleneck
+for z in LoadChunkInternal ApplyChunkData ProcessMeshJob UploadSection; do
+  tracy-csvexport -s $'\t' -u trace.tracy | awk -F'\t' -v Z="$z" \
+    '$1==Z{s=int(($4+$5)/1e9); c[s]++} END{for(k in c){n++;t+=c[k];if(c[k]>m)m=c[k]}
+     printf "%-18s while_active=%.1f/s peak=%d/s\n", Z, t/n, m}'
+done
+```
+Averages lie here: chunk loading is bursty, so a session average buries the burst
+rate under idle seconds. Always compute per-second buckets.
+
+### Terrain parity check (run this before/after ANY terrain-library change)
+
+`tools/terrain_parity/terrain_parity.cpp` generates a fixed grid of chunks from a
+fixed seed and prints a hash of every block state. Same hashes = bit-identical
+terrain. It links `terrain_library` alone (no game code) and runs single-threaded
+with inline executors, so there is no scheduling nondeterminism.
+
+Optimisations here fail silently — wrong terrain, not a crash — so "I believe it
+is equivalent" is not good enough. Build it standalone against
+`src/my_terrain_library`, then:
+
+```bash
+terrain_parity --seed 12345 --radius 2 > /tmp/before.txt   # BEFORE the change
+# ...apply change, rebuild...
+terrain_parity --seed 12345 --radius 2 > /tmp/after.txt
+diff /tmp/before.txt /tmp/after.txt                        # must be empty
+```
+
+Needs `MC_DATA_ROOT` (defaults to `data` relative to cwd) or block tags and
+structures fail to load and the comparison is meaningless.
+
+### Profiling zones (Tracy)
+Chunk generation is the most expensive thing in the program and used to be
+invisible. `TerrainLibGetChunk` in `MyTerrainGenerator` times only the CALLER's
+wait — off the library's main thread `ServerChunkCache::getChunk` enqueues and
+then `sleep_for(100us)` in a loop, so that number is latency, not CPU. The work
+runs on `BackgroundExecutor` (ChunkMap's "worldgen"/"light" executor), which had
+no thread name and no zones.
+
+- `include/util/TerrainProfiling.h` — `TERRAIN_ZONE_N` / `TERRAIN_THREAD`,
+  no-ops without `TRACY_ENABLE`. It depends on **TracyClient only**, on purpose:
+  do NOT add `${PROJECT_SOURCE_DIR}/src` to `terrain_library`'s include path, as
+  both trees have a top-level `server/` and terrain lib headers could resolve to
+  the game's.
+- `ChunkStatusTasks.h` — `Gen.Biomes`, `Gen.Noise`, `Gen.Surface`, `Gen.Carvers`,
+  `Gen.Features`, `Gen.Spawn`, `Gen.Full`. For the async stages the zone lives
+  **inside** the `supplyAsync` lambda; around it would time the dispatch instead.
+- `initializeLight` / `light` are no-op stubs here — nothing to measure.
+
 ### DensityFunctionRegistry re-bootstrap (quit-to-title support)
 `DensityFunctionRegistry::clear()` must NOT delete the `zero()` density function — it is `Constant::ZERO()`, a process-lifetime singleton whose static accessor caches the pointer. Deleting it leaves the cache dangling; the next `bootstrap()` (second world in one process via quit-to-title → rejoin) re-registers the freed pointer and the first `NoiseRouterData::overworld()` build segfaults.
 
 **Source** (`src/levelgen/DensityFunctionRegistry.cpp`): in `clear()`, skip the delete when `pair.second == zero()`.
+
+## Profiling with Tracy
+
+Tracy is the profiler of record for this project. Currently **v0.14.0** (client pinned in
+CMakeLists via FetchContent). Everything below was verified against the actual
+fetched source in `cmake-build-tracy/_deps/tracy-src`, not from memory — re-verify
+against `NEWS` and the client sources after any version bump.
+
+### Setup invariants (all three have bitten us)
+
+1. **Client and viewer versions must match exactly.** Tracy checks a protocol
+   version on connect; a mismatch gives a "Protocol mismatch" dialog and no data.
+   The `GIT_TAG` in CMakeLists and the `tracy-profiler` app must move together.
+2. **`TRACY_ENABLE` must be set as a CACHE var before `FetchContent_MakeAvailable`.**
+   As of 0.14 Tracy's own default flipped to OFF
+   (`set_option(TRACY_ENABLE "Enable profiling" OFF TracyClient)`). Setting it only via
+   `target_compile_definitions` on `MyVoxelGame` compiles profiling OUT of the
+   `TracyClient` library itself. 0.14 added macro-mismatch detection that makes this a
+   link error rather than a silently dead profiler.
+3. **A stale `libTracyClient.a` survives a `GIT_TAG` bump.** FetchContent re-fetches the
+   source but will happily relink the old archive. If a version bump doesn't take:
+   `rm -f cmake-build-tracy/_deps/tracy-build/libTracyClient.a`, or
+   `rm -rf cmake-build-tracy/_deps/tracy-*` and reconfigure.
+
+**Which build dir has Tracy:** `cmake-build-tracy` (and `cmake-build-debug`).
+`cmake-build-release` and `cmake-build-universal` have **no Tracy at all** — a binary
+from either will never connect. Check before debugging a "won't connect" report.
+
+**macOS viewer won't open** ("damaged and can't be opened"): Gatekeeper quarantine, not
+a corrupt download. Tracy's macOS binaries are ad-hoc linker-signed, not notarized.
+`xattr -dr com.apple.quarantine <folder>` — do the whole folder so the CLI tools
+(`tracy-capture`, `tracy-update`, `tracy-merge`, `tracy-capture-daemon`) are cleared too.
+
+### Our instrumentation
+
+Macros live in `src/common/core/Profiling_Tracy.hpp` (`PROFILE_ZONE`, `PROFILE_ZONE_N`,
+`PROFILE_PLOT`, `PROFILE_FRAME_MARK`, `PROFILE_THREAD`) and compile to nothing without
+`TRACY_ENABLE`.
+
+Main-thread frame phases, in order (`PlatformMain.cpp`): `InputUI` → `ClientTick` →
+`GameLogic` → `MeshUpload` → `TexAnimation` → `Render` → `DebugUI` → `Present`.
+
+Threads: `MeshWorker`, `ServerWorker`, `ServerThread`, `OcclusionBFS`.
+
+Plots (prefix-grouped so they sort together in the plot list):
+
+| Plot | Read it as |
+|---|---|
+| `Upload/QueueDepth` | Results awaiting upload. **Rising = a mesh permit is leaking.** Should return to ~0 each frame |
+| `Upload/Bytes` | Bytes handed to the GPU — should correlate with `Present` time |
+| `Upload/Sections`, `Upload/InFlight` | Uploads this frame; compile+upload occupancy |
+| `Resort/Considered`, `Resort/Uploaded` | Translucency re-sort. Considered should be ~nearby + 15, never thousands |
+| `Sections/Reachable`, `Sections/Visible` | Post-BFS and post-frustum section counts |
+
+### Reading zones — lessons that cost us real time
+
+- **A wide zone with ~100% self time and no children means the instrumentation is too
+  coarse, not that the code is slow.** `Input` at 107 ms turned out to be ~490 lines
+  wrapped in one zone. Split it before theorising about the cause.
+- **Zone names lie if they aren't maintained.** `VSync` was really `glfwSwapBuffers`
+  (renamed `Present`); `GPUUpload` existed at two different depths. Both sent us chasing
+  the wrong thing. Rename on sight.
+- **Cost is often paid somewhere other than where it's caused.** GL commands are queued,
+  so upload and draw cost lands in `Present` (the swap), not at the call site. A wide
+  `Present` means GPU-bound, not "the swap is slow".
+- **Budgets that measure CPU time do not bound GPU work.** `glBufferSubData` returns once
+  the driver stages the copy. See the mesh permit pool (`MeshUploadPermits.hpp`) for the
+  MC-style backpressure that replaced a CPU-millisecond budget.
+
+### Which tool for which symptom
+
+| Question | Tool |
+|---|---|
+| Why was *this* frame slow? | Timeline + Zone info (use **Parent zones** — "Zone trace" was removed in 0.14) |
+| Is this zone usually slow, or was that a fluke? | **Find Zone** — histogram + distribution across all instances |
+| Where does time go overall? | **Statistics**, **Flame graph** (zooms/pans as of 0.14) |
+| Did my fix work? | **Compare Traces** — load before/after; much improved in 0.14 |
+| What is this counter doing? | Plots |
+| Which source line / instruction? | **Sampling** + **Symbol view** |
+| Who is blocked on whom? | **Wait stacks** |
+| CPU or GPU bound? | GPU zones; also `g_enableGpuPassTimers` (ChunkRenderer.cpp), but it costs ~2.3 ms/call on Apple's GL driver — read it, then turn it off |
+| Which part of the session was this? | **Sections** (new in 0.14) — mark world-load vs steady-state, then range-limit stats |
+
+### macOS-specific limits — important when diagnosing stalls
+
+Tracy on macOS has **no context-switch capture**. It cannot tell you whether a thread was
+*executing* or *descheduled*. Do not claim starvation from Tracy data alone — cross-check
+CPU-usage plots and use `sample <pid> 10 1 -file <out>` (or Instruments) for the real
+blocked stack.
+
+**Apple system tracing (0.14, prototype)** — verified in `public/client/apple/TracyMach.cpp`:
+
+- It is **sampling only** (`QueueType::CallstackSample` at 1000 Hz default). It does
+  **not** emit context switches.
+- `SysTraceStart` gates on `geteuid() == 0` — stock Tracy needs **the GAME** run as root
+  (not the viewer). No entitlement or TCC permission exists to grant instead.
+- **We patch that check out.** `cmake/PatchTracyAppleSampling.cmake`, wired as a
+  `PATCH_COMMAND` on the Tracy `FetchContent_Declare`, so Apple sampling works with no
+  `sudo`. Legitimate because upstream's own comment calls the privilege check
+  *"technically unnecessary"* — it is user-mode self-sampling via `mach_task_self()`.
+  The script is **idempotent** (PATCH_COMMAND re-runs on reconfigure) and warns rather
+  than fails if a version bump moves the guard — so after a Tracy upgrade, check the
+  configure output for that warning, or you silently lose sampling-without-root.
+- **Why not just sudo:** running the game as root creates root-owned files in
+  `~/Library/Application Support/obeycraft/` (saves, options.txt, worlds.json), which
+  breaks every later normal run. If you ever do run under sudo, follow it with
+  `sudo chown -R obey:staff` on that directory.
+- **It is OFF by default** — `option(TRACY_APPLE_SAMPLING)` in CMakeLists, which when
+  OFF puts `TRACY_NO_SYSTEM_TRACING` on the `TracyClient` target and compiles the whole
+  path away. Turning it off does **not** need a re-fetch (the source stays patched, the
+  code just compiles out). Safe to set on TracyClient alone, unlike `TRACY_ENABLE`: this
+  macro is internal to `TracySysTrace.hpp` and is not macro-mismatch checked. There is no
+  runtime off-switch on macOS — the Apple path reads no env var (`TRACY_NO_SAMPLING` is
+  honoured only on the Linux path), so CMake is the only knob.
+- Sampling suspends each thread per sample, which perturbs the timings being measured.
+  **Never compare a sampled capture against an unsampled one.**
+- 0.14 colours sample markers: **green** = your program, **blue** = external, **red** =
+  kernel. Red inside a stalled zone means blocked in a syscall.
+
+**Ghost zones — the trap that follows from enabling sampling.** Symptom: the timeline
+fills with unnamed blocks whose tooltip reads *"👻 Ghost zone / Unknown frame: 0x…"* and
+the instrumented zones appear to be gone. Nothing is broken; three facts compound:
+
+1. The viewer's **"Draw ghost zones" option defaults to ON** (`TracyViewData.hpp`,
+   `uint8_t ghostZones = true`). Before sampling worked on macOS it was inert, because
+   `AreGhostZonesReady()` was always false — there was never any sample data.
+2. `TracyTimelineItemThread.cpp` renders ghosts when
+   `AreGhostZonesReady() && ( m_ghost || ( vd.ghostZones && thread->timeline.empty() ) )`.
+   Ghosts **replace** instrumented zones — any thread with no zones of its own is now
+   full of them, and a clickable 👻 icon appears immediately right of *every* thread
+   label that has both. That is exactly where you click to expand a thread, so one stray
+   click silently swaps a thread's real zones for ghosts (`m_ghost` is per-thread).
+3. Frames read "Unknown frame" because macOS is `TRACY_HAS_CALLSTACK 4` → **`dladdr`**,
+   which only resolves *exported* symbols. Our binary is not stripped (~121k symbols) but
+   they are local, so most game frames never resolve.
+
+**Fix:** Options → uncheck **👻 Draw ghost zones**, or click the 👻 beside the thread name
+to flip that one thread back. To make ghost frames actually readable you would need
+`-Wl,-export_dynamic`; not worth it — use `sample <pid>` or Instruments instead, which
+read the real symbol table.
+
+Also new in 0.14 and worth knowing: several sampling statistics were previously **wrong**
+(inclusive counts double-counted inline functions; context-switch samples leaked into
+per-symbol lists on load), so do not compare pre-0.14 traces against newer ones.
 
 ## Architecture Overview
 

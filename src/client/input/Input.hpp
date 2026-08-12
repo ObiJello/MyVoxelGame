@@ -55,6 +55,19 @@ namespace Input {
     // Reset the accumulated mouse-delta values to zero; call once per frame
     void ResetMouseDelta();
 
+    // Drop the delta AND re-arm the first-move guard, so the next cursor
+    // position seeds the tracker instead of producing a delta against it.
+    //
+    // Required whenever the cursor's coordinate space changes underneath us:
+    // GLFW_CURSOR_DISABLED reports virtual unbounded coordinates while
+    // GLFW_CURSOR_NORMAL reports real window coordinates, so a delta measured
+    // across that switch is the distance between two unrelated spaces. Feed
+    // that to mouse-look and the view snaps somewhere arbitrary.
+    //
+    // MC does exactly this via MouseHandler.ignoreFirstMove, re-armed in
+    // grabMouse (:407) and cursorEntered (:422) — not just once at startup.
+    void ResetMouseTracking();
+
     // Get the scroll-wheel offsets since the last frame (xoffset, yoffset)
     std::pair<double, double> GetScrollOffset();
 

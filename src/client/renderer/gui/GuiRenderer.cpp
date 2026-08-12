@@ -2,6 +2,7 @@
 #include "GuiRenderer.hpp"
 #include "FontRenderer.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -216,10 +217,19 @@ void main() {
         std::vector<TextCommand> texts;
         std::vector<QuadCommand> quads;
 
+        // Four separate walks of the RenderNode tree, each allocating and
+        // copying into a fresh vector every frame. Cheap for a hotbar; not
+        // obviously cheap with an inventory open queueing an icon per item.
+        // Zoned separately from the GL work below so a wide GuiFlush says
+        // WHICH half — collecting commands, or drawing them.
+        { PROFILE_ZONE_N("GuiCollect");
         state.GetAllFills(fills);
         state.GetAllBlits(blits);
         state.GetAllTexts(texts);
         state.GetAllQuads(quads);
+        PROFILE_PLOT("Gui/Commands", static_cast<int64_t>(
+            fills.size() + blits.size() + texts.size() + quads.size()));
+        }
 
         std::vector<SortedCommand> sorted;
         sorted.reserve(fills.size() + blits.size() + texts.size() + quads.size());

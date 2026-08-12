@@ -1,5 +1,6 @@
 #include "levelgen/NoiseRouter.h"
 #include "levelgen/NoiseChunk.h"
+#include "util/TerrainProfiling.h"
 #include "levelgen/RandomState.h"
 #include "levelgen/DensityFunctions.h"
 #include "levelgen/MaterialRuleList.h"
@@ -671,11 +672,19 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     m_inCellY = 0;
     m_inCellZ = 0;
 
+    // Measured 2026-08-11: constructing a NoiseChunk costs 11.44 ms and 26.1 s
+    // across a session — MORE than generating the noise itself (10.25 ms). It is
+    // built once per chunk from Gen.Biomes, which is the first stage to need it.
+    // These sub-zones say which part of the construction that 11.44 ms actually is.
+    {
+    TERRAIN_ZONE_N("NC.Arena");
     // Initialize arena for wrapped objects (eliminates ~200 malloc calls)
     // Must be done early since blend caches use it
     // ArenaStorage is WRAP_ARENA_ALIGN bytes each, so we need WRAP_ARENA_SIZE/WRAP_ARENA_ALIGN elements
+    // NOTE: resize() value-initializes, so this zero-fills the whole arena.
     m_wrapArena.resize(WRAP_ARENA_SIZE / WRAP_ARENA_ALIGN);
     m_wrapArenaOffset = 0;
+    }
 
     // Create slice filling context provider (Java lines 72-95)
     m_sliceFillingContextProvider = new SliceFillingContextProvider(this);
@@ -714,11 +723,35 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     const minecraft::levelgen::NoiseRouter* router = randomState.router();
     // Pre-allocate space in the wrap cache to avoid rehashing
     // Typical density function tree has ~5500 nodes
-    m_wrapped.reserve(6000);
+    //
+    // Prime suspect for the 11.44 ms: this rebuilds a wrapped copy of the ENTIRE
+    // density-function graph (~5500 nodes) for every chunk, with a hash lookup
+    // per node. The shape of that graph is identical chunk to chunk — only the
+    // NoiseChunk the wrappers point at differs — so if this dominates, pooling
+    // and resetting NoiseChunks is the fix rather than micro-optimising the walk.
     NoiseRouter wrappedRouter = [&]() {
+        // Inside the lambda so the zone ends with it — TERRAIN_ZONE_N is RAII and
+        // wrappedRouter has to stay in the enclosing scope.
+        TERRAIN_ZONE_N("NC.WrapRouter");
+        m_wrapped.reserve(6000);
         WrapVisitor wrapVisitor(this);
         return router->mapAll(wrapVisitor);
     }();
+
+    // Measured: Visits 5736 / Distinct 5095 (ratio 1.13, so no DAG re-traversal),
+    // yet NC.WrapRouter costs 11.29 ms — ~1.97 us per visited node, which is an
+    // order of magnitude more than new + hash insert should ever be. So the real
+    // work is NOT in the density-node walk these two count.
+    //
+    // Prime suspect: Spline::mapAll rebuilds the whole cubic-spline tree and
+    // sinks its nodes through ownObject() -> takeMappedNodeOwnership, which
+    // m_wrapVisits never sees. OwnedOther counts exactly those. If it dwarfs
+    // Visits, the splines are the cost and the fix is to stop rebuilding a
+    // spline whose coordinates all mapped to themselves.
+    TERRAIN_PLOT("Wrap/Visits", (int64_t)m_wrapVisits);
+    TERRAIN_PLOT("Wrap/Distinct", (int64_t)m_wrapped.size());
+    TERRAIN_PLOT("Wrap/OwnedDensity", (int64_t)m_ownedMappedDensityNodes.size());
+    TERRAIN_PLOT("Wrap/OwnedOther", (int64_t)m_ownedMappedNodes.size());
 
     // Get wrapped preliminary surface level (Java line 131)
     m_preliminarySurfaceLevel = wrappedRouter.preliminarySurfaceLevel();
@@ -730,6 +763,7 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     // Create aquifer based on settings (Java lines 133-138)
     // NOTE: Must create aquifer BEFORE fullNoiseValue since we need it
     {
+        TERRAIN_ZONE_N("NC.Aquifer");
         if (settings.isAquifersEnabled()) {
             // Create full noise-based aquifer using Aquifer::create factory
             // IMPORTANT: Must use wrappedRouter, not the original router (Java line 138)
@@ -753,6 +787,8 @@ NoiseChunk::NoiseChunk(int cellCountXZ,
     // Reference: Java lines 133-139
     // This is the density function that determines if a block is solid or air
     density::DensityFunction* fullNoiseValue = [&]() {
+        // A SECOND full mapAll over the density graph, on top of NC.WrapRouter.
+        TERRAIN_ZONE_N("NC.FullNoise");
         density::DensityFunction* finalDensity = wrappedRouter.finalDensity();
 
         // Add beardifier to final density (m_beardifier IS a DensityFunction)

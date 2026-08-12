@@ -1514,23 +1514,114 @@ GLFWbool _glfwRawMouseMotionSupportedCocoa(void)
     return GLFW_FALSE;
 }
 
+// [MyVoxelGame patch] Profiling for the Cocoa event pump.
+//
+// glfwPollEvents() shows up in our traces with a median of ~4.8us and a tail out
+// to 59ms — a stall, not a cost. All six of our GLFW callbacks are trivial, so
+// the time is inside AppKit, and macOS symbolication (dladdr) resolves nothing
+// useful, so sampling could not name it. Splitting the pump is the way to find
+// out which of the three things here actually blocks:
+//
+//   Cocoa.NextEvent  - mach IPC to WindowServer to fetch the next event
+//   Cocoa.SendEvent  - AppKit dispatch, which can run arbitrary handlers
+//   Cocoa.PoolScope  - the whole thing; its SELF time is the autorelease drain
+//
+// Tracy's C API is used because this is Objective-C. Self-no-ops when Tracy is
+// compiled out, and the include is guarded so GLFW needs no Tracy include path
+// in non-profiling builds.
+// Measured: Cocoa.SendEvent is the one that stalls (31.49 ms for a SINGLE event
+// against a ~116us mean), so NextEvent/WindowServer and the pool drain are ruled
+// out. What is left is knowing WHICH event AppKit chokes on — a KeyDown routed
+// through interpretKeyEvents: into the input-method machinery behaves very
+// differently from a SystemDefined or a CursorUpdate. So the zone renames itself
+// per event type, and also carries the raw NSEventType in Tracy's zone "value"
+// (which tracy-csvexport exports, so tools/analyze_trace.py can group by it).
+#if defined(TRACY_ENABLE)
+    #include <tracy/TracyC.h>
+    #include <string.h>
+
+    static const char* _glfwTracyEventName(NSEventType type)
+    {
+        switch (type)
+        {
+            case NSEventTypeLeftMouseDown:      return "SendEvent LeftMouseDown";
+            case NSEventTypeLeftMouseUp:        return "SendEvent LeftMouseUp";
+            case NSEventTypeRightMouseDown:     return "SendEvent RightMouseDown";
+            case NSEventTypeRightMouseUp:       return "SendEvent RightMouseUp";
+            case NSEventTypeMouseMoved:         return "SendEvent MouseMoved";
+            case NSEventTypeLeftMouseDragged:   return "SendEvent LeftMouseDragged";
+            case NSEventTypeRightMouseDragged:  return "SendEvent RightMouseDragged";
+            case NSEventTypeMouseEntered:       return "SendEvent MouseEntered";
+            case NSEventTypeMouseExited:        return "SendEvent MouseExited";
+            case NSEventTypeKeyDown:            return "SendEvent KeyDown";
+            case NSEventTypeKeyUp:              return "SendEvent KeyUp";
+            case NSEventTypeFlagsChanged:       return "SendEvent FlagsChanged";
+            case NSEventTypeAppKitDefined:      return "SendEvent AppKitDefined";
+            case NSEventTypeSystemDefined:      return "SendEvent SystemDefined";
+            case NSEventTypeApplicationDefined: return "SendEvent AppDefined";
+            case NSEventTypePeriodic:           return "SendEvent Periodic";
+            case NSEventTypeCursorUpdate:       return "SendEvent CursorUpdate";
+            case NSEventTypeScrollWheel:        return "SendEvent ScrollWheel";
+            case NSEventTypeTabletPoint:        return "SendEvent TabletPoint";
+            case NSEventTypeTabletProximity:    return "SendEvent TabletProximity";
+            case NSEventTypeOtherMouseDown:     return "SendEvent OtherMouseDown";
+            case NSEventTypeOtherMouseUp:       return "SendEvent OtherMouseUp";
+            case NSEventTypeOtherMouseDragged:  return "SendEvent OtherMouseDragged";
+            case NSEventTypeGesture:            return "SendEvent Gesture";
+            case NSEventTypeMagnify:            return "SendEvent Magnify";
+            case NSEventTypeSwipe:              return "SendEvent Swipe";
+            case NSEventTypeRotate:             return "SendEvent Rotate";
+            case NSEventTypeSmartMagnify:       return "SendEvent SmartMagnify";
+            case NSEventTypePressure:           return "SendEvent Pressure";
+            case NSEventTypeDirectTouch:        return "SendEvent DirectTouch";
+            case NSEventTypeChangeMode:         return "SendEvent ChangeMode";
+            default:                            return "SendEvent Other";
+        }
+    }
+
+    #define GLFW_TRACY_TAG_EVENT(ctx, ev)                                       \
+        do {                                                                    \
+            const NSEventType _tracyType = [(ev) type];                         \
+            const char* _tracyName = _glfwTracyEventName(_tracyType);           \
+            TracyCZoneName((ctx), _tracyName, strlen(_tracyName));              \
+            TracyCZoneValue((ctx), (uint64_t)_tracyType);                       \
+        } while (0)
+#else
+    #define TracyCZoneN(c,x,y)
+    #define TracyCZoneEnd(c)
+    #define GLFW_TRACY_TAG_EVENT(ctx, ev)
+#endif
+
 void _glfwPollEventsCocoa(void)
 {
+    // Opened before the pool so its self time captures the drain at the closing
+    // brace, which is itself a plausible stall site once a frame's worth of
+    // autoreleased AppKit objects has piled up.
+    TracyCZoneN(ctxPool, "Cocoa.PoolScope", 1);
+
     @autoreleasepool {
 
     for (;;)
     {
+        TracyCZoneN(ctxNext, "Cocoa.NextEvent", 1);
         NSEvent* event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                             untilDate:[NSDate distantPast]
                                                inMode:NSDefaultRunLoopMode
                                               dequeue:YES];
+        TracyCZoneEnd(ctxNext);
+
         if (event == nil)
             break;
 
+        TracyCZoneN(ctxSend, "Cocoa.SendEvent", 1);
+        GLFW_TRACY_TAG_EVENT(ctxSend, event);
         [NSApp sendEvent:event];
+        TracyCZoneEnd(ctxSend);
     }
 
     } // autoreleasepool
+
+    TracyCZoneEnd(ctxPool);
 }
 
 void _glfwWaitEventsCocoa(void)

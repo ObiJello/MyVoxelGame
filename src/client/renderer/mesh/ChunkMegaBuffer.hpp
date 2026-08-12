@@ -109,6 +109,19 @@ namespace Render {
         // ========================================================================
 
         size_t GetSectionCount() const { return m_regions.size(); }
+
+        // Bytes handed to the driver since the last call, then reset. This is
+        // the ONLY number that tracks what the GPU actually has to move —
+        // every write to a slab (mesh upload and translucency re-sort alike)
+        // funnels through UploadSection/UpdateSectionIndices. CPU time spent
+        // issuing those writes does not track it, because the driver stages
+        // the copy and returns; the transfer is paid at the swap.
+        size_t ConsumeUploadedBytes() {
+            const size_t bytes = m_uploadedBytes;
+            m_uploadedBytes = 0;
+            return bytes;
+        }
+
         size_t GetMemoryUsageBytes() const;
         size_t GetTotalVertexCapacity() const;
         size_t GetTotalIndexCapacity() const;
@@ -146,6 +159,10 @@ namespace Render {
         std::vector<Slab> m_slabs;
         size_t m_slabVertexCapacity = 0;
         size_t m_slabIndexCapacity = 0;
+
+        // Accumulated by every slab write; drained once a frame by
+        // ConsumeUploadedBytes. Render-thread only, so no atomic needed.
+        size_t m_uploadedBytes = 0;
 
         // Per-section region tracking (which slab + offset)
         struct Region {

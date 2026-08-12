@@ -128,6 +128,20 @@ namespace Server {
         // Process watch set changes: request loading for new chunks, unload for removed
         void ProcessWatchSetChanges();
 
+        // Drains the terrain generator's main-thread queue (MC's
+        // runDistanceManagerUpdates). MUST run on the server thread: the tasks
+        // touch ChunkMap/DistanceManager, which the terrain library treats as
+        // main-thread-only, so a worker cannot pump this itself.
+        //
+        // Called from the server loop's idle window, not just once per tick.
+        // Measured 2026-08: a ServerWorker blocked in ServerChunkCache::getChunk
+        // waits on THIS queue, so pumping it only at 20 TPS added ~25 ms of pure
+        // latency to every chunk (measured wait 32.79 ms of a 68.68 ms load).
+        // onlyIfPending: skip entirely unless a blocked worker is actually
+        // waiting. The ~1 kHz idle-window caller passes true; the per-tick
+        // caller passes false so ticket propagation still runs every tick.
+        void PumpChunkPipeline(bool onlyIfPending = false);
+
         // Unload chunks that no player is watching (periodic cleanup)
         void UnloadUnwatchedChunks();
         
@@ -346,7 +360,13 @@ namespace Server {
 
     // Convenience functions
     void InitializeIntegratedServer(const IntegratedServerConfig& config = IntegratedServerConfig{});
-    void StartIntegratedServer();
+    // Returns false if the server could not start — most commonly because
+    // port 25565 is already bound by another instance of the game. This is NOT
+    // a soft failure: even in singleplayer the local client connects to the
+    // integrated server over TCP (PlatformMain uses 127.0.0.1 + GetPort()), so
+    // a failed start means no ticks, no chunk generation, and a client left
+    // floating in an empty world. Callers must check it.
+    [[nodiscard]] bool StartIntegratedServer();
     void StopIntegratedServer();
     void ShutdownIntegratedServer();
 

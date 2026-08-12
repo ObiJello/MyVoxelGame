@@ -1,5 +1,6 @@
 #include "levelgen/ChunkGenerator.h"
 #include "levelgen/WorldGenLevel.h"
+#include "util/TerrainProfiling.h"
 #include <mutex>
 #include "levelgen/FeatureSorter.h"
 #include "levelgen/placement/PlacedFeature.h"
@@ -1026,8 +1027,14 @@ void NoiseBasedChunkGenerator::createBiomes(
     // Reference: NoiseBasedChunkGenerator.java doCreateBiomes() line 86:
     //   NoiseChunk noiseChunk = protoChunk.getOrCreateNoiseChunk((chunk) -> this.createNoiseChunk(...))
     // Note: Always use Blender::empty() for cached NoiseChunk
+    // Split out on purpose: BIOMES is the first stage to touch the NoiseChunk, so
+    // it pays to BUILD it (~2 MB — density tree, arena, caches; see the free in
+    // ChunkStatusTasks::full). Every later stage reuses it. Without this zone that
+    // construction is charged to Gen.Biomes and makes biome assignment look more
+    // expensive than terrain noise, which is backwards from Minecraft.
     NoiseChunk* noiseChunk;
     {
+        TERRAIN_ZONE_N("Biomes.NoiseChunkCreate");
         noiseChunk = protoChunk->getOrCreateNoiseChunk([this, randomState](::world::IChunk* c) {
             return NoiseChunk::forChunk(
                 c,
@@ -1072,6 +1079,10 @@ void NoiseBasedChunkGenerator::createBiomes(
     // The RTree cache persists across queries for spatial locality benefits.
     // We removed the resetLastResult() call to match Java's behavior.
     {
+        // The actual biome assignment: one climate sample + RTree lookup per
+        // quart cell. Compare against Biomes.NoiseChunkCreate above to see which
+        // half of Gen.Biomes is worth attacking.
+        TERRAIN_ZONE_N("Biomes.Fill");
         protoChunk->fillBiomesFromNoise(m_biomeSource, cachedSampler);
     }
 

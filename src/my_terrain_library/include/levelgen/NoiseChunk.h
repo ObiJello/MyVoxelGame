@@ -479,6 +479,18 @@ private:
      * Java line 348-350 - inlined for performance
      */
     inline density::DensityFunction* wrap(density::DensityFunction* function) {
+        // Counts every node the mapAll walk visits, vs m_wrapped.size() which is
+        // the number of DISTINCT nodes. The ratio is the DAG re-traversal factor:
+        // mapAll recurses into a shared subtree once per reference, so a graph
+        // with heavy sharing is walked far more than its node count suggests.
+        //
+        // Which of the two numbers is large decides the fix for NC.WrapRouter
+        // (11.03 ms/chunk, 23.3 s/session):
+        //   visits ~= distinct  -> per-node cost dominates (every node does
+        //                          `new` + own() + hash), so arena-allocate.
+        //   visits >> distinct  -> the walk itself dominates, so the recursion
+        //                          needs memoising, not the allocator.
+        ++m_wrapVisits;
         // Use try_emplace for single lookup (like Java's computeIfAbsent)
         auto [it, inserted] = m_wrapped.try_emplace(function, nullptr);
         if (inserted) {
@@ -486,6 +498,12 @@ private:
         }
         return it->second;
     }
+
+public:
+    size_t getWrapVisitCount() const { return m_wrapVisits; }
+    size_t getWrapDistinctCount() const { return m_wrapped.size(); }
+private:
+    size_t m_wrapVisits = 0;
 
     /**
      * Create a new wrapped density function

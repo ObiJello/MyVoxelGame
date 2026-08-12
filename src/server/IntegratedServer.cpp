@@ -13,6 +13,7 @@
 #include "session/PlayerSessionManager.hpp"
 #include "session/PlayerSession.hpp"
 #include "player/ServerPlayer.hpp"
+#include "level/PlayerSpawnFinder.hpp"
 #include "world/ticketing/ChunkTicketManager.hpp"
 #include "world/watch/ChunkWatchIndex.hpp"
 #include "world/status/ChunkStatusManager.hpp"
@@ -22,6 +23,7 @@
 #include "common/network/PacketTypes.hpp"
 
 #include "common/core/Log.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include <future>
 #include "common/world/level/World.hpp"
@@ -304,11 +306,18 @@ namespace Server {
 
     void IntegratedServer::ServerLoop() {
         PROFILE_THREAD("ServerThread");
+        // Has a real deadline (20 TPS = 50ms/tick) but it is not the frame, and
+        // it mostly dispatches to the worker pool rather than computing itself.
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
         using clock = std::chrono::steady_clock;
         using namespace std::chrono;
         
         static constexpr auto TICK_DURATION = 50ms;  // 20 TPS
         static constexpr auto SPIN_CUSHION = 2ms;    // Start spinning 2ms before target
+        // How often to drain the chunk pipeline inside the idle window between
+        // ticks. 1ms turns the old ~25ms average hand-off wait into ~0.5ms while
+        // still parking the thread ~98% of the time.
+        static constexpr auto PUMP_INTERVAL = 1ms;
         
         // Store server thread ID for assertions
         g_serverThreadId = std::this_thread::get_id();
@@ -336,6 +345,54 @@ namespace Server {
                 m_worldSpawn = glm::vec3(static_cast<float>(spawnBlock.x) + 0.5f,
                                          static_cast<float>(spawnBlock.y),
                                          static_cast<float>(spawnBlock.z) + 0.5f);
+
+                // The Y above is a worldgen NOISE ESTIMATE — getBaseHeight over
+                // WORLD_SURFACE_WG, which predates surface rules, trees, snow
+                // layers and every other decoration placed into the column. Land
+                // on it directly and you stand inside whatever was built on top.
+                //
+                // MC does not use it as a spawn either: setInitialSpawn walks an
+                // 11x11 chunk spiral asking PlayerSpawnFinder.getSpawnPosInChunk,
+                // which reads REAL blocks. Same spiral here, loading each chunk
+                // as we probe it — ChunkProvider::GetChunk generates on demand
+                // and blocks, which is this engine's equivalent of the
+                // SPAWN_SEARCH ticket MC takes per candidate.
+                auto* provider = m_world->GetChunkProvider();
+                const int spawnChunkX = static_cast<int>(std::floor(spawnBlock.x / 16.0f));
+                const int spawnChunkZ = static_cast<int>(std::floor(spawnBlock.z / 16.0f));
+                int xOff = 0, zOff = 0, dx = 0, dz = -1;
+                bool resolved = false;
+                for (int i = 0; i < 11 * 11 && !resolved; ++i) {
+                    if (xOff >= -5 && xOff <= 5 && zOff >= -5 && zOff <= 5) {
+                        const Game::Math::ChunkPos probe(spawnChunkX + xOff, spawnChunkZ + zOff);
+                        if (provider->GetChunk(probe)) {
+                            if (auto found = PlayerSpawnFinder::GetSpawnPosInChunk(*m_world, probe)) {
+                                m_worldSpawn = glm::vec3(static_cast<float>(found->x) + 0.5f,
+                                                         static_cast<float>(found->y),
+                                                         static_cast<float>(found->z) + 0.5f);
+                                resolved = true;
+                                Log::Info("[IntegratedServer] World spawn resolved against real "
+                                          "terrain at (%d, %d, %d) after %d chunk probe(s)",
+                                          found->x, found->y, found->z, i + 1);
+                            }
+                        }
+                    }
+                    // MC's square-spiral turn rule.
+                    if (xOff == zOff || (xOff < 0 && xOff == -zOff) ||
+                        (xOff > 0 && xOff == 1 - zOff)) {
+                        const int t = dx; dx = -dz; dz = t;
+                    }
+                    xOff += dx; zOff += dz;
+                }
+                if (!resolved) {
+                    // Nothing standable in 121 chunks (all ocean, say). Push the
+                    // estimate out of any geometry rather than spawning inside it
+                    // — MC's fixupSpawnHeight is the same last resort.
+                    m_worldSpawn = PlayerSpawnFinder::FixupSpawnHeight(*m_world, spawnBlock);
+                    Log::Warning("[IntegratedServer] No standable spawn within 5 chunks — "
+                                 "height-corrected estimate to (%.1f, %.1f, %.1f)",
+                                 m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
+                }
                 Log::Info("[IntegratedServer] World spawn set to (%.1f, %.1f, %.1f)",
                           m_worldSpawn.x, m_worldSpawn.y, m_worldSpawn.z);
                 // The host ServerPlayer was constructed at the legacy spawn
@@ -358,12 +415,26 @@ namespace Server {
         auto nextTickTime = clock::now() + TICK_DURATION;
 
         while (!m_shouldStop.load()) {
-            // Wait until next tick (sleep for most of it)
-            auto now = clock::now();
-            if (now + SPIN_CUSHION < nextTickTime) {
-                std::this_thread::sleep_until(nextTickTime - SPIN_CUSHION);
+            // Wait until next tick — but drain the chunk pipeline while waiting
+            // instead of sleeping straight through it.
+            //
+            // ServerWorkers blocked in ServerChunkCache::getChunk are waiting on
+            // a queue only this thread may drain. Pumping it once per tick meant
+            // every chunk paid ~25 ms (half a 50 ms tick) of pure latency before
+            // generation even started — measured as 32.79 ms of waiting inside a
+            // 68.68 ms chunk load, i.e. 48% of it.
+            //
+            // This costs nothing: the server thread is ~2% busy and was asleep
+            // for this entire window anyway. The wake never overshoots the tick
+            // deadline, so tick timing is unchanged.
+            const auto pumpUntil = nextTickTime - SPIN_CUSHION;
+            while (!m_shouldStop.load() && clock::now() < pumpUntil) {
+                PumpChunkPipeline(/*onlyIfPending=*/true);
+
+                const auto nextPump = clock::now() + PUMP_INTERVAL;
+                std::this_thread::sleep_until(nextPump < pumpUntil ? nextPump : pumpUntil);
             }
-            
+
             // Micro-spin for the final stretch to land exactly on time
             while (clock::now() < nextTickTime) {
                 std::this_thread::yield();
@@ -652,18 +723,32 @@ namespace Server {
     }
 
 
+    void IntegratedServer::PumpChunkPipeline(bool onlyIfPending) {
+        if (!m_world) return;
+        auto* chunkProvider = m_world->GetChunkProvider();
+        if (!chunkProvider) return;
+        auto* generator = dynamic_cast<Game::MyTerrainGenerator*>(chunkProvider->GetGenerator());
+        if (!generator) return;
+
+        // The idle-window caller passes true: PumpAsyncTasks() runs
+        // runDistanceManagerUpdates() unconditionally, which is far too heavy to
+        // do ~1000x/s when no worker is actually blocked. The per-tick caller
+        // passes false so ticket propagation still happens every tick regardless.
+        if (onlyIfPending && !generator->HasPendingAsyncTasks()) return;
+
+        PROFILE_ZONE_N("PumpChunkPipeline");
+        generator->PumpAsyncTasks();
+    }
+
     void IntegratedServer::ProcessWatchSetChanges() {
         PROFILE_ZONE;
         if (!m_sessionManager || !m_world) return;
 
-        // Pump the terrain generator's async pipeline (like Minecraft's runDistanceManagerUpdates)
-        auto* chunkProvider = m_world->GetChunkProvider();
-        if (chunkProvider) {
-            auto* generator = dynamic_cast<Game::MyTerrainGenerator*>(chunkProvider->GetGenerator());
-            if (generator) {
-                generator->PumpAsyncTasks();
-            }
-        }
+        // Pump the terrain generator's async pipeline (like Minecraft's
+        // runDistanceManagerUpdates). Kept here as well as in the loop's idle
+        // window because the watch-set scan below enqueues NEW requests, and
+        // draining them right away starts generation this tick rather than next.
+        PumpChunkPipeline();
 
         // Iterate pending chunk loads for each session.
         // The full pending set is scanned in place (no copy, no sort) — only the
@@ -1203,10 +1288,12 @@ namespace Server {
         g_integratedServer->Initialize();
     }
 
-    void StartIntegratedServer() {
-        if (g_integratedServer) {
-            g_integratedServer->Start();
+    bool StartIntegratedServer() {
+        if (!g_integratedServer) {
+            Log::Error("StartIntegratedServer: no integrated server instance");
+            return false;
         }
+        return g_integratedServer->Start();
     }
 
     void StopIntegratedServer() {

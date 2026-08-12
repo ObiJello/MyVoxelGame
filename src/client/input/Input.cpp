@@ -184,6 +184,14 @@ namespace Input {
         lastY = ypos;
     }
 
+    // MC MouseHandler.cursorEntered (:422). While the cursor is free it can
+    // leave the window and come back somewhere entirely different — alt-tab
+    // away, move the mouse, come back — and the first position reported after
+    // that has no relationship to the last one we saw.
+    static void CursorEnterCallback(GLFWwindow* /*window*/, int entered) {
+        if (entered) ResetMouseTracking();
+    }
+
     void Init(GLFWwindow* window) {
         gWindow = window;
 
@@ -193,6 +201,7 @@ namespace Input {
         // Register callbacks
         glfwSetScrollCallback(gWindow, ScrollCallback);
         glfwSetCursorPosCallback(gWindow, MouseCallback);
+        glfwSetCursorEnterCallback(gWindow, CursorEnterCallback);
         glfwSetCharCallback(gWindow, CharCallback);
         glfwSetMouseButtonCallback(gWindow, MouseButtonCallback);
         // Installed BEFORE ImGui's backend comes up, so ImGui captures this as
@@ -337,6 +346,15 @@ namespace Input {
     }
 
     void ResetMouseDelta() {
+        deltaX = 0.0;
+        deltaY = 0.0;
+    }
+
+    void ResetMouseTracking() {
+        // firstMouse makes the next MouseCallback re-seed lastX/lastY and
+        // return without emitting a delta — the same skip that runs once at
+        // startup, which is all it used to do.
+        firstMouse = true;
         deltaX = 0.0;
         deltaY = 0.0;
     }

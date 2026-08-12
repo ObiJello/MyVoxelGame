@@ -104,15 +104,21 @@ namespace Render {
         // Get GPU data for rendering (used by ChunkRenderer)
         const GPUSectionData* GetSectionGPUData(::Game::Math::ChunkPos chunkPos, int sectionY) const;
         
-        // Iterate all active sections under shared lock (zero-copy, zero-alloc)
-        // Re-sorts translucent quads back-to-front for sections whose view has
-        // changed. Call once a frame, before the translucent pass.
+        // Re-sorts ONE section's translucent quads back-to-front if its point
+        // of view has changed. Port of LevelRenderer.scheduleResort (:977) plus
+        // RenderSection.resortTransparency (SectionRenderDispatcher.java:309).
         //
-        // Port of LevelRenderer.scheduleTranslucentSectionResort: every section
-        // within `nearRadius` is considered each frame, plus a round-robin
-        // sweep over the rest, so the cost stays bounded no matter how much
-        // glass or water is in view. See mesh/TranslucentSort.hpp.
-        void ResortTranslucentSections(const glm::vec3& cameraPos, float nearRadius = 32.0f);
+        // WHICH sections get here and how often is the caller's decision —
+        // ChunkRenderer::ScheduleTranslucentSectionResort owns that policy, the
+        // same way MC splits LevelRenderer from RenderSection. Do not call this
+        // in a loop over every loaded section: the cost has to be bounded by
+        // what is VISIBLE, or it scales with render distance instead of view.
+        //
+        // Returns true if an index upload was issued (for profiling).
+        // See mesh/TranslucentSort.hpp for why sorting is load-bearing here.
+        bool ResortTranslucentSection(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                      const glm::vec3& cameraPos,
+                                      bool blockPosChanged, bool isNearby);
 
         // Callback receives (const SectionKey&, const GPUSectionData*)
         // Iterates m_gpuData directly — it only contains sections with geometry
@@ -162,12 +168,16 @@ namespace Render {
         struct ClientMeshConfig {
             // Time budgets (primary controls)
             float meshBuildBudgetMs = 50.0f;        // Time budget for mesh scheduling per frame (chunks)
-            float gpuUploadBudgetMs = 6.0f;         // Time budget for GPU uploads per frame
+
+            // NOTE: gpuUploadBudgetMs / maxGPUUploadsPerFrame / maxPendingBuilds
+            // used to live here. The first two throttled the upload drain by CPU
+            // time and count — neither tracks what the GPU actually has to move,
+            // so the frame paid for the backlog at the swap instead. The third
+            // was never referenced by any code at all. Uploads are now bounded
+            // at the source by MeshUploadPermits (see MeshUploadPermits.hpp).
 
             // Safety caps (rarely hit when budgets are enforced)
             int maxMeshSubmitsPerFrame = 16;        // Safety cap for mesh submissions
-            int maxGPUUploadsPerFrame = 64;         // Safety cap for GPU uploads
-            int maxPendingBuilds = 128;             // Max pending mesh builds (OOM guard)
             
             // Priority settings
             bool enablePriorityScheduling = true;   // Use distance-based priority
@@ -287,10 +297,14 @@ namespace Render {
         using GpuDataMap = std::unordered_map<SectionKey, GPUSectionData, SectionKeyHash>;
         GpuDataMap m_gpuData;
 
-        // Round-robin cursor for translucent re-sorting, mirroring MC's
-        // translucencyResortIterationIndex.
-        size_t m_resortCursor = 0;
-        glm::ivec3 m_lastResortCameraBlock{INT32_MIN, INT32_MIN, INT32_MIN};
+        // Scratch for translucent re-sorting. Render-thread only — the sort
+        // runs inline, so these are shared across sections rather than
+        // per-worker (MC needs a SectionBufferBuilderPack per worker because
+        // its equivalent runs on the chunk-compile pool).
+        //
+        // The round-robin cursor lives on ChunkRenderer with the visible list
+        // it indexes into, mirroring MC's translucencyResortIterationIndex on
+        // LevelRenderer.
         std::vector<uint16_t> m_resortIndexScratch;
         std::vector<uint32_t> m_resortOrderScratch;
 
@@ -340,7 +354,10 @@ namespace Render {
         void ProcessMeshBuildResult(const Network::MeshBuildResult& result);
 
         // Upload mesh results within time budget
-        void UploadMeshResultsWithBudget();
+        // Drains every pending mesh result. Bounded by the upload permit pool
+        // (MeshUploadPermits), not by a time or count budget — see the comment
+        // on the definition and MC's uploadAllPendingUploads.
+        void UploadAllPendingResults();
 
         // Check if chunk needs mesh builds
         bool ChunkNeedsMeshBuild(::Game::Math::ChunkPos chunkPos) const;

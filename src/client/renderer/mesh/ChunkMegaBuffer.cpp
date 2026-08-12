@@ -150,6 +150,8 @@ namespace Render {
                                        indexCount * INDEX_SIZE,
                                        indexData);
 
+        m_uploadedBytes += vertexCount * VERTEX_STRIDE + indexCount * INDEX_SIZE;
+
         // Store region
         m_regions[key] = {slabIndex, vertexOffset, vertexCount, indexOffset, indexCount};
         slab.sectionCount++;
@@ -174,6 +176,7 @@ namespace Render {
                                       region.indexOffset * INDEX_SIZE,
                                       indexCount * INDEX_SIZE,
                                       indexData);
+        m_uploadedBytes += indexCount * INDEX_SIZE;
         return true;
     }
 

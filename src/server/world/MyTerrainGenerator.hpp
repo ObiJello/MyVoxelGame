@@ -25,7 +25,9 @@
 
 // Server-level includes (the async pipeline)
 #include "server/level/ServerChunkCache.h"
+#include "util/TerrainProfiling.h"
 
+#include <algorithm>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -38,12 +40,36 @@ namespace Game {
     /**
      * Background thread pool executor - simulates Minecraft's Util.backgroundExecutor()
      * Reference: Minecraft uses ForkJoinPool.commonPool() for background work
+     *
+     * THIS POOL DOES THE ACTUAL TERRAIN GENERATION. ChunkMap wires it in as both
+     * the "worldgen" and "light" executor, so every noise/surface/carver/feature
+     * pass runs here — not on the ServerWorker that called GetChunk. That caller
+     * is off the library's main thread, so ServerChunkCache::getChunk enqueues
+     * and then sleep-polls in 100us steps until this pool finishes.
+     *
+     * Consequence for profiling: the game-side TerrainLibGetChunk zone measures
+     * the caller's WAIT, not work. Real cost lives on these threads, which is why
+     * they are named below — before that they emitted nothing and were invisible
+     * in every capture we took.
      */
     class BackgroundExecutor {
     public:
         using Task = std::function<void()>;
 
-        BackgroundExecutor(size_t numThreads = std::thread::hardware_concurrency())
+        // MC parity: Util.maxAllowedExecutorThreads() is
+        //   clamp(availableProcessors - 1, 1, getMaxThreads())
+        // (minecraft_code/decompiled_net/minecraft/util/Util.java:177).
+        // The -1 matters — it leaves a core for the thread waiting on the result.
+        // We previously took hardware_concurrency() flat, which on a 10-core M4
+        // put 10 worldgen threads on top of 4 ServerWorkers, 3 MeshWorkers, the
+        // server thread, the occlusion thread and the main thread.
+        static size_t DefaultThreadCount() {
+            const unsigned hw = std::thread::hardware_concurrency();
+            if (hw == 0) return 1;
+            return static_cast<size_t>(std::max(1u, hw - 1u));
+        }
+
+        explicit BackgroundExecutor(size_t numThreads = DefaultThreadCount())
             : m_running(true)
         {
             for (size_t i = 0; i < numThreads; ++i) {
@@ -82,6 +108,11 @@ namespace Game {
 
     private:
         void workerLoop() {
+            // Without a name these threads show up in Tracy as bare numeric ids
+            // with no zones — which is exactly why the most expensive work in the
+            // program stayed invisible across several captures.
+            TERRAIN_THREAD("TerrainWorker");
+
             while (true) {
                 Task task;
                 {
@@ -94,6 +125,10 @@ namespace Game {
                     }
                 }
                 if (task) {
+                    // Wraps the whole task so a thread's occupancy is visible even
+                    // for stages that carry no zone of their own. The per-stage
+                    // breakdown comes from ChunkStatusTasks.h nested inside this.
+                    TERRAIN_ZONE_N("TerrainTask");
                     try { task(); } catch (...) {}
                 }
             }
@@ -130,7 +165,7 @@ namespace Game {
             }
         }
 
-        bool hasPendingTasks() {
+        bool hasPendingTasks() const {
             std::lock_guard<std::mutex> lock(m_mutex);
             return !m_tasks.empty();
         }
@@ -143,7 +178,7 @@ namespace Game {
 
     private:
         std::queue<Task> m_tasks;
-        std::mutex m_mutex;
+        mutable std::mutex m_mutex;   // mutable so hasPendingTasks() can be const
     };
 
     /**
@@ -217,6 +252,14 @@ namespace Game {
         // Pump the internal task pipeline (call every server tick).
         // Runs distance manager updates and main-thread executor tasks.
         void PumpAsyncTasks();
+
+        // Cheap "is a blocked worker waiting on me?" probe — one mutex-guarded
+        // queue-empty check. The server loop pumps at ~1 kHz in its idle window,
+        // and PumpAsyncTasks() calls runDistanceManagerUpdates() unconditionally,
+        // which is far too heavy to run that often for nothing. Gate on this.
+        bool HasPendingAsyncTasks() const {
+            return m_mainThreadExecutor && m_mainThreadExecutor->hasPendingTasks();
+        }
 
         // Check if a chunk is ready (fully generated). Non-blocking. Must call from server thread.
         bool IsChunkReady(Math::ChunkPos position);

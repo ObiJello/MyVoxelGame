@@ -4,6 +4,7 @@
 #include "../mesh/SectionMesh.hpp"
 #include "client/world/ClientChunkManager.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include "common/core/Config.hpp"
 #include <algorithm>
 #include <cmath>
@@ -142,6 +143,9 @@ namespace Render {
 
     void SectionOcclusionGraph::WorkerLoop() {
         PROFILE_THREAD("OcclusionBFS");
+        // The frame renders the previous result while this runs, but a late BFS
+        // means rendering a stale visibility set — short deadline, not throughput.
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
         for (;;) {
             std::unique_ptr<BfsJob> job;
             {

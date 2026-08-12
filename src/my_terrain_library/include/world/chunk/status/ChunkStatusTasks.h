@@ -21,6 +21,7 @@
 #include "util/StaticCache2D.h"
 #include "levelgen/WorldGenRegionLevel.h"
 #include "levelgen/Heightmap.h"
+#include "util/TerrainProfiling.h"
 #include <vector>
 #include <set>
 
@@ -138,6 +139,7 @@ public:
 
         // If no background executor, run synchronously (fallback)
         if (!context.backgroundExecutor) {
+            TERRAIN_ZONE_N("Gen.Biomes");
             Blender blender;
             context.generator->createBiomes(context.randomState, &blender, chunk);
             return completed(chunk);
@@ -150,8 +152,11 @@ public:
         // }, Util.backgroundExecutor().forName("init_biomes"));
         //
         // Use supplyAsync pattern to run biome generation on thread pool
+        // Zone goes INSIDE the lambda: supplyAsync only enqueues here, so a zone
+        // around this call would time the dispatch, not the generation.
         return util::CompletableFuture<::world::IChunk*>::supplyAsync(
             [generator = context.generator, randomState = context.randomState, chunk]() {
+                TERRAIN_ZONE_N("Gen.Biomes");
                 Blender blender;
                 generator->createBiomes(randomState, &blender, chunk);
                 return chunk;
@@ -187,6 +192,7 @@ public:
 
         // If no background executor, run synchronously (like old behavior)
         if (!context.backgroundExecutor) {
+            TERRAIN_ZONE_N("Gen.Noise");
             Blender blender;
             context.generator->fillFromNoise(context.randomState, &blender, chunk);
             return completed(chunk);
@@ -198,8 +204,10 @@ public:
         // }, Util.backgroundExecutor().forName("wgen_fill_noise"));
         //
         // Use supplyAsync pattern to run noise generation on thread pool
+        // Zone goes INSIDE the lambda — see the note in generateBiomes.
         return util::CompletableFuture<::world::IChunk*>::supplyAsync(
             [generator = context.generator, randomState = context.randomState, chunk]() {
+                TERRAIN_ZONE_N("Gen.Noise");
                 Blender blender;
                 generator->fillFromNoise(randomState, &blender, chunk);
                 return chunk;
@@ -221,6 +229,8 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.Surface");
+
         // Reference: ChunkStatusTasks.java line 89
         // context.generator().buildSurface(region, structureManager, randomState, chunk)
         if (context.generator && context.randomState) {
@@ -291,6 +301,8 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.Carvers");
+
         // Reference: ChunkStatusTasks.java lines 96-98, 100
         // Blender.addAroundOldChunksCarvingMaskFilter(region, protoChunk) - for upgrades
         // context.generator().applyCarvers(region, seed, randomState, biomeManager, structureManager, chunk)
@@ -363,6 +375,8 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.Features");
+
         // Reference: ChunkStatusTasks.java lines 106-107
         // Heightmap.primeHeightmaps(chunk, MOTION_BLOCKING, MOTION_BLOCKING_NO_LEAVES, OCEAN_FLOOR, WORLD_SURFACE)
         // Reference: ChunkStatusTasks.java lines 108-110
@@ -541,6 +555,8 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.Spawn");
+
         // Reference: ChunkStatusTasks.java lines 130-132
         // if (!chunk.isUpgrading())
         //     context.generator().spawnOriginalMobs(new WorldGenRegion(...))
@@ -562,6 +578,8 @@ public:
         const std::vector<std::vector<::world::IChunk*>>& chunks,
         ::world::IChunk* chunk
     ) {
+        TERRAIN_ZONE_N("Gen.Full");
+
         // Reference: ChunkStatusTasks.java lines 140-164
         // In Java, this converts ProtoChunk to LevelChunk
         // For our C++ implementation, we just mark it complete.

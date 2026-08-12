@@ -9,6 +9,7 @@
 #include "../renderer/core/Frustum.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
+#include "../renderer/mesh/MeshUploadPermits.hpp"
 #include "../renderer/mesh/ChunkRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include <glad/glad.h>
@@ -907,10 +908,41 @@ namespace Client {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
 
-        // Throttle: run at most every 33ms (~30 times/sec)
+        // Throttle. This is the ceiling on how fast chunks can become visible:
+        // each pass can start at most permits.Available() sections (10, matching
+        // MC's SectionBufferBuilderPool sized at availableProcessors), so the
+        // rate is permits x passes/sec.
+        //
+        // At the old 33ms (30 passes/sec) that capped us at ~300 sections/s
+        // — measured 197/s — while chunks ARRIVED at ~570 sections/s. Meshing
+        // took 72s to work through what the server delivered in 25s, and that
+        // backlog is what shows up as chunks appearing slowly, long after the
+        // data is already on the client. The mesh workers were 1.6% busy the
+        // whole time; nothing was overloaded, we were just not asking.
+        //
+        // MC has no such throttle — LevelRenderer compiles sections every frame.
+        // The period only exists so we do not rescan the dirty set at our full
+        // frame rate; the permit pool above is the real backpressure, and when
+        // uploads fall behind Available() hits 0 and this returns immediately.
+        //
+        // Size it against the actual demand, not a round number. Sections needing
+        // a mesh per second is:
+        //
+        //     chunks/s (80.5) x sections/chunk (7.9) x remesh factor (2.2) ~ 1400/s
+        //
+        // and the ceiling is permits (10) x 1000/period. At 8ms that was 1250/s —
+        // 11% BELOW demand, so meshing could never catch up and 17s of arrivals
+        // took 37s to work through. 5ms gives 2000/s, ~43% headroom.
+        //
+        // The 2.2x remesh factor is NOT a bug to be optimised away: MC does the
+        // same thing (ClientPacketListener.enableChunkLight ->
+        // setSectionRangeDirty over the chunk AND its 8 neighbours, full Y range),
+        // and gating compiles on neighbour availability would only make sections
+        // appear LATER. Budget for it instead.
+        static constexpr float kMeshSchedulePeriodMs = 5.0f;
         auto now = std::chrono::steady_clock::now();
         float elapsedMs = std::chrono::duration<float, std::milli>(now - m_lastMeshScheduleTime).count();
-        if (elapsedMs < 33.0f) {
+        if (elapsedMs < kMeshSchedulePeriodMs) {
             return;
         }
         m_lastMeshScheduleTime = now;
@@ -918,11 +950,21 @@ namespace Client {
         auto workerPool = Threading::g_clientWorkerPool.get();
         if (!workerPool) return;
 
-        // Buffer pool backpressure: only submit when pipeline has room
-        size_t activeAndPending = workerPool->GetActiveJobCount() + workerPool->GetPendingJobCount();
-        const size_t POOL_SIZE = std::max(size_t(64), workerPool->GetWorkerCount() * 16);
-        if (activeAndPending >= POOL_SIZE) return;
-        size_t slotsAvailable = POOL_SIZE - activeAndPending;
+        // Buffer pool backpressure, MC-style (SectionBufferBuilderPool +
+        // SectionRenderDispatcher.runTask:74). A permit spans compile AND
+        // upload and only comes back once the render thread has uploaded the
+        // result, so a slow upload stage throttles submission automatically.
+        //
+        // The previous check counted GetActiveJobCount() + GetPendingJobCount()
+        // — both COMPILE-stage numbers. Results that had finished compiling and
+        // were waiting to be uploaded counted as zero, so the result queue grew
+        // without limit behind a check that read as "plenty of room", and the
+        // render thread paid for the whole backlog at the swap.
+        // ::Render, not Client::Render — this TU is inside namespace Client,
+        // which has its own nested Render (MeshJobData et al).
+        auto& permits = ::Render::GetMeshUploadPermits();
+        size_t slotsAvailable = permits.Available();
+        if (slotsAvailable == 0) return;
 
         // Collect dirty sections — reuse persistent buffer to avoid per-call heap allocation.
         // Iterates only the dirty-chunk index (not every loaded chunk); entries whose
@@ -1005,6 +1047,12 @@ namespace Client {
             snapshot->isHighPriority = (candidate.effectiveDistSq < 16384.0f); // 128^2
             snapshot->submitTime = std::chrono::steady_clock::now();
 
+            // Claim the pipeline slot BEFORE submitting. Held until the render
+            // thread has uploaded this section's result (or the result is
+            // dropped/discarded), which is what makes the backpressure span
+            // both stages the way MC's buffer pack does.
+            if (!permits.TryAcquire()) break;   // pipeline full — retry next pass
+
             if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
                 if (sectionInfo.lastMeshJob) {
                     sectionInfo.lastMeshJob->Cancel();
@@ -1015,6 +1063,11 @@ namespace Client {
                 sectionInfo.dirty = false;
                 chunk->dirtySections.erase(candidate.sectionY);
                 sectionsSubmitted++;
+            } else {
+                // Rejected before entering the pipeline (pool stopped, queue
+                // full): nothing will ever produce a result for it, so the
+                // permit has to go back here or it is leaked outright.
+                permits.Release();
             }
         }
 

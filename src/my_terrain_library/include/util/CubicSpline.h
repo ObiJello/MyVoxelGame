@@ -136,8 +136,13 @@ public:
     }
 
     CubicSpline<C, I>* mapAll(typename CubicSpline<C, I>::CoordinateVisitor& visitor) const override {
-        // Constant doesn't have coordinates to visit
-        return visitor.own(new Constant(m_value));
+        // Constant has no coordinates and no children, so a mapped copy is by
+        // definition identical to this one. Returning this instead of allocating
+        // a duplicate is result-identical and saves an allocation per node, per
+        // chunk. NOTE: the caller must not take ownership of what it gets back —
+        // that is why own() is deliberately not called here.
+        (void)visitor;
+        return const_cast<Constant*>(this);
     }
 
     float value() const { return m_value; }
@@ -464,13 +469,32 @@ CubicSpline<C, I>* CubicSpline<C, I>::Multipoint::mapAll(
     typename CubicSpline<C, I>::CoordinateVisitor& visitor) const
 {
     // Java line 189-191
+    I* mappedCoordinate = visitor.visit(m_coordinate);
+    bool changed = (mappedCoordinate != m_coordinate);
+
     std::vector<CubicSpline<C, I>*> mappedValues;
+    mappedValues.reserve(m_values.size());
     for (CubicSpline<C, I>* v : m_values) {
-        mappedValues.push_back(v->mapAll(visitor));
+        CubicSpline<C, I>* mapped = v->mapAll(visitor);
+        if (mapped != v) changed = true;
+        mappedValues.push_back(mapped);
+    }
+
+    // Every child mapped to itself, so create() below would build a spline
+    // equal to this one in every field. That is not a cheap copy: it duplicates
+    // three vectors AND re-runs Multipoint's cubic bounds computation, per node,
+    // per chunk. Hand back the original instead — result-identical, and this is
+    // where most of NC.WrapRouter's cost was going.
+    //
+    // The children were all still visited above, so the visitor has seen the
+    // whole tree either way. As in Constant, own() is skipped on this path
+    // because the caller must not take ownership of the original.
+    if (!changed) {
+        return const_cast<Multipoint*>(this);
     }
 
     return visitor.own(Multipoint::create(
-        visitor.visit(m_coordinate),
+        mappedCoordinate,
         m_locations,
         mappedValues,
         m_derivatives

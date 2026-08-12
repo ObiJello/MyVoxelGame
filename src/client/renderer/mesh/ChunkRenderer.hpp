@@ -10,6 +10,7 @@
 #include "../texture/TextureAnimator.hpp"
 #include "../backend/RenderTypes.hpp"
 #include <climits>
+#include <cstdint>
 #include <vector>
 #include <array>
 #include <memory>
@@ -51,6 +52,12 @@ namespace Render {
         float distanceToCamera;
         bool inFrustum;
         uint8_t layerMask;  // Bitmask of LayerFlag values
+        // MC's `isClose` (SectionOcclusionGraph.addSectionsInFrustum:80-89).
+        // Set by the PER-FRAME frustum filter, deliberately not by the BFS:
+        // distanceToCamera is baked when the reachable list is snapshotted and
+        // that list survives across frames, so it goes stale by up to a
+        // section of camera movement — which is most of the 32-block radius.
+        bool nearby = false;
 
         SectionRenderData(::Game::Math::ChunkPos pos, int secY, const GPUSectionData* gpu, float dist)
             : chunkPos(pos), sectionY(secY), gpuData(gpu), distanceToCamera(dist), inFrustum(true), layerMask(0) {}
@@ -265,6 +272,14 @@ namespace Render {
 
         bool m_visibleSectionsDirty = true;
 
+        // --- Translucency re-sort scheduling (MC LevelRenderer:165, 953) ---
+        // The cursor persists across frames and wraps modulo the visible count,
+        // so every visible section eventually takes its turn in the sweep. A
+        // budget that restarts from the front each frame would re-sort the same
+        // head sections forever and never reach the tail.
+        size_t m_translucencyResortIndex = 0;
+        glm::ivec3 m_lastTranslucentSortBlockPos{INT32_MIN, INT32_MIN, INT32_MIN};
+
         // Per-slab multi-draw command arrays (reused each frame to avoid allocation)
         std::vector<std::vector<int32_t>> m_perSlabCounts;
         std::vector<std::vector<size_t>> m_perSlabOffsets;
@@ -313,6 +328,13 @@ namespace Render {
         
         // Section preparation and culling
         void PrepareVisibleSections(const Camera& camera, const Frustum& frustum);
+
+        // Port of LevelRenderer.scheduleTranslucentSectionResort (:953). Owns
+        // the POLICY — which sections get re-sorted and how often; the per-
+        // section work lives in ClientMeshManager::ResortTranslucentSection,
+        // mirroring MC's split between LevelRenderer and RenderSection.
+        // Runs once a frame, immediately before the translucent pass.
+        void ScheduleTranslucentSectionResort(const glm::vec3& cameraPos);
         void SortSections(const Camera& camera, std::vector<SectionRenderData>& sections, bool frontToBack);
         
         // Bind shader, MVP, and atlas texture once per frame (shared across all 3 passes)

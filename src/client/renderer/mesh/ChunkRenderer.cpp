@@ -36,6 +36,12 @@ namespace Render {
     // Static portal clip plane (no clipping by default).
     glm::vec4 ChunkRenderer::s_portalClipPlane{0.0f};
 
+    // MC's "close" radius for translucency re-sorting — the 32 handed to
+    // SectionTree.visitNodes in SectionOcclusionGraph.addSectionsInFrustum:89.
+    // Sections inside it are re-checked every frame; the rest ride the sweep.
+    static constexpr float kTranslucentNearRadius   = 32.0f;
+    static constexpr float kTranslucentNearRadiusSq = kTranslucentNearRadius * kTranslucentNearRadius;
+
     ChunkRenderer::ChunkRenderer() {
         SetupRenderConfigs();
         for (auto& slot : m_reachableSlots) slot.sections.reserve(2048);
@@ -241,7 +247,7 @@ namespace Render {
         // WITHIN a section also have to be ordered, or a nearer surface can
         // write depth first and cut out everything behind it. See
         // mesh/TranslucentSort.hpp.
-        g_clientMeshManager->ResortTranslucentSections(camera.position);
+        ScheduleTranslucentSectionResort(camera.position);
 
         // Setup render state for translucent pass
         SetupRenderPass(m_translucentConfig);
@@ -572,6 +578,17 @@ namespace Render {
         {
             PROFILE_ZONE_N("FrustumFilter");
             m_visibleSections.clear();
+
+            // MC tags `isClose` during the same traversal that builds the
+            // visible list (SectionOcclusionGraph:80-89), so the flag costs
+            // nothing extra and is always current for THIS camera position.
+            auto tagNearby = [&](SectionRenderData& rd, float minX, float minY, float minZ) {
+                const float dx = (minX + 8.0f) - camera.position.x;
+                const float dy = (minY + 8.0f) - camera.position.y;
+                const float dz = (minZ + 8.0f) - camera.position.z;
+                rd.nearby = (dx * dx + dy * dy + dz * dz) < kTranslucentNearRadiusSq;
+            };
+
             if (m_enableFrustumCulling) {
                 for (const auto& section : slot->sections) {
                     float minX = static_cast<float>(section.chunkPos.x * 16);
@@ -580,17 +597,27 @@ namespace Render {
                     if (frustum.IsBoxVisible(glm::vec3(minX, minY, minZ),
                                              glm::vec3(minX + 16.0f, minY + 16.0f, minZ + 16.0f))) {
                         m_visibleSections.push_back(section);
+                        tagNearby(m_visibleSections.back(), minX, minY, minZ);
                     }
                 }
             } else {
                 m_visibleSections = slot->sections;
+                for (auto& rd : m_visibleSections) {
+                    tagNearby(rd,
+                              static_cast<float>(rd.chunkPos.x * 16),
+                              static_cast<float>(rd.sectionY * 16 + Config::MinY),
+                              static_cast<float>(rd.chunkPos.z * 16));
+                }
             }
         }
         auto cullEnd = std::chrono::high_resolution_clock::now();
         m_stats.frustumCullingTimeMs = std::chrono::duration<float, std::milli>(cullEnd - cullStart).count();
 
-        PROFILE_PLOT("ReachableSections", static_cast<int64_t>(slot->sections.size()));
-        PROFILE_PLOT("VisibleSections", static_cast<int64_t>(m_visibleSections.size()));
+        // Reachable = survived the occlusion BFS; Visible = also survived the
+        // frustum. Visible is the denominator for the translucency re-sort
+        // budget, so a spike here shows up in Resort/Considered next frame.
+        PROFILE_PLOT("Sections/Reachable", static_cast<int64_t>(slot->sections.size()));
+        PROFILE_PLOT("Sections/Visible", static_cast<int64_t>(m_visibleSections.size()));
 
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
         m_stats.sectionsSkipped = m_bfsOccludedCount;
@@ -598,6 +625,60 @@ namespace Render {
 
         auto overallEndTime = std::chrono::high_resolution_clock::now();
         m_stats.buildDrawListsTimeMs = std::chrono::duration<float, std::milli>(overallEndTime - overallStartTime).count();
+    }
+
+    // Port of LevelRenderer.scheduleTranslucentSectionResort (LevelRenderer.java:953).
+    //
+    // Two phases, both over the VISIBLE list — never over every loaded section.
+    // MC keeps two lists (visibleSections / nearbyVisibleSections) because its
+    // octree visitor fills them both in one pass; our frustum filter tags a
+    // `nearby` bit on the single list instead, which has the same semantics.
+    // MC's phase 2 also walks the full visible list including the nearby ones,
+    // so a section can be visited twice in a frame — harmless, because the
+    // second visit finds the point of view already up to date and no-ops.
+    void ChunkRenderer::ScheduleTranslucentSectionResort(const glm::vec3& cameraPos) {
+        PROFILE_ZONE_N("ResortTranslucent");
+        if (m_visibleSections.empty() || !g_clientMeshManager) return;
+
+        const glm::ivec3 cameraBlock(static_cast<int>(std::floor(cameraPos.x)),
+                                     static_cast<int>(std::floor(cameraPos.y)),
+                                     static_cast<int>(std::floor(cameraPos.z)));
+        const bool blockPosChanged = cameraBlock != m_lastTranslucentSortBlockPos;
+        m_lastTranslucentSortBlockPos = cameraBlock;
+
+        // Profiling counters only — PROFILE_PLOT compiles out without Tracy.
+        [[maybe_unused]] int64_t considered = 0, uploaded = 0;
+        auto visit = [&](const SectionRenderData& s, bool isNearby) {
+            ++considered;
+            if (g_clientMeshManager->ResortTranslucentSection(
+                    s.chunkPos, s.sectionY, cameraPos, blockPosChanged, isNearby)) {
+                ++uploaded;
+            }
+        };
+
+        // Phase 1 — every nearby visible section, every frame. These are the
+        // ones where a single block of camera movement visibly reorders quads.
+        for (const auto& section : m_visibleSections) {
+            if (section.nearby) visit(section, true);
+        }
+
+        // Phase 2 — a rotating slice of the visible list. The budget is
+        // max(visible/8, 15) against the VISIBLE count, which is what bounds
+        // the per-frame cost; the cursor persists across frames so the whole
+        // list is covered over time instead of just its first N entries.
+        const size_t visibleCount = m_visibleSections.size();
+        m_translucencyResortIndex %= visibleCount;
+        int resortsLeft = std::max<int>(static_cast<int>(visibleCount) / 8, 15);
+        while (resortsLeft-- > 0) {
+            const size_t index = m_translucencyResortIndex++ % visibleCount;
+            visit(m_visibleSections[index], false);
+        }
+
+        // Considered = sections the policy looked at (should be ~nearby + 15,
+        // NOT thousands). Uploaded = of those, how many actually re-sorted and
+        // wrote a new index range — that number feeds Upload/Bytes too.
+        PROFILE_PLOT("Resort/Considered", considered);
+        PROFILE_PLOT("Resort/Uploaded", uploaded);
     }
 
     void ChunkRenderer::SetEnvironmentUniforms(ShaderHandle shader, const Camera& camera) {

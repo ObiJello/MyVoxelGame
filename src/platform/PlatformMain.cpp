@@ -8,6 +8,7 @@
 #include "common/core/Config.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/ThreadAllocator.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include "client/renderer/debug/DebugSystem.hpp"
 // Include game headers
 #include "common/world/block/BlockRegistry.hpp"
@@ -95,6 +96,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 // Include mesh system headers
 #include "client/renderer/mesh/ChunkRenderer.hpp"
 #include "client/renderer/mesh/ClientMeshManager.hpp"
+#include "client/renderer/mesh/MeshUploadPermits.hpp"
 
 // Include new Minecraft-style architecture
 #include "client/network/NetworkClient.hpp"
@@ -287,18 +289,32 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         Render::GuiRenderState renderState;
         Render::GuiGraphics graphics(guiWidth, guiHeight, &g_guiAtlas, &renderState, &g_fontRenderer);
+        // "HudRender" covers far more than the HUD — hotbar, chat, the whole
+        // inventory screen, the pause/options stack and nametags all render
+        // through this one GuiGraphics. Split so a wide zone names a culprit
+        // instead of just a phase.
+        { PROFILE_ZONE_N("Hud");
         g_hudRenderer.Render(graphics, inventory, deltaTime);
+        }
 
         // Chat: update timer and render messages + input field
+        { PROFILE_ZONE_N("Chat");
         g_chatComponent.Update(deltaTime);
         g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
         g_chatScreen.Render(graphics);
+        }
+
+        // Prime suspect when this zone is wide: the creative search tab draws
+        // an icon per registered item, and every icon is its own sub-draw.
+        { PROFILE_ZONE_N("InventoryScreen");
         Render::GetInventoryScreen().Render(graphics);
+        }
 
         // ── Pause menu / options overlay (ESC) — drawn above everything ────
         {
             auto& screens = Render::GetScreenManager();
             if (!screens.Empty()) {
+                PROFILE_ZONE_N("ScreenStack");
                 screens.Update(guiWidth, guiHeight);
                 auto [smx, smy] = Input::GetMousePosition();
                 const int sgx = static_cast<int>(
@@ -432,8 +448,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
         }
 
+        // THE zone to watch. Everything above only queues commands into
+        // renderState; this is the single point where the GUI actually hits
+        // the GL driver. So a hotbar/inventory/chat that "submits" cheaply can
+        // still cost tens of ms here — the cost is paid at the flush, not at
+        // the call site that caused it. If the sub-zones above are all small
+        // and HudRender is still wide, the answer is in here.
+        { PROFILE_ZONE_N("GuiFlush");
         g_guiRenderer.Render(renderState, windowWidth, windowHeight,
                             framebufferWidth, framebufferHeight, guiScale, &g_fontRenderer);
+        }
     }
 
     Shader InitializeShaders() {
@@ -587,6 +611,21 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     //   - overlay: forced visible by UI screens that need pointer input (chat, future menus)
     // The effective state is applied to GLFW only on transition so opening chat while the
     // cursor is already up via Tab doesn't fight the manual toggle (and vice versa).
+    // Change cursor capture. ALWAYS go through this rather than calling
+    // glfwSetInputMode directly: GLFW reports cursor positions in a different
+    // coordinate space either side of the switch, so the first delta measured
+    // across it is meaningless and, applied to mouse-look, snaps the view to
+    // an arbitrary direction. Pairing the two calls here is what stops a new
+    // transition site from silently reintroducing that.
+    //
+    // MC pairs them the same way — MouseHandler.grabMouse sets ignoreFirstMove
+    // right next to grabOrReleaseMouse (:404-407).
+    void SetCursorCaptured(GLFWwindow* window, bool captured) {
+        glfwSetInputMode(window, GLFW_CURSOR,
+                         captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
+        Input::ResetMouseTracking();
+    }
+
     bool HandleCursorToggle(GLFWwindow* window, Render::Camera& camera, bool overlayWantsCursor) {
         static bool s_manualCursorVisible = false;
         static bool s_lastEffective = false;
@@ -605,10 +644,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         if (!s_initialized || effective != s_lastEffective) {
             if (effective) {
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                SetCursorCaptured(window, false);
                 camera.enableMouseLook = false;
             } else {
-                glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                SetCursorCaptured(window, true);
                 camera.enableMouseLook = true;
             }
             s_lastEffective = effective;
@@ -677,7 +716,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Client::FriendPresence::State::Menu, "", 0);
         }
 
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+        SetCursorCaptured(window, false);
 
         bool lmbHeld = false;
 
@@ -1042,6 +1081,47 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     }
 
     int Run(int argc, char** argv) {
+        // This is the frame thread. Claim it before anything spawns a worker,
+        // or the scheduler treats it as just another compute thread and parks
+        // it behind terrain generation — which shows up as tens of ms of
+        // phantom "self time" inside glfwPollEvents.
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Interactive);
+
+        // Pin the terrain library's data root before anything can generate a
+        // chunk. Two places need it — BlockPredicate (block tags, used by every
+        // placed feature) and FossilTemplate (structure NBTs) — and both check
+        // MC_DATA_ROOT first, falling back to walking UP FROM THE WORKING
+        // DIRECTORY otherwise.
+        //
+        // That fallback is why the game worked from an IDE and not from the
+        // launcher: CLion runs it with the cwd inside the repo, so the walk
+        // finds data/, while `open` (which is how the launcher starts the
+        // bundle, and there is no way to set a cwd with it) hands the app "/".
+        // The walk then hits the filesystem root and gives up, BlockPredicate
+        // throws, ServerWorkerPool::ProcessChunkGeneration catches it per job —
+        // and every single chunk fails to generate with no crash and no visible
+        // error. You spawn, you can look around, and nothing ever loads.
+        //
+        // overwrite=0 so an explicitly exported MC_DATA_ROOT still wins.
+        {
+            const std::string dataRoot = GetAssetPath("data");
+            if (std::filesystem::exists(dataRoot)) {
+#ifdef _WIN32
+                _putenv_s("MC_DATA_ROOT", dataRoot.c_str());
+#else
+                setenv("MC_DATA_ROOT", dataRoot.c_str(), 0);
+#endif
+                Log::Info("Terrain data root: %s", dataRoot.c_str());
+            } else {
+                Log::Error("=========================================================");
+                Log::Error("data/ NOT FOUND (looked in: %s)", dataRoot.c_str());
+                Log::Error("Chunk generation WILL fail — every chunk throws while");
+                Log::Error("resolving block tags, and the world loads up empty.");
+                Log::Error("The build must copy data/ next to assets/ (CMakeLists).");
+                Log::Error("=========================================================");
+            }
+        }
+
         // Parse command-line arguments
         bool useVulkan = false;
         bool crashTest = false;
@@ -1315,7 +1395,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Input::InitKeyMappings();
         Input::LoadKeyBindings();
         Input::Init(window);
-        glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+        SetCursorCaptured(window, true);
 
         // Apply fullscreen setting from saved preferences
         if (Platform::g_gameSettings.GetFullscreen()) {
@@ -1378,7 +1458,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                           remoteServerAddress.c_str(),
                           static_cast<unsigned>(remoteServerPort));
             }
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            SetCursorCaptured(window, true);
         } else if (!isRemoteClient) {
             titleAction = RunTitleScreenPhase(window);
             if (titleAction.kind == Render::TitleAction::Kind::Quit) {
@@ -1427,7 +1507,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Singleplayer (or Multiplayer) — panorama is done, gameplay owns
             // the cursor again.
             Render::g_panoramaRenderer.Shutdown();
-            glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+            SetCursorCaptured(window, true);
         }
 
         // Raw-input preference for gameplay mouse-look (Mouse Settings).
@@ -1538,6 +1618,38 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // ALSO created for the host below — see the shared setup.
         }
 
+        // Mesh pipeline backpressure — and the ceiling on how fast chunks become
+        // visible. A permit is held from submit through compile until the render
+        // thread uploads the result, so throughput is permits / round-trip.
+        //
+        // MC sizes its equivalent from
+        //   min(availableProcessors, maxMemory * 0.3 / TOTAL_BUFFERS_SIZE)
+        // (SectionBufferBuilderPool.allocate, Minecraft.java:550). That cap is
+        // MEMORY-driven: each SectionBufferBuilderPack is a real allocated buffer
+        // set. Ours are pure counters — the buffers live elsewhere — so copying
+        // MC's number matched its arithmetic while our actual constraint is the
+        // per-frame upload cost, not heap.
+        //
+        // Sized from measurement instead. Peak chunk arrival is ~120 chunks/s,
+        // and each chunk costs sections/chunk (7.9) x the MC-faithful remesh
+        // factor (2.2) ~ 17.4 section meshes:
+        //
+        //     peak demand      ~2086 sections/s
+        //     observed permit round-trip ~6.9 ms (about 1.7 frames)
+        //     permits needed   2086 * 0.0069 ~ 14.4
+        //
+        // 16 covers that with margin. At peak that is ~0.5 ms/frame of upload
+        // (0.060 ms per section) against a ~4 ms frame — the pool still throttles
+        // scheduling the moment uploads fall behind, which is the point of it.
+        // Raise further only with a trace showing permits starved AND frame time
+        // to spare; this is the knob that trades frame smoothness for fill speed.
+        {
+            const unsigned hw = std::thread::hardware_concurrency();
+            const size_t permitCount = std::max<size_t>(16, hw > 0 ? hw : 4);
+            Render::GetMeshUploadPermits().Initialize(permitCount);
+            Log::Info("✓ Mesh upload permits: %zu", permitCount);
+        }
+
         // ClientBlockAccess is needed in BOTH modes. Besides being the remote
         // client's physics/raycast source, it is the ILevelWrite that item
         // behaviours (hoe, shovel, bucket, …) write through when the client
@@ -1599,7 +1711,22 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         // 9. Start the IntegratedServer thread (host only)
         if (!isRemoteClient) {
-            Server::StartIntegratedServer();
+            if (!Server::StartIntegratedServer()) {
+                // Almost always "port 25565 already bound" — i.e. a second copy
+                // of the game is running (i.e. one from the IDE and one from
+                // the launcher). Silently continuing produces the world's most
+                // confusing bug report: the game loads, you can look around,
+                // and no chunk ever appears, because the client below dials
+                // 127.0.0.1 and finds either nothing or the OTHER instance's
+                // server. Loud and fatal beats quiet and mystifying.
+                Log::Error("=========================================================");
+                Log::Error("FAILED TO START INTEGRATED SERVER");
+                Log::Error("Port 25565 is most likely already in use by another");
+                Log::Error("running copy of the game. Close it and try again.");
+                Log::Error("(check with: lsof -nP -iTCP:25565)");
+                Log::Error("=========================================================");
+                return -8;
+            }
             Log::Info("✓ IntegratedServer thread started (20 TPS)");
         }
 
@@ -1840,19 +1967,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // === PER-FRAME: Poll events and handle input (must be every frame for responsiveness) ===
             bool cursorEnabled;
-            { PROFILE_ZONE_N("Input");
+            // Covers polling AND every UI branch (chat / inventory / pause) —
+            // not just input. The children below say which part actually ran.
+            { PROFILE_ZONE_N("InputUI");
             PROFILE_TIMER_START(input);
+            { PROFILE_ZONE_N("PollEvents");
             glfwPollEvents();
+            }
+            { PROFILE_ZONE_N("KeyStates");
             Input::UpdateKeyStates();
+            }
 
             // Apply menu-editable options every frame (cheap settings-map
             // lookups). FOV feeds the projection below; sensitivity/invert
             // feed Camera::Update's mouse-look. Sensitivity 1.0 (= 100% on
             // the slider, the default) maps to the engine's historical
             // 0.1°/px feel; the slider scales linearly around that.
+            { PROFILE_ZONE_N("Settings");
             camera.fov              = Platform::g_gameSettings.GetFOV();
             camera.mouseSensitivity = Platform::g_gameSettings.GetMouseSensitivity() * 0.1f;
             camera.invertY          = Platform::g_gameSettings.GetInvertYMouse();
+            }
 
             // Escape no longer closes the game — use the window close button instead
 
@@ -1874,6 +2009,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Takes priority over chat/inventory (those close before the
             // pause menu can open, so they're never open simultaneously).
             if (!Render::GetScreenManager().Empty()) {
+                PROFILE_ZONE_N("ScreenMgrInput");
                 auto& screens = Render::GetScreenManager();
 
                 // Screens swallow gameplay input — but HandlePlayerInput
@@ -1996,6 +2132,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
             // Chat system: open on T or /, route input when open
             else if (g_chatScreen.IsOpen()) {
+                PROFILE_ZONE_N("ChatInput");
                 // Mouse, so chat lines can be clicked. MC's chat is clickable
                 // (ChatComponent.getClickedComponentStyleAt) and /seed leans on
                 // it; without this the copy-on-click segment is inert.
@@ -2112,6 +2249,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // Drain char queue to prevent stale input
                 // Skip player input — chat has focus
             } else if (Render::GetInventoryScreen().IsOpen()) {
+                PROFILE_ZONE_N("InventoryInput");
                 // ── Inventory screen overlay ───────────────────────────────────
                 auto& inv = Render::GetInventoryScreen();
 
@@ -2213,6 +2351,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     }
                 }
             } else {
+                PROFILE_ZONE_N("GameKeybinds");
                 // Chat just lost focus — drop any pointing-hand cursor it left
                 // set, or it would persist into gameplay.
                 SetChatPointerCursor(window, false);
@@ -2323,13 +2462,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // Drains attack/use and stops an in-progress break/place whenever
             // the cursor is up, which is what tears down held-RMB when a screen
             // takes over.
+            { PROFILE_ZONE_N("PlayerInput");
             HandlePlayerInput(player, playerController, camera, cursorVisible);
+            }
 
             // Resolve cursor state AFTER chat/inventory/pause handling so
             // opening/closing this frame takes effect immediately.
+            { PROFILE_ZONE_N("CursorToggle");
             cursorEnabled = HandleCursorToggle(window, camera,
                 g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen() ||
                 !Render::GetScreenManager().Empty());
+            }
 
             PROFILE_TIMER_END(input, metrics.inputHandlingTime);
             }
@@ -2366,13 +2509,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 PROFILE_TIMER_END(network, metrics.networkProcessingTime);
                 }
 
-                // 2. Schedule mesh builds (fixed-rate, not per-frame)
-                { PROFILE_ZONE_N("MeshSchedule");
-                PROFILE_TIMER_START(meshsched);
-                glm::vec3 tickPlayerPos = player.physics.position;
-                Render::ScheduleClientMeshBuilds(tickPlayerPos);
-                PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
-                }
+                // (Mesh scheduling used to live here, in the 20 Hz tick. It is a
+                // FRAME phase now — see the MeshSchedule block next to MeshUpload
+                // below. Each pass can start at most permits.Available() = 10
+                // sections, so calling it at tick rate hard-capped meshing at
+                // 20 x 10 = 200 sections/s ~= 25 chunks/s, which is exactly what
+                // traces showed while the mesh workers sat 1.6% busy.)
 
                 // 3. Interpolate remote player positions (Minecraft's InterpolationHandler)
                 if (Client::g_remotePlayerManager) {
@@ -2653,8 +2795,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             glm::vec3 playerPos = player.physics.position;
             Render::SetClientMeshPlayerPosition(playerPos);
 
+            // 6b. Schedule mesh builds — a FRAME phase, like MC's
+            // LevelRenderer compiling sections every frame.
+            //
+            // Moved out of the 20 Hz ClientTick: a pass starts at most
+            // permits.Available() = 10 sections, so tick-rate scheduling capped
+            // meshing at 200 sections/s no matter how idle the mesh workers were.
+            // The server was delivering ~570 sections/s, so the client fell
+            // steadily behind and chunks appeared long after they had arrived.
+            //
+            // Rate limiting belongs to the two mechanisms that can actually see
+            // the load: the ~8ms period inside ScheduleMeshBuildsWithSnapshots,
+            // and the mesh permit pool, which stops handing out slots when
+            // uploads fall behind. Calling this per frame just lets them work.
+            { PROFILE_ZONE_N("MeshSchedule");
+            PROFILE_TIMER_START(meshsched);
+            Render::ScheduleClientMeshBuilds(player.physics.position);
+            PROFILE_TIMER_END(meshsched, metrics.meshSchedulingTime);
+            }
+
             // 7. Perform GPU uploads
-            { PROFILE_ZONE_N("GPUUpload");
+            // Frame phase. The cost you see here is only the CPU side of
+            // handing data to the driver — the transfer itself is paid later,
+            // in Present. Watch the UploadBytes plot, not this zone's width.
+            { PROFILE_ZONE_N("MeshUpload");
             PROFILE_TIMER_START(gpuupload);
             Render::PerformClientGPUUploads();
             PROFILE_TIMER_END(gpuupload, metrics.gpuUploadTime);
@@ -3592,7 +3756,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 
             // 11. Swap buffers (includes VSync wait)
-            { PROFILE_ZONE_N("VSync");
+            // NOT a vsync wait — this is the buffer swap, which is where the
+            // driver flushes the queued command stream and blocks if the GPU
+            // is behind the CPU. With vsync OFF a long "Present" means the GPU
+            // is still chewing on work this frame queued (usually buffer
+            // uploads), not that anything is waiting on the display.
+            { PROFILE_ZONE_N("Present");
             PROFILE_TIMER_START(vsync);
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->EndFrame(window);

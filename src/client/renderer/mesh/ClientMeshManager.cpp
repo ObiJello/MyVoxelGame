@@ -1,6 +1,7 @@
 // File: src/client/renderer/mesh/ClientMeshManager.cpp
 #include "ClientMeshManager.hpp"
 #include "ChunkRenderer.hpp"
+#include "MeshUploadPermits.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Config.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -168,79 +169,66 @@ namespace Render {
         m_stats.meshUploadsThisFrame = 0;
         auto startTime = std::chrono::steady_clock::now();
 
-        UploadMeshResultsWithBudget();
-        
-        // Record timing
+        UploadAllPendingResults();
+
+        // Kept for the F3 readout only. Do NOT reintroduce a threshold on this
+        // number to throttle uploads: it measures how long the CPU spent
+        // handing work to the driver, which is not what the frame ends up
+        // paying. The permit pool is the throttle now.
         auto endTime = std::chrono::steady_clock::now();
-        float uploadTime = std::chrono::duration<float, std::milli>(endTime - startTime).count();
-        m_stats.gpuUploadTimeMs = uploadTime;
-        
-        if (uploadTime > m_config.gpuUploadBudgetMs && m_stats.meshUploadsThisFrame > 0) {
-            Log::Debug("GPU uploads exceeded budget: %.2fms > %.2fms (uploaded %d meshes)", 
-                      uploadTime, m_config.gpuUploadBudgetMs, m_stats.meshUploadsThisFrame);
-        }
+        m_stats.gpuUploadTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
     // ========================================================================
     // PLAYER POSITION UPDATES
     // ========================================================================
 
-    void ClientMeshManager::ResortTranslucentSections(const glm::vec3& cameraPos, float nearRadius) {
-        if (m_gpuData.empty()) return;
+    bool ClientMeshManager::ResortTranslucentSection(Game::Math::ChunkPos chunkPos, int sectionY,
+                                                     const glm::vec3& cameraPos,
+                                                     bool blockPosChanged, bool isNearby) {
+        auto it = m_gpuData.find(SectionKey{chunkPos, sectionY});
+        if (it == m_gpuData.end()) return false;
+        GPUSectionData& gpuData = it->second;
 
-        const glm::ivec3 cameraBlock(static_cast<int>(std::floor(cameraPos.x)),
-                                     static_cast<int>(std::floor(cameraPos.y)),
-                                     static_cast<int>(std::floor(cameraPos.z)));
-        const bool blockPosChanged = cameraBlock != m_lastResortCameraBlock;
-        m_lastResortCameraBlock = cameraBlock;
+        // MC: section.hasTranslucentGeometry().
+        if (gpuData.translucentCentroids.empty()) return false;
+        if (!gpuData.translucentDrawCmd.valid) return false;
 
-        const float nearRadiusSq = nearRadius * nearRadius;
+        const glm::ivec3 origin(
+            chunkPos.x * 16,
+            Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
+            chunkPos.z * 16);
 
-        // MC visits every nearby section each frame and only a slice of the
-        // rest: max(visible/8, 15). Same shape here, so the cost stays bounded
-        // however much glass or water is in view.
-        const size_t total = m_gpuData.size();
-        size_t sweepRemaining = std::max<size_t>(total / 8, 15);
+        const auto pov = TranslucentSort::MakePointOfView(cameraPos, origin);
+        const bool povChanged = pov != gpuData.translucencyPov;
+        // MC: a one-block camera move only forces a re-sort when the view
+        // is axis-aligned (where a single step can reorder quads) or the
+        // section is close enough for the error to show.
+        const bool blockMoveForces = blockPosChanged && (pov.IsAxisAligned() || isNearby);
+        if (!povChanged && !blockMoveForces) return false;
 
-        for (auto& entry : m_gpuData) {
-            const SectionKey& key = entry.first;
-            GPUSectionData& gpuData = entry.second;
-            if (gpuData.translucentCentroids.empty()) continue;
-            if (!gpuData.translucentDrawCmd.valid) continue;
-
-            const glm::ivec3 origin(
-                key.chunkPos.x * 16,
-                Game::Math::WorldCoordinates::SectionCoordsToWorldY(key.sectionY, 0),
-                key.chunkPos.z * 16);
-            const glm::vec3 centre = glm::vec3(origin) + glm::vec3(8.0f);
-            const glm::vec3 toCentre = centre - cameraPos;
-            const bool isNearby = glm::dot(toCentre, toCentre) < nearRadiusSq;
-
-            // Distant sections only get looked at on their turn in the sweep.
-            if (!isNearby) {
-                if (sweepRemaining == 0) continue;
-                --sweepRemaining;
-            }
-
-            const auto pov = TranslucentSort::MakePointOfView(cameraPos, origin);
-            const bool povChanged = pov != gpuData.translucencyPov;
-            // MC: a one-block camera move only forces a re-sort when the view
-            // is axis-aligned (where a single step can reorder quads) or the
-            // section is close enough for the error to show.
-            const bool blockMoveForces = blockPosChanged && (pov.IsAxisAligned() || isNearby);
-            if (!povChanged && !blockMoveForces) continue;
-
-            TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
-                                                m_resortIndexScratch, m_resortOrderScratch);
-            if (m_resortIndexScratch.empty()) continue;
-
-            const MegaBufferSectionKey megaKey{key.chunkPos, key.sectionY};
-            if (m_translucentMegaBuffer.UpdateSectionIndices(megaKey,
-                                                             m_resortIndexScratch.data(),
-                                                             m_resortIndexScratch.size())) {
-                gpuData.translucencyPov = pov;
-            }
+        // Split because the fix differs entirely depending on which half costs:
+        // MC runs the SORT on a worker (RenderSection.resortTransparency ->
+        // dispatcher.schedule(ResortTransparencyTask)) but uploads on the render
+        // thread like we do. So if Resort.Sort dominates, going async is the
+        // MC-faithful fix; if Resort.Upload dominates, async buys nothing and the
+        // problem is the buffer update instead.
+        { PROFILE_ZONE_N("Resort.Sort");
+        TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
+                                            m_resortIndexScratch, m_resortOrderScratch);
         }
+        if (m_resortIndexScratch.empty()) return false;
+
+        const MegaBufferSectionKey megaKey{chunkPos, sectionY};
+        { PROFILE_ZONE_N("Resort.Upload");
+        if (!m_translucentMegaBuffer.UpdateSectionIndices(megaKey,
+                                                          m_resortIndexScratch.data(),
+                                                          m_resortIndexScratch.size())) {
+            return false;
+        }
+        }
+        gpuData.translucencyPov = pov;
+        return true;
     }
 
     void ClientMeshManager::SetPlayerPosition(const glm::vec3& position) {
@@ -360,7 +348,10 @@ namespace Render {
                     return;
                 }
 
-                { PROFILE_ZONE_N("GPUUpload");
+                // Named for what it does, not "GPUUpload" — that collided with
+                // the frame-level phase in PlatformMain and the trace showed
+                // the same label at two different depths.
+                { PROFILE_ZONE_N("WriteBuffers");
                 UploadMeshResultToGPU(result.chunkPos, result.sectionY, result.meshData, result.visibilitySet);
                 }
 
@@ -392,19 +383,29 @@ namespace Render {
         }
     }
     
-    void ClientMeshManager::UploadMeshResultsWithBudget() {
-        auto startTime = std::chrono::steady_clock::now();
+    // Port of SectionRenderDispatcher.uploadAllPendingUploads (:104), which
+    // drains its whole queue with no budget of any kind:
+    //
+    //     while ((upload = this.toUpload.poll()) != null) upload.run();
+    //
+    // That is only safe because the permit pool already bounded how much could
+    // be in the queue. A CPU-millisecond budget here would be measuring the
+    // wrong thing anyway: glBufferSubData returns once the driver has staged
+    // the copy, so the loop can exit well inside budget having handed the GPU
+    // more work than it can retire — and Present pays the difference.
+    void ClientMeshManager::UploadAllPendingResults() {
+        PROFILE_ZONE_N("DrainUploads");
         int uploadsThisFrame = 0;
 
         auto& meshResultQueue = GetMeshResultQueue();
+        auto& permits = GetMeshUploadPermits();
 
-        while (uploadsThisFrame < m_config.maxGPUUploadsPerFrame) {
-            auto currentTime = std::chrono::steady_clock::now();
-            float elapsedMs = std::chrono::duration<float, std::milli>(currentTime - startTime).count();
-            if (elapsedMs >= m_config.gpuUploadBudgetMs) {
-                break;
-            }
+        // QueueDepth is the health metric: with backpressure working it should
+        // sit at or below the permit capacity and return to 0 every frame.
+        // A rising QueueDepth means a permit is being leaked somewhere.
+        PROFILE_PLOT("Upload/QueueDepth", static_cast<int64_t>(meshResultQueue.Size()));
 
+        while (true) {
             Network::MeshBuildResult result;
             { PROFILE_ZONE_N("PopResult");
             if (!meshResultQueue.try_pop(result)) {
@@ -412,10 +413,26 @@ namespace Render {
             }
             }
 
+            // Scope guard, not a plain call at the end: ProcessMeshBuildResult
+            // returns early on four separate drop paths (build failed, failed
+            // validation, chunk unloaded, stale/replaced generation). Each one
+            // would otherwise leak this section's permit.
+            struct PermitGuard {
+                MeshUploadPermits& p;
+                ~PermitGuard() { p.Release(); }
+            } guard{permits};
+
             ProcessMeshBuildResult(result);
             uploadsThisFrame++;
             m_stats.meshUploadsThisFrame++;
         }
+
+        PROFILE_PLOT("Upload/Sections",  static_cast<int64_t>(uploadsThisFrame));
+        PROFILE_PLOT("Upload/InFlight",  static_cast<int64_t>(permits.InFlight()));
+        PROFILE_PLOT("Upload/Bytes", static_cast<int64_t>(
+            m_opaqueMegaBuffer.ConsumeUploadedBytes() +
+            m_cutoutMegaBuffer.ConsumeUploadedBytes() +
+            m_translucentMegaBuffer.ConsumeUploadedBytes()));
     }
     
     bool ClientMeshManager::ChunkNeedsMeshBuild(::Game::Math::ChunkPos chunkPos) const {
@@ -765,11 +782,17 @@ namespace Render {
                 // Sort NOW, not on some later frame. MC sorts at compile time
                 // (SectionCompiler → MeshData.sortQuads with the camera
                 // position), so a section is never drawn in raw mesher order.
-                // Ours used to defer to ResortTranslucentSections, which is
+                // Ours used to defer to the per-frame re-sort, which is
                 // throttled to the nearby sections plus a slice of the rest —
                 // a newly streamed distant chunk could wait many frames, and
                 // since the translucent pass writes depth, unsorted quads
                 // occlude each other instead of blending.
+                //
+                // This is load-bearing for the scheduler in ChunkRenderer:
+                // that sweep only ever walks VISIBLE sections, so a section
+                // that is off-screen (or behind the occlusion BFS) is never
+                // swept at all. Sorting at upload time is what guarantees it
+                // still has a valid order the frame it first comes into view.
                 //
                 // An empty result means the quad count overflowed the 16-bit
                 // index space; UpdateSectionIndices then rejects the size

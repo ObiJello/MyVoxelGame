@@ -1,6 +1,7 @@
 // File: src/server/world/ServerWorkerPool.cpp
 #include "ServerWorkerPool.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/chunk/Chunk.hpp"
@@ -247,6 +248,10 @@ namespace Threading {
 
     void ServerWorkerPool::WorkerLoop() {
         PROFILE_THREAD("ServerWorker");
+        // Terrain generation: pure throughput, no frame deadline. These are the
+        // threads that were starving the main thread — four of them saturating
+        // a 4-performance-core machine while the frame waited its turn.
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Throughput);
         Log::Debug("Server worker thread started");
 
         while (m_running.load()) {

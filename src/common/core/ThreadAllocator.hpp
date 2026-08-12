@@ -12,9 +12,13 @@ namespace Core {
         size_t clientMeshWorkers;
         size_t serverWorldWorkers;
         size_t totalCores;
+        // Fast cores only. Equals totalCores on a homogeneous CPU; on Apple
+        // Silicon it is the performance-core count, which is what frame-
+        // critical pools have to be sized against.
+        size_t performanceCores;
         size_t reservedThreads;
         size_t availableWorkers;
-        
+
         std::string ToString() const;
     };
 
@@ -43,6 +47,11 @@ namespace Core {
         
         // Get the number of physical CPU cores
         static size_t GetPhysicalCoreCount();
+
+        // Fast-core count. On Apple Silicon this reads hw.perflevel0.logicalcpu
+        // (4 on an M4 that reports 10 total); everywhere else it falls back to
+        // the total, which is the right answer for a homogeneous CPU.
+        static size_t GetPerformanceCoreCount();
         
         // Check if we have enough cores for the game to run well
         static bool HasSufficientCores();
