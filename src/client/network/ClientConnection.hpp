@@ -37,6 +37,11 @@ namespace Client {
 
         // See NetworkConnection::ShouldDeferPacket.
         bool ShouldDeferPacket(uint8_t packetId) const override;
+
+        // See NetworkConnection::IsPacketAllowedOutbound. Ours is the
+        // serverbound half of MC's per-phase protocol tables
+        // (HandshakeProtocols / LoginProtocols / GameProtocols.SERVERBOUND_TEMPLATE).
+        bool IsPacketAllowedOutbound(uint8_t packetId) const override;
         
         // Get player name
         const std::string& GetPlayerName() const { return m_playerName; }

@@ -77,7 +77,19 @@ namespace Network {
         }
     }
 
-    void NetworkConnection::SendPacket(uint8_t packetId, const std::vector<uint8_t>& data) {
+    void NetworkConnection::SendPacket(uint8_t packetId, const std::vector<uint8_t>& data,
+                                       std::function<void()> onSent) {
+        // MC IdDispatchCodec.encode (:47): a packet that is not in the ACTIVE
+        // protocol's id map is refused outright rather than written. The
+        // encoder is swapped per phase (Connection.setupOutboundProtocol), so
+        // in vanilla a play packet during login is not merely unusual — it
+        // cannot be encoded at all. Ours logs and drops instead of throwing.
+        if (!IsPacketAllowedOutbound(packetId)) {
+            Log::Warning("[%s] Refusing to send packet 0x%02X — not part of the "
+                         "current protocol phase", m_name.c_str(), packetId);
+            return;
+        }
+
         // The frame body: VarInt packet id followed by the payload. This is
         // what the compression stage below operates on, matching MC — the id is
         // inside the compressed region, not outside it.
@@ -86,6 +98,15 @@ namespace Network {
         EncodeVarInt(static_cast<uint32_t>(packetId), body);
         body.insert(body.end(), data.begin(), data.end());
 
+        // Queue the BODY, not a finished frame. Framing happens at write time
+        // in FrameForWire — see the comment there for why that distinction is
+        // load-bearing rather than stylistic.
+        SendRaw(std::move(body), std::move(onSent));
+
+        m_stats.packetsSent.fetch_add(1);
+    }
+
+    std::vector<uint8_t> NetworkConnection::FrameForWire(const std::vector<uint8_t>& body) const {
         std::vector<uint8_t> packet;
         packet.reserve(10 + body.size());
 
@@ -123,45 +144,31 @@ namespace Network {
             EncodeVarInt(static_cast<uint32_t>(body.size()), packet);
             packet.insert(packet.end(), body.begin(), body.end());
         }
-        
-        // Debug logging - only log in base class if not a known packet type
-        // Client and Server connections will log their own specific packets
-        if (packetId != 0x81 && packetId != static_cast<uint8_t>(PacketId::PlayerMoveC2S) && 
-            packetId != static_cast<uint8_t>(PacketId::KeepAliveC2S)) {
-            Log::Debug("[%s] Sending packet ID 0x%02X, size: %zu bytes", 
-                      m_name.c_str(), packetId, packet.size());
-            
-            // Log first few bytes of packet for debugging
-            std::string hexDump;
-            for (size_t i = 0; i < std::min(size_t(20), packet.size()); i++) {
-                char buf[4];
-                snprintf(buf, sizeof(buf), "%02X ", packet[i]);
-                hexDump += buf;
-            }
-            // Log::Debug("[%s] Packet hex (first 20 bytes): %s", m_name.c_str(), hexDump.c_str());
-        }
-        
-        // Send the packet
-        SendRaw(packet);
-        
-        m_stats.packetsSent.fetch_add(1);
+
+        return packet;
     }
 
     void NetworkConnection::SendPacket(const RawPacket& packet) {
         SendPacket(packet.header.packetId, packet.payload);
     }
 
-    void NetworkConnection::SendRaw(const std::vector<uint8_t>& data) {
+    void NetworkConnection::SendRaw(std::vector<uint8_t> data, std::function<void()> onSent) {
         if (m_state != ConnectionState::CONNECTED) {
             Log::Warning("[%s] Attempted to send data on disconnected connection", m_name.c_str());
+            // The hook still runs. MC's thenRun fires on the future regardless
+            // of outcome (PacketSendListener.java:13), and a caller that uses
+            // it to advance protocol state must not be stranded by a dead
+            // socket.
+            if (onSent) onSent();
             return;
         }
-        
+
         // Add to send queue (SendScheduler manages outbox limits)
         bool startSend = false;
+        const size_t queuedBytes = data.size();
         {
             std::lock_guard<std::mutex> lock(m_sendMutex);
-            m_sendQueue.push_back(data);
+            m_sendQueue.push_back(PendingSend{std::move(data), std::move(onSent)});
             if (!m_sending) {
                 m_sending = true;
                 startSend = true;
@@ -175,7 +182,7 @@ namespace Network {
             });
         }
         
-        m_stats.bytesSent.fetch_add(data.size());
+        m_stats.bytesSent.fetch_add(queuedBytes);
     }
 
     void NetworkConnection::StartRead() {
@@ -414,23 +421,42 @@ namespace Network {
 
     void NetworkConnection::ProcessSendQueue() {
         // Use shared_ptr to keep data alive during async operation
-        auto data = std::make_shared<std::vector<uint8_t>>();
+        auto entry = std::make_shared<PendingSend>();
         {
             std::lock_guard<std::mutex> lock(m_sendMutex);
             if (m_sendQueue.empty()) {
                 m_sending = false;
                 return;
             }
-            *data = std::move(m_sendQueue.front());
+            *entry = std::move(m_sendQueue.front());
             m_sendQueue.pop_front();
         }
-        
+
+        // FRAME HERE, on the strand, immediately before the write — not when
+        // the packet was enqueued.
+        //
+        // This is Netty's CompressionEncoder position: a pipeline stage that
+        // runs at write time, so "everything written after the encoder was
+        // installed is compressed, everything before it is not" is true by
+        // construction. Framing at enqueue time instead makes that depend on a
+        // race between the caller and this strand — enable compression in a
+        // send-completion hook and the very next packet may already have been
+        // framed under the old rules, which the peer would then mis-parse.
+        entry->data = FrameForWire(entry->data);
+
         // Async write - data is kept alive by the shared_ptr captured in lambda
         net::async_write(m_socket,
-            net::buffer(*data),
+            net::buffer(entry->data),
             net::bind_executor(m_strand,
-                [self = shared_from_this(), data](const error_code& ec, size_t bytes) {
-                    // data shared_ptr keeps the buffer alive until this handler completes
+                [self = shared_from_this(), entry](const error_code& ec, size_t bytes) {
+                    // entry shared_ptr keeps the buffer alive until this handler completes.
+                    //
+                    // The hook runs BEFORE HandleWrite queues the next frame,
+                    // and before the error path, so a hook that reframes the
+                    // stream (compression) takes effect for everything after
+                    // this packet and nothing before it. Unconditional, as in
+                    // PacketSendListener.thenRun.
+                    if (entry->onSent) entry->onSent();
                     self->HandleWrite(ec, bytes);
                 }));
     }

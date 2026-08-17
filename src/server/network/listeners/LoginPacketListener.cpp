@@ -37,13 +37,32 @@ namespace Server {
         if (m_compressionThreshold >= 0 && !m_connection.IsLoopback()) {
             Network::PacketBuffer buffer;
             buffer.WriteVarInt(m_compressionThreshold);
+
+            // The enable runs in the SEND-COMPLETION hook, not inline. MC:
+            //
+            //   this.connection.send(new ClientboundLoginCompressionPacket(t),
+            //      PacketSendListener.thenRun(() ->
+            //         this.connection.setupCompression(t, true)));
+            //
+            // Enabling inline flips this connection's READER the instant the
+            // call returns, while the announcing packet may still be sitting in
+            // our own send queue. Anything the peer sends in the interim is
+            // still old-framed, and inflating it yields Z_DATA_ERROR — which is
+            // exactly how a remote client got kicked with
+            // "Inflate failed (rc=-3, got 0 of 129)": 129 is PlayerMoveC2S's id
+            // VarInt being read as a compressed frame's uncompressed-length.
+            //
+            // Capturing a shared_ptr keeps the connection alive until the hook
+            // runs; the listener that owns this lambda may be long gone by then.
+            auto conn = std::static_pointer_cast<ServerConnection>(m_connection.shared_from_this());
+            const int threshold = m_compressionThreshold;
             m_connection.SendPacket(static_cast<uint8_t>(Network::PacketId::SetCompression),
-                                    buffer.GetData());
-
-            m_connection.EnableCompression(m_compressionThreshold);
-
-            Log::Info("[LoginPacketListener] Compression enabled, threshold %d bytes",
-                      m_compressionThreshold);
+                                    buffer.GetData(),
+                                    [conn, threshold]() {
+                                        conn->EnableCompression(threshold);
+                                        Log::Info("[LoginPacketListener] Compression enabled "
+                                                  "(post-write), threshold %d bytes", threshold);
+                                    });
         } else if (m_connection.IsLoopback()) {
             Log::Info("[LoginPacketListener] Loopback peer — compression skipped "
                       "(MC does the same for its in-process connection)");

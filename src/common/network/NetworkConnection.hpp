@@ -74,7 +74,17 @@ namespace Network {
         // ========================================================================
 
         // Send a packet asynchronously (thread-safe, queues to write strand)
-        void SendPacket(uint8_t packetId, const std::vector<uint8_t>& data);
+        // `onSent` is MC's PacketSendListener.thenRun: a hook that runs once
+        // this packet has actually been written to the socket, rather than at
+        // the moment of the call. The distinction matters for anything that
+        // changes how the STREAM ITSELF is framed — see
+        // ServerLoginPacketListenerImpl.java:147, where compression is enabled
+        // in exactly this callback so the announcing packet goes out under the
+        // old framing and everything after it under the new.
+        //
+        // Runs regardless of write success, matching PacketSendListener.java:13.
+        void SendPacket(uint8_t packetId, const std::vector<uint8_t>& data,
+                        std::function<void()> onSent = {});
 
         // ── Compression (MC CompressionEncoder / CompressionDecoder) ────────
         //
@@ -94,9 +104,26 @@ namespace Network {
         // where deflating would cost CPU to save bandwidth that is free.
         bool IsLoopback() const;
         void SendPacket(const RawPacket& packet);
-        
-        // Send raw bytes (for handshake/protocol negotiation)
-        void SendRaw(const std::vector<uint8_t>& data);
+
+        // Queue a frame BODY (VarInt packet id + payload). Length-prefixing and
+        // compression are applied at write time by FrameForWire.
+        void SendRaw(std::vector<uint8_t> data, std::function<void()> onSent = {});
+
+        // Apply the wire framing — compression (when enabled) then the length
+        // prefix — to a frame body. Called on the strand at write time, which
+        // is where Netty's CompressionEncoder sits in the pipeline. Never call
+        // it at enqueue time; see ProcessSendQueue.
+        std::vector<uint8_t> FrameForWire(const std::vector<uint8_t>& body) const;
+
+        // Refuse to send a packet that is not part of the connection's current
+        // protocol phase. Port of MC IdDispatchCodec.encode (:47), which looks
+        // the packet type up in the ACTIVE protocol's id map and throws
+        // "Sending unknown packet" when it is absent — the encoder is swapped
+        // per phase by Connection.setupOutboundProtocol, so a play packet
+        // simply cannot be encoded during login.
+        //
+        // Default allows everything; derived classes narrow it.
+        virtual bool IsPacketAllowedOutbound(uint8_t packetId) const { return true; }
         
         // Try to pop an incoming packet from the queue (main thread)
         bool TryPopIncoming(IncomingPacket& packet) {
@@ -240,11 +267,23 @@ namespace Network {
         bool m_readingHeader = true;
 
         // < 0 means no compression stage in either direction.
+        // -1 = compression off. STRAND-CONFINED: written by EnableCompression
+        // (server: the SetCompression send-completion hook; client: the read
+        // handler for that packet) and read by FrameForWire and
+        // HandleReadPayload — all on m_strand. That confinement is what makes
+        // the switch atomic with respect to the byte stream in both directions;
+        // do not set it from a game thread.
         int  m_compressionThreshold = -1;
         
         // Send queue (thread-safe)
         std::mutex m_sendMutex;
-        std::deque<std::vector<uint8_t>> m_sendQueue;
+        // One queued frame plus MC's optional post-write hook. See
+        // SendPacket's onSent parameter.
+        struct PendingSend {
+            std::vector<uint8_t> data;
+            std::function<void()> onSent;
+        };
+        std::deque<PendingSend> m_sendQueue;
         bool m_sending = false;
         
         // Connection info

@@ -89,6 +89,40 @@ namespace Client {
     ClientConnection::~ClientConnection() {
     }
 
+    bool ClientConnection::IsPacketAllowedOutbound(uint8_t packetId) const {
+        // MC builds one protocol per phase and swaps the ENCODER with the phase
+        // (Connection.setupOutboundProtocol), so the set of sendable packets is
+        // whatever that protocol's codec knows. Anything else dies in
+        // IdDispatchCodec.encode with "Sending unknown packet". This is the
+        // same table, expressed directly.
+        //
+        // Why it matters beyond tidiness: our render loop starts the moment the
+        // socket opens and PlayerController pumps PlayerMoveC2S every tick,
+        // regardless of protocol phase. Vanilla cannot do that — LocalPlayer,
+        // which is what sends ServerboundMovePlayerPacket (LocalPlayer.java:260),
+        // does not exist until ClientboundLoginPacket creates it. Those stray
+        // pre-PLAY moves are what got mis-framed across the compression switch
+        // and killed a remote join.
+        switch (m_phase) {
+            case ConnectionPhase::HANDSHAKING:
+                // HandshakeProtocols.SERVERBOUND carries exactly one packet.
+                return packetId == static_cast<uint8_t>(Network::PacketId::Handshake);
+
+            case ConnectionPhase::LOGIN:
+                // LoginProtocols.SERVERBOUND. We have no encryption or cookie
+                // packets, so LoginStart is the whole set.
+                return packetId == static_cast<uint8_t>(Network::PacketId::LoginStart);
+
+            case ConnectionPhase::PLAY:
+                // GameProtocols.SERVERBOUND_TEMPLATE — everything gameplay.
+                // Handshake and LoginStart are NOT in it; sending either now
+                // would be a protocol error in vanilla too.
+                return packetId != static_cast<uint8_t>(Network::PacketId::Handshake)
+                    && packetId != static_cast<uint8_t>(Network::PacketId::LoginStart);
+        }
+        return false;
+    }
+
     bool ClientConnection::ShouldDeferPacket(uint8_t packetId) const {
         // Mirror of ServerConnection::ShouldDeferPacket — see there. On this
         // side the phase gate is what keeps SetCompression inline, and that is
