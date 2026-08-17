@@ -67,6 +67,12 @@ namespace Server {
 
         // Client reports its own level is ready (MC handleAcceptPlayerLoad)
         void onPlayerLoaded() override;
+
+        // Client echoes a teleport id (MC handleAcceptTeleportPacket)
+        void onAcceptTeleportation(int32_t teleportId) override;
+
+        // Client settings, PLAY phase (MC handleClientInformation)
+        void onClientConfigC2S(int renderDistance, bool vsync, float mouseSensitivity) override;
     };
     
 } // namespace Server

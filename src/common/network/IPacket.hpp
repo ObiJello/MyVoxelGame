@@ -4,6 +4,8 @@
 #include "PacketRegistry.hpp"
 #include <memory>
 #include <chrono>
+#include <cstdint>
+#include <vector>
 
 namespace Network {
     
@@ -34,6 +36,37 @@ namespace Network {
     public:
         // Apply this packet to the listener (visitor pattern)
         virtual void apply(IPacketListener& listener) = 0;
+    };
+
+    // A packet that has NOT been decoded into a typed object, carried through
+    // the queue so its legacy m_packetRegistry handler runs on the owning
+    // thread instead of the network I/O thread.
+    //
+    // This is the transport for MC's PacketUtils.ensureRunningOnSameThread /
+    // PacketProcessor.scheduleIfPossible property: no PLAY-phase handler ever
+    // executes on the network thread. MC has no equivalent type because MC has
+    // no undecoded path at all — this exists only until the last legacy
+    // handler is migrated to a typed packet, at which point it goes away.
+    class RawPayloadPacket : public IPacket {
+    public:
+        RawPayloadPacket(uint8_t id, std::vector<uint8_t> payload)
+            : m_id(id)
+            , m_payload(std::move(payload))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        uint8_t rawId() const { return m_id; }
+        const std::vector<uint8_t>& payload() const { return m_payload; }
+
+        // The REAL id, not a placeholder: ServerConnection::tick peeks this to
+        // decide whether a queued packet is critical enough to exceed the
+        // per-tick time budget.
+        PacketId getId() const override { return static_cast<PacketId>(m_id); }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+
+    private:
+        uint8_t m_id;
+        std::vector<uint8_t> m_payload;
+        std::chrono::steady_clock::time_point m_timestamp;
     };
 
     // Type aliases

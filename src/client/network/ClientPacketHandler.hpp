@@ -18,6 +18,7 @@ namespace Client {
     // Forward declarations
     class ClientChunkManager;
     class NetworkClient;
+    class ClientConnection;
 
     // Handles incoming packets on the main thread
     // All methods here run on the render thread and can safely modify game state
@@ -28,6 +29,12 @@ namespace Client {
 
         // Set client player reference for inventory sync
         void SetPlayer(Game::ClientPlayer* player) { m_player = player; }
+
+        // MC's ClientPacketListener holds `this.connection` for exactly this
+        // reason: several handlers need connection-owned state (world age,
+        // spawn position, the local player id) or need to send a reply, like
+        // the teleport ack. Set by NetworkClient when the connection is created.
+        void SetConnection(ClientConnection* connection) { m_connection = connection; }
         
         // IPacketListener interface
         const char* getName() const override { return "ClientPacketHandler"; }
@@ -78,6 +85,22 @@ namespace Client {
         void onSetHealthS2C(const Network::SetHealthS2CPacket& packet) override { handleSetHealth(packet); }
         void onBlockChangedAckS2C(const Network::BlockChangedAckS2CPacket& packet) override { handleBlockChangedAck(packet); }
         void onPlayerAbilitiesS2C(const Network::PlayerAbilitiesS2CPacket& packet) override { handlePlayerAbilities(packet); }
+
+        // ── The last packets off the raw-payload path ──────────────────────
+        // Bodies live on ClientConnection (they read its world age, spawn
+        // position and player id), which is the same split MC uses: the
+        // listener dispatches, `this.connection` holds the state.
+        void onChatMessageS2C(const Network::ChatMessageS2CPacket& packet) override;
+        void onTimeUpdateS2C(const Network::TimeUpdateS2CPacket& packet) override;
+        void onWorldSpawnS2C(const Network::WorldSpawnS2CPacket& packet) override;
+        void onPlayerInfoS2C(const Network::PlayerInfoS2CPacket& packet) override;
+        void onClientboundPlayerPosition(const Network::ClientboundPlayerPositionPacket& packet) override;
+        void onBlockEntityDataS2C(const Network::BlockEntityDataS2CPacket& packet) override;
+        void onBlockEntityRemoveS2C(const Network::BlockEntityRemoveS2CPacket& packet) override;
+        // Block events (MC ClientboundBlockEventPacket). Intentionally still a
+        // no-op — no animated block entities ship yet — but the dispatch is in
+        // place for when ChestLidController lands.
+        void onBlockEntityActionS2C(const Network::BlockEntityActionS2CPacket& packet) override {}
 #if ENABLE_PORTAL_GUN
         void onPortalSetS2C(const Network::PortalSetS2CPacket& packet) override    { handlePortalSet(packet); }
         void onPortalRemoveS2C(const Network::PortalRemoveS2CPacket& packet) override { handlePortalRemove(packet); }
@@ -191,6 +214,7 @@ namespace Client {
         // Cached references (set during initialization)
         ClientChunkManager* m_chunkManager = nullptr;
         Game::ClientPlayer* m_player = nullptr;
+        ClientConnection* m_connection = nullptr;   // MC ClientPacketListener.connection
         // Note: NetworkClient is accessed via g_networkClient global
 
         // Chunk batch rate calculator (Minecraft's ChunkBatchSizeCalculator)

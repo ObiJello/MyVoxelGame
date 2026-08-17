@@ -183,6 +183,18 @@ namespace Game {
                         glm::vec3(w, h, w));
         }
 
+        // Same box in world doubles. GetAABB() above narrows the entity's
+        // double position to float, which is fine for the collision work it
+        // feeds but not for reach tests far from the origin — a few hundred
+        // thousand blocks out, float spacing exceeds the reach distance itself.
+        AABBd GetAABBd() const {
+            const double w = GetBbWidth(), h = GetBbHeight();
+            return AABBd{
+                glm::dvec3(position.x - w * 0.5, position.y,     position.z - w * 0.5),
+                glm::dvec3(position.x + w * 0.5, position.y + h, position.z + w * 0.5)
+            };
+        }
+
         glm::ivec3 BlockPosition() const {
             return glm::ivec3(static_cast<int>(std::floor(position.x)),
                               static_cast<int>(std::floor(position.y)),

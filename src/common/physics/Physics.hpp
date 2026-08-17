@@ -2,6 +2,8 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -278,6 +280,17 @@ namespace Game {
     struct AABBd {
         glm::dvec3 min{0.0};
         glm::dvec3 max{0.0};
+
+        // MC AABB.distanceToSqr: squared distance from `p` to the nearest point
+        // ON the box, zero when inside. Used for interaction reach, which MC
+        // measures eye-to-box rather than centre-to-centre — see
+        // Player.isWithinEntityInteractionRange (Player.java:1905).
+        double DistanceToSqr(const glm::dvec3& p) const {
+            const double dx = std::max({min.x - p.x, 0.0, p.x - max.x});
+            const double dy = std::max({min.y - p.y, 0.0, p.y - max.y});
+            const double dz = std::max({min.z - p.z, 0.0, p.z - max.z});
+            return dx * dx + dy * dy + dz * dz;
+        }
 
         bool Intersects(const AABBd& o) const {
             return (min.x < o.max.x && max.x > o.min.x) &&

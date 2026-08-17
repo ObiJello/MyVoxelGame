@@ -377,8 +377,23 @@ namespace Network {
                                   m_name.c_str(), m_incomingPackets.Size());
                     }
                 }
+            } else if (ShouldDeferPacket(m_currentPacket.header.packetId)) {
+                // Not decoded into a typed packet, but it still must not run
+                // here — this is the network I/O thread. Queue it so the legacy
+                // registry handler runs on the owning thread, which is MC's
+                // PacketUtils.ensureRunningOnSameThread ->
+                // PacketProcessor.scheduleIfPossible path.
+                IncomingPacket incoming(std::make_unique<RawPayloadPacket>(
+                    m_currentPacket.header.packetId, m_currentPacket.payload));
+                if (!m_incomingPackets.try_push(std::move(incoming))) {
+                    Log::Warning("[%s] Incoming packet queue full, dropping packet ID 0x%02X",
+                                m_name.c_str(), m_currentPacket.header.packetId);
+                }
             } else {
-                // Fallback to legacy callback for backward compatibility
+                // Handled inline, on purpose. MC's login/handshake listeners
+                // carry no ensureRunningOnSameThread call and run on the Netty
+                // thread; so do ours. See ShouldDeferPacket for which packets
+                // this covers and why compression MUST be one of them.
                 OnPacketReceived(m_currentPacket.header.packetId, m_currentPacket.payload);
             }
         } catch (const std::exception& e) {

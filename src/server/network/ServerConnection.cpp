@@ -10,6 +10,7 @@
 #include "../player/ServerPlayer.hpp"
 #include "../IntegratedServer.hpp"
 #include "common/world/level/World.hpp"
+#include "common/core/Assert.hpp"
 #include "common/core/Log.hpp"
 #include <limits>
 #include "common/network/packets/HandshakeC2S.hpp"
@@ -48,24 +49,22 @@ namespace Server {
         //                                  [this](const std::vector<uint8_t>& p) { HandleHandshake(p); });
         // m_packetRegistry.RegisterHandler(PacketId::LoginStart,
         //                                  [this](const std::vector<uint8_t>& p) { HandleLoginStart(p); });
-        m_packetRegistry.RegisterHandler(PacketId::BlockActionC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandleBlockAction(p); });
-        m_packetRegistry.RegisterHandler(PacketId::PlayerMoveC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandlePlayerMove(p); });
-        m_packetRegistry.RegisterHandler(PacketId::ChatMessageC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandleChatMessage(p); });
-        m_packetRegistry.RegisterHandler(PacketId::KeepAliveC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandleKeepAliveResponse(p); });
+        // Only ONE entry left. Everything else that used to live here — block
+        // actions, movement, chat, held-item, inventory clicks, the teleport
+        // ack — now has a typed representation and is decoded in DecodePacket,
+        // which routes it through the queue to the server thread. Handlers
+        // registered here run INLINE ON THE NETWORK I/O THREAD (unless
+        // ShouldDeferPacket says otherwise), so nothing that touches the level,
+        // a player or a session may be added back.
+        //
+        // Client settings survive because they can legitimately arrive before
+        // the session exists, and MC handles that same pre-play case on its
+        // network thread too (ServerConfigurationPacketListenerImpl
+        // .handleClientInformation carries no ensureRunningOnSameThread call,
+        // while the game-phase handler at ServerGamePacketListenerImpl:1953
+        // does). Once in PLAY, DecodePacket claims it and this never fires.
         m_packetRegistry.RegisterHandler(PacketId::ClientConfigC2S,
                                          [this](const std::vector<uint8_t>& p) { HandleClientSettings(p); });
-        m_packetRegistry.RegisterHandler(PacketId::HeldItemChange,
-                                         [this](const std::vector<uint8_t>& p) { HandleHeldItemChange(p); });
-        m_packetRegistry.RegisterHandler(PacketId::ServerboundAcceptTeleportation,
-                                         [this](const std::vector<uint8_t>& p) { HandleAcceptTeleportation(p); });
-        m_packetRegistry.RegisterHandler(PacketId::InventoryClickC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandleInventoryClick(p); });
-        m_packetRegistry.RegisterHandler(PacketId::InventoryCloseC2S,
-                                         [this](const std::vector<uint8_t>& p) { HandleInventoryClose(p); });
     }
 
     ServerConnection::~ServerConnection() {
@@ -111,6 +110,12 @@ namespace Server {
     }
     
     void ServerConnection::tick() {
+        // MC ServerGamePacketListenerImpl.tickCount, incremented once per
+        // server tick. Drives the teleport retry window in
+        // UpdateAwaitingTeleport; kept here rather than on the session because
+        // the teleport gate lives on the connection.
+        ++m_tickCount;
+
         // Drain incoming packets queue and apply to listener
         int packetsProcessed = 0;
         const int MAX_PACKETS_PER_TICK = 1000;  // Safety limit
@@ -135,6 +140,11 @@ namespace Server {
         
         // Peek-then-pop pattern (Minecraft-style: never lose packets)
         while (packetsProcessed < MAX_PACKETS_PER_TICK) {
+            // Free any listener displaced during the PREVIOUS iteration. Safe
+            // here and nowhere earlier: the handler that triggered the switch
+            // has returned by now, so nothing is still executing inside it.
+            m_retiredListeners.clear();
+
             // Check if queue is empty
             if (!HasIncomingPackets()) {
                 break;
@@ -175,12 +185,31 @@ namespace Server {
             
             // Process the packet
             if (packet.packet) {
+                // An undecoded packet that was deferred here rather than run on
+                // the I/O thread — dispatch it to the legacy registry NOW, on
+                // the server thread. Goes away with the registry itself.
+                if (auto* raw = dynamic_cast<Network::RawPayloadPacket*>(packet.packet.get())) {
+                    try {
+                        if (!m_packetRegistry.HandlePacket(raw->rawId(), raw->payload())) {
+                            Log::Warning("[ServerConnection %u] Unhandled deferred packet ID 0x%02X in phase %d",
+                                        GetConnectionId(), raw->rawId(), static_cast<int>(m_phase.load()));
+                        }
+                    } catch (const std::exception& e) {
+                        Log::Error("[ServerConnection %u] Exception processing deferred packet 0x%02X: %s",
+                                  GetConnectionId(), raw->rawId(), e.what());
+                    }
+                    packetsProcessed++;
+                    continue;
+                }
+
                 // Check if we need to create a listener based on the packet type
                 if (!m_listener) {
                     if (packet.packet->getId() == Network::PacketId::Handshake) {
+                        RetireListener();
                         m_listener = std::make_unique<HandshakePacketListener>(*this);
                     } else if (packet.packet->getId() == Network::PacketId::LoginStart && 
                                m_phase == ConnectionPhase::LOGIN) {
+                        RetireListener();
                         m_listener = std::make_unique<LoginPacketListener>(*this, m_server);
                     }
                 }
@@ -210,11 +239,14 @@ namespace Server {
                 } else {
                     Log::Warning("[ServerConnection %u] No listener set for packet ID 0x%02X in phase %d", 
                                 GetConnectionId(), static_cast<int>(packet.packet->getId()), 
-                                static_cast<int>(m_phase));
+                                static_cast<int>(m_phase.load()));
                 }
             }
         }
         
+        // ...and once more for the final iteration's switch, if any.
+        m_retiredListeners.clear();
+
         // Log only if we processed packets or have a backlog
         if (packetsProcessed > 0 || GetIncomingQueueSize() > 10) {
             Log::Debug("[ServerConnection %u] Processed %d packets, %zu remaining in queue", 
@@ -261,6 +293,7 @@ namespace Server {
         switch (state) {
             case Network::ProtocolState::HANDSHAKING:
                 m_phase = ConnectionPhase::HANDSHAKING;
+                RetireListener();
                 m_listener = std::make_unique<HandshakePacketListener>(*this);
                 break;
                 
@@ -272,6 +305,7 @@ namespace Server {
                 
             case Network::ProtocolState::LOGIN:
                 m_phase = ConnectionPhase::LOGIN;
+                RetireListener();
                 m_listener = std::make_unique<LoginPacketListener>(*this, m_server);
                 break;
                 
@@ -306,6 +340,7 @@ namespace Server {
         m_phase = ConnectionPhase::PLAY;
         
         // Create listener with session reference
+        RetireListener();
         m_listener = std::make_unique<ServerPlayPacketListener>(*this, *session);
         
         Log::Info("[ServerConnection %u] Switched to PLAY state with session-aware ServerPlayPacketListener", 
@@ -329,6 +364,21 @@ namespace Server {
         SendPacket(static_cast<uint8_t>(Network::PacketId::WorldSpawn), spawnBuffer.GetData());
     }
 
+    bool ServerConnection::ShouldDeferPacket(uint8_t packetId) const {
+        // MC's split, exactly: ServerGamePacketListenerImpl defers every
+        // handler; ServerLoginPacketListenerImpl defers none. Anything arriving
+        // while we are still HANDSHAKING/LOGIN is connection-setup work that
+        // belongs on the I/O thread, and anything arriving in PLAY touches the
+        // level or the player and belongs on the server thread.
+        if (m_phase != ConnectionPhase::PLAY) {
+            return false;
+        }
+        // Disconnect is terminal — MC's handleDisconnect carries no
+        // ensureRunningOnSameThread call and tears the connection down from the
+        // Netty thread. Deferring it would keep reading from a dead peer.
+        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect);
+    }
+
     void ServerConnection::OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) {
         UpdateActivity();
         m_lastPacketReceived = std::chrono::steady_clock::now();
@@ -343,7 +393,7 @@ namespace Server {
         // Handle packet based on current phase
         if (!m_packetRegistry.HandlePacket(packetId, payload)) {
             Log::Warning("[ServerConnection %u] Unhandled packet ID: 0x%02X in phase %d",
-                GetConnectionId(), packetId, static_cast<int>(m_phase));
+                GetConnectionId(), packetId, static_cast<int>(m_phase.load()));
         }
     }
 
@@ -467,7 +517,7 @@ namespace Server {
     void ServerConnection::HandleHandshake(const std::vector<uint8_t>& payload) {
         if (m_phase != ConnectionPhase::HANDSHAKING) {
             Log::Warning("[ServerConnection %u] Unexpected handshake in phase %d",
-                GetConnectionId(), static_cast<int>(m_phase));
+                GetConnectionId(), static_cast<int>(m_phase.load()));
             return;
         }
         
@@ -493,7 +543,7 @@ namespace Server {
     void ServerConnection::HandleLoginStart(const std::vector<uint8_t>& payload) {
         if (m_phase != ConnectionPhase::LOGIN) {
             Log::Warning("[ServerConnection %u] Unexpected login start in phase %d",
-                GetConnectionId(), static_cast<int>(m_phase));
+                GetConnectionId(), static_cast<int>(m_phase.load()));
             return;
         }
         
@@ -543,39 +593,14 @@ namespace Server {
         }
     }
 
-    void ServerConnection::HandleBlockAction(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) {
-            return;
-        }
-        
-        auto packet = Network::Serialization::DeserializeBlockActionC2S(payload);
-        
-        // Route through packet listener → PlayerSession::HandleBlockAction()
-        // (validates against THIS player's position, not the host's)
-        if (m_listener) {
-            m_listener->onBlockActionC2S(packet);
-        }
-    }
 
-    void ServerConnection::HandlePlayerMove(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) {
-            return;
-        }
 
-        auto packet = Network::Serialization::DeserializePlayerMoveC2S(payload);
-
-        // Route through packet listener → PlayerSession::HandlePlayerMove()
-        if (m_listener) {
-            m_listener->onPlayerMoveC2S(packet);
-        }
-    }
-
-    void ServerConnection::HandleChatMessage(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) {
-            return;
-        }
-
-        auto packet = Network::Serialization::DeserializeChatMessageC2S(payload);
+    void ServerConnection::HandleChatMessage(const Network::ChatMessageC2SPacket& packet) {
+        // Server thread — reached from ServerPlayPacketListener::onChatMessageC2S
+        // via the typed packet queue. The phase/auth checks that used to open
+        // this method are now in DecodePacket, which only builds the packet in
+        // PLAY with an authenticated connection.
+        ASSERT_SERVER_THREAD();
 
         Log::Info("[Server#%u] RECEIVED ChatMessageC2S (ID: 0x%02X) - Message: %s (isCommand=%d)",
                   GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ChatMessageC2S),
@@ -646,26 +671,8 @@ namespace Server {
         }
     }
 
-    void ServerConnection::HandleHeldItemChange(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
 
-        auto packet = Network::Serialization::DeserializeHeldItemChangeC2S(payload);
-        if (m_listener) {
-            m_listener->onHeldItemChangeC2S(packet);
-        }
-    }
 
-    void ServerConnection::HandleInventoryClick(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
-        auto packet = Network::Serialization::DeserializeInventoryClickC2S(payload);
-        if (m_listener) m_listener->onInventoryClickC2S(packet);
-    }
-
-    void ServerConnection::HandleInventoryClose(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
-        auto packet = Network::Serialization::DeserializeInventoryCloseC2S(payload);
-        if (m_listener) m_listener->onInventoryCloseC2S(packet);
-    }
 
     void ServerConnection::Teleport(double x, double y, double z, float yRot, float xRot,
                                     double dx, double dy, double dz) {
@@ -673,6 +680,11 @@ namespace Server {
         //   1. Bump the awaiting-teleport id (wrap on int max)
         //   2. Snap the server-side player position
         //   3. Send ClientboundPlayerPosition to the client; client snaps and acks
+        //
+        // MC :1181 stamps the issue time FIRST, so the 20-tick retry window in
+        // UpdateAwaitingTeleport is measured from this teleport and not an
+        // earlier one.
+        m_awaitingTeleportTime = m_tickCount;
         if (++m_awaitingTeleport == std::numeric_limits<int32_t>::max()) {
             m_awaitingTeleport = 0;
         }
@@ -692,12 +704,14 @@ namespace Server {
             }
         }
 
-        // Gate: drop any further C2S position packets until the client echoes the
-        // matching ack. Mirrors MC's awaitingPositionFromClient — without this,
-        // 1–2 in-flight pre-teleport MovePlayer packets revert m_position to the
-        // old location and other clients see the teleported player flicker / stay
-        // behind. Cleared in HandleAcceptTeleportation when the id matches.
-        m_awaitingTeleportAck = true;
+        // Gate: ignore the position in any further C2S move packet until the
+        // client echoes the matching ack. Mirrors MC's
+        // awaitingPositionFromClient — without this, 1–2 in-flight pre-teleport
+        // MovePlayer packets revert m_position to the old location and other
+        // clients see the teleported player flicker / stay behind. Cleared in
+        // AcceptTeleportation when the id matches; re-sent by
+        // UpdateAwaitingTeleport if the ack never comes.
+        m_awaitingPositionFromClient = glm::dvec3(x, y, z);
 
         Network::ClientboundPlayerPositionPacket packet;
         packet.id = m_awaitingTeleport;
@@ -713,30 +727,79 @@ namespace Server {
                   GetConnectionId(), m_awaitingTeleport, x, y, z, dx, dy, dz);
     }
 
-    void ServerConnection::HandleAcceptTeleportation(const std::vector<uint8_t>& payload) {
-        if (m_phase != ConnectionPhase::PLAY || !m_authenticated) return;
+    bool ServerConnection::UpdateAwaitingTeleport() {
+        // MC ServerGamePacketListenerImpl.updateAwaitingTeleport (:1148).
+        if (!m_awaitingPositionFromClient.has_value()) {
+            // MC keeps the timestamp fresh while nothing is pending, so the
+            // window is measured from the teleport rather than from whenever
+            // the last one was cleared.
+            m_awaitingTeleportTime = m_tickCount;
+            return false;
+        }
 
-        auto packet = Network::Serialization::DeserializeServerboundAcceptTeleportation(payload);
-        if (packet.id == m_awaitingTeleport) {
-            // Clear the gate — subsequent C2S position packets are now accepted again.
-            // Matches MC's handleAcceptTeleportPacket clearing awaitingPositionFromClient.
-            m_awaitingTeleportAck = false;
-            Log::Info("[ServerConnection %u] Teleport id=%d acked", GetConnectionId(), packet.id);
+        if (m_tickCount - m_awaitingTeleportTime > 20) {
+            const glm::dvec3 pos = *m_awaitingPositionFromClient;
+            float yRot = 0.0f, xRot = 0.0f;
+            if (Server::g_integratedServer) {
+                if (auto* sessions = Server::g_integratedServer->GetSessionManager()) {
+                    auto session = sessions->GetSession(m_playerId);
+                    if (session && session->GetPlayer()) {
+                        yRot = session->GetPlayer()->getYaw();
+                        xRot = session->GetPlayer()->getPitch();
+                    }
+                }
+            }
+            Log::Warning("[ServerConnection %u] Teleport id=%d unacknowledged after 20 ticks "
+                         "— re-sending", GetConnectionId(), m_awaitingTeleport);
+            // Bumps the id, re-stamps m_awaitingTeleportTime and re-sends.
+            Teleport(pos.x, pos.y, pos.z, yRot, xRot);
+        }
+
+        return true;
+    }
+
+    void ServerConnection::AcceptTeleportation(int32_t teleportId) {
+        // No phase check. This runs on the server thread, applied from the
+        // packet queue in FIFO order, so by the time it lands finalizeLogin has
+        // already completed — but the packet itself may well have ARRIVED
+        // during LOGIN, which is exactly the case the old phase check threw
+        // away.
+        if (teleportId == m_awaitingTeleport) {
+            if (!m_awaitingPositionFromClient.has_value()) {
+                // MC :514 — an ack for the current id with nothing outstanding
+                // means the client is fabricating acks. MC disconnects.
+                Log::Error("[ServerConnection %u] Teleport ack id=%d with no teleport pending",
+                           GetConnectionId(), teleportId);
+                SendDisconnect("Invalid player movement");
+                return;
+            }
+            // Clear the gate — subsequent C2S move packets are honored in full again.
+            m_awaitingPositionFromClient.reset();
+            Log::Info("[ServerConnection %u] Teleport id=%d acked", GetConnectionId(), teleportId);
         } else {
-            Log::Warning("[ServerConnection %u] Stale teleport ack: got %d, expected %d",
-                         GetConnectionId(), packet.id, m_awaitingTeleport);
+            // Not an error: an ack for a SUPERSEDED teleport, which is exactly
+            // what the 20-tick retry above produces when the original was slow
+            // rather than lost. Ignoring it leaves the newer teleport pending,
+            // which is correct.
+            Log::Debug("[ServerConnection %u] Stale teleport ack: got %d, expected %d",
+                       GetConnectionId(), teleportId, m_awaitingTeleport);
         }
     }
 
     void ServerConnection::HandleClientSettings(const std::vector<uint8_t>& payload) {
+        // The PRE-PLAY path only; DecodePacket claims this id once the
+        // connection reaches PLAY. Runs on the network I/O thread, as MC's
+        // configuration-phase handleClientInformation does — at this point
+        // there is no session to touch, and OnClientSettingsReceived parks the
+        // value until one exists.
         Network::PacketReader reader(payload);
-        int renderDistance = reader.ReadVarInt();
-        bool vsync = reader.ReadByte() != 0;
-        float mouseSensitivity = reader.ReadFloat();
+        const int renderDistance = reader.ReadVarInt();
+        const bool vsync = reader.ReadByte() != 0;
+        const float mouseSensitivity = reader.ReadFloat();
+        ApplyClientSettings(std::clamp(renderDistance, 2, 32), vsync, mouseSensitivity);
+    }
 
-        // Clamp to valid range
-        renderDistance = std::clamp(renderDistance, 2, 32);
-
+    void ServerConnection::ApplyClientSettings(int renderDistance, bool vsync, float mouseSensitivity) {
         Log::Info("[Server#%u] Client settings: renderDistance=%d, vsync=%s, sensitivity=%.2f",
                   GetConnectionId(), renderDistance, vsync ? "true" : "false", mouseSensitivity);
 
@@ -878,6 +941,88 @@ namespace Server {
                 }
                 break;
 
+            // ── Formerly legacy-registry packets ───────────────────────────
+            // Every one of these used to be handled inline on the network I/O
+            // thread. They all reach ServerPlayer / the session / the level, so
+            // MC would defer all of them (ServerGamePacketListenerImpl opens
+            // every handler with ensureRunningOnSameThread). Decoding them here
+            // is what puts them on the server thread.
+            case PacketId::BlockActionC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeBlockActionC2S(payload);
+                    return std::make_unique<Network::Packets::BlockActionC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::PlayerMoveC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializePlayerMoveC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerMoveC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::ChatMessageC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeChatMessageC2S(payload);
+                    return std::make_unique<Network::Packets::ChatMessageC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::HeldItemChange:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeHeldItemChangeC2S(payload);
+                    return std::make_unique<Network::Packets::HeldItemChangeC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::InventoryClickC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeInventoryClickC2S(payload);
+                    return std::make_unique<Network::Packets::InventoryClickC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::InventoryCloseC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeInventoryCloseC2S(payload);
+                    return std::make_unique<Network::Packets::InventoryCloseC2SPacketImpl>(std::move(data));
+                }
+                break;
+
+            case PacketId::ClientConfigC2S:
+                // PLAY only, and that split is MC's own: the game-phase
+                // handleClientInformation defers
+                // (ServerGamePacketListenerImpl.java:1953) because a player
+                // exists to update, while the configuration-phase one
+                // (ServerConfigurationPacketListenerImpl.java:124) does not,
+                // because there is nothing to touch yet. Ours matches — before
+                // PLAY this falls through to the legacy handler, which parks
+                // the value in m_pendingClientViewDistance for the session that
+                // does not exist yet.
+                if (m_phase == ConnectionPhase::PLAY) {
+                    Network::PacketReader reader(payload);
+                    const int renderDistance = std::clamp(static_cast<int>(reader.ReadVarInt()), 2, 32);
+                    const bool vsync = reader.ReadByte() != 0;
+                    const float mouseSensitivity = reader.ReadFloat();
+                    return std::make_unique<Network::Packets::ClientConfigC2SPacketImpl>(
+                        renderDistance, vsync, mouseSensitivity);
+                }
+                break;
+
+            case PacketId::ServerboundAcceptTeleportation: {
+                // Deliberately NOT gated on ConnectionPhase::PLAY. The join
+                // teleport goes out from OnPlayerJoined, several statements
+                // before finalizeLogin flips the phase, so the client's ack can
+                // legitimately arrive while this connection still reads as
+                // LOGIN. Decoding it here queues it for the server thread,
+                // where it is applied in FIFO order — i.e. after LoginStart has
+                // finished and the PLAY listener exists. Rejecting it here
+                // would leave m_awaitingPositionFromClient stuck set, which silently
+                // drops every subsequent movement packet.
+                auto data = Network::Serialization::DeserializeServerboundAcceptTeleportation(payload);
+                return std::make_unique<Network::Packets::AcceptTeleportationC2SPacketImpl>(data.id);
+            }
+
             case PacketId::PlayerLoadedC2S:
                 // MC ServerboundPlayerLoadedPacket: unit codec, nothing to read.
                 if (m_phase == ConnectionPhase::PLAY) {
@@ -897,7 +1042,7 @@ namespace Server {
         
         // Unknown or invalid packet for current state
         Log::Warning("[ServerConnection %u] Unexpected packet 0x%02X in state %d", 
-                    GetConnectionId(), packetId, static_cast<int>(m_phase));
+                    GetConnectionId(), packetId, static_cast<int>(m_phase.load()));
         return nullptr;
     }
 

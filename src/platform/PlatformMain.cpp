@@ -146,6 +146,7 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include <atomic>
 #include <optional>
 #include <thread>   // frame limiter sleep_until
+#include "common/core/Assert.hpp"   // Client::g_clientThreadId
 
 #include "platform/GameDirectory.hpp"
 #include "platform/CrashHandler.hpp"
@@ -1122,6 +1123,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     }
 
     int Run(int argc, char** argv) {
+        // Stamp the client main thread before anything else, so
+        // ASSERT_CLIENT_THREAD is armed for the whole run. Counterpart to
+        // IntegratedServer stamping g_serverThreadId — together they are what
+        // keep packet handlers on the thread that owns the state they touch.
+        Client::g_clientThreadId = std::this_thread::get_id();
+
         // Open the log file FIRST, before anything can fail.
         //
         // Everything below logs, and until this runs those lines only reach

@@ -830,21 +830,41 @@ namespace Server {
     // === PACKET HANDLING ===
 
     void PlayerSession::HandlePlayerMove(const Network::PlayerMoveC2SPacket& packet) {
-        // Drop stale client-predicted moves that were in flight when we issued a
+        // Server thread only. Until the packet-threading rework this ran
+        // inline on the network I/O thread, racing the server tick that
+        // mutates the same ServerPlayer; the assert is the standing proof
+        // that it does not any more.
+        ASSERT_SERVER_THREAD();
+        // Stale client-predicted moves that were in flight when we issued a
         // teleport (the client may have sent 1–2 MovePlayer packets at the old
-        // position before processing our ClientboundPlayerPosition). Applying them
-        // would revert the server-side position to the pre-teleport spot and other
-        // clients would see this player flicker / stay behind. Matches MC's
-        // ServerGamePacketListenerImpl.handleMovePlayer awaitingPositionFromClient
-        // null-check.
-        if (m_connection && m_connection->IsAwaitingTeleportAck()) {
-            return;
-        }
+        // position before processing our ClientboundPlayerPosition). Applying
+        // their POSITION would revert the server-side player to the
+        // pre-teleport spot and other clients would see this player flicker.
+        //
+        // MC handleMovePlayer (:1030) does NOT drop the packet outright — it
+        // takes the rotation and discards only the position:
+        //
+        //     if (this.updateAwaitingTeleport()) {
+        //        this.player.absSnapRotationTo(targetYRot, targetXRot);
+        //     } else { ...full move... }
+        //
+        // which is why looking around still works in vanilla while a teleport
+        // is pending. updateAwaitingTeleport also re-sends the teleport if it
+        // has gone unacknowledged for 20 ticks, so this can never latch.
+        const bool awaitingTeleport =
+            m_connection && m_connection->UpdateAwaitingTeleport();
 
         // Dead players don't move — MC freezes the body until the client
         // sends PERFORM_RESPAWN (ServerGamePacketListenerImpl.handleMovePlayer
         // returns early when player.isImmobile()/dead).
         if (m_player && m_player->isDead()) {
+            return;
+        }
+
+        if (awaitingTeleport) {
+            if (m_player) {
+                m_player->setRotation(packet.rotation.x, packet.rotation.y);
+            }
             return;
         }
 
@@ -963,6 +983,11 @@ namespace Server {
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
+        // Server thread only. Until the packet-threading rework this ran
+        // inline on the network I/O thread, racing the server tick that
+        // mutates the same ServerPlayer; the assert is the standing proof
+        // that it does not any more.
+        ASSERT_SERVER_THREAD();
         // MC acks EVERY ServerboundPlayerActionPacket regardless of outcome
         // (ServerGamePacketListenerImpl.handlePlayerAction line 1332) — the ack
         // is "I processed this", not "I agreed with it". Rejections still get
@@ -1155,6 +1180,11 @@ namespace Server {
     }
     
     void PlayerSession::HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet) {
+        // Server thread only. Until the packet-threading rework this ran
+        // inline on the network I/O thread, racing the server tick that
+        // mutates the same ServerPlayer; the assert is the standing proof
+        // that it does not any more.
+        ASSERT_SERVER_THREAD();
         if (!m_player) return;
         int slot = packet.slot;
         if (slot >= 0 && slot < 9) {
@@ -1317,6 +1347,11 @@ namespace Server {
 #define INVENTORY_CLICK_TRACE 0
 
     void PlayerSession::HandleInventoryClick(const Network::InventoryClickC2SPacket& packet) {
+        // Server thread only. Until the packet-threading rework this ran
+        // inline on the network I/O thread, racing the server tick that
+        // mutates the same ServerPlayer; the assert is the standing proof
+        // that it does not any more.
+        ASSERT_SERVER_THREAD();
         if (!m_player || !m_connection) return;
         // The other path that dereferences menu slots. A click can arrive
         // between the block being broken and the next per-tick diff, so the
@@ -1423,6 +1458,11 @@ namespace Server {
     }
 
     void PlayerSession::HandleInventoryClose(const Network::InventoryCloseC2SPacket&) {
+        // Server thread only. Until the packet-threading rework this ran
+        // inline on the network I/O thread, racing the server tick that
+        // mutates the same ServerPlayer; the assert is the standing proof
+        // that it does not any more.
+        ASSERT_SERVER_THREAD();
         if (!m_player || !m_connection) return;
 #if INVENTORY_CLICK_TRACE
         {

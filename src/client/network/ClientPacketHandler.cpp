@@ -634,4 +634,47 @@ namespace Client {
     }
 #endif
 
+
+    // ========================================================================
+    // FORMERLY LEGACY-REGISTRY PACKETS
+    // ========================================================================
+    //
+    // Each of these used to be dispatched by raw payload id on the network I/O
+    // thread. They are typed packets now, so they arrive here on the client
+    // main thread — the property every MC ClientPacketListener handler gets
+    // from PacketUtils.ensureRunningOnSameThread.
+    //
+    // The bodies stay on ClientConnection because they read connection-owned
+    // state; MC splits it the same way, with the listener dispatching and
+    // `this.connection` holding the state.
+
+    void ClientPacketHandler::onChatMessageS2C(const Network::ChatMessageS2CPacket& packet) {
+        if (m_connection) m_connection->HandleChatMessage(packet);
+    }
+
+    void ClientPacketHandler::onTimeUpdateS2C(const Network::TimeUpdateS2CPacket& packet) {
+        if (m_connection) m_connection->HandleTimeUpdate(packet);
+    }
+
+    void ClientPacketHandler::onWorldSpawnS2C(const Network::WorldSpawnS2CPacket& packet) {
+        if (m_connection) m_connection->HandleWorldSpawn(packet);
+    }
+
+    void ClientPacketHandler::onPlayerInfoS2C(const Network::PlayerInfoS2CPacket& packet) {
+        if (m_connection) m_connection->HandlePlayerInfo(packet);
+    }
+
+    void ClientPacketHandler::onClientboundPlayerPosition(
+            const Network::ClientboundPlayerPositionPacket& packet) {
+        if (m_connection) m_connection->HandleClientboundPlayerPosition(packet);
+    }
+
+    void ClientPacketHandler::onBlockEntityDataS2C(const Network::BlockEntityDataS2CPacket& packet) {
+        if (m_connection) m_connection->HandleBlockEntityData(packet);
+    }
+
+    void ClientPacketHandler::onBlockEntityRemoveS2C(const Network::BlockEntityRemoveS2CPacket& packet) {
+        if (m_connection) m_connection->HandleBlockEntityRemove(packet);
+    }
+
 } // namespace Client

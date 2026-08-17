@@ -80,14 +80,27 @@ namespace Server {
         // Send initial game data
         m_connection.sendInitialGameData();
         
+        // ── EVERYTHING BELOW THIS LINE MUST NOT TOUCH `this` ───────────────
+        //
+        // OnPlayerJoined switches the connection to PLAY, which replaces
+        // ServerConnection::m_listener — the unique_ptr that owns THIS object.
+        // The instance survives the call only because ServerConnection parks
+        // displaced listeners until the dispatch returns (see RetireListener);
+        // even so, treating `this` as live past here is asking for the
+        // use-after-free that reading m_connection here caused.
+        //
+        // So bind the connection to a local first. It is a separate object with
+        // its own lifetime and stays valid regardless.
+        ServerConnection& connection = m_connection;
+
         // Notify server that player has joined
         // This will create the PlayerSession and ServerPlayer
         if (m_server) {
             // Get shared_ptr from ServerConnection (which inherits enable_shared_from_this)
-            auto connPtr = std::static_pointer_cast<ServerConnection>(m_connection.shared_from_this());
+            auto connPtr = std::static_pointer_cast<ServerConnection>(connection.shared_from_this());
             m_server->OnPlayerJoined(connPtr);
         }
-        
+
         // Get the PlayerSession that was just created by PlayerSessionManager
         PlayerSession* session = nullptr;
         if (Server::g_integratedServer) {
@@ -105,16 +118,29 @@ namespace Server {
         // Session is REQUIRED for PLAY state
         if (!session) {
             Log::Error("[LoginPacketListener] Failed to get PlayerSession for player %s", username.c_str());
-            m_connection.SendDisconnect("Server error: Failed to create player session");
+            connection.SendDisconnect("Server error: Failed to create player session");
             return;
         }
-        
-        // Switch to PLAY protocol state with session reference
-        // This replaces the current listener, so it must be done after all operations
-        // that might use this LoginPacketListener instance
-        m_connection.setProtocolState(Network::ProtocolState::PLAY, session);
-        
-        Log::Info("[LoginPacketListener] Player %s successfully logged in and switched to PLAY state", 
+
+        // The switch to PLAY is NOT done here any more. IntegratedServer::
+        // OnPlayerJoined performs it the moment the session is wired, before it
+        // sends any join packet — mirroring MC PlayerList.placeNewPlayer, where
+        // setupInboundProtocol (:154) precedes every send and the teleport
+        // (:179). Doing it here meant the join teleport went out while the
+        // connection still read as LOGIN, and the client's ack raced us.
+        //
+        // Verify rather than assume: if OnPlayerJoined bailed before the
+        // switch, the connection would sit in LOGIN with a live session and
+        // silently ignore everything the client sends.
+        if (connection.getPhase() != ServerConnection::ConnectionPhase::PLAY) {
+            Log::Error("[LoginPacketListener] Player %s has a session but the connection "
+                       "never reached PLAY — OnPlayerJoined did not complete",
+                       username.c_str());
+            connection.SendDisconnect("Server error: Failed to enter play state");
+            return;
+        }
+
+        Log::Info("[LoginPacketListener] Player %s successfully logged in and switched to PLAY state",
                   username.c_str());
     }
 

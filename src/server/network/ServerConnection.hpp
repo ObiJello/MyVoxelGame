@@ -7,7 +7,10 @@
 #include "common/network/ProtocolTypes.hpp"
 #include "common/network/IPacketListener.hpp"
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
+#include <glm/glm.hpp>
 #include <memory>
+#include <optional>
+#include <vector>
 #include <string>
 #include <atomic>
 
@@ -125,14 +128,41 @@ namespace Server {
             Teleport(x, y, z, yRot, xRot, 0.0, 0.0, 0.0);
         }
 
-        // True while a server-initiated teleport is outstanding (Teleport() was called
-        // but the client hasn't echoed the matching ServerboundAcceptTeleportation id
-        // yet). PlayerSession uses this to drop stale C2S position packets that were
-        // already in flight at the old location — otherwise they snap the server-side
-        // ServerPlayer back to the pre-teleport position and other clients see the
-        // teleported player flicker / stay at the old spot. Mirrors MC's
-        // ServerGamePacketListenerImpl.awaitingPositionFromClient null-check.
-        bool IsAwaitingTeleportAck() const { return m_awaitingTeleportAck; }
+        // Port of MC ServerGamePacketListenerImpl.updateAwaitingTeleport
+        // (:1148). Returns true while a server-initiated teleport is
+        // outstanding — PlayerSession uses that to ignore the POSITION in C2S
+        // move packets that were already in flight at the old location, which
+        // would otherwise snap the ServerPlayer back and make other clients see
+        // the teleported player flicker.
+        //
+        // The important half is the retry. If the ack has not arrived within 20
+        // ticks it RE-SENDS the teleport, forever, so a dropped or discarded
+        // ack costs one second rather than wedging the player for the rest of
+        // the session. That is not a nicety: the old one-shot bool version is
+        // exactly how a single lost ack froze movement on Windows, which then
+        // presented as "I can't hit mobs" once the player walked out of reach
+        // of their own frozen server-side position.
+        //
+        // Must be called from the server thread (it can send a packet).
+        bool UpdateAwaitingTeleport();
+
+        // Clear the gate for a client-echoed teleport id (MC
+        // ServerGamePacketListenerImpl.handleAcceptTeleportPacket). Called from
+        // ServerPlayPacketListener, i.e. on the SERVER thread — see the comment
+        // on the decode case in ServerConnection::DecodePacket for why this
+        // packet must not be handled inline on the network I/O thread.
+        void AcceptTeleportation(int32_t teleportId);
+
+        // Chat + command dispatch. Lives on the connection rather than the
+        // listener because it reads m_playerName / m_server / *this to format
+        // and broadcast; the listener calls it. Server thread only.
+        void HandleChatMessage(const Network::ChatMessageC2SPacket& packet);
+
+        // Apply client settings (render distance is the one that matters).
+        // Reached from two places on purpose, mirroring MC: the typed PLAY-phase
+        // path via the listener, and the pre-PLAY inline path where there is no
+        // session yet and the value is parked for one.
+        void ApplyClientSettings(int renderDistance, bool vsync, float mouseSensitivity);
 
         // ========================================================================
         // PACKET HANDLERS (OVERRIDE FROM BASE)
@@ -140,6 +170,7 @@ namespace Server {
         
         Network::PacketPtr DecodePacket(uint8_t packetId, const std::vector<uint8_t>& payload) override;
         void OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) override;
+        bool ShouldDeferPacket(uint8_t packetId) const override;
         void OnConnected() override;
         void OnDisconnected() override;
         void OnError(const error_code& error) override;
@@ -159,33 +190,21 @@ namespace Server {
         // Handle login start
         void HandleLoginStart(const std::vector<uint8_t>& payload);
         
-        // Handle block action
-        void HandleBlockAction(const std::vector<uint8_t>& payload);
-        
-        // Handle player move
-        void HandlePlayerMove(const std::vector<uint8_t>& payload);
-        
-        // Handle chat message
-        void HandleChatMessage(const std::vector<uint8_t>& payload);
-        
-        // Handle client settings
+        // Pre-PLAY client settings, still on the raw-payload path — see
+        // ApplyClientSettings. Every other C2S packet now has a typed
+        // representation and reaches the listener on the server thread.
         void HandleClientSettings(const std::vector<uint8_t>& payload);
-
-        // Handle held item change
-        void HandleHeldItemChange(const std::vector<uint8_t>& payload);
-
-        // Handle inventory click and close
-        void HandleInventoryClick(const std::vector<uint8_t>& payload);
-        void HandleInventoryClose(const std::vector<uint8_t>& payload);
-
-        // Handle ack for a previously sent ClientboundPlayerPosition (MC: handleAcceptTeleportPacket).
-        // Validates the id matches m_awaitingTeleport — stale acks are ignored.
-        void HandleAcceptTeleportation(const std::vector<uint8_t>& payload);
 
         // ========================================================================
         // INTERNAL HELPERS
         // ========================================================================
         
+        // Park the outgoing listener so it outlives the handler that is
+        // (usually) still running inside it. See m_retiredListeners.
+        void RetireListener() {
+            if (m_listener) m_retiredListeners.push_back(std::move(m_listener));
+        }
+
         // Validate packet size
         bool ValidatePacketSize(const std::vector<uint8_t>& payload, size_t expectedMin);
         
@@ -215,15 +234,47 @@ namespace Server {
         // client must echo this id back so we can ignore stale C2S position packets that
         // were in flight before the teleport.
         int32_t m_awaitingTeleport = 0;
-        // True between Teleport() and the matching HandleAcceptTeleportation. See
-        // IsAwaitingTeleportAck() above for the gory details.
-        bool    m_awaitingTeleportAck = false;
+        // MC ServerGamePacketListenerImpl.awaitingPositionFromClient: the
+        // position we teleported the player to, held until the client echoes
+        // the id back. Engaged = a teleport is outstanding. A nullable POSITION
+        // rather than a bare bool because the retry below has to re-send it.
+        std::optional<glm::dvec3> m_awaitingPositionFromClient;
+        // MC awaitingTeleportTime — the tick the current teleport was issued,
+        // for the 20-tick retry. Paired with m_tickCount, bumped in tick().
+        int32_t m_awaitingTeleportTime = 0;
+        int32_t m_tickCount = 0;
         
         // Connection state
-        ConnectionPhase m_phase = ConnectionPhase::HANDSHAKING;
+        // Atomic because it is genuinely cross-thread now: written on the
+        // SERVER thread (setProtocolState, from OnPlayerJoined) and read on the
+        // NETWORK I/O thread by DecodePacket and — critically —
+        // ShouldDeferPacket, which uses it to decide whether a packet may run
+        // inline. A stale read there would put a packet on the wrong thread,
+        // which is the exact failure this whole rework exists to prevent.
+        // Relaxed ordering is enough: nothing is published through this flag,
+        // and the packet queue provides the ordering that matters.
+        std::atomic<ConnectionPhase> m_phase{ConnectionPhase::HANDSHAKING};
         
         // Current packet listener (based on protocol state)
         std::unique_ptr<Network::IPacketListener> m_listener;
+
+        // Listeners displaced by setProtocolState, kept alive until the current
+        // packet dispatch returns.
+        //
+        // A protocol switch usually happens FROM INSIDE a handler on the
+        // listener being replaced — LoginPacketListener::finalizeLogin is the
+        // canonical case. Assigning straight over m_listener destroys that
+        // object while its own method is still on the stack, so every member
+        // access after the call is a use-after-free. MC gets away with the same
+        // pattern (Connection.setupInboundProtocol reassigns this.packetListener
+        // mid-handler) only because the GC keeps the old listener alive until
+        // the stack unwinds. This is that guarantee, done by hand.
+        //
+        // A vector, not a single slot: two switches within one dispatch must
+        // not let the second free the listener the first is still running in.
+        // Cleared at the top of each tick() drain iteration, by which point the
+        // previous handler has returned.
+        std::vector<std::unique_ptr<Network::IPacketListener>> m_retiredListeners;
         
         // Keep-alive tracking
         uint64_t m_lastKeepAliveId = 0;

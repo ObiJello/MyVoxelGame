@@ -784,5 +784,137 @@ namespace Packets {
     };
 #endif
 
+    // ========================================================================
+    // THE LAST OF THE LEGACY-REGISTRY PACKETS
+    // ========================================================================
+    //
+    // These eight were the final S2C packets without a typed representation,
+    // which meant they were dispatched by raw payload id. MC has no such path —
+    // every packet is a type and every PLAY-phase client handler runs on the
+    // main thread via PacketUtils.ensureRunningOnSameThread (verified for all
+    // six equivalents in ClientPacketListener). Giving them types is what
+    // retires the second dispatch mechanism entirely.
+    //
+    // Their bodies stay on ClientConnection because they read its state
+    // (world age, spawn position, player id, the chat/time/teleport callbacks).
+    // That mirrors MC, whose ClientPacketListener holds `this.connection` and
+    // reaches through it for exactly the same reason.
+
+    class ChatMessageS2CPacketImpl : public IS2CPacket {
+    private:
+        ChatMessageS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ChatMessageS2CPacketImpl(ChatMessageS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onChatMessageS2C(m_data); }
+        const ChatMessageS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ChatMessageS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class TimeUpdateS2CPacketImpl : public IS2CPacket {
+    private:
+        TimeUpdateS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit TimeUpdateS2CPacketImpl(TimeUpdateS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onTimeUpdateS2C(m_data); }
+        const TimeUpdateS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::TimeUpdate; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class WorldSpawnS2CPacketImpl : public IS2CPacket {
+    private:
+        WorldSpawnS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit WorldSpawnS2CPacketImpl(WorldSpawnS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onWorldSpawnS2C(m_data); }
+        const WorldSpawnS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::WorldSpawn; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PlayerInfoS2CPacketImpl : public IS2CPacket {
+    private:
+        PlayerInfoS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PlayerInfoS2CPacketImpl(PlayerInfoS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPlayerInfoS2C(m_data); }
+        const PlayerInfoS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PlayerInfoS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ClientboundPlayerPositionPacketImpl : public IS2CPacket {
+    private:
+        ClientboundPlayerPositionPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ClientboundPlayerPositionPacketImpl(ClientboundPlayerPositionPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onClientboundPlayerPosition(m_data); }
+        const ClientboundPlayerPositionPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ClientboundPlayerPosition; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class BlockEntityDataS2CPacketImpl : public IS2CPacket {
+    private:
+        BlockEntityDataS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit BlockEntityDataS2CPacketImpl(BlockEntityDataS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onBlockEntityDataS2C(m_data); }
+        const BlockEntityDataS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::BlockEntityDataS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class BlockEntityRemoveS2CPacketImpl : public IS2CPacket {
+    private:
+        BlockEntityRemoveS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit BlockEntityRemoveS2CPacketImpl(BlockEntityRemoveS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onBlockEntityRemoveS2C(m_data); }
+        const BlockEntityRemoveS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::BlockEntityRemoveS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // Block events (MC ClientboundBlockEventPacket). The listener default is a
+    // no-op — the per-BE TriggerEvent hook lands with ChestLidController — but
+    // the id is claimed here rather than left to the raw path, so the dispatch
+    // is already in place when that arrives.
+    class BlockEntityActionS2CPacketImpl : public IS2CPacket {
+    private:
+        BlockEntityActionS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit BlockEntityActionS2CPacketImpl(BlockEntityActionS2CPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onBlockEntityActionS2C(m_data); }
+        const BlockEntityActionS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::BlockEntityActionS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network

@@ -40,6 +40,14 @@ namespace Network {
     struct SetHealthS2CPacket;
     struct BlockChangedAckS2CPacket;
     struct PlayerAbilitiesS2CPacket;
+    struct ChatMessageS2CPacket;
+    struct TimeUpdateS2CPacket;
+    struct WorldSpawnS2CPacket;
+    struct PlayerInfoS2CPacket;
+    struct ClientboundPlayerPositionPacket;
+    struct BlockEntityDataS2CPacket;
+    struct BlockEntityRemoveS2CPacket;
+    struct BlockEntityActionS2CPacket;
 #if ENABLE_PORTAL_GUN
     struct PortalSetS2CPacket;
     struct PortalRemoveS2CPacket;
@@ -192,6 +200,29 @@ namespace Network {
         // Play phase - client reports its own level is ready
         // (MC ServerGamePacketListener.handleAcceptPlayerLoad)
         virtual void onPlayerLoaded() {}
+
+        // Play phase - client echoes a teleport id back
+        // (MC ServerGamePacketListener.handleAcceptTeleportPacket)
+        virtual void onAcceptTeleportation(int32_t teleportId) {}
+
+        // ── The last packets to leave the raw-payload path ─────────────────
+        // All of these reach client world state, so MC's equivalents in
+        // ClientPacketListener all call ensureRunningOnSameThread. Declaring
+        // them here is what lets them be typed, and therefore queued.
+        virtual void onChatMessageS2C(const ChatMessageS2CPacket& packet) {}
+        virtual void onTimeUpdateS2C(const TimeUpdateS2CPacket& packet) {}
+        virtual void onWorldSpawnS2C(const WorldSpawnS2CPacket& packet) {}
+        virtual void onPlayerInfoS2C(const PlayerInfoS2CPacket& packet) {}
+        virtual void onClientboundPlayerPosition(const ClientboundPlayerPositionPacket& packet) {}
+        virtual void onBlockEntityDataS2C(const BlockEntityDataS2CPacket& packet) {}
+        virtual void onBlockEntityRemoveS2C(const BlockEntityRemoveS2CPacket& packet) {}
+        // No-op by default until the per-BE event hook exists — see the impl.
+        virtual void onBlockEntityActionS2C(const BlockEntityActionS2CPacket& packet) {}
+
+        // Play phase - client settings (MC ServerboundClientInformationPacket).
+        // Passed as fields rather than the struct because ClientConfigC2SPacket
+        // carries no deserializer; the wire read lives in DecodePacket.
+        virtual void onClientConfigC2S(int renderDistance, bool vsync, float mouseSensitivity) {}
     };
 
 } // namespace Network

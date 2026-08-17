@@ -10,6 +10,14 @@ namespace Server {
     extern std::thread::id g_serverThreadId;
 }
 
+// Client main-thread assertion support. Set once in PlatformMain::Run.
+// This is the counterpart to g_serverThreadId and exists for the same reason:
+// packet handlers must run on the thread that owns the state they touch, and
+// an assert is the only way to keep that true as handlers get added.
+namespace Client {
+    extern std::thread::id g_clientThreadId;
+}
+
 // Thread assertion macros for debug builds
 #ifdef NDEBUG
     // Release build - no assertions
@@ -36,8 +44,15 @@ namespace Server {
             } \
         } while(0)
     
-    // Client thread assertion would require client thread tracking
-    #define ASSERT_CLIENT_THREAD() ((void)0)
+    #define ASSERT_CLIENT_THREAD() \
+        do { \
+            if (Client::g_clientThreadId != std::thread::id() && \
+                std::this_thread::get_id() != Client::g_clientThreadId) { \
+                fprintf(stderr, "ASSERTION FAILED: Not on client main thread! File: %s, Line: %d\n", \
+                        __FILE__, __LINE__); \
+                assert(false && "Not on client main thread"); \
+            } \
+        } while(0)
 #endif
 
 // General assertion macro

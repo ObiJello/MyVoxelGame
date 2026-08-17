@@ -127,6 +127,22 @@ namespace Network {
         
         // Legacy callback for compatibility (will be removed)
         virtual void OnPacketReceived(uint8_t packetId, const std::vector<uint8_t>& payload) {}
+
+        // Should an UNDECODED packet be queued for the owning thread rather
+        // than run inline here on the network I/O thread?
+        //
+        // This is the one decision point for MC's threading invariant. MC
+        // spells it per-handler — every method in ServerGamePacketListenerImpl
+        // opens with PacketUtils.ensureRunningOnSameThread, while
+        // ServerLoginPacketListenerImpl has none at all — so the rule is
+        // "PLAY defers, login/handshake does not". Expressing it once here
+        // rather than ~60 times means a new handler cannot accidentally omit
+        // it. Derived classes narrow it; the base default is conservative.
+        //
+        // Note this only governs the LEGACY path. Decoded packets are always
+        // queued, which is why migrating a handler to a typed packet
+        // (Stage 4) is always safe.
+        virtual bool ShouldDeferPacket(uint8_t packetId) const { return false; }
         
         // Called when connection is established
         virtual void OnConnected() {}

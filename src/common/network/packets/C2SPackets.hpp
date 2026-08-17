@@ -228,6 +228,118 @@ namespace Packets {
 
 
     // ========================================================================
+    // HELD ITEM CHANGE / INVENTORY CLICK / INVENTORY CLOSE / CLIENT SETTINGS
+    // ========================================================================
+    //
+    // These four were the last C2S packets handled by the legacy raw-payload
+    // registry, i.e. inline on the network I/O thread while the server thread
+    // was ticking the very ServerPlayer and inventory they mutate. Giving them
+    // typed representations puts them on the one path MC has: decode on the
+    // network thread, apply on the server thread.
+
+    class HeldItemChangeC2SPacketImpl : public IC2SPacket {
+    private:
+        HeldItemChangeC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit HeldItemChangeC2SPacketImpl(HeldItemChangeC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onHeldItemChangeC2S(m_data);
+        }
+        const HeldItemChangeC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::HeldItemChange; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class InventoryClickC2SPacketImpl : public IC2SPacket {
+    private:
+        InventoryClickC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit InventoryClickC2SPacketImpl(InventoryClickC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onInventoryClickC2S(m_data);
+        }
+        const InventoryClickC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::InventoryClickC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class InventoryCloseC2SPacketImpl : public IC2SPacket {
+    private:
+        InventoryCloseC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit InventoryCloseC2SPacketImpl(InventoryCloseC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onInventoryCloseC2S(m_data);
+        }
+        PacketId getId() const override { return PacketId::InventoryCloseC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundClientInformationPacket. Unlike the three above this is a
+    // "common" packet in MC and its handler carries no ensureRunningOnSameThread
+    // call — but ours reaches IntegratedServer::OnClientSettingsReceived, which
+    // touches session view distances, so it belongs on the server thread.
+    class ClientConfigC2SPacketImpl : public IC2SPacket {
+    private:
+        int   m_renderDistance;
+        bool  m_vsync;
+        float m_mouseSensitivity;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        ClientConfigC2SPacketImpl(int renderDistance, bool vsync, float mouseSensitivity)
+            : m_renderDistance(renderDistance)
+            , m_vsync(vsync)
+            , m_mouseSensitivity(mouseSensitivity)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onClientConfigC2S(m_renderDistance, m_vsync, m_mouseSensitivity);
+        }
+        PacketId getId() const override { return PacketId::ClientConfigC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+
+    // ========================================================================
+    // ACCEPT TELEPORTATION PACKET
+    // ========================================================================
+
+    // MC ServerboundAcceptTeleportationPacket. This one is decoded rather than
+    // left to the legacy registry ON PURPOSE, and the distinction is
+    // load-bearing: decoded packets are queued and applied on the SERVER
+    // thread, while undecoded ones run inline on the network I/O thread. The
+    // ack races the login handshake — it can arrive before the server thread
+    // has finished finalizeLogin and flipped the connection to PLAY — so
+    // handling it off-thread meant it got dropped by the phase check and the
+    // teleport gate never cleared. Queuing it puts it back in FIFO order
+    // behind LoginStart, which is what MC's
+    // PacketUtils.ensureRunningOnSameThread guarantees for every game packet.
+    class AcceptTeleportationC2SPacketImpl : public IC2SPacket {
+    private:
+        int32_t m_id;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit AcceptTeleportationC2SPacketImpl(int32_t id)
+            : m_id(id)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onAcceptTeleportation(m_id);
+        }
+        int32_t getTeleportId() const { return m_id; }
+        PacketId getId() const override { return PacketId::ServerboundAcceptTeleportation; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+
+    // ========================================================================
     // PLAYER LOADED PACKET
     // ========================================================================
 

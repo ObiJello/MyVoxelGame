@@ -71,6 +71,8 @@
 #include "packets/game/ChatMessageC2SPacket.hpp"
 #include "packets/game/ClientConfigC2SPacket.hpp"
 #include "packets/game/PlayerAbilitiesC2SPacket.hpp"
+#include "packets/game/WorldStateS2CPackets.hpp"
+#include "packets/game/ChatMessageS2CPacket.hpp"
 
 #include "PacketRegistry.hpp"
 

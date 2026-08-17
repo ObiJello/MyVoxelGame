@@ -3,11 +3,17 @@
 #include "ClientConnection.hpp"
 #include "ClientPacketHandler.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Assert.hpp"   // Client::g_clientThreadId
 
 namespace Client {
 
     // Global instance
     NetworkClient* g_networkClient = nullptr;
+
+    // Declared in common/core/Assert.hpp; stamped by PlatformMain::Run. Lives
+    // here rather than in PlatformMain so the launcher and any client-only
+    // tooling link cleanly without dragging in the game's main().
+    std::thread::id g_clientThreadId;
 
     NetworkClient::NetworkClient(net::io_context& ioContext)
         : m_ioContext(ioContext)
@@ -43,6 +49,10 @@ namespace Client {
             // Create ClientConnection
             m_connection = std::make_shared<ClientConnection>(std::move(socket), this);
             m_connection->Start();
+            // MC ClientPacketListener holds `this.connection`; the handler
+            // needs it to reach connection-owned state and to send the
+            // teleport ack.
+            if (m_packetHandler) m_packetHandler->SetConnection(m_connection.get());
             
             m_state = ClientState::CONNECTED;
             m_stats.connectedTime = std::chrono::steady_clock::now();
@@ -121,7 +131,13 @@ namespace Client {
                             // Create ClientConnection
                             m_connection = std::make_shared<ClientConnection>(std::move(*socket), this);
                             m_connection->Start();
-                            
+                            // MC ClientPacketListener holds `this.connection`;
+                            // the handler needs it to reach connection-owned
+                            // state and to send the teleport ack.
+                            if (m_packetHandler) {
+                                m_packetHandler->SetConnection(m_connection.get());
+                            }
+
                             // CRITICAL: Send handshake immediately to prevent server EOF
                             m_connection->StartHandshake(m_playerName, m_playerColor,
                                                          m_serverHost, m_serverPort);

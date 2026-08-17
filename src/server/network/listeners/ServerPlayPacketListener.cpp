@@ -97,8 +97,18 @@ namespace Server {
     }
     
     void ServerPlayPacketListener::onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) {
-        Log::Debug("[ServerPlayPacketListener] Received ChatMessageC2S: %s", packet.message.c_str());
-        // TODO: Implement chat message handling
+        // MC handleChat / handleChatCommand live on the game listener. Ours
+        // delegates back to the connection because the broadcast needs its
+        // player name and the server's connection list.
+        m_connection.HandleChatMessage(packet);
+    }
+
+    void ServerPlayPacketListener::onClientConfigC2S(int renderDistance, bool vsync,
+                                                     float mouseSensitivity) {
+        // MC ServerGamePacketListenerImpl.handleClientInformation (:1952), which
+        // — unlike its configuration-phase twin — defers to the main thread
+        // because there is a player to update. We are on the server thread here.
+        m_connection.ApplyClientSettings(renderDistance, vsync, mouseSensitivity);
     }
 
     void ServerPlayPacketListener::onHeldItemChangeC2S(const Network::HeldItemChangeC2SPacket& packet) {
@@ -137,6 +147,11 @@ namespace Server {
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
         // Forward to session for per-player adaptive rate control (Minecraft's PlayerChunkSender)
         m_session.OnChunkBatchAck(desiredChunksPerTick);
+    }
+
+    void ServerPlayPacketListener::onAcceptTeleportation(int32_t teleportId) {
+        // MC ServerGamePacketListenerImpl.handleAcceptTeleportPacket.
+        m_connection.AcceptTeleportation(teleportId);
     }
 
     void ServerPlayPacketListener::onPlayerLoaded() {

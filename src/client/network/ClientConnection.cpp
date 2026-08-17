@@ -3,6 +3,7 @@
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
 #include "NetworkClient.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Assert.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/network/packets/S2CPackets.hpp"  // Ensure packet implementations are available
 #include "../world/ClientChunkManager.hpp"
@@ -19,7 +20,8 @@
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
 static std::function<void(const Network::ChatMessageS2CPacket&)> s_chatCallback;
 static std::function<void(uint32_t, const std::string&)> s_chatBubbleCallback;
-// (gameTime, dayTime, doDaylightCycle) — fires on the network I/O thread.
+// (gameTime, dayTime, doDaylightCycle) — fires on the client main thread,
+// from the typed packet queue. It used to fire on the network I/O thread.
 static std::function<void(uint64_t, uint64_t, bool)> s_timeUpdateCallback;
 // Teleport callback — set by PlatformMain to snap the local Player on /tp.
 // Signature: (x, y, z, yaw, pitch, dx, dy, dz). dx/dy/dz are the
@@ -72,38 +74,35 @@ namespace Client {
                 EnableCompression(threshold);
                 Log::Info("[ClientConnection] Compression enabled, threshold %d bytes", threshold);
             });
-        m_packetRegistry.RegisterHandler(PacketId::Disconnect,
-            [this](const std::vector<uint8_t>& p) { HandleDisconnect(p); });
-        m_packetRegistry.RegisterHandler(PacketId::BlockChangeS2C,
-            [this](const std::vector<uint8_t>& p) { HandleBlockChange(p); });
-        m_packetRegistry.RegisterHandler(PacketId::ChatMessageS2C,
-            [this](const std::vector<uint8_t>& p) { HandleChatMessage(p); });
-        m_packetRegistry.RegisterHandler(PacketId::TimeUpdate,
-            [this](const std::vector<uint8_t>& p) { HandleTimeUpdate(p); });
-        // KeepAliveS2C is now handled through typed packet system (KeepAliveS2CPacketImpl)
-        // m_packetRegistry.RegisterHandler(PacketId::KeepAliveS2C,
-        //     [this](const std::vector<uint8_t>& p) { HandleKeepAlive(p); });
-        // PlayerAbilities is handled through the typed packet system
-        // (PlayerAbilitiesS2CPacketImpl) so it applies on the main thread.
-        m_packetRegistry.RegisterHandler(PacketId::WorldSpawn,
-            [this](const std::vector<uint8_t>& p) { HandleWorldSpawn(p); });
-        m_packetRegistry.RegisterHandler(PacketId::PlayerInfoS2C,
-            [this](const std::vector<uint8_t>& p) { HandlePlayerInfo(p); });
-        m_packetRegistry.RegisterHandler(PacketId::ClientboundPlayerPosition,
-            [this](const std::vector<uint8_t>& p) { HandleClientboundPlayerPosition(p); });
-
-        m_packetRegistry.RegisterHandler(PacketId::BlockEntityDataS2C,
-            [this](const std::vector<uint8_t>& p) { HandleBlockEntityData(p); });
-        m_packetRegistry.RegisterHandler(PacketId::BlockEntityRemoveS2C,
-            [this](const std::vector<uint8_t>& p) { HandleBlockEntityRemove(p); });
-        // Stage 4: block-event packets. Stub for now (no animated BEs ship
-        // in this batch); the dispatcher's per-BE TriggerEvent hook lands
-        // alongside Stage 4's ChestLidController + ContainerOpenersCounter.
-        m_packetRegistry.RegisterHandler(PacketId::BlockEntityActionS2C,
-            [](const std::vector<uint8_t>& p) { (void)p; });
+        // That is the whole list. Everything else — chat, time, world spawn,
+        // player info, the position snap, block entities, block events — now
+        // has a typed representation, is decoded in DecodePacket and applied by
+        // ClientPacketHandler on the client main thread. MC has exactly one
+        // path (typed packet -> packet.handle(listener)) and so, from here, do
+        // we; these two survive only because MC's login-phase listener runs on
+        // the Netty thread too.
+        //
+        // Anything added back here runs on the network I/O thread while the
+        // render thread is reading the chunk cache. Don't.
     }
 
     ClientConnection::~ClientConnection() {
+    }
+
+    bool ClientConnection::ShouldDeferPacket(uint8_t packetId) const {
+        // Mirror of ServerConnection::ShouldDeferPacket — see there. On this
+        // side the phase gate is what keeps SetCompression inline, and that is
+        // REQUIRED rather than incidental: the decoder has to switch before the
+        // next frame is read off the socket, so deferring it to the main thread
+        // would leave the I/O thread parsing compressed frames as plaintext.
+        // MC has the same property for the same reason
+        // (ClientHandshakePacketListenerImpl.handleCompression is not
+        // deferred). SetCompression and LoginSuccess both precede the switch to
+        // PLAY, so the phase test covers them.
+        if (m_phase != ConnectionPhase::PLAY) {
+            return false;
+        }
+        return packetId != static_cast<uint8_t>(Network::PacketId::Disconnect);
     }
 
     void ClientConnection::OnConnected() {
@@ -282,17 +281,12 @@ namespace Client {
         }
     }
 
-    void ClientConnection::HandleBlockChange(const std::vector<uint8_t>& payload) {
-        auto packet = Network::Serialization::DeserializeBlockChangeS2C(payload);
 
-        // Queue packet for main thread processing via IncomingPacket queue
-        // The packet will be processed by ClientPacketHandler on the main thread
-        Log::Debug("[ClientConnection] Received block change at (%d, %d, %d) -> block %d",
-                   packet.worldX, packet.worldY, packet.worldZ, static_cast<int>(packet.newBlockId));
-    }
-
-    void ClientConnection::HandleBlockEntityData(const std::vector<uint8_t>& payload) {
-        auto packet = Network::Serialization::DeserializeBlockEntityDataS2C(payload);
+    void ClientConnection::HandleBlockEntityData(const Network::BlockEntityDataS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
         if (!g_clientChunkManager) return;
         const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(packet.worldX, packet.worldZ);
         auto* clientChunk = g_clientChunkManager->GetChunk(chunkPos);
@@ -319,8 +313,11 @@ namespace Client {
         clientChunk->chunkData->SetBlockEntity(lx, packet.worldY, lz, std::move(be));
     }
 
-    void ClientConnection::HandleBlockEntityRemove(const std::vector<uint8_t>& payload) {
-        auto packet = Network::Serialization::DeserializeBlockEntityRemoveS2C(payload);
+    void ClientConnection::HandleBlockEntityRemove(const Network::BlockEntityRemoveS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
         if (!g_clientChunkManager) return;
         const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(packet.worldX, packet.worldZ);
         auto* clientChunk = g_clientChunkManager->GetChunk(chunkPos);
@@ -330,8 +327,11 @@ namespace Client {
         clientChunk->chunkData->RemoveBlockEntity(lx, packet.worldY, lz);
     }
 
-    void ClientConnection::HandleChatMessage(const std::vector<uint8_t>& payload) {
-        const auto packet = Network::Serialization::DeserializeChatMessageS2C(payload);
+    void ClientConnection::HandleChatMessage(const Network::ChatMessageS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
 
         // Flattened text for logging and for the speech bubble, which has no
         // room for styling anyway.
@@ -358,11 +358,14 @@ namespace Client {
         }
     }
 
-    void ClientConnection::HandleTimeUpdate(const std::vector<uint8_t>& payload) {
-        Network::PacketReader reader(payload);
-        m_worldAge = reader.ReadLong();
-        m_timeOfDay = reader.ReadLong();
-        m_doDaylightCycle = reader.ReadByte() != 0;
+    void ClientConnection::HandleTimeUpdate(const Network::TimeUpdateS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
+        m_worldAge = packet.worldAge;
+        m_timeOfDay = packet.timeOfDay;
+        m_doDaylightCycle = packet.doDaylightCycle;
 
         if (s_timeUpdateCallback) {
             s_timeUpdateCallback(m_worldAge, m_timeOfDay, m_doDaylightCycle);
@@ -372,18 +375,24 @@ namespace Client {
             m_worldAge, m_timeOfDay, m_doDaylightCycle ? 1 : 0);
     }
 
-    void ClientConnection::HandleWorldSpawn(const std::vector<uint8_t>& payload) {
-        Network::PacketReader reader(payload);
-        m_spawnPosition.x = reader.ReadInt();
-        m_spawnPosition.y = reader.ReadInt();
-        m_spawnPosition.z = reader.ReadInt();
+    void ClientConnection::HandleWorldSpawn(const Network::WorldSpawnS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
+        m_spawnPosition.x = static_cast<float>(packet.x);
+        m_spawnPosition.y = static_cast<float>(packet.y);
+        m_spawnPosition.z = static_cast<float>(packet.z);
 
         Log::Info("[ClientConnection] World spawn set to (%.0f, %.0f, %.0f)",
             m_spawnPosition.x, m_spawnPosition.y, m_spawnPosition.z);
     }
 
-    void ClientConnection::HandleClientboundPlayerPosition(const std::vector<uint8_t>& payload) {
-        auto packet = Network::Serialization::DeserializeClientboundPlayerPosition(payload);
+    void ClientConnection::HandleClientboundPlayerPosition(const Network::ClientboundPlayerPositionPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
 
         // MC's client computes absolute values from current player state when relative bits are
         // set. Our /tp only ever sends absolute (relatives == 0), so the snap is straightforward.
@@ -407,8 +416,11 @@ namespace Client {
                   packet.id, packet.x, packet.y, packet.z);
     }
 
-    void ClientConnection::HandlePlayerInfo(const std::vector<uint8_t>& payload) {
-        auto packet = Network::Serialization::DeserializePlayerInfoS2C(payload);
+    void ClientConnection::HandlePlayerInfo(const Network::PlayerInfoS2CPacket& packet) {
+        // Client main thread only — reached from the typed packet queue in
+        // DrainIncomingPackets. This ran on the network I/O thread until the
+        // packet-threading rework; the assert is the standing proof it does not.
+        ASSERT_CLIENT_THREAD();
 
         // Don't track our own player ID in the remote player manager — it's only for OTHER players
         // (matching MC: the local player is in PlayerInfo for tab-list purposes, but we don't render
@@ -555,6 +567,52 @@ namespace Client {
                 std::string reason = reader.ReadString();
                 return std::make_unique<DisconnectPacketImpl>(std::move(reason));
             }
+
+            // ── Formerly legacy-registry packets ───────────────────────────
+            // Each of these reaches client world state — the chunk cache, the
+            // remote player list, the local player's position — so MC's
+            // equivalents in ClientPacketListener all call
+            // ensureRunningOnSameThread. Decoding them here is what puts them
+            // on the client main thread instead of the network I/O thread.
+            case PacketId::ChatMessageS2C: {
+                auto data = Network::Serialization::DeserializeChatMessageS2C(payload);
+                return std::make_unique<Network::Packets::ChatMessageS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::TimeUpdate: {
+                auto data = Network::Serialization::DeserializeTimeUpdateS2C(payload);
+                return std::make_unique<Network::Packets::TimeUpdateS2CPacketImpl>(data);
+            }
+
+            case PacketId::WorldSpawn: {
+                auto data = Network::Serialization::DeserializeWorldSpawnS2C(payload);
+                return std::make_unique<Network::Packets::WorldSpawnS2CPacketImpl>(data);
+            }
+
+            case PacketId::PlayerInfoS2C: {
+                auto data = Network::Serialization::DeserializePlayerInfoS2C(payload);
+                return std::make_unique<Network::Packets::PlayerInfoS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ClientboundPlayerPosition: {
+                auto data = Network::Serialization::DeserializeClientboundPlayerPosition(payload);
+                return std::make_unique<Network::Packets::ClientboundPlayerPositionPacketImpl>(data);
+            }
+
+            case PacketId::BlockEntityDataS2C: {
+                auto data = Network::Serialization::DeserializeBlockEntityDataS2C(payload);
+                return std::make_unique<Network::Packets::BlockEntityDataS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::BlockEntityRemoveS2C: {
+                auto data = Network::Serialization::DeserializeBlockEntityRemoveS2C(payload);
+                return std::make_unique<Network::Packets::BlockEntityRemoveS2CPacketImpl>(data);
+            }
+
+            case PacketId::BlockEntityActionS2C: {
+                auto data = Network::Serialization::DeserializeBlockEntityActionS2C(payload);
+                return std::make_unique<Network::Packets::BlockEntityActionS2CPacketImpl>(data);
+            }
             
             case PacketId::KeepAliveS2C: {
                 PacketReader reader(payload);
@@ -671,7 +729,16 @@ namespace Client {
         Network::IncomingPacket packet;
         while (TryPopIncoming(packet)) {
             try {
-                if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
+                // Undecoded packet deferred off the I/O thread — run its legacy
+                // registry handler here, on the client main thread. Disappears
+                // once every S2C packet has a typed representation.
+                if (auto* raw = dynamic_cast<Network::RawPayloadPacket*>(packet.packet.get())) {
+                    PROFILE_ZONE_N("ApplyDeferredPacket");
+                    if (!m_packetRegistry.HandlePacket(raw->rawId(), raw->payload())) {
+                        Log::Warning("[ClientConnection] Unhandled deferred packet ID 0x%02X",
+                                     raw->rawId());
+                    }
+                } else if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
                     PROFILE_ZONE_N("ApplyPacket");
                     s2cPacket->apply(*handler);
                 }

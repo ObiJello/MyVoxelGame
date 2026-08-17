@@ -1239,8 +1239,24 @@ namespace Server {
 
         // Reach check, server-side. The client picks the target, but a client
         // that picked one 40 blocks away must not get to hit it.
-        constexpr double kMaxReachSq = 6.0 * 6.0;
-        if (attacker->DistanceToSqr(*target) > kMaxReachSq) return;
+        //
+        // MC ServerboundInteractPacket.isWithinRange (:82) ->
+        // Player.isWithinEntityInteractionRange (Player.java:1905):
+        //
+        //     double maxRange = this.entityInteractionRange() + buffer;
+        //     return aabb.distanceToSqr(this.getEyePosition()) < maxRange * maxRange;
+        //
+        // ENTITY_INTERACTION_RANGE defaults to 3.0 and handleInteract passes a
+        // buffer of 3.0, so the magnitude matches the 6.0 we already used — but
+        // MC measures from the player's EYE to the nearest point on the
+        // target's bounding box, not centre to centre. Centre-to-centre makes
+        // tall or wide mobs read as further away than they are, so a legitimate
+        // hit on a spider's flank or an enderman's legs got rejected.
+        constexpr double kEntityInteractionRange = 3.0;   // Attributes.ENTITY_INTERACTION_RANGE
+        constexpr double kReachBuffer            = 3.0;   // handleInteract's slack
+        constexpr double kMaxRangeSq =
+            (kEntityInteractionRange + kReachBuffer) * (kEntityInteractionRange + kReachBuffer);
+        if (target->GetAABBd().DistanceToSqr(attacker->GetEyePosition()) >= kMaxRangeSq) return;
 
         // ── INTERACT (right-click) ─────────────────────────────────────────
         // MC Player.interactOn, in ITS order:
@@ -2037,6 +2053,21 @@ namespace Server {
             }
             Log::Info("[IntegratedServer] Player '%s' (ID: %u) session created and wired to connection %u",
                       playerName.c_str(), playerId, connection->GetConnectionId());
+
+            // ── Switch to PLAY *before* any join packet goes out ────────────
+            //
+            // MC PlayerList.placeNewPlayer:153-154 constructs the game listener
+            // and calls setupInboundProtocol as its first act, and does not
+            // reach connection.teleport until :179. The order matters: the join
+            // teleport provokes an immediate ack from the client, and anything
+            // that arrives before the connection reads as PLAY is answering a
+            // question we have not finished asking.
+            //
+            // This used to happen at the END of finalizeLogin, after the
+            // teleport below. On Windows the ack won that race, the phase check
+            // in the old teleport-ack handler discarded it, and the player's
+            // movement was gated off for the rest of the session.
+            connection->setProtocolState(Network::ProtocolState::PLAY, session.get());
 
             // Apply the world's game mode and sync abilities. Mirrors MC
             // PlayerList.placeNewPlayer applying the level's default game

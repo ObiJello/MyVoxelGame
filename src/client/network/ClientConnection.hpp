@@ -34,6 +34,9 @@ namespace Client {
         
         // Check if logged in
         bool IsLoggedIn() const { return m_loggedIn; }
+
+        // See NetworkConnection::ShouldDeferPacket.
+        bool ShouldDeferPacket(uint8_t packetId) const override;
         
         // Get player name
         const std::string& GetPlayerName() const { return m_playerName; }
@@ -76,45 +79,54 @@ namespace Client {
         // Process incoming packets on main thread
         void DrainIncomingPackets();
 
-    private:
         // ========================================================================
         // PACKET HANDLERS (SERVER → CLIENT)
         // ========================================================================
-        
-        // Handle login success
-        void HandleLoginSuccess(const std::vector<uint8_t>& payload);
-        
-        // Handle disconnect
-        void HandleDisconnect(const std::vector<uint8_t>& payload);
-        
-        // Handle block change
-        void HandleBlockChange(const std::vector<uint8_t>& payload);
+        //
+        // Public, and called from ClientPacketHandler — which is where MC puts
+        // the dispatch (ClientPacketListener) while reaching back through
+        // `this.connection` for connection-owned state, exactly as these do for
+        // the world age, spawn position and player id.
+        //
+        // CLIENT MAIN THREAD ONLY. Every one of these is reached from the typed
+        // packet queue drained in DrainIncomingPackets. They used to run inline
+        // on the network I/O thread, which raced the render thread reading the
+        // very chunk cache they write.
 
         // BlockEntity create/update and remove (Stage 2 of the BE system).
         // Materialise (or destroy) a client-side BlockEntity in the
         // corresponding chunk's per-cell BE map so the dispatcher can render
         // it next frame.
-        void HandleBlockEntityData(const std::vector<uint8_t>& payload);
-        void HandleBlockEntityRemove(const std::vector<uint8_t>& payload);
-        
+        void HandleBlockEntityData(const Network::BlockEntityDataS2CPacket& packet);
+        void HandleBlockEntityRemove(const Network::BlockEntityRemoveS2CPacket& packet);
+
         // Handle chat message
-        void HandleChatMessage(const std::vector<uint8_t>& payload);
-        
+        void HandleChatMessage(const Network::ChatMessageS2CPacket& packet);
+
         // Handle time update
-        void HandleTimeUpdate(const std::vector<uint8_t>& payload);
-        
+        void HandleTimeUpdate(const Network::TimeUpdateS2CPacket& packet);
+
         // Handle world spawn
-        void HandleWorldSpawn(const std::vector<uint8_t>& payload);
+        void HandleWorldSpawn(const Network::WorldSpawnS2CPacket& packet);
 
         // Handle player info update (join/leave with name) — MC: ClientboundPlayerInfoUpdatePacket
-        void HandlePlayerInfo(const std::vector<uint8_t>& payload);
+        void HandlePlayerInfo(const Network::PlayerInfoS2CPacket& packet);
 
         // Handle authoritative position snap from server (MC: ClientboundPlayerPositionPacket).
         // Calls the teleport callback registered by PlatformMain to snap the local Player,
         // then sends ServerboundAcceptTeleportation back with the same id.
-        void HandleClientboundPlayerPosition(const std::vector<uint8_t>& payload);
+        void HandleClientboundPlayerPosition(const Network::ClientboundPlayerPositionPacket& packet);
 
     private:
+        // Login-phase handlers. These stay on the raw-payload path and run on
+        // the network I/O thread, matching MC — ClientHandshakePacketListenerImpl
+        // carries no ensureRunningOnSameThread call. For compression that is
+        // mandatory, not stylistic: the decoder has to switch before the next
+        // frame is read off the socket.
+        void HandleLoginSuccess(const std::vector<uint8_t>& payload);
+        void HandleDisconnect(const std::vector<uint8_t>& payload);
+
+
         // Client reference
         NetworkClient* m_client;
         
