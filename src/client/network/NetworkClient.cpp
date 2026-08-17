@@ -166,9 +166,14 @@ namespace Client {
         
         if (m_connection) {
             m_connection->Close();
+            // Drop the handler's back-pointer BEFORE the connection dies, or it
+            // is left dangling — the handler outlives the connection (it is
+            // owned by NetworkClient, the connection is a shared_ptr that goes
+            // here). Any packet drained after this would call through it.
+            if (m_packetHandler) m_packetHandler->SetConnection(nullptr);
             m_connection.reset();
         }
-        
+
         m_state = ClientState::DISCONNECTED;
         m_stats.disconnectedTime = std::chrono::steady_clock::now();
     }
@@ -204,6 +209,9 @@ namespace Client {
         Log::Info("NetworkClient: Connection closed: %s", reason.c_str());
         
         m_state = ClientState::DISCONNECTED;
+        // Same reason as in Disconnect(): the handler's back-pointer must not
+        // outlive the connection it points at.
+        if (m_packetHandler) m_packetHandler->SetConnection(nullptr);
         m_connection.reset();
         m_stats.disconnectedTime = std::chrono::steady_clock::now();
         
