@@ -1745,6 +1745,10 @@ if(CURL_FOUND)
         src/common/core/Log.cpp
         src/common/entity/PlayerColors.cpp  # palette table shared with the game
         src/platform/GameDirectory.cpp
+        # GameDirectory::ReadLevelDat parses level.dat to list existing
+        # Minecraft worlds, so the launcher needs the NBT reader too. Its only
+        # dependency is Log.cpp, already above.
+        src/server/world/storage/NBTParser.cpp
         ${MINIZIP_SOURCES}
     )
 
