@@ -83,7 +83,7 @@ def load_item_tags():
     for name in os.listdir(ITEM_TAG_DIR):
         if not name.endswith(".json"):
             continue
-        with open(os.path.join(ITEM_TAG_DIR, name)) as f:
+        with open(os.path.join(ITEM_TAG_DIR, name), encoding="utf-8") as f:
             data = json.load(f)
         tags[strip_ns(name[:-len(".json")])] = data.get("values", [])
     return tags
@@ -245,7 +245,7 @@ def collect():
     for name in sorted(os.listdir(RECIPE_DIR)):
         if not name.endswith(".json"):
             continue
-        with open(os.path.join(RECIPE_DIR, name)) as f:
+        with open(os.path.join(RECIPE_DIR, name), encoding="utf-8") as f:
             data = json.load(f)
 
         kind = data.get("type", "")
@@ -368,7 +368,7 @@ def emit(collector, recipes, cooking, stonecutting, fuel, skipped):
         r["cell_begin"] = len(cell_pool)
         cell_pool.extend(r["cells"])
 
-    with open(os.path.join(OUT_DIR, "GeneratedRecipeList.hpp"), "w") as f:
+    with open(os.path.join(OUT_DIR, "GeneratedRecipeList.hpp"), "w", encoding="utf-8") as f:
         f.write(HEADER.format(ext="hpp"))
         f.write("""#pragma once
 
@@ -462,7 +462,7 @@ namespace Game {
 } // namespace Game
 """)
 
-    with open(os.path.join(OUT_DIR, "GeneratedRecipeList.cpp"), "w") as f:
+    with open(os.path.join(OUT_DIR, "GeneratedRecipeList.cpp"), "w", encoding="utf-8") as f:
         f.write(HEADER.format(ext="cpp"))
         f.write('#include "GeneratedRecipeList.hpp"\n\nnamespace Game {\n\n')
 

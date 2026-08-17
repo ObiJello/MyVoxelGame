@@ -2,6 +2,8 @@
 #include "HandshakeC2S.hpp"
 #include "common/network/IPacketListener.hpp"
 
+#include <stdexcept>
+
 namespace Network {
 
     void HandshakeC2SPacket::apply(IPacketListener& listener) {

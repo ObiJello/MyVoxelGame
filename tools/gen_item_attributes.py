@@ -77,12 +77,12 @@ def cf(v):
 
 
 def main():
-    mat_src = open(MATERIAL).read()
+    mat_src = open(MATERIAL, encoding="utf-8").read()
     bonus = {m.group(1): float(m.group(2)) for m in MATERIAL_BONUS.finditer(mat_src)}
     if not bonus:
         raise SystemExit("no ToolMaterial rows parsed — ToolMaterial.java changed shape")
 
-    items_src = open(ITEMS).read()
+    items_src = open(ITEMS, encoding="utf-8").read()
 
     rows = {}
     for m in PROP_FORM.finditer(items_src):
@@ -100,7 +100,7 @@ def main():
         if not os.path.exists(path):
             print("  %s: no source for %s.createAttributes()" % (slug, cls))
             continue
-        found = dict(ATTR_BUILDER_FORM.findall(open(path).read()))
+        found = dict(ATTR_BUILDER_FORM.findall(open(path, encoding="utf-8").read()))
         if "ATTACK_DAMAGE" not in found:
             continue   # a non-weapon that still ships attributes
         rows[slug] = (slug, "-",
@@ -113,7 +113,7 @@ def main():
     # Resolve slugs against the generated item table so a weapon MC has and this
     # port does not is dropped loudly rather than emitting a dangling id.
     known = set(re.findall(r'//\s*"([a-z0-9_]+)"',
-                           open("src/common/entity/GeneratedItemList.hpp").read()))
+                           open("src/common/entity/GeneratedItemList.hpp", encoding="utf-8").read()))
     missing = sorted(s for s in rows if s not in known)
 
     emitted = [(s, rows[s]) for s in sorted(rows) if s in known]
@@ -241,8 +241,8 @@ namespace Game {
         "",
     ])
 
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp)
 
     print("%s: %d weapons" % (OUT_HPP, len(emitted)))
     if missing:

@@ -31,7 +31,7 @@
 namespace Game {
 
     class LivingEntity;
-    class EntityLevel;
+    struct EntityLevel;
     class Brain;
 
     enum class BehaviorStatus : uint8_t { Stopped, Running };

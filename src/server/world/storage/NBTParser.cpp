@@ -4,6 +4,7 @@
 #include <iomanip>
 #include <sstream>
 #include <cstring>
+#include <stdexcept>
 
 namespace World {
 

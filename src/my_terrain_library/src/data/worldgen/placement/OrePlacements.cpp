@@ -1,6 +1,10 @@
 #include "data/worldgen/placement/OrePlacements.h"
 #include "levelgen/carver/CarverConfiguration.h"
 
+// MSVC's STL does not include <deque> transitively (libc++ does) — see the
+// "MSVC compatibility fixes" list in CLAUDE.md.
+#include <deque>
+
 // Reference: net/minecraft/data/worldgen/placement/OrePlacements.java
 
 namespace minecraft {

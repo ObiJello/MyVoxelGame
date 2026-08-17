@@ -41,7 +41,7 @@
 namespace Game {
 
     class LivingEntity;
-    class EntityLevel;
+    struct EntityLevel;
 
     class Brain {
     public:

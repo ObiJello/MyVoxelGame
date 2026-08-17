@@ -6,6 +6,8 @@
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/ProtocolTypes.hpp"
 
+#include <stdexcept>
+
 namespace Server {
     class IHandshakePacketListener;
 }

@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 #include <memory>
+#include <string>
 
 namespace minecraft {
 namespace util {

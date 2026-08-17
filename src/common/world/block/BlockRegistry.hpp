@@ -18,7 +18,7 @@ namespace Server { class ServerPlayer; }
 
 namespace Game {
 
-    class IBlockAccess;
+    struct IBlockAccess;
 
     // Forward declarations only — including BlockInteraction.hpp here would
     // also expose its `class World;` forward decl (Game::World) to every TU

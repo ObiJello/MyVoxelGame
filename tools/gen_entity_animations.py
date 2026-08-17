@@ -156,7 +156,7 @@ def main():
     for f in sorted(os.listdir(DEF_DIR)):
         if not f.endswith("Animation.java"):
             continue
-        src = strip_comments(open(os.path.join(DEF_DIR, f)).read())
+        src = strip_comments(open(os.path.join(DEF_DIR, f), encoding="utf-8").read())
         for name, length, looping, channels in parse_definitions(src):
             anims.append((f[:-5] + "." + name, length, looping, channels))
 
@@ -254,8 +254,8 @@ namespace Render {{
         "",
     ])
 
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp)
     print(f"{OUT_HPP}: {len(anim_rows)} animations, "
           f"{len(ch_rows)} channels, {len(key_rows)} keyframes")
 

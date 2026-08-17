@@ -362,9 +362,9 @@ namespace Game {{
 }} // namespace Game
 """
 
-    with open(OUT_HPP, "w") as f:
+    with open(OUT_HPP, "w", encoding="utf-8") as f:
         f.write(hpp)
-    with open(OUT_CPP, "w") as f:
+    with open(OUT_CPP, "w", encoding="utf-8") as f:
         f.write(cpp)
 
     print(f"slugs with a class: {len(slug2cls)}")

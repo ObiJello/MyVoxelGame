@@ -187,8 +187,17 @@ namespace Input {
             return;
         }
 
-        deltaX = xpos - lastX;
-        deltaY = lastY - ypos; // invert Y so upward motion is positive dy
+        // ACCUMULATE, never assign. GLFW delivers one cursor event per OS mouse
+        // report, and Windows reports at the device's polling rate (125-1000 Hz)
+        // — several events per rendered frame. Assigning here threw away every
+        // event but the last one in the frame, so a fast flick moved the view a
+        // fraction of the distance and the surviving sample varied event to
+        // event, which reads as jittery, "finicky" mouse-look. macOS hides the
+        // bug because Cocoa coalesces motion to roughly one event per frame.
+        // The frame consumes this via GetMouseDelta and clears it with
+        // ResetMouseDelta, so the sum is exactly the motion for that frame.
+        deltaX += xpos - lastX;
+        deltaY += lastY - ypos; // invert Y so upward motion is positive dy
 
         lastX = xpos;
         lastY = ypos;

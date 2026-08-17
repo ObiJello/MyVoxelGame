@@ -23,7 +23,7 @@ namespace Game {
 
     // Forward declaration
     class World;
-    class IBlockAccess;
+    struct IBlockAccess;
 
     // Client-side player controller that handles interaction and (future) networking
     class ClientPlayerController {

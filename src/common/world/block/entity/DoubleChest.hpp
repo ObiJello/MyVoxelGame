@@ -29,7 +29,7 @@
 
 namespace Game {
 
-    class IBlockAccess;
+    struct IBlockAccess;
 
     struct ChestPairing {
         glm::ivec3 partnerPos{0, 0, 0};

@@ -255,6 +255,8 @@ The terrain library uses GCC/Clang-specific features that need MSVC equivalents:
 
 **`Climate.h`, `Palette.h`, `SimpleBitStorage.h`**: Add `#include <string>` — MSVC doesn't include it transitively like GCC/Clang, so `std::to_string` fails.
 
+**`AquaticFeatures.cpp`, `CaveFeatures.cpp`, `OrePlacements.cpp`**: Add `#include <deque>` — same transitive-include difference, for the `static std::deque<PlacedFeature>` pools.
+
 **`NoiseChunk.cpp`**: Replace `__restrict__` with `#ifdef _MSC_VER __restrict` (MSVC uses different keyword).
 
 ### MapBlockType thread safety
@@ -606,6 +608,21 @@ All external dependencies are vendored in `ext/`:
 - STB Image (texture loading)
 - nlohmann/json (via FetchContent)
 - Boost.Asio (networking, header-only)
+
+### Windows/MSVC portability (things Clang accepts and MSVC does not)
+
+Code written on the Mac builds clean under Clang and then fails on Windows in
+three recurring ways. Check these before blaming the Windows toolchain:
+
+- **Transitive includes.** libc++ pulls in `<stdexcept>`, `<string>`, `<deque>`
+  and friends through other headers; MSVC's STL does not. Include what you use.
+- **Zero-length arrays.** `static const T k_foo[] = {};` is a Clang extension —
+  MSVC gives C2466. The generators emit `nullptr` + count 0 instead (see
+  `tools/gen_mob_loot.py`).
+- **`class` vs `struct` in forward declarations.** MSVC mangles the two tags
+  differently (`V` vs `U`), so a `class Foo;` forward declaration of a `struct
+  Foo` links fine on Clang and gives LNK2019 on MSVC, pointing at a function
+  whose definition plainly exists. Match the tag to the definition.
 
 ### Code Organization
 - Platform-specific code isolated in `src/platform/`

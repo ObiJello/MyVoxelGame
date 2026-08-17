@@ -7,6 +7,7 @@
 #include <memory>
 #include <unordered_map>
 #include <algorithm>
+#include <string>
 
 namespace minecraft {
 namespace util {

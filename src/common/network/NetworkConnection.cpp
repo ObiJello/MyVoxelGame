@@ -3,6 +3,7 @@
 #include "PacketTypes.hpp"
 #include "../core/Log.hpp"
 #include <algorithm>
+#include <stdexcept>
 #include <zlib.h>
 
 namespace Network {

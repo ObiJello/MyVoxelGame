@@ -47,7 +47,7 @@ def existing_order(path):
     """Slugs already in the generated file, in their current id order."""
     if not os.path.exists(path):
         return []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return re.findall(r'BIOME_DEF\(\s*"([a-z0-9_]+)"', f.read())
 
 
@@ -60,7 +60,7 @@ def main():
         if not name.endswith(".json"):
             continue
         slug = name[:-5]
-        with open(os.path.join(SRC, name)) as f:
+        with open(os.path.join(SRC, name), encoding="utf-8") as f:
             d = json.load(f)
         e = d.get("effects", {})
         biomes[slug] = {
@@ -116,7 +116,7 @@ def main():
         )
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w") as f:
+    with open(OUT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
     print(f"wrote {len(order)} biomes to {os.path.relpath(OUT, REPO)}")

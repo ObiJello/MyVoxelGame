@@ -5,50 +5,10 @@
 
 namespace Game {
 
-    // allay
-    static const MobLootEntry k_allay[] = {
-        // (no supported entries)
-    };
-
-    // armadillo
-    static const MobLootEntry k_armadillo[] = {
-        // (no supported entries)
-    };
-
-    // axolotl
-    static const MobLootEntry k_axolotl[] = {
-        // (no supported entries)
-    };
-
-    // bat
-    static const MobLootEntry k_bat[] = {
-        // (no supported entries)
-    };
-
-    // bee
-    static const MobLootEntry k_bee[] = {
-        // (no supported entries)
-    };
-
-    // blaze
-    static const MobLootEntry k_blaze[] = {
-        // (no supported entries)
-    };
-
     // bogged
     static const MobLootEntry k_bogged[] = {
         { Items::Arrow, 0, 2, Items::Air },
         { Items::Bone, 0, 2, Items::Air },
-    };
-
-    // breeze
-    static const MobLootEntry k_breeze[] = {
-        // (no supported entries)
-    };
-
-    // camel
-    static const MobLootEntry k_camel[] = {
-        // (no supported entries)
     };
 
     // camel_husk
@@ -88,11 +48,6 @@ namespace Game {
         { Items::Beef, 1, 3, Items::CookedBeef },
     };
 
-    // creaking
-    static const MobLootEntry k_creaking[] = {
-        // (no supported entries)
-    };
-
     // creeper
     static const MobLootEntry k_creeper[] = {
         { Items::Gunpowder, 0, 2, Items::Air },
@@ -121,34 +76,14 @@ namespace Game {
         { Items::TideArmorTrimSmithingTemplate, 1, 1, Items::Air },
     };
 
-    // ender_dragon
-    static const MobLootEntry k_ender_dragon[] = {
-        // (no supported entries)
-    };
-
     // enderman
     static const MobLootEntry k_enderman[] = {
         { Items::EnderPearl, 0, 1, Items::Air },
     };
 
-    // endermite
-    static const MobLootEntry k_endermite[] = {
-        // (no supported entries)
-    };
-
     // evoker
     static const MobLootEntry k_evoker[] = {
         { Items::TotemOfUndying, 1, 1, Items::Air },
-    };
-
-    // fox
-    static const MobLootEntry k_fox[] = {
-        // (no supported entries)
-    };
-
-    // frog
-    static const MobLootEntry k_frog[] = {
-        // (no supported entries)
     };
 
     // ghast
@@ -157,19 +92,9 @@ namespace Game {
         { Items::Gunpowder, 0, 2, Items::Air },
     };
 
-    // giant
-    static const MobLootEntry k_giant[] = {
-        // (no supported entries)
-    };
-
     // glow_squid
     static const MobLootEntry k_glow_squid[] = {
         { Items::GlowInkSac, 1, 3, Items::Air },
-    };
-
-    // goat
-    static const MobLootEntry k_goat[] = {
-        // (no supported entries)
     };
 
     // guardian
@@ -177,11 +102,6 @@ namespace Game {
         { Items::PrismarineShard, 0, 2, Items::Air },
         { Items::Cod, 1, 1, Items::CookedCod },
         { Items::PrismarineCrystals, 1, 1, Items::Air },
-    };
-
-    // happy_ghast
-    static const MobLootEntry k_happy_ghast[] = {
-        // (no supported entries)
     };
 
     // hoglin
@@ -200,11 +120,6 @@ namespace Game {
         { Items::RottenFlesh, 0, 2, Items::Air },
     };
 
-    // illusioner
-    static const MobLootEntry k_illusioner[] = {
-        // (no supported entries)
-    };
-
     // iron_golem
     static const MobLootEntry k_iron_golem[] = {
         { Items::IronIngot, 3, 5, Items::Air },
@@ -213,11 +128,6 @@ namespace Game {
     // llama
     static const MobLootEntry k_llama[] = {
         { Items::Leather, 0, 2, Items::Air },
-    };
-
-    // magma_cube
-    static const MobLootEntry k_magma_cube[] = {
-        // (no supported entries)
     };
 
     // mooshroom
@@ -231,21 +141,6 @@ namespace Game {
         { Items::Leather, 0, 2, Items::Air },
     };
 
-    // nautilus
-    static const MobLootEntry k_nautilus[] = {
-        // (no supported entries)
-    };
-
-    // ocelot
-    static const MobLootEntry k_ocelot[] = {
-        // (no supported entries)
-    };
-
-    // panda
-    static const MobLootEntry k_panda[] = {
-        // (no supported entries)
-    };
-
     // parched
     static const MobLootEntry k_parched[] = {
         { Items::Arrow, 0, 2, Items::Air },
@@ -257,29 +152,9 @@ namespace Game {
         { Items::Feather, 1, 2, Items::Air },
     };
 
-    // phantom
-    static const MobLootEntry k_phantom[] = {
-        // (no supported entries)
-    };
-
     // pig
     static const MobLootEntry k_pig[] = {
         { Items::Porkchop, 1, 3, Items::CookedPorkchop },
-    };
-
-    // piglin
-    static const MobLootEntry k_piglin[] = {
-        // (no supported entries)
-    };
-
-    // piglin_brute
-    static const MobLootEntry k_piglin_brute[] = {
-        // (no supported entries)
-    };
-
-    // pillager
-    static const MobLootEntry k_pillager[] = {
-        // (no supported entries)
     };
 
     // polar_bear
@@ -314,16 +189,6 @@ namespace Game {
         { Items::Mutton, 1, 2, Items::CookedMutton },
     };
 
-    // shulker
-    static const MobLootEntry k_shulker[] = {
-        // (no supported entries)
-    };
-
-    // silverfish
-    static const MobLootEntry k_silverfish[] = {
-        // (no supported entries)
-    };
-
     // skeleton
     static const MobLootEntry k_skeleton[] = {
         { Items::Arrow, 0, 2, Items::Air },
@@ -333,16 +198,6 @@ namespace Game {
     // skeleton_horse
     static const MobLootEntry k_skeleton_horse[] = {
         { Items::Bone, 0, 2, Items::Air },
-    };
-
-    // slime
-    static const MobLootEntry k_slime[] = {
-        // (no supported entries)
-    };
-
-    // sniffer
-    static const MobLootEntry k_sniffer[] = {
-        // (no supported entries)
     };
 
     // snow_golem
@@ -371,11 +226,6 @@ namespace Game {
         { Items::String, 2, 5, Items::Air },
     };
 
-    // tadpole
-    static const MobLootEntry k_tadpole[] = {
-        // (no supported entries)
-    };
-
     // trader_llama
     static const MobLootEntry k_trader_llama[] = {
         { Items::Leather, 0, 2, Items::Air },
@@ -384,36 +234,6 @@ namespace Game {
     // tropical_fish
     static const MobLootEntry k_tropical_fish[] = {
         { Items::TropicalFish, 1, 1, Items::Air },
-    };
-
-    // turtle
-    static const MobLootEntry k_turtle[] = {
-        // (no supported entries)
-    };
-
-    // vex
-    static const MobLootEntry k_vex[] = {
-        // (no supported entries)
-    };
-
-    // villager
-    static const MobLootEntry k_villager[] = {
-        // (no supported entries)
-    };
-
-    // vindicator
-    static const MobLootEntry k_vindicator[] = {
-        // (no supported entries)
-    };
-
-    // wandering_trader
-    static const MobLootEntry k_wandering_trader[] = {
-        // (no supported entries)
-    };
-
-    // warden
-    static const MobLootEntry k_warden[] = {
-        // (no supported entries)
     };
 
     // witch
@@ -427,20 +247,10 @@ namespace Game {
         { Items::Redstone, 4, 8, Items::Air },
     };
 
-    // wither
-    static const MobLootEntry k_wither[] = {
-        // (no supported entries)
-    };
-
     // wither_skeleton
     static const MobLootEntry k_wither_skeleton[] = {
         { Items::Coal, 0, 1, Items::Air },
         { Items::Bone, 0, 2, Items::Air },
-    };
-
-    // wolf
-    static const MobLootEntry k_wolf[] = {
-        // (no supported entries)
     };
 
     // zoglin
@@ -458,11 +268,6 @@ namespace Game {
         { Items::RottenFlesh, 2, 3, Items::Air },
     };
 
-    // zombie_nautilus
-    static const MobLootEntry k_zombie_nautilus[] = {
-        // (no supported entries)
-    };
-
     // zombie_villager
     static const MobLootEntry k_zombie_villager[] = {
         { Items::RottenFlesh, 0, 2, Items::Air },
@@ -475,15 +280,15 @@ namespace Game {
     };
 
     const MobLootTable kMobLootTables[] = {
-        { EntityTypeId::Allay, k_allay, 0 },
-        { EntityTypeId::Armadillo, k_armadillo, 0 },
-        { EntityTypeId::Axolotl, k_axolotl, 0 },
-        { EntityTypeId::Bat, k_bat, 0 },
-        { EntityTypeId::Bee, k_bee, 0 },
-        { EntityTypeId::Blaze, k_blaze, 0 },
+        { EntityTypeId::Allay, nullptr, 0 },
+        { EntityTypeId::Armadillo, nullptr, 0 },
+        { EntityTypeId::Axolotl, nullptr, 0 },
+        { EntityTypeId::Bat, nullptr, 0 },
+        { EntityTypeId::Bee, nullptr, 0 },
+        { EntityTypeId::Blaze, nullptr, 0 },
         { EntityTypeId::Bogged, k_bogged, 2 },
-        { EntityTypeId::Breeze, k_breeze, 0 },
-        { EntityTypeId::Camel, k_camel, 0 },
+        { EntityTypeId::Breeze, nullptr, 0 },
+        { EntityTypeId::Camel, nullptr, 0 },
         { EntityTypeId::CamelHusk, k_camel_husk, 1 },
         { EntityTypeId::Cat, k_cat, 1 },
         { EntityTypeId::CaveSpider, k_cave_spider, 1 },
@@ -491,77 +296,77 @@ namespace Game {
         { EntityTypeId::Cod, k_cod, 1 },
         { EntityTypeId::CopperGolem, k_copper_golem, 1 },
         { EntityTypeId::Cow, k_cow, 2 },
-        { EntityTypeId::Creaking, k_creaking, 0 },
+        { EntityTypeId::Creaking, nullptr, 0 },
         { EntityTypeId::Creeper, k_creeper, 1 },
         { EntityTypeId::Dolphin, k_dolphin, 1 },
         { EntityTypeId::Donkey, k_donkey, 1 },
         { EntityTypeId::Drowned, k_drowned, 1 },
         { EntityTypeId::ElderGuardian, k_elder_guardian, 4 },
-        { EntityTypeId::EnderDragon, k_ender_dragon, 0 },
+        { EntityTypeId::EnderDragon, nullptr, 0 },
         { EntityTypeId::Enderman, k_enderman, 1 },
-        { EntityTypeId::Endermite, k_endermite, 0 },
+        { EntityTypeId::Endermite, nullptr, 0 },
         { EntityTypeId::Evoker, k_evoker, 1 },
-        { EntityTypeId::Fox, k_fox, 0 },
-        { EntityTypeId::Frog, k_frog, 0 },
+        { EntityTypeId::Fox, nullptr, 0 },
+        { EntityTypeId::Frog, nullptr, 0 },
         { EntityTypeId::Ghast, k_ghast, 2 },
-        { EntityTypeId::Giant, k_giant, 0 },
+        { EntityTypeId::Giant, nullptr, 0 },
         { EntityTypeId::GlowSquid, k_glow_squid, 1 },
-        { EntityTypeId::Goat, k_goat, 0 },
+        { EntityTypeId::Goat, nullptr, 0 },
         { EntityTypeId::Guardian, k_guardian, 3 },
-        { EntityTypeId::HappyGhast, k_happy_ghast, 0 },
+        { EntityTypeId::HappyGhast, nullptr, 0 },
         { EntityTypeId::Hoglin, k_hoglin, 2 },
         { EntityTypeId::Horse, k_horse, 1 },
         { EntityTypeId::Husk, k_husk, 1 },
-        { EntityTypeId::Illusioner, k_illusioner, 0 },
+        { EntityTypeId::Illusioner, nullptr, 0 },
         { EntityTypeId::IronGolem, k_iron_golem, 1 },
         { EntityTypeId::Llama, k_llama, 1 },
-        { EntityTypeId::MagmaCube, k_magma_cube, 0 },
+        { EntityTypeId::MagmaCube, nullptr, 0 },
         { EntityTypeId::Mooshroom, k_mooshroom, 2 },
         { EntityTypeId::Mule, k_mule, 1 },
-        { EntityTypeId::Nautilus, k_nautilus, 0 },
-        { EntityTypeId::Ocelot, k_ocelot, 0 },
-        { EntityTypeId::Panda, k_panda, 0 },
+        { EntityTypeId::Nautilus, nullptr, 0 },
+        { EntityTypeId::Ocelot, nullptr, 0 },
+        { EntityTypeId::Panda, nullptr, 0 },
         { EntityTypeId::Parched, k_parched, 2 },
         { EntityTypeId::Parrot, k_parrot, 1 },
-        { EntityTypeId::Phantom, k_phantom, 0 },
+        { EntityTypeId::Phantom, nullptr, 0 },
         { EntityTypeId::Pig, k_pig, 1 },
-        { EntityTypeId::Piglin, k_piglin, 0 },
-        { EntityTypeId::PiglinBrute, k_piglin_brute, 0 },
-        { EntityTypeId::Pillager, k_pillager, 0 },
+        { EntityTypeId::Piglin, nullptr, 0 },
+        { EntityTypeId::PiglinBrute, nullptr, 0 },
+        { EntityTypeId::Pillager, nullptr, 0 },
         { EntityTypeId::PolarBear, k_polar_bear, 2 },
         { EntityTypeId::Pufferfish, k_pufferfish, 1 },
         { EntityTypeId::Rabbit, k_rabbit, 2 },
         { EntityTypeId::Ravager, k_ravager, 1 },
         { EntityTypeId::Salmon, k_salmon, 1 },
         { EntityTypeId::Sheep, k_sheep, 1 },
-        { EntityTypeId::Shulker, k_shulker, 0 },
-        { EntityTypeId::Silverfish, k_silverfish, 0 },
+        { EntityTypeId::Shulker, nullptr, 0 },
+        { EntityTypeId::Silverfish, nullptr, 0 },
         { EntityTypeId::Skeleton, k_skeleton, 2 },
         { EntityTypeId::SkeletonHorse, k_skeleton_horse, 1 },
-        { EntityTypeId::Slime, k_slime, 0 },
-        { EntityTypeId::Sniffer, k_sniffer, 0 },
+        { EntityTypeId::Slime, nullptr, 0 },
+        { EntityTypeId::Sniffer, nullptr, 0 },
         { EntityTypeId::SnowGolem, k_snow_golem, 1 },
         { EntityTypeId::Spider, k_spider, 1 },
         { EntityTypeId::Squid, k_squid, 1 },
         { EntityTypeId::Stray, k_stray, 2 },
         { EntityTypeId::Strider, k_strider, 1 },
-        { EntityTypeId::Tadpole, k_tadpole, 0 },
+        { EntityTypeId::Tadpole, nullptr, 0 },
         { EntityTypeId::TraderLlama, k_trader_llama, 1 },
         { EntityTypeId::TropicalFish, k_tropical_fish, 1 },
-        { EntityTypeId::Turtle, k_turtle, 0 },
-        { EntityTypeId::Vex, k_vex, 0 },
-        { EntityTypeId::Villager, k_villager, 0 },
-        { EntityTypeId::Vindicator, k_vindicator, 0 },
-        { EntityTypeId::WanderingTrader, k_wandering_trader, 0 },
-        { EntityTypeId::Warden, k_warden, 0 },
+        { EntityTypeId::Turtle, nullptr, 0 },
+        { EntityTypeId::Vex, nullptr, 0 },
+        { EntityTypeId::Villager, nullptr, 0 },
+        { EntityTypeId::Vindicator, nullptr, 0 },
+        { EntityTypeId::WanderingTrader, nullptr, 0 },
+        { EntityTypeId::Warden, nullptr, 0 },
         { EntityTypeId::Witch, k_witch, 7 },
-        { EntityTypeId::Wither, k_wither, 0 },
+        { EntityTypeId::Wither, nullptr, 0 },
         { EntityTypeId::WitherSkeleton, k_wither_skeleton, 2 },
-        { EntityTypeId::Wolf, k_wolf, 0 },
+        { EntityTypeId::Wolf, nullptr, 0 },
         { EntityTypeId::Zoglin, k_zoglin, 1 },
         { EntityTypeId::Zombie, k_zombie, 1 },
         { EntityTypeId::ZombieHorse, k_zombie_horse, 1 },
-        { EntityTypeId::ZombieNautilus, k_zombie_nautilus, 0 },
+        { EntityTypeId::ZombieNautilus, nullptr, 0 },
         { EntityTypeId::ZombieVillager, k_zombie_villager, 1 },
         { EntityTypeId::ZombifiedPiglin, k_zombified_piglin, 2 },
     };

@@ -68,7 +68,7 @@ def value_kind(java_type):
 
 
 def main():
-    src = open(SRC).read()
+    src = open(SRC, encoding="utf-8").read()
     rows = []
     for m in DECL.finditer(src):
         java_type, const = m.group(1).strip(), m.group(2)
@@ -147,8 +147,8 @@ namespace Game {
     ])
 
     os.makedirs(os.path.dirname(OUT_HPP), exist_ok=True)
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp)
 
     kinds = {}
     for _, _, k, _ in rows:

@@ -83,7 +83,7 @@ def camel(slug):
 
 
 def parse():
-    text = open(SRC).read()
+    text = open(SRC, encoding="utf-8").read()
     out = {}
     rows = []
     for m in ROW_HEAD.finditer(text):
@@ -120,7 +120,7 @@ def existing_order():
     if not os.path.exists(OUT_HPP):
         return list(LEGACY_ORDER)
     order = []
-    for line in open(OUT_HPP):
+    for line in open(OUT_HPP, encoding="utf-8"):
         m = re.search(r'^\s*([A-Za-z0-9]+)\s*(?:=\s*\d+\s*)?,\s*//\s*"([a-z_]+)"', line)
         if m:
             order.append(m.group(2))
@@ -242,8 +242,8 @@ def main():
     cpp.append("} // namespace Game")
     cpp.append("")
 
-    open(OUT_HPP, "w").write("\n".join(hpp))
-    open(OUT_CPP, "w").write("\n".join(cpp))
+    open(OUT_HPP, "w", encoding="utf-8").write("\n".join(hpp))
+    open(OUT_CPP, "w", encoding="utf-8").write("\n".join(cpp))
     print(f"{OUT_HPP}: {len(order)} entity types")
     kept = [s for s in LEGACY_ORDER if s in order]
     print(f"  legacy ids preserved: {', '.join(kept)}")

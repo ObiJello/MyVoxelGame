@@ -95,7 +95,7 @@ def chain(cls, files, seen=None):
     if cls in seen or cls not in files:
         return []
     seen.add(cls)
-    src = strip_comments(open(files[cls]).read())
+    src = strip_comments(open(files[cls], encoding="utf-8").read())
     sup = superclass(src, cls)
     return [cls] + (chain(sup, files, seen) if sup else [])
 
@@ -163,7 +163,7 @@ def attributes(cls, files, method="createAttributes", seen=None, unparsed=None):
     # inherits its parent's (Donkey -> AbstractChestedHorse -> AbstractHorse).
     body, home = None, None
     for c in chain(cls, files):
-        src = strip_comments(open(files[c]).read())
+        src = strip_comments(open(files[c], encoding="utf-8").read())
         body = method_body(src, method)
         if body is not None:
             home, home_src = c, src
@@ -312,7 +312,7 @@ def target_types(cls, files, slug_of_class):
     hunt_players = flee_players = seeks_shade = False
 
     for c in chain(cls, files):
-        src = strip_comments(open(files[c]).read()) if c in files else ""
+        src = strip_comments(open(files[c], encoding="utf-8").read()) if c in files else ""
         bodies = [b for b in (method_body(src, "registerGoals"),
                               method_body(src, "addBehaviourGoals")) if b]
         if not bodies:
@@ -351,7 +351,7 @@ def goal_params(cls, files):
            "look": None, "land": None, "lookmin": 0, "lookmax": 0,
            "__goals_done": False}
     for c in chain(cls, files):
-        src = strip_comments(open(files[c]).read())
+        src = strip_comments(open(files[c], encoding="utf-8").read())
 
         m = re.search(SMOOTH_SWIM, src)
         if m and out["land"] is None:
@@ -391,7 +391,7 @@ def goal_params(cls, files):
         ai = files.get(c + "Ai")
         if not ai:
             continue
-        g = re.search(BRAIN_LOOK, strip_comments(open(ai).read()))
+        g = re.search(BRAIN_LOOK, strip_comments(open(ai, encoding="utf-8").read()))
         if g:
             out["look"] = num(g.group(1))
             out["lookmin"] = int(g.group(2))
@@ -404,7 +404,7 @@ def goal_params(cls, files):
             ai = files.get(c + "Ai")
             if not ai:
                 continue
-            g = re.search(BRAIN_STROLL, strip_comments(open(ai).read()))
+            g = re.search(BRAIN_STROLL, strip_comments(open(ai, encoding="utf-8").read()))
             if g:
                 out["stroll"] = num(g.group(1))
                 break
@@ -426,7 +426,7 @@ def load_item_identifiers():
     """slug -> Items::Identifier, from the generated item list."""
     pat = re.compile(r'ItemID\s+(\w+)\s+=\s+PURE_ITEM_BASE\s+\+\s+\d+;\s*//\s*"([a-z0-9_]+)"')
     out = {}
-    for line in open(ITEM_LIST):
+    for line in open(ITEM_LIST, encoding="utf-8"):
         m = pat.search(line)
         if m:
             out[m.group(2)] = m.group(1)
@@ -444,7 +444,7 @@ def resolve_item_tag(tag, seen=None):
     if not os.path.exists(path):
         return []
     out = []
-    for v in json.load(open(path)).get("values", []):
+    for v in json.load(open(path, encoding="utf-8")).get("values", []):
         v = v["id"] if isinstance(v, dict) else v
         if v.startswith("#"):
             out += resolve_item_tag(v.removeprefix("#minecraft:"), seen)
@@ -456,7 +456,7 @@ def resolve_item_tag(tag, seen=None):
 def food_items(cls, files, items, unknown):
     """The item slugs MC's isFood accepts."""
     for c in chain(cls, files):
-        src = strip_comments(open(files[c]).read())
+        src = strip_comments(open(files[c], encoding="utf-8").read())
         body = method_body(src, "isFood")
         if body is None:
             continue
@@ -489,7 +489,7 @@ WALK_ANIM = re.compile(
 def walk_anim(cls, files):
     """(distanceScale, cap, smoothing, babyPositionScale) for this mob."""
     for c in chain(cls, files):
-        src = strip_comments(open(files[c]).read())
+        src = strip_comments(open(files[c], encoding="utf-8").read())
         m = WALK_ANIM.search(src)
         if not m:
             continue
@@ -519,7 +519,7 @@ def walk_anim(cls, files):
 
 def entity_classes():
     """slug -> the entity's Java class, from `Class::new` in EntityType.java."""
-    src = strip_comments(open(os.path.join(ENT_DIR, "EntityType.java")).read())
+    src = strip_comments(open(os.path.join(ENT_DIR, "EntityType.java"), encoding="utf-8").read())
     return {m.group(1): m.group(2) for m in re.finditer(
         r'register\(\s*"([a-z_0-9]+)"\s*,\s*EntityType\.Builder\.'
         r'(?:<[^>]*>)?of\(\s*(\w+)::new', src)}
@@ -528,7 +528,7 @@ def entity_classes():
 def default_attribute_sources():
     """slug -> (Class, method) from DefaultAttributes.java's SUPPLIERS map."""
     src = strip_comments(open(os.path.join(
-        ENT_DIR, "ai/attributes/DefaultAttributes.java")).read())
+        ENT_DIR, "ai/attributes/DefaultAttributes.java"), encoding="utf-8").read())
     return {const.lower(): (cls, meth) for const, cls, meth in re.findall(
         r"put\(\s*EntityType\.([A-Z_0-9]+)\s*,\s*(\w+)\.(\w+)\(\)", src)}
 
@@ -540,7 +540,7 @@ def base_builder_reached(cls, files, method, seen=None):
         return method
     body, home = None, None
     for c in chain(cls, files):
-        body = method_body(strip_comments(open(files[c]).read()), method)
+        body = method_body(strip_comments(open(files[c], encoding="utf-8").read()), method)
         if body is not None:
             home = c
             break
@@ -589,7 +589,7 @@ def texture_for(slug, files_ren):
     cls = camel(slug) + "Renderer"
     for c in (cls, camel(slug) + "EntityRenderer"):
         if c in files_ren:
-            src = open(files_ren[c]).read()
+            src = open(files_ren[c], encoding="utf-8").read()
             m = re.search(r'withDefaultNamespace\(\s*"(textures/entity/[^"]+)"', src)
             if m:
                 return "assets/" + m.group(1)
@@ -603,7 +603,7 @@ def main():
     ent_files = index_sources(ENT_DIR)
     ren_files = index_sources(REN_DIR)
 
-    slugs = re.findall(r'//\s*"([a-z_]+)"', open(TYPES_HPP).read())
+    slugs = re.findall(r'//\s*"([a-z_]+)"', open(TYPES_HPP, encoding="utf-8").read())
 
     entity_class = entity_classes()
     # Java class -> our slugs, for the target/avoid lists. Several MC classes
@@ -840,8 +840,8 @@ namespace Game {{
         "",
     ])
 
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp)
 
     by_base = {}
     for _, b, *_ in rows:

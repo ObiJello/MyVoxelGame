@@ -840,7 +840,7 @@ def read_mob_anim_slots():
     turns a rename or an inserted slot into a generator error rather than every
     animation silently playing on the wrong timer.
     """
-    src = open(ANIM_STATE_HPP).read()
+    src = open(ANIM_STATE_HPP, encoding="utf-8").read()
     m = re.search(r"enum class MobAnim\s*:\s*uint8_t\s*\{(.*?)\}", src, re.S)
     if not m:
         raise SystemExit("could not find MobAnim in " + ANIM_STATE_HPP)
@@ -1079,7 +1079,7 @@ def setup_anim_info(cls, sources):
 def load_layer_defs():
     """(layer name -> expression, local name -> expression)."""
     src = strip_comments(open(os.path.join(MODEL_DIR,
-                                           "geom/LayerDefinitions.java")).read())
+                                           "geom/LayerDefinitions.java"), encoding="utf-8").read())
     lvars = {}
     for m in re.finditer(r"\b(?:LayerDefinition|MeshTransformer)\s+(\w+)\s*=\s*([^;]+);",
                          src):
@@ -1275,12 +1275,12 @@ def main():
         for f in fs:
             if f.endswith(".java"):
                 p = os.path.join(r, f)
-                sources[f[:-5]] = strip_comments(open(p).read())
+                sources[f[:-5]] = strip_comments(open(p, encoding="utf-8").read())
                 paths[f[:-5]] = p
 
     # Which mobs need a model.
     from subprocess import run as _run
-    ent = open("src/common/entity/GeneratedEntityTypes.hpp").read()
+    ent = open("src/common/entity/GeneratedEntityTypes.hpp", encoding="utf-8").read()
     slugs = re.findall(r'//\s*"([a-z_]+)"', ent)
 
     def camel(s):
@@ -1487,8 +1487,8 @@ namespace Render {{
         "",
     ])
 
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp)
     print(f"{OUT_HPP}: {len(models)} meshes, "
           f"{len(parts_rows)} parts, {len(cubes_rows)} cubes")
     if missing:

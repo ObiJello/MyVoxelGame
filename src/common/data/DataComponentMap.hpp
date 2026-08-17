@@ -18,6 +18,7 @@
 #include <memory>
 #include <optional>
 #include <vector>
+#include <stdexcept>
 
 namespace Game {
 

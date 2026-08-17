@@ -812,13 +812,13 @@ def main():
     for r, _, fs in os.walk(MODEL_DIR):
         for f in fs:
             if f.endswith(".java"):
-                sources.setdefault(f[:-5], strip_comments(open(os.path.join(r, f)).read()))
+                sources.setdefault(f[:-5], strip_comments(open(os.path.join(r, f), encoding="utf-8").read()))
 
     # Which model class each generated mob uses, and the parts its mesh has.
     sys.path.insert(0, "tools")
     import gen_entity_models as GM
 
-    cpp = open(MODELS_CPP).read()
+    cpp = open(MODELS_CPP, encoding="utf-8").read()
     mseg = cpp[cpp.index("kGenModels[kGenModelCount] = {"):]
     mseg = mseg[:mseg.index("\n    };")]
     rows = re.findall(
@@ -1042,8 +1042,8 @@ namespace Render {{
         "",
     ])
 
-    open(OUT_HPP, "w").write(hpp)
-    open(OUT_CPP, "w").write(cpp_out)
+    open(OUT_HPP, "w", encoding="utf-8").write(hpp)
+    open(OUT_CPP, "w", encoding="utf-8").write(cpp_out)
 
     pct = 100.0 * total_stmts / max(1, total_stmts + total_skipped)
     print(f"{OUT_HPP}: {len(prog_rows)} programs, {len(stmt_rows)} statements, "

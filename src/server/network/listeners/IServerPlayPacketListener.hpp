@@ -4,9 +4,9 @@
 #include "common/network/IPacketListener.hpp"
 
 namespace Network {
-    class PlayerMoveC2SPacket;
-    class BlockActionC2SPacket;
-    class ChatMessageC2SPacket;
+    struct PlayerMoveC2SPacket;
+    struct BlockActionC2SPacket;
+    struct ChatMessageC2SPacket;
     class KeepAliveC2SPacket;
 }
 

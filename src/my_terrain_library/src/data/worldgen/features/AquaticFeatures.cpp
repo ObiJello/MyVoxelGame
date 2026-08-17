@@ -1,6 +1,10 @@
 #include "data/worldgen/features/AquaticFeatures.h"
 #include "levelgen/placement/PlacedFeature.h"
 
+// MSVC's STL does not include <deque> transitively (libc++ does) — see the
+// "MSVC compatibility fixes" list in CLAUDE.md.
+#include <deque>
+
 // Reference: net/minecraft/data/worldgen/features/AquaticFeatures.java
 
 namespace minecraft {
