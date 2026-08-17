@@ -64,6 +64,9 @@ namespace Server {
 
         // Chunk batch acknowledgment
         void onChunkBatchAck(float desiredChunksPerTick) override;
+
+        // Client reports its own level is ready (MC handleAcceptPlayerLoad)
+        void onPlayerLoaded() override;
     };
     
 } // namespace Server

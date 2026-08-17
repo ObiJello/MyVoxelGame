@@ -165,8 +165,22 @@ namespace Server {
         ClearQueues();
         ClearDiffs();
 
-        // Set state to joining
-        m_state = State::JOINING;
+        // The player is IN THE WORLD from here on — MC PlayerList.placeNewPlayer
+        // has no intermediate "joining" phase that gates interaction, and
+        // neither do we any more. What used to happen here was a transition to
+        // PLAYING keyed on a server-side chunk queue being non-empty; that
+        // queue is filled and drained later in the same server tick, so once
+        // delivery outran generation the session simply never left JOINING and
+        // every block placement was rejected.
+        //
+        // Readiness is now MC's: HasClientLoaded(), driven by the client's own
+        // PlayerLoadedC2S with a 60-tick fail-open timeout.
+        m_state = State::PLAYING;
+
+        // MC ServerGamePacketListenerImpl's constructor (:273) does exactly
+        // this — the play listener is born with the 60-tick timer armed.
+        RestartClientLoadTimerAfterRespawn();
+        m_wasPlayerDead = false;
 
         // The tracking view starts EMPTY; the server's first UpdateChunkTracking
         // diffs it against the real view, so the whole initial set arrives
@@ -215,10 +229,12 @@ namespace Server {
         // UpdateChunkTracking every tick; its centre/view-distance early-out
         // makes that free when nothing moved.
 
-        // Transition to playing state after initial join
-        if (m_state == State::JOINING && !m_pendingChunksToSend.empty()) {
-            m_state = State::PLAYING;
-        }
+        // MC ServerPlayer.tick's very first line (:588):
+        //     this.connection.tickClientLoadTimeout();
+        // Counts down the join/respawn grace window. It runs before the player
+        // ticks so a client that never sends PlayerLoadedC2S is let in after
+        // 60 ticks regardless.
+        TickClientLoadTimeout();
 
         // Tick the player entity (movement physics, mining, item-use
         // countdown). Lives HERE — per-session — so REMOTE players tick too;
@@ -232,6 +248,18 @@ namespace Server {
                 world = server->GetWorld();
             }
             m_player->tick(world, static_cast<int>(serverTick));
+
+            // MC ServerPlayer.die (:932) ends with
+            //     this.connection.markClientUnloadedAfterDeath();
+            // which blocks interaction until PERFORM_RESPAWN re-arms the timer.
+            // Our ServerPlayer has no back-pointer to its connection, so the
+            // session watches the alive→dead edge instead; the effect is the
+            // same, one call at the moment of death.
+            const bool deadNow = m_player->isDead();
+            if (deadNow && !m_wasPlayerDead) {
+                MarkClientUnloadedAfterDeath();
+            }
+            m_wasPlayerDead = deadNow;
 
             // Stats sync — mirrors ServerPlayer.tick's dirty-check on
             // lastSentHealth / lastSentFood / lastSaturationLevel: send
@@ -382,6 +410,13 @@ namespace Server {
 
         m_state = State::PLAYING;
         m_isRespawning = false;
+
+        // MC handleClientCommand PERFORM_RESPAWN (:1789 / :1798) calls
+        // restartClientLoadTimerAfterRespawn right after PlayerList.respawn:
+        // clears waitingForRespawn (set by die()) and re-arms the 60-tick wait
+        // for the client to report the new level is ready.
+        RestartClientLoadTimerAfterRespawn();
+        m_wasPlayerDead = false;
     }
 
     // === VIEW CONFIGURATION ===
@@ -941,6 +976,14 @@ namespace Server {
         AckBlockChangesUpTo(packet.sequenceNumber);
 
         if (!m_player) return;
+
+        // MC folds digging into handlePlayerAction, whose entire body sits
+        // behind hasClientLoaded() (:1193). The ack above is deliberately
+        // outside the gate — see the comment on it.
+        if (!HasClientLoaded()) {
+            Log::Debug("HandleBlockAction: client not loaded yet");
+            return;
+        }
 
         switch (packet.action) {
             // MC's START_DESTROY / ABORT_DESTROY are purely informational
@@ -1884,9 +1927,11 @@ namespace Server {
             return;
         }
         
-        // Check if connection is in PLAY phase
-        if (m_state != State::PLAYING) {
-            Log::Warning("HandleUseItemOn: Not in PLAYING state");
+        // MC ServerGamePacketListenerImpl.handleUseItemOn (:1613) gates the
+        // whole body on hasClientLoaded() — the client's own readiness, not
+        // any server-side queue. Fails open after 60 ticks.
+        if (!HasClientLoaded()) {
+            Log::Debug("HandleUseItemOn: client not loaded yet");
             AckInteraction(packet.sequence, false);
             return;
         }
@@ -2476,8 +2521,9 @@ namespace Server {
             Log::Warning("HandleUseItem: No player attached to session");
             return;
         }
-        if (m_state != State::PLAYING) {
-            Log::Warning("HandleUseItem: Not in PLAYING state");
+        // :1331 — same hasClientLoaded() gate as handleUseItemOn.
+        if (!HasClientLoaded()) {
+            Log::Debug("HandleUseItem: client not loaded yet");
             AckInteraction(packet.sequence, false);
             return;
         }
@@ -2576,6 +2622,18 @@ namespace Server {
         // (ServerGamePacketListenerImpl.java:1191-1248).
         ASSERT_SERVER_THREAD();
         if (!m_player) return;
+
+        // MC gates the whole of handlePlayerAction on hasClientLoaded()
+        // (:1193). PERFORM_RESPAWN is the one action that must stay outside
+        // the gate: it lives on a DIFFERENT packet in MC
+        // (handleClientCommand, which has no such check) precisely because a
+        // dead player has waitingForRespawn set — gating it would make death
+        // permanent.
+        if (packet.action != Network::PlayerAction::PERFORM_RESPAWN
+            && !HasClientLoaded()) {
+            Log::Debug("HandlePlayerAction: client not loaded yet");
+            return;
+        }
 
         switch (packet.action) {
             case Network::PlayerAction::RELEASE_USE_ITEM:

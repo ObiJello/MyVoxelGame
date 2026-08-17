@@ -120,6 +120,33 @@ namespace Server {
         // Respawn player
         void Respawn(const glm::vec3& spawnPos);
 
+        // === CLIENT LOAD GATE (MC ServerGamePacketListenerImpl) ===
+        //
+        // Port of MC's clientLoadedTimeoutTimer / waitingForRespawn pair —
+        // the ONLY thing that gates a player's interactions server-side.
+        // Deliberately NOT derived from any server-side queue: MC asks the
+        // client whether IT is ready (ServerboundPlayerLoadedPacket) and
+        // otherwise fails OPEN after 60 ticks, so a lost or unsupported
+        // signal costs 3 seconds rather than wedging the player forever.
+        //
+        // MC ServerGamePacketListenerImpl.java:2069.
+        bool HasClientLoaded() const {
+            return !m_waitingForRespawn && m_clientLoadedTimeoutTimer <= 0;
+        }
+        // :2073 — called once per tick from ServerPlayer.tick's first line.
+        void TickClientLoadTimeout() {
+            if (m_clientLoadedTimeoutTimer > 0) --m_clientLoadedTimeoutTimer;
+        }
+        // :2080 — the client told us its level is ready; skip the rest of the wait.
+        void MarkClientLoaded() { m_clientLoadedTimeoutTimer = 0; }
+        // :2084 — ServerPlayer.die(). Blocks interaction until PERFORM_RESPAWN.
+        void MarkClientUnloadedAfterDeath() { m_waitingForRespawn = true; }
+        // :2088 — construction of the play listener AND every respawn.
+        void RestartClientLoadTimerAfterRespawn() {
+            m_waitingForRespawn = false;
+            m_clientLoadedTimeoutTimer = 60;
+        }
+
         // === VIEW CONFIGURATION ===
 
         // Update view distance (client request or server override)
@@ -495,6 +522,16 @@ namespace Server {
         // === FLAGS ===
         bool m_isChangingDimension = false;
         bool m_isRespawning = false;
+
+        // MC ServerGamePacketListenerImpl.waitingForRespawn / clientLoadedTimeoutTimer.
+        // See HasClientLoaded above. The initial values are MC's field defaults;
+        // Initialize() immediately calls RestartClientLoadTimerAfterRespawn, the
+        // same way MC's constructor does (:273).
+        bool m_waitingForRespawn = false;
+        int  m_clientLoadedTimeoutTimer = 0;
+        // Edge detector for ServerPlayer.die() — our ServerPlayer has no
+        // connection back-pointer, so the session watches the flag instead.
+        bool m_wasPlayerDead = false;
         
         // === INTERNAL METHODS ===
         

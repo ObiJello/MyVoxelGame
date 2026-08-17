@@ -125,6 +125,7 @@
             InventoryCloseC2S   = 0x93,  // Inventory screen closed (server drops carried item)
             PlayerAbilitiesC2S  = 0x94,  // Client fly-state toggle (mirrors MC ServerboundPlayerAbilitiesPacket)
             InteractC2S         = 0x95,  // Attack or interact with an entity (mirrors MC ServerboundInteractPacket)
+            PlayerLoadedC2S     = 0x96,  // "my level is ready" (mirrors MC ServerboundPlayerLoadedPacket) — no payload
         };
 
         // Convert PacketId to string for logging
@@ -214,6 +215,7 @@
                 case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
                 case PacketId::PlayerAbilitiesC2S: return "PlayerAbilitiesC2S";
                 case PacketId::InteractC2S: return "InteractC2S";
+                case PacketId::PlayerLoadedC2S: return "PlayerLoadedC2S";
 
                 default: return "Unknown";
             }

@@ -730,6 +730,8 @@ set(GAME_SOURCES
             src/client/world/ClientChunkManager.hpp
             src/client/world/ClientBlockAccess.cpp
             src/client/world/ClientBlockAccess.hpp
+            src/client/world/LevelLoadTracker.cpp
+            src/client/world/LevelLoadTracker.hpp
             src/client/world/ClientUsePlayer.hpp
             src/common/entity/IUsePlayer.hpp
             src/common/world/level/ILevelWrite.hpp

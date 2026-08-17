@@ -188,6 +188,10 @@ namespace Network {
 
         // Play phase - Chunk batch acknowledgment
         virtual void onChunkBatchAck(float desiredChunksPerTick) {}
+
+        // Play phase - client reports its own level is ready
+        // (MC ServerGamePacketListener.handleAcceptPlayerLoad)
+        virtual void onPlayerLoaded() {}
     };
 
 } // namespace Network

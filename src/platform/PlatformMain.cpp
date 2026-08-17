@@ -108,6 +108,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "server/IntegratedServer.hpp"
 #include "server/network/NetworkServer.hpp"
 #include "client/world/ClientChunkManager.hpp"
+#include "client/world/LevelLoadTracker.hpp"
 #include "client/world/ClientBlockAccess.hpp"
 #include "server/world/ServerWorkerPool.hpp"
 #include "client/world/ClientWorkerPool.hpp"
@@ -1767,6 +1768,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Render::InitializeClientMeshManager(Client::g_clientChunkManager.get());
         Log::Info("✓ Client systems initialized (chunk manager, mesh manager)");
 
+        // MC ClientPacketListener.startWaitingForNewLevel, on entering a level.
+        // Arms the client-side readiness watch; once the player's own section
+        // compiles it sends PlayerLoadedC2S, which is what lifts the server's
+        // interaction gate (PlayerSession::HasClientLoaded).
+        Client::g_levelLoadTracker.StartClientLoad();
+
         // 5. Initialize player and controller
         Game::ClientPlayer player;
         player.color = playerColor; // from --color CLI arg parsed earlier
@@ -2219,6 +2226,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 // back to 20) then closes the screen.
                 if (Render::ConsumeDeathRespawnRequest()) {
                     playerController.SendPlayerAction(Network::PlayerAction::PERFORM_RESPAWN);
+                    // MC calls startWaitingForNewLevel on respawn too — the
+                    // server re-arms its own 60-tick wait in
+                    // PlayerSession::Respawn, so the client has to re-report.
+                    Client::g_levelLoadTracker.StartClientLoad();
                 }
 
                 Render::TitleAction pauseAction = Render::ConsumeTitleAction();
@@ -2613,6 +2624,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 }
                 PROFILE_TIMER_END(network, metrics.networkProcessingTime);
                 }
+
+                // MC ClientPacketListener.tick: levelLoadTracker.tickClientLoad()
+                // then notifyPlayerLoaded() once the level is ready. Runs right
+                // after the packet drain, as it does there — the chunk that
+                // makes us ready may have arrived in the drain above.
+                Client::g_levelLoadTracker.Tick(player.physics.position);
 
                 // (Mesh scheduling used to live here, in the 20 Hz tick. It is a
                 // FRAME phase now — see the MeshSchedule block next to MeshUpload

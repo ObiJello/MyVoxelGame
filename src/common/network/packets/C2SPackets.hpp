@@ -226,5 +226,26 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+
+    // ========================================================================
+    // PLAYER LOADED PACKET
+    // ========================================================================
+
+    // MC ServerboundPlayerLoadedPacket — a `record ...()` with a unit stream
+    // codec, i.e. no payload at all. The client sends it once its own level is
+    // ready; the server uses it to clear the client-load timeout early.
+    class PlayerLoadedC2SPacketImpl : public IC2SPacket {
+    private:
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        PlayerLoadedC2SPacketImpl()
+            : m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerLoaded();
+        }
+        PacketId getId() const override { return PacketId::PlayerLoadedC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
 } // namespace Packets
 } // namespace Network

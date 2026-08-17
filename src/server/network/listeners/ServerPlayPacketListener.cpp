@@ -114,6 +114,12 @@ namespace Server {
     }
 
     void ServerPlayPacketListener::onInteractC2S(const Network::InteractC2SPacket& packet) {
+        // MC handleInteract (:1703) sits behind hasClientLoaded(), same as the
+        // rest of the interaction family. The gate lives here rather than in
+        // IntegratedServer::HandleInteract because that is where MC puts it —
+        // on the listener, next to the packet.
+        if (!m_session.HasClientLoaded()) return;
+
         // Straight to the server rather than through the session: the mob
         // system is owned by IntegratedServer, and PlayerSession has no reason
         // to know about it.
@@ -131,6 +137,11 @@ namespace Server {
     void ServerPlayPacketListener::onChunkBatchAck(float desiredChunksPerTick) {
         // Forward to session for per-player adaptive rate control (Minecraft's PlayerChunkSender)
         m_session.OnChunkBatchAck(desiredChunksPerTick);
+    }
+
+    void ServerPlayPacketListener::onPlayerLoaded() {
+        // MC ServerGamePacketListenerImpl.handleAcceptPlayerLoad -> markClientLoaded()
+        m_session.MarkClientLoaded();
     }
 
 } // namespace Server

@@ -878,6 +878,13 @@ namespace Server {
                 }
                 break;
 
+            case PacketId::PlayerLoadedC2S:
+                // MC ServerboundPlayerLoadedPacket: unit codec, nothing to read.
+                if (m_phase == ConnectionPhase::PLAY) {
+                    return std::make_unique<Network::Packets::PlayerLoadedC2SPacketImpl>();
+                }
+                break;
+
             // TODO: Add more packet types as we implement them
             // case PacketId::BlockActionC2S:
             // case PacketId::PlayerMoveC2S:
