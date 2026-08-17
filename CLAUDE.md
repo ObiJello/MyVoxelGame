@@ -119,6 +119,93 @@ stonecutting, smithing and the code-driven `crafting_special_*` types are skippe
 `Game::RecipeManager::Initialize`, so a recipe naming an item we don't have drops
 with a log rather than failing the load — the count is printed at boot.
 
+### Mob parity audit — run this instead of finding gaps in game
+
+`tools/mob_audit.py` compares every mob against `minecraft_code/` field by field
+and prints what is missing. It exists because every gap found in this port so far
+was found by a human noticing something in game — a frog that would not croak, a
+camel whose ears did not move, an armadillo that never rolled up. That does not
+scale to 90 mobs times a dozen systems.
+
+```bash
+python3 tools/mob_audit.py              # summary + every mob with a defect
+python3 tools/mob_audit.py --all        # all 89
+python3 tools/mob_audit.py frog camel   # named mobs, in full
+python3 tools/mob_audit.py --self-test  # prove each check can still fail
+python3 tools/mob_audit.py --html=out.html
+```
+
+Findings split into **defects** (dead clips, missing mesh/texture, attribute
+drift, missing loot — things that are WRONG) and **scope** (MC behaviour not
+ported yet). The most valuable check is **dead-clip**: a baked
+KeyframeAnimation whose `MobAnim` timer slot is never started anywhere in `src/`
+can never play, and that is invisible both in game and in review — it is exactly
+the frog-croak bug.
+
+**Always run `--self-test` after touching the audit.** A check that cannot fail
+reports a clean bill of health forever, which is worse than no check: the first
+draft of the attribute check looked up `DefaultAttributes` by class name when
+the table is keyed by slug, so it silently compared nothing across all 89 mobs
+and reported zero problems. The self-test injects a fault per check and requires
+the count to rise.
+
+### Mob spawn weights and loot tables
+
+Both are baked from the vanilla data files this repo already ships, following
+the same "generate to C++" pattern as recipes and block shapes:
+
+```bash
+python3 tools/gen_mob_spawns.py   # → src/common/world/spawn/GeneratedMobSpawns.{hpp,cpp}
+python3 tools/gen_mob_loot.py     # → src/common/world/loot/GeneratedMobLoot.{hpp,cpp}
+```
+
+`gen_mob_spawns.py` reads `data/minecraft/worldgen/biome/*.json` `spawners`;
+`gen_mob_loot.py` reads `data/minecraft/loot_table/entities/*.json`. Both drop
+entries naming mobs or items this port does not implement, and print what they
+skipped — expect ~42 unimplemented mob types and a handful of skipped loot
+pools. Two skips are deliberate and permanent:
+
+- **Conditional (rare-drop) pools** — zombie iron ingots, skeleton bows and the
+  like are gated on `killed_by_player` plus a looting-scaled chance. Emitting
+  them unconditionally would make every zombie drop an ingot, so the whole pool
+  is skipped rather than half-modelled.
+- **Sheep wool** — MC expresses it as an `alternatives` entry keyed on the
+  sheep's dye colour, which cannot be a static row. It is dropped from
+  `MobManager::DropLoot` using the sheep's live colour instead.
+
+### Block outline shapes (hitboxes)
+
+**A block's MODEL is not its shape.** MC keeps `BlockBehaviour.getShape`
+completely independent of the rendered geometry, and for the whole cross-model
+family they disagree wildly: a sapling is drawn as `block/cross` — two planes
+spanning the full 16×16 cell — while `SaplingBlock.SHAPE` is
+`Block.column(12, 0, 12)`. Mushrooms are `column(6, 0, 6)` against a full-width
+model. Deriving the box by unioning model elements (which is what this engine
+used to do) hands those blocks a 1×1×1 hitbox.
+
+MC hardcodes shapes per block class in Java, so there is no data file to read —
+they come out of the decompiled source:
+
+```bash
+python3 tools/gen_block_shapes.py   # → src/common/world/block/GeneratedBlockShapes.{hpp,cpp}
+```
+
+It maps slug → class from `Blocks.java`, then resolves each class's `getShape`
+when it is a plain `return <CONST>;`, evaluating MC's `Block.box/column/cube/boxZ`
+and `Shapes.or/join/block/empty` helpers (all closed-form conversions to a box).
+`.move(...)` is stripped deliberately — that is MC applying the per-position
+scatter, which this engine applies itself via `GetBlockOffset`, so baking the
+moved shape would double the offset.
+
+Blocks whose shape is per-state (`getShapeForEachState`, direction maps: slabs,
+stairs, walls, doors, leaf litter, candles) are **deliberately skipped** and keep
+the model-derived box, which is correct for them. Expect ~202 rows and a boot log
+line reporting how many matched a BlockID. Chest and fire keep hand-written
+shapes in `GetBlockShape` because their models are empty / deliberately oversized.
+
+Since the engine stores one AABB per state, multi-box shapes are unioned — the
+same simplification the model path already made.
+
 ### When MC ships new items
 
 The choice between re-running the generator vs. hand-editing depends on how many items changed:
@@ -193,9 +280,24 @@ demand. Demand is `chunks/s x sections/chunk (~7.9) x remesh factor (~2.2)`.
 
 The **2.2x remesh factor is MC-faithful** — `ClientPacketListener.enableChunkLight`
 calls `setSectionRangeDirty` over the arriving chunk *and its 8 neighbours*, full
-Y range, exactly like our `MarkNeighborSectionsDirty`. Do not "fix" it by gating
-compiles on neighbour availability: sections would appear later, which is the
-opposite of what is wanted. Budget for it.
+Y range, exactly like our `MarkNeighborSectionsDirty`. Budget for it.
+
+**First compiles ARE gated on neighbour availability, because MC gates them.**
+`LevelRenderer.compileSections` schedules a section only when
+
+```java
+section.isDirty() && (section.getSectionMesh() != CompiledSectionMesh.UNCOMPILED
+                      || section.hasAllNeighbors())
+```
+
+so a section that has never been compiled waits for all 8 surrounding chunk
+columns; one already compiled is always rescheduled. Ported as
+`ClientChunkManager::HasAllNeighborChunks`. An earlier note here said the
+opposite — do not gate — on the belief that gating was un-MC-like. That was
+wrong on the facts. The tradeoff it described is real (frontier sections appear
+a little later), but it is the tradeoff vanilla makes, and the gate is what
+keeps the uncapped per-frame schedule affordable during a world load: the
+frontier is exactly where neighbours are missing.
 
 Useful commands (needs `cmake-build-tracy/tools/`, see the Tracy section):
 ```bash
@@ -208,6 +310,38 @@ done
 ```
 Averages lie here: chunk loading is bursty, so a session average buries the burst
 rate under idle seconds. Always compute per-second buckets.
+
+### Translucency re-sort (measured 2026-08)
+
+Two MC divergences were found and fixed here; both are easy to reintroduce.
+
+1. **Sort by precomputed keys.** MC's `VertexSorting.byDistance` fills a flat
+   `float[]` in one sequential pass and sorts indices against it. Recomputing the
+   subtract + dot *inside* the comparator costs `~2*N*log N` distance evaluations
+   instead of `N`, each a 12-byte random load. `TranslucentSort::BuildSortedIndices`
+   now matches MC. Never move that math back into the comparator.
+2. **Never `glBufferSubData` a re-sort into the shared slab IBO.** Writing a
+   buffer with draws in flight makes the GL driver serialise — measured 0.18 ms
+   per write, **16x the sort itself**, and 385 frames/session over 4 ms. Re-sorts
+   go through `RenderBackend::UpdateBufferUnsynchronized` instead
+   (`GL_MAP_UNSYNCHRONIZED_BIT`, no `INVALIDATE_RANGE` — see below).
+
+Result: `Resort.Upload` 0.1813 ms -> **0.0011 ms**, frames >4 ms **385 -> 0**.
+
+**Why unsynchronized is safe HERE only:** a re-sort is a same-length permutation
+of one section's own quad range (`UpdateSectionIndices` rejects anything else), so
+a torn read is a mix of two valid orderings — every index still points at a real
+quad. Worst case is one frame of imperfect blend order, which the design already
+tolerates (sorts go stale between re-sorts by construction). `INVALIDATE_RANGE` is
+deliberately omitted: it would let the driver treat the old contents as undefined
+and break exactly that property. **Do not use this path for mesh uploads** — those
+write new geometry, where a torn read is real garbage.
+
+`ChunkMegaBuffer` also supports MC's literal layout (`perSectionIndexBuffers`,
+per-section IBOs like `CompiledSectionMesh` -> `SectionBuffers`). It fixes the same
+stall but costs the multi-draw: translucent becomes one bind+draw per section
+(measured `SubmitMultiDraw` 0.55 -> 0.69 ms, ~11 fps). Kept behind the flag for A/B;
+the unsynchronized path is the better trade on this backend.
 
 ### Terrain parity check (run this before/after ANY terrain-library change)
 
@@ -513,6 +647,47 @@ Building in the right configuration automatically handles everything:
 3. **Post-build**: The app is zipped (stays in the build dir, e.g., `cmake-build-universal/bin/`) and uploaded to GitHub via `gh` CLI. Non-fatal — if offline or `gh` isn't authenticated, the build still succeeds.
 
 Version format: `{major}.{minor}.{build_number}` — game uses `0.1.X`, launcher uses `1.0.X`.
+
+### Player-side diagnostics (log file + crash reports)
+
+Two artifacts land in the obeycraft directory (`~/Library/Application Support/obeycraft`
+on macOS). Ask a player for these first — they exist whether or not Sentry got through.
+
+| Path | What it is |
+|---|---|
+| `logs/latest.log` | Current session. Every `Log::` line, timestamped, no ANSI codes |
+| `logs/<date>.log` | Previous sessions, newest 5 kept |
+| `crash-reports/crash-<date>.txt` | Version, signal + fault address, backtrace, last ~512 log lines |
+
+**Why this exists alongside Sentry:** the game only ever logged to stdout, which a
+launcher-started build discards outright — macOS `open --args` gives the process no
+terminal. So a player's "it just closed" came with nothing at all. Sentry is still the
+better report when it arrives (symbolicated, aggregated), but it needs network, a live
+crashpad process, and a crash of a kind crashpad claims.
+
+**The log file is the primary artifact; the crash report is a bonus.** On macOS Sentry
+runs crashpad out-of-process via Mach exception ports, which are delivered *before*
+POSIX signals — so for a hard SIGSEGV crashpad can take the exception and the process
+dies without our signal handler ever running. The log is written as the game runs, so
+it survives regardless. The handler still earns its keep for `std::terminate` (an
+uncaught C++ exception is not a Mach exception, so this always fires) and for signals
+crashpad doesn't claim.
+
+**`--- log closed cleanly ---` is the tell.** `Log::CloseLogFile` writes it on the
+normal exit path only, so a log ending without it means the process died — which is the
+one question a crash report can't answer if it never ran.
+
+Implementation notes that are easy to break:
+- `CrashHandler.cpp` preallocates the report path, banner and scratch buffer at install
+  time and uses only `open`/`write`/`close` + `backtrace_symbols_fd` in the handler.
+  `malloc`, `snprintf` and stdio are **not** async-signal-safe, and a crash inside the
+  allocator (likely, since heap corruption often *is* the crash) would deadlock on the
+  way to writing the report. `backtrace_symbols` allocates; the `_fd` variant does not.
+- `Log`'s ring buffer is a fixed `char[512][256]` with an atomic write index for the
+  same reason — a `std::deque` behind a mutex is unreadable from a signal handler.
+- Install order matters: `InstallCrashHandler` runs **after** `sentry_init`, and chains
+  to the previously-installed handler, so Sentry still reports.
+- Test with `--crash-test` (SIGSEGV after 3s); it logs the expected report path first.
 
 ### Sentry Debug Symbols (Game Only)
 

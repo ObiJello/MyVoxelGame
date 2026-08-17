@@ -17,6 +17,8 @@
 #include "../backend/RenderTypes.hpp"
 #include "common/entity/Item.hpp"  // Game::ItemID, Game::ItemStack
 
+#include <glm/glm.hpp>
+
 namespace Render {
 
     class HeldItemRenderer {
@@ -31,8 +33,21 @@ namespace Render {
         // off = inventory slot 45) + whether the player started attacking
         // THIS tick (rising edge); the renderer handles per-hand equip
         // swaps and the main-hand swing itself.
+        // `viewPitchDeg` / `viewYawDeg` are the live view angles in MINECRAFT's
+        // convention (pitch positive looking DOWN). They drive the look-around
+        // sway — see m_xBob below.
+        // `mainHandSwapScale` is MC Player.getItemSwapScale(1.0F) — the raise
+        // animation is paced by the HELD WEAPON's attack cooldown, not by a
+        // fixed duration, which is why a netherite axe takes a full second to
+        // come up and a bare hand a quarter of one.
         void Tick(Game::ItemID mainItem, Game::ItemID offhandItem,
-                  bool attackPressedThisTick);
+                  bool attackPressedThisTick, float mainHandSwapScale,
+                  float viewPitchDeg, float viewYawDeg);
+
+        // The camera's damage-tilt / death-spin matrix for this frame (MC
+        // GameRenderer.bobHurt). Set it alongside Camera::viewTilt — vanilla
+        // renders the hand inside the same bobbed pose as the level.
+        void SetViewTilt(const glm::mat4& tilt) { m_viewTilt = tilt; }
 
         // Per-frame draw of both hands. partialTick is the 0..1 fraction
         // between the previous and next game tick (matches MC's
@@ -40,7 +55,9 @@ namespace Render {
         // walked distance in metres (bob phase). aspect is the framebuffer
         // w/h ratio. renderMainHand=false skips the main hand (portal gun
         // viewmodel owns it) but still draws the offhand.
+        // `viewPitchDeg` / `viewYawDeg` in MC convention, as for Tick.
         void Render(float aspect, float partialTick, float walkDistance,
+                    float viewPitchDeg, float viewYawDeg,
                     bool renderMainHand = true);
 
         // Hold-to-use pose state — fed per-frame from the local player's
@@ -87,7 +104,34 @@ namespace Render {
         int                    m_useRemaining = 0;
         int                    m_useDuration  = 0;
 
+        // MC GameRenderer.bobHurt's tilt, in view space. The hand shares the
+        // level's bobbed pose in vanilla, so it leans and spins with the world
+        // rather than staying pinned to the screen. Identity when unhurt.
+        glm::mat4 m_viewTilt {1.0f};
+
         bool m_firstTick = true;
+
+        // ── Look-around sway (MC LocalPlayer.xBob / yBob) ────────────────
+        //
+        // A lagging copy of the view angles. LocalPlayer.applyInput advances
+        // it once per tick by half the remaining gap:
+        //     xBob += (getXRot() - xBob) * 0.5F
+        // and ItemInHandRenderer rotates the whole hand rig by a tenth of
+        // however far the view has outrun it:
+        //     mulPose(XP.rotationDegrees((viewXRot - xBob) * 0.1F))
+        //     mulPose(YP.rotationDegrees((viewYRot - yBob) * 0.1F))
+        //
+        // So the item trails the camera on a fast flick and settles back to
+        // centre when you stop — the whole effect is those two lines plus the
+        // 0.5 follow. Angles are MC-convention degrees.
+        float m_xBob = 0.0f, m_xBobPrev = 0.0f;
+        float m_yBob = 0.0f, m_yBobPrev = 0.0f;
+
+        // Sway rotation for the current frame, in degrees. Recomputed once per
+        // Render() and applied by both the BEWLR and cube/sprite paths, which
+        // build their model matrices separately.
+        float m_swayPitchDeg = 0.0f;
+        float m_swayYawDeg   = 0.0f;
 
         // Draw one hand. `hand` indexes m_hands; invert = +1 / -1.
         void RenderHand(int hand, float aspect, float partialTick,

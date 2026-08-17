@@ -101,6 +101,7 @@ namespace Game {
     using ItemFrameSelector = int (*)(const ItemRenderContext& ctx);
 
     struct ItemStack;  // forward — defined below
+    class LivingEntity;
 
     // Right-click ON a block. Mirrors MC's `Item.useOn(UseOnContext)`
     // (Item.java:187). Default behaviour (nullptr → Pass) lets the dispatch
@@ -119,6 +120,16 @@ namespace Game {
     // entities exist).
     using ItemUseFn = UseResult (*)(ILevelWrite* world, IUsePlayer* player,
                                     uint32_t hand, ItemStack& stack);
+
+    // Right-click ON A MOB. Mirrors MC's
+    // `Item.interactLivingEntity(ItemStack, Player, LivingEntity, InteractionHand)`
+    // (Item.java) — what dye-on-sheep, shears-on-sheep, saddles and name tags
+    // all hang off. MC runs it BEFORE the entity's own mobInteract, so an item
+    // that claims the click stops the entity ever seeing it.
+    //
+    // Server-only by construction: it mutates an entity the client does not
+    // own. Returning Pass falls through to the entity's own interaction.
+    using ItemInteractEntityFn = UseResult (*)(ItemStack& stack, LivingEntity& target);
 
     // Base `Item.use` — mirrors Item.java:196-219. Dispatches on the held
     // stack's DataComponents:
@@ -172,6 +183,19 @@ namespace Game {
         std::string                   name;            // human-readable display name
         ItemRenderType                renderType = ItemRenderType::Sprite;
         BlockID                       blockId    = BlockID::Air;  // iff renderType == Block
+        // The block this item PLACES, when that isn't the item's own block.
+        //
+        // MC's BlockItem carries its block explicitly, so an item's name and the
+        // block it places need not match: `wheat_seeds` places `wheat`, `carrot`
+        // places `carrots`, `cocoa_beans` places `cocoa`
+        // (Items.java:1548 createBlockItemWithCustomItemName). Here the two are
+        // normally the same thing — a block item's ItemID IS its BlockID
+        // (ItemRegistry::FromBlock) — so those mismatched pairs have nowhere to
+        // live without this field.
+        //
+        // Air (the default) means "this item places nothing beyond whatever
+        // blockId already says", which is every item but the seeds.
+        BlockID                       placesBlock = BlockID::Air;
         std::string                   spriteName;                  // single static sprite (layer0 or non-layered)
         std::vector<std::string>      spriteLayers;                // all layerN textures (multi-layer items: leather armor, spawn egg, potion, …)
         std::vector<uint32_t>         layerTints;                  // ARGB tint per layer index (0 = untinted/white). From the items/{slug}.json `tints` array.
@@ -211,6 +235,7 @@ namespace Game {
         // Item.java:196 (use). Wiring happens in ItemRegistry::Initialize for
         // items that need behaviour (FlintAndSteel, BoneMeal, Hoe, Bucket, etc).
         ItemUseOnFn                   useOn = nullptr;
+        ItemInteractEntityFn          interactLivingEntity = nullptr;
         ItemUseFn                     use   = nullptr;
         // Inventory click-behaviour overrides (bundle). See the fn typedefs
         // above; consulted by AbstractContainerMenu::TryItemClickBehaviourOverride
@@ -233,9 +258,22 @@ namespace Game {
     struct PureItemTableEntry {
         const char* slug;           // matches assets/models/item/{slug}.json + textures/item/{slug}.png
         const char* predicateHint;  // "angle" | "time" | "pull" | ... | "none"
+        int         maxStackSize;   // MC's MAX_STACK_SIZE component: 64 unless Items.java says otherwise
     };
     extern const PureItemTableEntry kPureItemTable[];
     extern const size_t             kPureItemTableSize;
+
+    // Block items whose max stack size is NOT 64 (beds, signs, banners, boats,
+    // shulker boxes — 74 of them). They get no PureItemTableEntry, because
+    // ItemRegistry synthesises one Item per BlockID instead, and none of the
+    // behaviour-registration hooks can reach g_blockItems — so this table is
+    // the only path for their limit. Keyed on the block's registry slug.
+    struct BlockItemStackSizeEntry {
+        const char* slug;
+        int         maxStackSize;
+    };
+    extern const BlockItemStackSizeEntry kBlockItemStackSize[];
+    extern const size_t                  kBlockItemStackSizeCount;
 
     // Process-global item registry. Build-once, read-many.
     class ItemRegistry {
@@ -326,10 +364,15 @@ namespace Game {
 
         // BlockID accessor for legacy callers that only deal with blocks. Returns Air for
         // pure items so existing block-only flows (place-block, etc.) treat them as nothing.
+        //
+        // A pure item may still place a block — MC's BlockItem does not require
+        // the item and the block to share a name, which is how wheat_seeds
+        // places wheat. Item::placesBlock carries that pairing, and consulting
+        // it here means every existing placement path (server dispatch, client
+        // prediction, reach checks) picks seeds up with no change of its own.
         BlockID AsBlockID() const {
-            return ItemRegistry::IsBlockItem(itemId)
-                ? ItemRegistry::ToBlock(itemId)
-                : BlockID::Air;
+            if (ItemRegistry::IsBlockItem(itemId)) return ItemRegistry::ToBlock(itemId);
+            return ItemRegistry::Get(itemId).placesBlock;
         }
 
         // Read a DataComponent value, falling back to the owning item's defaults

@@ -32,19 +32,26 @@ namespace Render {
                     const glm::vec3& cameraPos) override;
 
         void RenderBEWLR(Game::BlockID blockId, const glm::mat4& mvp) override;
+        // Owns its item geometry — see BlockEntityRenderer::SupportsBEWLR.
+        bool SupportsBEWLR() const override { return true; }
 
     private:
         TextureHandle LoadVariantTexture(const std::string& variant);
         const char*   VariantForBlock(Game::BlockID id) const;
 
+        // MC ChestModel has THREE layer definitions — single, double-left and
+        // double-right — and ChestRenderer picks one per chest from its
+        // ChestType. Same here: one mesh per variant, chosen at draw time.
+        enum Variant { kSingle = 0, kLeft = 1, kRight = 2, kVariantCount = 3 };
+
         ShaderHandle  m_shader = INVALID_SHADER;
-        MeshHandle    m_mesh   = INVALID_MESH;
-        BufferHandle  m_vb     = INVALID_BUFFER;
-        BufferHandle  m_ib     = INVALID_BUFFER;
+        MeshHandle    m_mesh[kVariantCount] = {INVALID_MESH, INVALID_MESH, INVALID_MESH};
+        BufferHandle  m_vb[kVariantCount]   = {INVALID_BUFFER, INVALID_BUFFER, INVALID_BUFFER};
+        BufferHandle  m_ib[kVariantCount]   = {INVALID_BUFFER, INVALID_BUFFER, INVALID_BUFFER};
         std::unordered_map<std::string, TextureHandle> m_textureCache;
 
         bool          m_geomBuilt    = false;
-        uint32_t      m_indexCount   = 0;
+        uint32_t      m_indexCount[kVariantCount] = {0, 0, 0};
     };
 
 } // namespace Render

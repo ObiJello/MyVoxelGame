@@ -3,6 +3,7 @@
 #include "PacketTypes.hpp"
 #include "../core/Log.hpp"
 #include <algorithm>
+#include <zlib.h>
 
 namespace Network {
 
@@ -66,28 +67,61 @@ namespace Network {
         }
     }
 
+    bool NetworkConnection::IsLoopback() const {
+        try {
+            const auto endpoint = m_socket.remote_endpoint();
+            return endpoint.address().is_loopback();
+        } catch (...) {
+            return false;   // socket already closed — assume not local
+        }
+    }
+
     void NetworkConnection::SendPacket(uint8_t packetId, const std::vector<uint8_t>& data) {
-        // Create packet with header
+        // The frame body: VarInt packet id followed by the payload. This is
+        // what the compression stage below operates on, matching MC — the id is
+        // inside the compressed region, not outside it.
+        std::vector<uint8_t> body;
+        body.reserve(5 + data.size());
+        EncodeVarInt(static_cast<uint32_t>(packetId), body);
+        body.insert(body.end(), data.begin(), data.end());
+
         std::vector<uint8_t> packet;
-        
-        // Reserve space for VarInt length (max 5 bytes) + VarInt packet ID (max 5 bytes) + payload
-        packet.reserve(10 + data.size());
-        
-        // Encode packet ID as VarInt to temp buffer
-        std::vector<uint8_t> packetIdBytes;
-        EncodeVarInt(static_cast<uint32_t>(packetId), packetIdBytes);
-        
-        // Calculate packet size (VarInt packet ID + payload)
-        uint32_t packetSize = static_cast<uint32_t>(packetIdBytes.size() + data.size());
-        
-        // Encode length as VarInt
-        EncodeVarInt(packetSize, packet);
-        
-        // Add packet ID as VarInt
-        packet.insert(packet.end(), packetIdBytes.begin(), packetIdBytes.end());
-        
-        // Add payload
-        packet.insert(packet.end(), data.begin(), data.end());
+        packet.reserve(10 + body.size());
+
+        if (m_compressionThreshold >= 0) {
+            // MC CompressionEncoder.encode:
+            //
+            //     if (uncompressedLength < threshold) { VarInt.write(out, 0);
+            //                                           out.writeBytes(uncompressed); }
+            //     else { VarInt.write(out, input.length); deflate... }
+            //
+            // A leading zero means "not compressed"; anything else is the
+            // UNCOMPRESSED length, which is how the reader sizes its output.
+            std::vector<uint8_t> framed;
+            if (body.size() < static_cast<size_t>(m_compressionThreshold)) {
+                EncodeVarInt(0, framed);
+                framed.insert(framed.end(), body.begin(), body.end());
+            } else {
+                uLongf bound = compressBound(static_cast<uLong>(body.size()));
+                std::vector<uint8_t> deflated(bound);
+                if (compress2(deflated.data(), &bound, body.data(),
+                              static_cast<uLong>(body.size()), Z_DEFAULT_COMPRESSION) == Z_OK) {
+                    deflated.resize(bound);
+                    EncodeVarInt(static_cast<uint32_t>(body.size()), framed);
+                    framed.insert(framed.end(), deflated.begin(), deflated.end());
+                } else {
+                    // Deflate failed — send it through uncompressed rather than
+                    // dropping the packet. The reader cannot tell the difference.
+                    EncodeVarInt(0, framed);
+                    framed.insert(framed.end(), body.begin(), body.end());
+                }
+            }
+            EncodeVarInt(static_cast<uint32_t>(framed.size()), packet);
+            packet.insert(packet.end(), framed.begin(), framed.end());
+        } else {
+            EncodeVarInt(static_cast<uint32_t>(body.size()), packet);
+            packet.insert(packet.end(), body.begin(), body.end());
+        }
         
         // Debug logging - only log in base class if not a known packet type
         // Client and Server connections will log their own specific packets
@@ -237,11 +271,57 @@ namespace Network {
             hexDump += buf;
         }
         
+        // Undo the compression stage first, so everything below sees the same
+        // "VarInt id + payload" body it always did.
+        //
+        // MC CompressionDecoder: a leading VarInt of 0 means the rest is raw;
+        // otherwise it is the uncompressed length to inflate to.
+        std::vector<uint8_t> inflated;
+        const uint8_t* body = m_readBuffer.data();
+        size_t bodySize = bytesTransferred;
+
+        if (m_compressionThreshold >= 0) {
+            size_t lenBytes = 0;
+            uint32_t uncompressedLength = 0;
+            try {
+                uncompressedLength = DecodeVarInt(m_readBuffer.data(), lenBytes);
+            } catch (const std::exception& e) {
+                Log::Error("[%s] Bad compressed frame header: %s", m_name.c_str(), e.what());
+                Disconnect();
+                return;
+            }
+            if (uncompressedLength == 0) {
+                body     = m_readBuffer.data() + lenBytes;
+                bodySize = bytesTransferred - lenBytes;
+            } else {
+                if (uncompressedLength > MAX_PACKET_SIZE) {
+                    Log::Error("[%s] Compressed frame claims %u bytes", m_name.c_str(),
+                               uncompressedLength);
+                    Disconnect();
+                    return;
+                }
+                inflated.resize(uncompressedLength);
+                uLongf out = uncompressedLength;
+                const int rc = uncompress(inflated.data(), &out,
+                                          m_readBuffer.data() + lenBytes,
+                                          static_cast<uLong>(bytesTransferred - lenBytes));
+                if (rc != Z_OK || out != uncompressedLength) {
+                    Log::Error("[%s] Inflate failed (rc=%d, got %lu of %u)",
+                               m_name.c_str(), rc, static_cast<unsigned long>(out),
+                               uncompressedLength);
+                    Disconnect();
+                    return;
+                }
+                body     = inflated.data();
+                bodySize = uncompressedLength;
+            }
+        }
+
         // Extract packet ID as VarInt
         size_t packetIdBytes = 0;
         uint32_t packetId = 0;
         try {
-            packetId = DecodeVarInt(m_readBuffer.data(), packetIdBytes);
+            packetId = DecodeVarInt(body, packetIdBytes);
         } catch (const std::exception& e) {
             Log::Error("[%s] Failed to decode packet ID: %s, raw bytes: %s", 
                       m_name.c_str(), e.what(), hexDump.c_str());
@@ -259,10 +339,7 @@ namespace Network {
         m_currentPacket.header.packetId = static_cast<uint8_t>(packetId);
         
         // Extract payload (remaining bytes after VarInt packet ID)
-        m_currentPacket.payload.assign(
-            m_readBuffer.begin() + packetIdBytes,
-            m_readBuffer.begin() + bytesTransferred
-        );
+        m_currentPacket.payload.assign(body + packetIdBytes, body + bodySize);
         
         // Debug log for received packets - only log in base class if not a known packet type
         // Client and Server connections will log their own specific packets  

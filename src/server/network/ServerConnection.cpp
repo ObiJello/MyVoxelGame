@@ -864,6 +864,13 @@ namespace Server {
                 }
                 break;
 
+            case PacketId::InteractC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeInteractC2S(payload);
+                    return std::make_unique<Network::Packets::InteractC2SPacketImpl>(data);
+                }
+                break;
+
             case PacketId::PlayerAbilitiesC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializePlayerAbilitiesC2S(payload);

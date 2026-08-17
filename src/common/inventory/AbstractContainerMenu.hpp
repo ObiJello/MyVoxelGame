@@ -25,6 +25,7 @@
 // walk menu slots instead — that is the one place the equivalence is assumed.
 #pragma once
 
+#include "ContainerData.hpp"
 #include "Slot.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/network/PacketTypes.hpp"
@@ -37,7 +38,15 @@ namespace Game {
     struct ContainerClickResult {
         std::vector<uint8_t> changedSlots;    // unique MENU indices to rebroadcast
         bool                 carriedChanged = false;
-        ItemStack            droppedItem{};   // populated for THROW (entity spawn TODO)
+        // Populated for THROW and for a click outside the window: the stack the
+        // player deliberately threw away. The session spawns it as a world
+        // entity.
+        ItemStack            droppedItem{};
+        // Stacks a closing menu could not hand back because the inventory was
+        // full (MC clearContainer → Containers.drop). These were never the
+        // menu's to keep, so they go into the world rather than being deleted.
+        // Separate from droppedItem because a single close can strand several.
+        std::vector<ItemStack> extraDrops;
     };
 
     class AbstractContainerMenu {
@@ -113,12 +122,33 @@ namespace Game {
             return IsValidSlotIndex(inventoryIndex) ? inventoryIndex : -1;
         }
 
+        // ── Data slots (MC addDataSlots / ContainerData) ──────────────────
+        // State the client must see that isn't an item: furnace burn + cook
+        // timers, brewing progress, enchantment offers. Null for menus with
+        // none, which is most of them. The server diffs these every tick
+        // alongside the slots and sends ContainerSetDataS2C per changed index;
+        // the client's copy is always a SimpleContainerData it just receives
+        // into. See ContainerData.hpp.
+        int  DataCount() const { return m_data ? m_data->Count() : 0; }
+        int  GetData(int index) const { return m_data ? m_data->Get(index) : 0; }
+        void SetData(int index, int value) { if (m_data) m_data->Set(index, value); }
+
     protected:
         explicit AbstractContainerMenu(Inventory* playerInventory)
             : m_playerInventory(playerInventory) {}
 
         // Append a slot; assigns its menu index. Mirrors MC addSlot.
         Slot& AddSlot(std::unique_ptr<Slot> slot);
+
+        // Mirrors MC addDataSlots(ContainerData). Ownership stays with the
+        // caller when it's a block entity's live view (DelegatingContainerData
+        // over the BE's own counters); menus with no BE behind them hand over a
+        // SimpleContainerData they own via SetOwnedData.
+        void SetData(ContainerData* data) { m_data = data; }
+        void SetOwnedData(std::unique_ptr<ContainerData> data) {
+            m_ownedData = std::move(data);
+            m_data = m_ownedData.get();
+        }
 
         // MC AbstractContainerMenu.moveItemStackTo — merge `stack` into
         // matching stacks in [begin, end), then into the first empty slot that
@@ -159,6 +189,11 @@ namespace Game {
         std::vector<std::unique_ptr<Slot>> m_slots;
         Inventory* m_playerInventory = nullptr;
         ItemStack  m_carried{};
+
+        // Borrowed (block-entity-backed) or owned (SimpleContainerData) — see
+        // SetData / SetOwnedData. m_data always points at whichever is live.
+        ContainerData*                 m_data = nullptr;
+        std::unique_ptr<ContainerData> m_ownedData;
 
         // MC quickcraftStatus / quickcraftType / quickcraftSlots.
         uint8_t          m_quickcraftStatus = 0;

@@ -45,17 +45,23 @@ namespace Game {
 
     // MC ChunkAccess.getNoiseBiome — the caller's block coordinates are shifted
     // right by 2 and clamped into the chunk's quarter grid.
+    // Biomes live on the SECTION now (MC LevelChunkSection.biomes). These two
+    // keep the chunk-level, world-Y vocabulary the rest of the engine uses and
+    // route it to the right section's 4x4x4 container.
     uint16_t Chunk::GetBiome(int localX, int worldY, int localZ) const {
-        if (biomes.empty()) return kFallbackBiomeId;
-
-        const int qx = std::clamp(localX >> 2, 0, BIOME_HORIZONTAL - 1);
-        const int qz = std::clamp(localZ >> 2, 0, BIOME_HORIZONTAL - 1);
+        const int qxAll = std::clamp(localX >> 2, 0, BIOME_HORIZONTAL - 1);
+        const int qzAll = std::clamp(localZ >> 2, 0, BIOME_HORIZONTAL - 1);
         // Y is world-space and starts at MIN_WORLD_Y (-64), so it has to be
         // rebased before the shift or everything below y=0 lands in cell 0.
-        const int qy = std::clamp(
+        const int qyAll = std::clamp(
             (worldY - Math::WorldCoordinates::MIN_WORLD_Y) >> 2, 0, BIOME_VERTICAL - 1);
 
-        return biomes[static_cast<size_t>((qy * BIOME_HORIZONTAL + qz) * BIOME_HORIZONTAL + qx)];
+        const int sectionIndex = qyAll / ChunkSection::BIOME_AXIS;
+        const ChunkSection* section =
+            (sectionIndex >= 0 && sectionIndex < SECTION_COUNT) ? GetSection(sectionIndex) : nullptr;
+        if (!section) return kFallbackBiomeId;
+
+        return section->GetBiome(qxAll, qyAll % ChunkSection::BIOME_AXIS, qzAll);
     }
 
     void Chunk::SetBiomeQuart(int qx, int qy, int qz, uint16_t biomeId) {
@@ -63,8 +69,12 @@ namespace Game {
             qy < 0 || qy >= BIOME_VERTICAL) {
             return;
         }
-        if (biomes.empty()) biomes.assign(BIOME_COUNT, 0);
-        biomes[static_cast<size_t>((qy * BIOME_HORIZONTAL + qz) * BIOME_HORIZONTAL + qx)] = biomeId;
+        const int sectionIndex = qy / ChunkSection::BIOME_AXIS;
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) return;
+        EnsureSection(sectionIndex);
+        if (ChunkSection* section = GetSection(sectionIndex)) {
+            section->SetBiome(qx, qy % ChunkSection::BIOME_AXIS, qz, biomeId);
+        }
     }
 
     uint8_t Chunk::GetBlockState(int localX, int worldY, int localZ) const {
@@ -125,6 +135,8 @@ namespace Game {
             section->Set(localX, sectionY, localZ, blockId);
             section->SetState(localX, sectionY, localZ, stateIndex);
 
+            UpdateHeightmaps(localX, worldY, localZ, blockId);
+
             if (onSectionDirty) {
                 onSectionDirty(sectionIndex);
             }
@@ -176,11 +188,75 @@ namespace Game {
             // state index 3.
             section->SetState(localX, sectionY, localZ, 0);
 
+            UpdateHeightmaps(localX, worldY, localZ, blockId);
+
             // Mark section as dirty for mesh rebuilding
             if (onSectionDirty) {
                 onSectionDirty(sectionIndex);
             }
         }
+    }
+
+    void Chunk::UpdateHeightmaps(int localX, int worldY, int localZ, BlockID newBlock) {
+        // MC LevelChunk.setBlockState updates every heightmap on every write.
+        // Skipped entirely until the chunk is primed: before that the stored
+        // heights are all minY, so an Update would happily conclude that the
+        // first block written is the surface and leave every column below it
+        // wrong. The prime pass is what establishes the truth.
+        if (!m_heightmapsPrimed) return;
+
+        const auto blockAt = [this](int x, int y, int z) { return GetBlock(x, y, z); };
+
+        for (size_t i = 0; i < static_cast<size_t>(HeightmapType::Count); ++i) {
+            m_heightmaps[i].Update(localX, worldY, localZ, newBlock,
+                                   static_cast<HeightmapType>(i), blockAt);
+        }
+    }
+
+    void Chunk::PrimeHeightmaps() {
+        // MC Heightmap.primeHeightmaps: one downward scan per column, stopping
+        // as soon as every map has found its surface.
+        //
+        // This is the SLOW path and it is meant to be — a freshly generated
+        // chunk copies the terrain library's already-computed heights instead
+        // (see MyTerrainGenerator), and a loaded chunk reads them from NBT.
+        // Reaching here means neither was available.
+        constexpr size_t kTypeCount = static_cast<size_t>(HeightmapType::Count);
+
+        // Start from the top of the highest non-empty section rather than the
+        // build limit: most chunks are empty above y=128 and scanning that is
+        // pure waste.
+        int scanTop = MIN_WORLD_Y;
+        for (int i = SECTION_COUNT - 1; i >= 0; --i) {
+            if (HasSection(i)) {
+                scanTop = Math::WorldCoordinates::SectionCoordsToWorldY(i, SECTION_HEIGHT - 1);
+                break;
+            }
+        }
+
+        for (size_t i = 0; i < kTypeCount; ++i) m_heightmaps[i].Reset(MIN_WORLD_Y);
+
+        for (int x = 0; x < SIZE_X; ++x) {
+            for (int z = 0; z < SIZE_Z; ++z) {
+                bool found[kTypeCount] = {};
+                size_t remaining = kTypeCount;
+
+                for (int y = scanTop; y >= MIN_WORLD_Y && remaining > 0; --y) {
+                    const BlockID block = GetBlock(x, y, z);
+                    if (block == BlockID::Air) continue;
+
+                    for (size_t i = 0; i < kTypeCount; ++i) {
+                        if (found[i]) continue;
+                        if (!HeightmapIsOpaque(static_cast<HeightmapType>(i), block)) continue;
+                        m_heightmaps[i].SetHeight(x, z, y + 1);
+                        found[i] = true;
+                        --remaining;
+                    }
+                }
+            }
+        }
+
+        m_heightmapsPrimed = true;
     }
 
     // Section management

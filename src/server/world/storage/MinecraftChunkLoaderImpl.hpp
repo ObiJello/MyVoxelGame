@@ -229,6 +229,11 @@ namespace Game {
         ::World::NBTTagPtr LoadChunkNBT(Math::ChunkPos position);
 
         // Convert NBT data to chunk
+        // Restore the chunk's heightmaps from the Heightmaps NBT compound,
+        // re-priming anything missing. Called right after the sections are
+        // unpacked, because priming needs the blocks in place.
+        void LoadHeightmaps(const ::World::NBTTagPtr& nbtData, Chunk& chunk);
+
         std::shared_ptr<Chunk> NBTToChunk(const ::World::NBTTagPtr& nbtData, Math::ChunkPos position);
 
         // Validate NBT chunk data

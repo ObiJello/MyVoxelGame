@@ -70,6 +70,11 @@ namespace Render {
     void ApplyContainerSlot(int menuIndex, const Game::ItemStack& stack);
     void ApplyContainerSlots(const std::vector<Game::ItemStack>& slots);
 
+    // Apply one ContainerData index (MC ClientboundContainerSetDataPacket).
+    // Dropped when `containerId` names a menu we already replaced — a furnace
+    // sends these every tick, so one in flight across a close is normal.
+    void ApplyContainerData(uint32_t containerId, uint16_t index, int32_t value);
+
     // ── Entry points for the network layer (declared again at file scope in
     // ClientPacketHandler.cpp so it needn't include a GUI header) ───────────
 

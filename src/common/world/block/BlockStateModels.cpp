@@ -401,10 +401,16 @@ namespace Game {
                     }
 
                     // Pick the variant whose selector this state satisfies.
-                    // Constraints naming a property we don't model (a furnace's
-                    // `lit`, a stair's `shape`) can't be judged, so they're counted
+                    // Constraints naming a property we don't model (a stair's
+                    // `shape`, a door's `hinge`) can't be judged, so they're counted
                     // as "extra" and we prefer the variant with the fewest of them —
                     // i.e. the one that pins down the least beyond what we track.
+                    //
+                    // Declaring a property in BlockRegistry::InitBlockStates is what
+                    // moves it out of "extra" and lets its variants be selected at
+                    // all: a furnace could only ever resolve the unlit model until
+                    // `lit` was added there, because both lit=true and lit=false
+                    // scored one extra and JSON order handed it to `false`.
                     // Ties break on JSON order, which puts MC's default-ish states
                     // first and keeps the choice deterministic across runs.
                     const VariantEntry* best = nullptr;

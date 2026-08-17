@@ -22,6 +22,17 @@ namespace Network {
         uint8_t         face    = 0;                  // 0..5
         glm::vec3       hitPosition;                  // exact hit point (for placement)
         uint32_t        sequenceNumber = 0;
+        // Block-state index of the block being broken, captured client-side at
+        // the START of the dig.
+        //
+        // The server cannot read this itself. In integrated-server mode client
+        // and server share one World, so the client's local break prediction
+        // has already cleared the cell by the time this packet is handled —
+        // which is exactly why `blockId` above is carried in the packet rather
+        // than read from the world. The state needs the same treatment, and
+        // without it every loot condition on a state reads the DEFAULT: a fully
+        // grown wheat evaluated as age=0 and dropped seeds instead of wheat.
+        uint8_t         blockState = 0;
 
         BlockActionC2SPacket() = default;
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act)
@@ -44,6 +55,7 @@ namespace Network {
             buffer.WriteFloat(packet.hitPosition.y);
             buffer.WriteFloat(packet.hitPosition.z);
             buffer.WriteVarInt(packet.sequenceNumber);
+            buffer.WriteByte(packet.blockState);
             return buffer.GetData();
         }
 
@@ -60,6 +72,12 @@ namespace Network {
             packet.hitPosition.y = reader.ReadFloat();
             packet.hitPosition.z = reader.ReadFloat();
             packet.sequenceNumber = reader.ReadVarInt();
+            // Tail-appended, same pattern as BlockChangeS2CPacket's state byte:
+            // absent from a pre-state sender, which means "default state" — the
+            // correct reading for a block that carries no properties.
+            if (reader.Remaining() >= 1) {
+                packet.blockState = reader.ReadByte();
+            }
             return packet;
         }
 

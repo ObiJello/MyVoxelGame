@@ -11,13 +11,15 @@
 // all three). The variant is encoded in m_blockId (inherited from
 // BlockEntity).
 //
+// Holds the 27-slot inventory (MC ChestBlockEntity.items). Save/Load of the
+// contents comes from BaseContainerBlockEntity.
+//
 // Future state to add as the corresponding stages ship:
-//   - items[27]               (Stage 5, container UI)
 //   - openersCounter          (Stage 4, lid animation)
 //   - chestLidController      (Stage 4)
 #pragma once
 
-#include "BlockEntity.hpp"
+#include "BaseContainerBlockEntity.hpp"
 #include "common/network/PacketRegistry.hpp"
 
 namespace Game {
@@ -32,10 +34,14 @@ namespace Game {
         East  = 3,   // +X
     };
 
-    class ChestBlockEntity : public BlockEntity {
+    class ChestBlockEntity : public BaseContainerBlockEntity {
     public:
+        // MC ChestBlockEntity is a 27-slot container (a double chest is two of
+        // them joined by a CompoundContainer, not one 54-slot BE).
+        static constexpr int SLOT_COUNT = 27;
+
         ChestBlockEntity(const BlockEntityType* type, glm::ivec3 worldPos, BlockID blockId)
-            : BlockEntity(type, worldPos, blockId) {}
+            : BaseContainerBlockEntity(type, worldPos, blockId, SLOT_COUNT) {}
 
         // Auto-close lid arrives with Stage 4; nothing to tick yet.
         bool NeedsTicking() const override { return false; }
@@ -49,14 +55,9 @@ namespace Game {
         // replicated with the block itself, so it needs no separate BE sync and
         // survives a world reload with the chunk rather than alongside it.
         //
-        // The byte written here keeps the on-wire/on-disk BE payload non-empty
-        // and reserved for the lid/inventory data that follows.
-        void Save(Network::PacketBuffer& out) const override {
-            out.WriteByte(0);
-        }
-        void Load(Network::PacketReader& in) override {
-            if (in.Remaining() >= 1) (void)in.ReadByte();
-        }
+        // Save/Load are BaseContainerBlockEntity's — they write the 27 stacks.
+        // The old placeholder byte is gone; overriding them here again would
+        // silently drop every chest's contents on save.
     };
 
     // Convert a HorizontalDirection to the Y-rotation in radians needed

@@ -26,11 +26,25 @@ namespace Game {
         constexpr uint16_t CHEST         = 1;
         constexpr uint16_t TRAPPED_CHEST = 2;
         constexpr uint16_t ENDER_CHEST   = 3;
-        // ... 4..29 reserved for the other 23 MC BE types (Sign, Banner, Bed,
-        // ShulkerBox, Bell, Beacon, Conduit, EndPortal, EndGateway, EnchantingTable,
-        // Lectern, MobSpawner, TrialSpawner, Vault, StructureBlock, TestInstanceBlock,
-        // Piston, BrushableBlock, DecoratedPot, Campfire, Skull, CopperGolemStatue,
-        // Shelf, HangingSign). Added in later stages.
+        // Container block entities (they all store items, so they all need a BE).
+        constexpr uint16_t BARREL        = 4;
+        constexpr uint16_t SHULKER_BOX   = 5;
+        constexpr uint16_t DISPENSER     = 6;
+        constexpr uint16_t DROPPER       = 7;
+        constexpr uint16_t HOPPER        = 8;
+        constexpr uint16_t FURNACE       = 9;
+        constexpr uint16_t BLAST_FURNACE = 10;
+        constexpr uint16_t SMOKER        = 11;
+        constexpr uint16_t BREWING_STAND = 12;
+        constexpr uint16_t BEACON        = 13;
+        constexpr uint16_t CRAFTER       = 14;
+        constexpr uint16_t CAMPFIRE      = 15;
+        constexpr uint16_t SOUL_CAMPFIRE = 16;
+        // ... 17..29 reserved for the remaining MC BE types (Sign, Banner, Bed,
+        // Bell, Conduit, EndPortal, EndGateway, EnchantingTable, Lectern,
+        // MobSpawner, TrialSpawner, Vault, StructureBlock, TestInstanceBlock,
+        // Piston, BrushableBlock, DecoratedPot, Skull,
+        // CopperGolemStatue, Shelf, HangingSign). Added in later stages.
         constexpr uint16_t MAX_ID        = 64;
     }
 

@@ -2,7 +2,7 @@
 #pragma once
 
 #include "SectionChangeAccumulator.hpp"
-#include "../watch/ChunkWatchIndex.hpp"
+#include "../../session/PlayerSessionManager.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/network/PacketTypes.hpp"
 #include <glm/glm.hpp>
@@ -25,7 +25,7 @@ public:
     
     ChunkDeltaBroadcaster(IntegratedServer* server,
                          SectionChangeAccumulator* accumulator,
-                         ChunkWatchIndex* watchIndex);
+                         PlayerSessionManager* sessionManager);
     ~ChunkDeltaBroadcaster();
     
     // === MAIN FLUSH ===
@@ -89,7 +89,7 @@ private:
     
     IntegratedServer* m_server;
     SectionChangeAccumulator* m_accumulator;
-    ChunkWatchIndex* m_watchIndex;
+    PlayerSessionManager* m_sessionManager;
     
     // Statistics
     Stats m_stats;

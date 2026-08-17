@@ -171,11 +171,23 @@ namespace Game {
         // Section exists - write flag
         buffer.push_back(1);
 
-        // Write block data (simplified - just the raw block array)
-        const auto& blocks = section->blocks;
-        buffer.insert(buffer.end(),
-                     reinterpret_cast<const uint8_t*>(blocks.data()),
-                     reinterpret_cast<const uint8_t*>(blocks.data()) + blocks.size() * sizeof(uint16_t));
+        // Block data, one uint16_t per voxel.
+        //
+        // NOT the storage layout any more — ChunkSection holds a paletted
+        // container. World saving is disabled, so this stays a plain flat dump
+        // purely to keep the round trip self-consistent; it is not a format to
+        // build on. When saving is turned back on this should write the
+        // container (palette + raw words), which would also fix the fact that
+        // block STATES have never been persisted here at all.
+        for (int y = 0; y < ChunkSection::SIZE; ++y) {
+            for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                for (int x = 0; x < ChunkSection::SIZE; ++x) {
+                    const uint16_t raw = section->Get(x, y, z);
+                    buffer.push_back(static_cast<uint8_t>(raw & 0xFF));
+                    buffer.push_back(static_cast<uint8_t>((raw >> 8) & 0xFF));
+                }
+            }
+        }
     }
 
     bool ChunkSerializer::DeserializeSection(const uint8_t*& data, size_t& remaining, ChunkSection& section) {
@@ -188,19 +200,34 @@ namespace Game {
 
         if (!exists) {
             // Section doesn't exist - clear it
-            std::fill(section.blocks.begin(), section.blocks.end(), 0);
+            section = ChunkSection{};
             return true;
         }
 
-        // Read block data
-        size_t blockDataSize = section.blocks.size() * sizeof(uint16_t);
+        // Read block data (see SerializeSection for why this is a flat dump).
+        const size_t blockDataSize = ChunkSection::TOTAL * sizeof(uint16_t);
         if (remaining < blockDataSize) {
             return false;
         }
 
-        std::memcpy(section.blocks.data(), data, blockDataSize);
-        data += blockDataSize;
+        for (int y = 0; y < ChunkSection::SIZE; ++y) {
+            for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                for (int x = 0; x < ChunkSection::SIZE; ++x) {
+                    const uint16_t raw =
+                        static_cast<uint16_t>(data[0]) |
+                        static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8);
+                    section.Set(x, y, z, raw);
+                    data += 2;
+                }
+            }
+        }
         remaining -= blockDataSize;
+
+        // This is the one path that fills a section without going through
+        // ChunkSection::Set, so the random-tick census it maintains has to be
+        // rebuilt by hand here. Skipping it would load a saved wheat field that
+        // silently never grows again.
+        section.RecountRandomTicking();
 
         return true;
     }

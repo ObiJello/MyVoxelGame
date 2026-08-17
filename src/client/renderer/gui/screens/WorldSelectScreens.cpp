@@ -156,11 +156,46 @@ namespace Render {
             }
         }
 
+        // MC bounds every row line with StringWidget.setMaxWidth and shows the
+        // full text in a tooltip. We have no per-row tooltips, so trim to fit
+        // with an ellipsis — a long world name plus a snapshot version string
+        // otherwise runs past the row and into the scrollbar.
+        std::string Ellipsize(GuiGraphics& g, const std::string& text, int maxWidth) {
+            if (text.empty() || g.GetStringWidth(text) <= maxWidth) return text;
+            const int dotsW = g.GetStringWidth("...");
+            if (maxWidth <= dotsW) return "...";
+            std::string out;
+            out.reserve(text.size());
+            for (char c : text) {
+                out.push_back(c);
+                if (g.GetStringWidth(out) + dotsW > maxWidth) {
+                    out.pop_back();
+                    break;
+                }
+            }
+            return out + "...";
+        }
+
+        // MC's GameType ordinal from level.dat's Data.GameType. NOT the same
+        // numbering as GameModeName above, which uses our worlds.json ids
+        // (where 2 means Hardcore, not Adventure).
+        const char* McGameModeName(int gameType) {
+            switch (gameType) {
+                case 0:  return "Survival";
+                case 1:  return "Creative";
+                case 2:  return "Adventure";
+                case 3:  return "Spectator";
+                default: return "Survival";
+            }
+        }
+
         // Fill the pending TitleAction with a world and hand it to the host loop.
         void LaunchWorld(const WorldEntry& e) {
             TitleAction a;
             a.kind = TitleAction::Kind::Singleplayer;
             a.useMinecraftSave = e.isMinecraftSave;
+            a.worldPath        = e.savePath;
+            a.readOnlyWorld    = e.readOnly;
             a.worldName = e.name;
             a.seed      = e.seed;
             a.gameMode  = e.gameMode;
@@ -214,7 +249,11 @@ namespace Render {
         const int rowX = m_x + (m_width - ROW_W) / 2;
         if (mouseX < rowX || mouseX >= rowX + ROW_W) return -1;
         int idx = static_cast<int>((mouseY - m_y - 2 + m_scroll) / ROW_H);
-        return (idx >= 0 && idx < static_cast<int>(m_entries.size())) ? idx : -1;
+        if (idx < 0 || idx >= static_cast<int>(m_entries.size())) return -1;
+        // Section headers occupy a row but are not worlds — clicking one must
+        // not change the selection or the footer buttons would act on it.
+        if (m_entries[idx].isHeader) return -1;
+        return idx;
     }
 
     void WorldListWidget::OnClick(double mouseX, double mouseY) {
@@ -248,6 +287,29 @@ namespace Render {
             if (top + ROW_H < m_y || top > m_y + m_height) continue;
             const WorldEntry& e = m_entries[i];
 
+            // Section divider. Reads as a heading, not as a third line of some
+            // world's grey subtext: a full-width banner plate, bright text
+            // centred in it, and rules on both sides of the label so the eye
+            // parses it as a break in the list rather than another row.
+            if (e.isHeader) {
+                const int bandTop = top + 6;
+                const int bandBot = top + ROW_H - 8;
+
+                const int textW = g.GetStringWidth(e.name);
+                const int textX = rowX + (ROW_W - textW) / 2;
+                const int textY = (bandTop + bandBot) / 2 - FontRenderer::LINE_HEIGHT / 2;
+                g.DrawString(e.name, textX, textY, 0xFFFFFFFF);
+
+                const int ruleY = (bandTop + bandBot) / 2;
+                if (textX - 8 > rowX + 4) {
+                    g.Fill(rowX + 4, ruleY, textX - 8, ruleY + 1, 0x60FFFFFF);
+                }
+                if (textX + textW + 8 < rowX + ROW_W - 4) {
+                    g.Fill(textX + textW + 8, ruleY, rowX + ROW_W - 4, ruleY + 1, 0x60FFFFFF);
+                }
+                continue;
+            }
+
             // MC selection chrome: dark plate with a light border.
             if (static_cast<int>(i) == m_selected) {
                 g.Fill(rowX - 2, top - 2, rowX + ROW_W + 2, top + ROW_H - 2, 0xFF808080);
@@ -258,15 +320,25 @@ namespace Render {
 
             g.DrawString(e.name, rowX + 3, top + 1, 0xFFFFFFFF);
             std::string line2, line3;
-            if (e.isMinecraftSave) {
+            if (!e.infoLine1.empty() || !e.infoLine2.empty()) {
+                // Anvil world summarised from level.dat — MC's own two grey
+                // lines, verbatim in content and order.
+                line2 = e.infoLine1;
+                line3 = e.infoLine2;
+            } else if (e.readOnly) {
+                line2 = "Minecraft world";
+                line3 = "Read-only - changes are not saved";
+            } else if (e.isMinecraftSave) {
                 line2 = "Minecraft save (saves/world)";
                 line3 = "Loaded from disk - block changes persist";
             } else {
                 line2 = std::string(GameModeName(e.gameMode)) + ", Seed: " + std::to_string(e.seed);
                 line3 = "Created " + FormatDate(e.created) + " - regenerates on join";
             }
-            g.DrawString(line2, rowX + 3, top + 1 + FontRenderer::LINE_HEIGHT + 2, 0xFF808080);
-            g.DrawString(line3, rowX + 3, top + 1 + 2 * (FontRenderer::LINE_HEIGHT + 2), 0xFF808080);
+            g.DrawString(Ellipsize(g, line2, ROW_W - 6), rowX + 3,
+                         top + 1 + FontRenderer::LINE_HEIGHT + 2, 0xFF808080);
+            g.DrawString(Ellipsize(g, line3, ROW_W - 6), rowX + 3,
+                         top + 1 + 2 * (FontRenderer::LINE_HEIGHT + 2), 0xFF808080);
         }
         g.DisableScissor();
 
@@ -290,14 +362,66 @@ namespace Render {
         m_list = AddWidget(new WorldListWidget(0, 48, m_width, m_height - 48 - 64));
 
         std::vector<WorldEntry> entries;
+
+        // Headings only make sense when there are two sections to tell apart.
+        // With no Minecraft install the list is just your worlds, and a lone
+        // "Your ObeyCraft Worlds" banner over them would be noise.
+        const auto mcWorlds = Platform::GameDirectory::ListMinecraftWorlds();
+        const bool sectioned = !mcWorlds.empty();
+
+        if (sectioned) {
+            WorldEntry header;
+            header.name     = "Your ObeyCraft Worlds";
+            header.isHeader = true;
+            entries.push_back(std::move(header));
+        }
+
         // The auto-detected Anvil save keeps today's behavior, listed first.
         if (Platform::g_gameDirectory.HasDefaultSaveWorld()) {
             WorldEntry mc;
             mc.name = "world";
             mc.isMinecraftSave = true;
+            mc.savePath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
             entries.push_back(std::move(mc));
         }
         for (auto& e : WorldList::Load()) entries.push_back(std::move(e));
+
+        // Worlds from the player's real Minecraft installation, under their own
+        // heading. Read-only — see WorldEntry::readOnly.
+        if (sectioned) {
+            WorldEntry header;
+            header.name     = "Your Minecraft Worlds";
+            header.isHeader = true;
+            entries.push_back(std::move(header));
+
+            for (const auto& w : mcWorlds) {
+                WorldEntry e;
+                e.name            = w.levelName;
+                e.isMinecraftSave = true;
+                e.readOnly        = true;
+                e.savePath        = w.path;
+                e.lastPlayed      = w.lastPlayed;
+
+                // MC WorldSelectionList.WorldListEntry:1362-1366 — the folder
+                // name, then the last-played timestamp in parentheses.
+                e.infoLine1 = w.folderName;
+                if (w.lastPlayed > 0) {
+                    e.infoLine1 += " (" + FormatDate(w.lastPlayed) + ")";
+                }
+
+                // MC LevelSummary.createInfo():1136-1163 — game mode (Hardcore
+                // replaces it outright), then cheats, then the version.
+                e.infoLine2 = w.hardcore ? "Hardcore" : McGameModeName(w.gameMode);
+                if (w.allowCommands) e.infoLine2 += ", Allow Cheats";
+                if (!w.versionName.empty()) e.infoLine2 += ", Version: " + w.versionName;
+
+                entries.push_back(std::move(e));
+            }
+            Log::Info("Select World: found %zu Minecraft world(s) in %s",
+                      mcWorlds.size(),
+                      Platform::GameDirectory::GetMinecraftSavesDirectory().c_str());
+        }
+
         m_list->SetEntries(std::move(entries));
         m_list->onSelectionChanged = [this] { UpdateButtonStates(); };
         m_list->onDoubleClick      = [this] { PlaySelected(); };

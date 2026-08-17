@@ -112,6 +112,13 @@ namespace Server {
         // Get all chunks that should be loaded
         std::vector<Game::Math::ChunkPos> GetLoadedChunks() const;
 
+        // Every chunk close enough to a player to run block ticks — MC's
+        // ChunkMap.forEachBlockTickingChunk. Returned as a list rather than
+        // queried per chunk because the caller (the random-tick loop) wants to
+        // iterate it, and building it once per tick takes the manager's mutex
+        // once instead of once per chunk.
+        std::vector<Game::Math::ChunkPos> GetBlockTickingChunks() const;
+
         // === DISTANCE CALCULATIONS ===
 
         // Convert simulation distance to ticket level
@@ -120,8 +127,12 @@ namespace Server {
         // Convert ticket level to distance
         static int LevelToDistance(int level);
         
-        // Calculate ticket level from chunk distance
-        static int CalculateTicketLevel(int chunkDistance);
+        // Ticket level for a chunk `chunkDistance` chunks (Chebyshev) from the
+        // anchor of a ticket whose reach is `simulationDistance`. See the
+        // implementation for the MC level layout it reproduces — the short
+        // version is that block ticking reaches simulationDistance - 1, so the
+        // simulation distance means what a player expects it to mean.
+        static int CalculateTicketLevel(int chunkDistance, int simulationDistance);
 
         // === MAINTENANCE ===
 

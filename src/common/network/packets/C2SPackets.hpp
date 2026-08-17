@@ -90,6 +90,29 @@ namespace Packets {
     // PLAYER ABILITIES PACKET (client fly-state toggle)
     // ========================================================================
 
+    // MC ServerboundInteractPacket — the client's "I attacked that entity".
+    // The server re-checks reach and liveness; this packet is a request, not a
+    // command (see IntegratedServer::HandleInteract).
+    class InteractC2SPacketImpl : public IC2SPacket {
+    private:
+        InteractC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit InteractC2SPacketImpl(InteractC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onInteractC2S(m_data);
+        }
+
+        const InteractC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::InteractC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PlayerAbilitiesC2SPacketImpl : public IC2SPacket {
     private:
         PlayerAbilitiesC2SPacket m_data;

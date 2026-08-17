@@ -38,6 +38,33 @@ namespace Game {
         virtual bool IsBlockSolid(int worldX, int worldY, int worldZ) const = 0;
         virtual bool IsBlockFluid(int worldX, int worldY, int worldZ) const = 0;
         virtual bool IsValidPosition(int worldX, int worldY, int worldZ) const = 0;
+
+        // ── Light (MC LevelReader.getRawBrightness(pos, amount)) ────────────
+        //
+        // STAND-IN. This engine has no light engine at all — no sky light, no
+        // block light, no propagation — so there is nothing to read. Every MC
+        // farming rule is nevertheless gated on light (crops need >= 9 to grow
+        // and >= 8 to survive), and dropping those gates outright would let
+        // wheat grow in a sealed cave, which reads as a bug.
+        //
+        // So: 15 when this column is open to the sky, 0 when it is roofed.
+        // That reproduces the behaviour players actually notice — crops grow
+        // outdoors, refuse indoors — and gets the comparison operators right,
+        // so porting a real light engine later means replacing THIS function
+        // and nothing else. Call sites keep MC's literal `>= 9` / `>= 8`.
+        //
+        // Deliberately NOT modelled: torches (no block light to read), the
+        // per-block attenuation that lets crops grow under a leaf canopy at
+        // reduced light, and night. MC's crops keep growing at night because
+        // `getRawBrightness(pos, 0)` reads raw sky light, not the time-of-day
+        // -dimmed value — so returning a constant 15 for open sky is correct
+        // rather than a simplification.
+        //
+        // The default walks the column with GetBlock, which is honest but
+        // O(height). It is affordable because it is only reached for blocks
+        // that random-tick at all — a few per tick, never ordinary terrain —
+        // but an implementation with a heightmap should override it.
+        virtual int GetRawBrightness(int worldX, int worldY, int worldZ) const;
     };
 
 } // namespace Game

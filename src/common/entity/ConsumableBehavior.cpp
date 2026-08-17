@@ -5,6 +5,7 @@
 
 #include "../core/Log.hpp"
 #include "Inventory.hpp"
+#include "../world/level/WorldDrops.hpp"
 #include "server/player/ServerPlayer.hpp"
 
 #include <array>
@@ -125,7 +126,7 @@ namespace Game::ConsumableBehavior {
                     return remainderStack;                                   // :19-20
                 }
                 // :22 onExtraCreatedRemainder → Player.handleExtraItemsCreatedOnUse
-                // (add to inventory; drop the overflow — no item entities).
+                // (add to inventory, drop whatever doesn't fit).
                 // Diff the inventory around the add so every slot the
                 // remainder landed in gets broadcast via the dirty-slot
                 // channel (the hand slot is handled by completeUsingItem).
@@ -141,8 +142,11 @@ namespace Game::ConsumableBehavior {
                     }
                 }
                 if (leftover > 0) {
-                    Log::Debug("[Consume] remainder overflow x%d — no item-entity "
-                               "system, items lost", leftover);
+                    // Inventory full — the remainder (an empty bucket, a bowl)
+                    // goes on the ground at the player's feet rather than
+                    // being destroyed.
+                    DropItemStackNear(glm::ivec3(glm::floor(player.getPosition())),
+                                      ItemStack(remainderStack.itemId, leftover));
                 }
             }
         }

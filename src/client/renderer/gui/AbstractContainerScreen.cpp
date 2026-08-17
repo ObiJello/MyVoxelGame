@@ -89,6 +89,12 @@ namespace Render {
         menu->GetSlot(menuIndex).Set(stack);
     }
 
+    void ApplyContainerData(uint32_t containerId, uint16_t index, int32_t value) {
+        Game::AbstractContainerMenu* menu = PlayerContainerMenu();
+        if (!menu || menu->containerId != containerId) return;
+        menu->SetData(static_cast<int>(index), value);
+    }
+
     void ApplyContainerSlots(const std::vector<Game::ItemStack>& slots) {
         Game::AbstractContainerMenu* menu = CurrentMenu();
         if (!menu) return;

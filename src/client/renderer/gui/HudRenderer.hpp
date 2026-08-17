@@ -37,9 +37,29 @@ namespace Render {
         // armor, air, XP) — MC Gui gates those on gameMode.canHurtPlayer().
         void SetStatsHidden(bool hidden)   { m_statsHidden = hidden; }
 
+        // ── Attack indicator (MC Gui.renderCrosshair) ─────────────────────
+        //
+        // `scale` is Player.getAttackStrengthScale(0.0) — note the ZERO, not
+        // the 0.5 the damage calculation uses. MC deliberately shows the bar
+        // slightly behind the damage it would deal, so a bar that looks full
+        // always IS full.
+        void SetAttackStrength(float scale, float delayTicks) {
+            m_attackStrengthScale = scale;
+            m_attackStrengthDelay = delayTicks;
+        }
+        // True when the crosshair is on a living target — MC only shows the
+        // "full" burst when there is something to hit.
+        void SetCrosshairOnLivingTarget(bool v) { m_crosshairTarget = v; }
+
+        void RenderAttackIndicator(GuiGraphics& graphics);
+
     private:
         // MC's Gui.java HUD element methods
         void RenderItemHotbar(GuiGraphics& graphics, const Game::Inventory& inventory);
+
+        float m_attackStrengthScale = 1.0f;
+        float m_attackStrengthDelay = 5.0f;
+        bool  m_crosshairTarget = false;
         void RenderSlot(GuiGraphics& graphics, int x, int y,
                        const Game::InventorySlot& slot);
         void RenderSelectedItemName(GuiGraphics& graphics, const Game::Inventory& inventory);

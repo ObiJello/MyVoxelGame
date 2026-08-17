@@ -112,6 +112,41 @@ namespace Debug {
     // CROSS-THREAD METRIC SNAPSHOTS
     // ========================================================================
 
+    // Mob-system state, snapshotted once per frame in PlatformMain.
+    //
+    // A snapshot rather than a direct read because DebugSystem.cpp is compiled
+    // into the `imgui` target, which cannot see IntegratedServer or anything
+    // else that pulls in Boost/Asio — and because mobs tick on the server
+    // thread, so reading them from the render thread would be a data race.
+    struct EntitySnapshot {
+        static constexpr int kTypeCount = 16;
+
+        struct TypeRow {
+            const char* name = nullptr;
+            int serverCount = 0;
+            int clientCount = 0;
+        };
+        TypeRow types[kTypeCount] = {};
+        int typeRowCount = 0;
+
+        int totalServerMobs = 0;
+        int totalClientMobs = 0;
+
+        // Per-category live count and the computed cap, so the panel can show
+        // headroom — the number that explains why nothing is spawning.
+        int monsterCount = 0, monsterCap = 0;
+        int creatureCount = 0, creatureCap = 0;
+        int spawnableChunks = 0;
+
+        // What the mob under the crosshair is doing, if any.
+        bool  hasSelected = false;
+        char  selectedType[32] = {};
+        float selectedHealth = 0.0f;
+        float selectedMaxHealth = 0.0f;
+        int   selectedPathNodes = 0;
+        bool  selectedHasTarget = false;
+    };
+
     struct ServerMetricsSnapshot {
         bool serverRunning = false;
         uint16_t serverPort = 0;
@@ -315,6 +350,7 @@ namespace Debug {
         bool controls = false;
         bool chunkPipeline = false;
         bool worldInfo = false;
+        bool entities = false;
     };
 
     // ========================================================================
@@ -345,6 +381,7 @@ namespace Debug {
         static void SetNetworkSnapshot(const NetworkMetricsSnapshot& snap);
         static void SetChunkPipelineSnapshot(const ChunkPipelineSnapshot& snap);
         static void SetWorldInfoSnapshot(const WorldInfoSnapshot& snap);
+        static void SetEntitySnapshot(const EntitySnapshot& snap);
         // Lets the producer skip building a snapshot nobody is looking at.
         static const PanelVisibility& GetPanelVisibility();
 
@@ -365,6 +402,7 @@ namespace Debug {
         static void DrawPerformancePanel(const PerformanceMetrics& metrics);
         static void DrawWorldInfoPanel();
         static void DrawServerNetworkPanel(const ServerMetricsSnapshot& serverSnap, const NetworkMetricsSnapshot& netSnap);
+        static void DrawEntitiesPanel(const EntitySnapshot& snap);
         static void DrawClientSystemsPanel();
         static void DrawMemoryPanel(const PerformanceMetrics& metrics);
         static void DrawPlayerPanel(Game::ClientPlayer& player, Game::ClientPlayerController& playerController, const Render::Camera& camera);
@@ -386,6 +424,7 @@ namespace Debug {
         static PanelVisibility s_visibility;
         static LogBuffer s_logBuffer;
         static ServerMetricsSnapshot s_serverSnap;
+        static EntitySnapshot s_entitySnap;
         static NetworkMetricsSnapshot s_netSnap;
         static ChunkPipelineSnapshot s_pipelineSnap;
         static WorldInfoSnapshot s_worldInfoSnap;

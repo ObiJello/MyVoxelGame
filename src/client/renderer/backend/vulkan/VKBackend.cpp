@@ -3,6 +3,7 @@
 
 #include "VKBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -122,6 +123,7 @@ namespace Render {
             Log::Warning("VKBackend: per-frame UBO setup failed");
         }
         if (!CreatePipelineCache()) return false;
+        CreateTimestampPool();   // non-fatal: leaves pass timers reporting -1
 
         Log::Info("VKBackend: Vulkan initialization complete");
         return true;
@@ -182,6 +184,11 @@ namespace Render {
         m_pipelines.clear();
 
         // Destroy core resources
+        if (m_timestampPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(m_device, m_timestampPool, nullptr);
+            m_timestampPool = VK_NULL_HANDLE;
+        }
+        m_gpuTimers.clear();
         if (m_pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
         // Portal-feature UBO infrastructure (cleaned BEFORE descriptor
         // pool / layouts so descriptor sets referencing the layout are
@@ -231,26 +238,48 @@ namespace Render {
     // ========================================================================
 
     void VKBackend::BeginFrame() {
+        PROFILE_ZONE_N("Vk.BeginFrame");
         m_frameActive = false; // Only set true at end if everything succeeds
 
-        // Wait for the previous frame with this index to finish (1 second timeout)
+        // Wait for the previous frame with this index to finish (1 second timeout).
+        //
+        // This is where the CPU pays for being ahead of the GPU: with
+        // MAX_FRAMES_IN_FLIGHT slots, frame N blocks until frame N-MAX has
+        // fully executed. A wide Vk.FenceWait therefore means GPU-bound (or
+        // too few frames in flight), NOT that anything here is slow. It is
+        // called out as its own zone because it used to be invisible inside
+        // the Render phase, which made a GPU-bound frame look like CPU work.
+        { PROFILE_ZONE_N("Vk.FenceWait");
         VkResult fenceResult = vkWaitForFences(m_device, 1, &m_inFlightFences[m_currentFrame], VK_TRUE, 1'000'000'000);
         if (fenceResult == VK_TIMEOUT) {
             Log::Error("VKBackend: Fence wait timed out (1s) — possible GPU hang");
             // Reset the fence and try to continue rather than blocking forever
             vkResetFences(m_device, 1, &m_inFlightFences[m_currentFrame]);
         }
+        }
 
         // Flush deferred deletions for this frame slot — GPU is done with these resources
+        { PROFILE_ZONE_N("Vk.DeferredDelete");
         for (auto& del : m_deletionQueues[m_currentFrame]) {
             if (del.buffer != INVALID_BUFFER) DestroyBuffer(del.buffer);
             if (del.mesh != INVALID_MESH) DestroyMesh(del.mesh);
         }
         m_deletionQueues[m_currentFrame].clear();
+        }
 
-        // Acquire swapchain image (1 second timeout)
-        VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, 1'000'000'000,
+        // Acquire swapchain image (1 second timeout).
+        //
+        // Separate zone from the fence wait because the two mean different
+        // things: fence = the GPU is behind, acquire = the PRESENTATION ENGINE
+        // has no image free (too few swapchain images, or the compositor is
+        // holding them). On MoltenVK this is also where a CAMetalLayer
+        // nextDrawable stall can surface. Distinguishing them decides whether
+        // to cut GPU work or add swapchain images.
+        VkResult result;
+        { PROFILE_ZONE_N("Vk.Acquire");
+        result = vkAcquireNextImageKHR(m_device, m_swapchain, 1'000'000'000,
             m_imageAvailableSemaphores[m_currentFrame], VK_NULL_HANDLE, &m_currentImageIndex);
+        }
 
         if (result == VK_ERROR_OUT_OF_DATE_KHR) {
             RecreateSwapchain(m_window);
@@ -288,7 +317,55 @@ namespace Render {
         // Flush queued texture updates (animated textures, etc.) into the command
         // buffer BEFORE the render pass — transfer ops can't run inside a render pass.
         // This replaces per-update vkQueueWaitIdle with batched pipeline barriers.
+        { PROFILE_ZONE_N("Vk.TexFlush");
         FlushPendingTextureUpdates(m_commandBuffers[m_currentFrame]);
+        }
+
+        // Reclaim this frame slot's timestamp queries. MUST be outside the
+        // render pass (vkCmdResetQueryPool is forbidden inside one), and only
+        // this slot's partition may be touched — the other slot's queries can
+        // still be in flight, and resetting those would lose their results.
+        // The fence wait above guarantees this partition's previous use is done.
+        if (m_timestampPool != VK_NULL_HANDLE) {
+            const uint32_t base = m_currentFrame * kTimersPerFrame * 2;
+
+            // Every timer still holding a slot in THIS partition is from this
+            // slot's previous use, and the fence wait above proves the GPU has
+            // finished it — so its queries are readable right now. Resolve them
+            // into resultMs BEFORE the reset destroys the queries.
+            //
+            // Losing a result is not merely a missing number: ChunkRenderer
+            // keeps polling the same handle until it returns >= 0 and refuses
+            // to start a new timer for that pass until it does, so one dropped
+            // result would stop GPU timing for the rest of the session.
+            for (auto it = m_gpuTimers.begin(); it != m_gpuTimers.end(); ) {
+                if (it->second.frameSlot != m_currentFrame) { ++it; continue; }
+                if (it->second.resolved) {
+                    // Resolved a full cycle ago and still not collected — the
+                    // owner is not polling it, so let it go.
+                    it = m_gpuTimers.erase(it);
+                    continue;
+                }
+                if (it->second.ended) {
+                    uint64_t stamps[2] = {0, 0};
+                    if (vkGetQueryPoolResults(m_device, m_timestampPool, it->second.begin, 2,
+                                              sizeof(stamps), stamps, sizeof(uint64_t),
+                                              VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+                        const uint64_t d = (stamps[1] >= stamps[0]) ? (stamps[1] - stamps[0]) : 0;
+                        it->second.resultMs = static_cast<float>(d) * m_timestampPeriodNs / 1.0e6f;
+                        it->second.resolved = true;
+                        ++it;
+                        continue;
+                    }
+                }
+                // Never ended, or unreadable — nothing will ever come of it.
+                it = m_gpuTimers.erase(it);
+            }
+
+            vkCmdResetQueryPool(m_commandBuffers[m_currentFrame], m_timestampPool,
+                                base, kTimersPerFrame * 2);
+            m_timersUsedThisFrame = 0;
+        }
 
         vkCmdBeginRenderPass(m_commandBuffers[m_currentFrame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -324,12 +401,15 @@ namespace Render {
     }
 
     void VKBackend::EndFrame(GLFWwindow* window) {
+        PROFILE_ZONE_N("Vk.EndFrame");
         if (!m_frameActive) return; // BeginFrame failed — skip submit/present
         m_frameActive = false;
 
         // End render pass
+        { PROFILE_ZONE_N("Vk.EndCommandBuffer");
         vkCmdEndRenderPass(m_commandBuffers[m_currentFrame]);
         vkEndCommandBuffer(m_commandBuffers[m_currentFrame]);
+        }
 
         // Submit
         VkSubmitInfo submitInfo{};
@@ -347,7 +427,13 @@ namespace Render {
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
+        // On MoltenVK this is where the recorded command buffer is translated
+        // and committed to Metal, so it is NOT free — it scales with how many
+        // commands the frame recorded, unlike a native Vulkan driver where
+        // submit is nearly instant.
+        { PROFILE_ZONE_N("Vk.QueueSubmit");
         vkQueueSubmit(m_graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrame]);
+        }
 
         // Present
         VkPresentInfoKHR presentInfo{};
@@ -358,7 +444,10 @@ namespace Render {
         presentInfo.pSwapchains = &m_swapchain;
         presentInfo.pImageIndices = &m_currentImageIndex;
 
-        VkResult result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+        VkResult result;
+        { PROFILE_ZONE_N("Vk.QueuePresent");
+        result = vkQueuePresentKHR(m_presentQueue, &presentInfo);
+        }
         if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || m_framebufferResized) {
             m_framebufferResized = false;
             RecreateSwapchain(window);
@@ -409,6 +498,29 @@ namespace Render {
 
     void VKBackend::SetViewport(int x, int y, int width, int height) {
         // Dynamic viewport is set in BeginFrame; this could update for sub-viewports
+    }
+
+    void VKBackend::SetScissorRect(int x, int y, int w, int h) {
+        if (!m_frameActive) return;
+        // Vulkan's scissor origin is top-left, same as the caller's, so no flip.
+        // Must stay inside the framebuffer or validation errors out.
+        VkRect2D r{};
+        r.offset.x = std::max(0, x);
+        r.offset.y = std::max(0, y);
+        const int maxW = static_cast<int>(m_swapchainExtent.width)  - r.offset.x;
+        const int maxH = static_cast<int>(m_swapchainExtent.height) - r.offset.y;
+        r.extent.width  = static_cast<uint32_t>(std::clamp(w, 0, std::max(0, maxW)));
+        r.extent.height = static_cast<uint32_t>(std::clamp(h, 0, std::max(0, maxH)));
+        vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &r);
+    }
+
+    void VKBackend::ClearScissorRect() {
+        if (!m_frameActive) return;
+        // Back to the whole framebuffer — matches what BeginFrame installs.
+        VkRect2D r{};
+        r.offset = {0, 0};
+        r.extent = m_swapchainExtent;
+        vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &r);
     }
 
     // ========================================================================
@@ -1614,9 +1726,100 @@ namespace Render {
     // GPU TIMERS (stub)
     // ========================================================================
 
-    GPUTimerHandle VKBackend::BeginGPUTimer(const std::string& name) { return INVALID_GPU_TIMER; }
-    void VKBackend::EndGPUTimer(GPUTimerHandle) {}
-    float VKBackend::GetGPUTimerResultMs(GPUTimerHandle) { return -1.0f; }
+    bool VKBackend::CreateTimestampPool() {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+
+        // timestampPeriod == 0 means the device cannot do timestamps at all.
+        // Also require the graphics queue family to have timestamp bits —
+        // vkCmdWriteTimestamp is undefined on a family reporting 0.
+        uint32_t famCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &famCount, nullptr);
+        std::vector<VkQueueFamilyProperties> fams(famCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physicalDevice, &famCount, fams.data());
+
+        const uint32_t gfx = m_queueFamilies.graphicsFamily.value();
+        if (props.limits.timestampPeriod <= 0.0f ||
+            gfx >= famCount || fams[gfx].timestampValidBits == 0) {
+            Log::Info("VKBackend: GPU timestamps unavailable — pass timers disabled");
+            m_timestampPeriodNs = 0.0f;
+            return true;   // not fatal; timers just report -1 forever
+        }
+
+        VkQueryPoolCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        info.queryCount = kTimersPerFrame * 2 * MAX_FRAMES_IN_FLIGHT;
+        if (vkCreateQueryPool(m_device, &info, nullptr, &m_timestampPool) != VK_SUCCESS) {
+            Log::Warning("VKBackend: failed to create timestamp query pool");
+            m_timestampPeriodNs = 0.0f;
+            return true;
+        }
+
+        m_timestampPeriodNs = props.limits.timestampPeriod;
+        Log::Info("VKBackend: GPU pass timers enabled (timestampPeriod %.3f ns)",
+                  m_timestampPeriodNs);
+        return true;
+    }
+
+    GPUTimerHandle VKBackend::BeginGPUTimer(const std::string& /*name*/) {
+        if (m_timestampPool == VK_NULL_HANDLE || !m_frameActive) return INVALID_GPU_TIMER;
+        if (m_timersUsedThisFrame >= kTimersPerFrame) return INVALID_GPU_TIMER;
+
+        const uint32_t local = m_timersUsedThisFrame++;
+        const uint32_t base  = m_currentFrame * kTimersPerFrame * 2 + local * 2;
+
+        // BOTTOM_OF_PIPE: stamp once everything queued so far has finished, so
+        // the pair brackets exactly the work issued between Begin and End.
+        vkCmdWriteTimestamp(m_commandBuffers[m_currentFrame],
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            m_timestampPool, base);
+
+        const uint32_t handle = AllocHandle();
+        GPUTimer t;
+        t.begin     = base;
+        t.frameSlot = m_currentFrame;
+        m_gpuTimers[handle] = t;
+        return handle;
+    }
+
+    void VKBackend::EndGPUTimer(GPUTimerHandle handle) {
+        auto it = m_gpuTimers.find(handle);
+        if (it == m_gpuTimers.end() || it->second.ended) return;
+        if (m_timestampPool == VK_NULL_HANDLE || !m_frameActive) return;
+
+        vkCmdWriteTimestamp(m_commandBuffers[m_currentFrame],
+                            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            m_timestampPool, it->second.begin + 1);
+        it->second.ended = true;
+    }
+
+    float VKBackend::GetGPUTimerResultMs(GPUTimerHandle handle) {
+        auto it = m_gpuTimers.find(handle);
+        if (it == m_gpuTimers.end()) return -1.0f;
+
+        // Already banked by BeginFrame's pre-reset sweep.
+        if (it->second.resolved) {
+            const float ms = it->second.resultMs;
+            m_gpuTimers.erase(it);
+            return ms;
+        }
+        if (!it->second.ended) return -1.0f;   // still recording this frame
+
+        uint64_t stamps[2] = {0, 0};
+        // No WAIT bit — the contract is non-blocking. VK_NOT_READY means the
+        // GPU has not reached those commands yet; the caller polls again next
+        // frame and the timer stays alive until then.
+        const VkResult r = vkGetQueryPoolResults(
+            m_device, m_timestampPool, it->second.begin, 2,
+            sizeof(stamps), stamps, sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT);
+        if (r != VK_SUCCESS) return -1.0f;
+
+        const uint64_t elapsed = (stamps[1] >= stamps[0]) ? (stamps[1] - stamps[0]) : 0;
+        m_gpuTimers.erase(it);
+        return static_cast<float>(elapsed) * m_timestampPeriodNs / 1.0e6f;
+    }
 
     // ========================================================================
     // MEMORY STATS

@@ -13,7 +13,9 @@ namespace Server {
     private:
         ServerConnection& m_connection;
         NetworkServer* m_server;
-        int m_compressionThreshold = -1;  // -1 = disabled
+        // MC MinecraftServer.getCompressionThreshold() returns 256; dedicated
+        // servers override it from network-compression-threshold. -1 disables.
+        int m_compressionThreshold = 256;
         
         // Finalize login after authentication
         void finalizeLogin(const std::string& username);

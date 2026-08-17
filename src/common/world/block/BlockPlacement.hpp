@@ -13,6 +13,7 @@
 #include "Blocks.hpp"
 #include "Direction.hpp"
 #include "BlockInteraction.hpp"
+#include "../chunk/IBlockAccess.hpp"
 
 namespace Game {
 
@@ -93,5 +94,56 @@ namespace Game {
     // Blocks with no modelled rule return true, matching the previous
     // unconditional behaviour.
     bool CanSurviveOn(BlockID id, BlockID belowId, uint8_t belowState);
+
+    // World-aware canSurvive. Same question as CanSurviveOn, for the blocks
+    // whose MC rule cannot be answered from the block below alone:
+    //
+    //   sugar cane — dirt or sand with WATER beside the block underneath
+    //   cactus     — sand or cactus, and no solid block on any horizontal side
+    //   bamboo     — the #bamboo_plantable_on tag
+    //
+    // Everything else delegates to CanSurviveOn, so this is the form every
+    // placement path should call. Both the server's placement gate and the
+    // client's prediction use it, which is what keeps a rejected planting from
+    // flickering: the two sides ask the same function the same question.
+    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id);
+
+    // State-aware form. Some blocks cannot answer "can I survive here" without
+    // knowing their own state: a button attached to a WALL is held up by a
+    // different neighbour than one on the FLOOR, and only its `face`/`facing`
+    // says which. MC has the same split — canSurvive reads
+    // getConnectedDirection(state).
+    //
+    // Must be called AFTER the placement state is computed, which is why the
+    // placement paths check twice: the cheap state-free gate first, then this
+    // once they know what they are about to write.
+    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id,
+                      uint8_t stateIndex);
+
+    // True when CanSurviveAt/CanSurviveOn reproduce this block's MC canSurvive
+    // rule, rather than falling through to "no modelled rule, allow anything".
+    //
+    // World::CanBlockSurviveAt needs the distinction: where a real rule exists
+    // it must be used, and where one doesn't it keeps its "the block below has
+    // a solid top face" heuristic. Asking CanSurviveAt unconditionally would
+    // make every unmodelled block indestructible-by-support (it answers true),
+    // and using the heuristic unconditionally deletes blocks that legitimately
+    // stack on themselves — sugar cane on sugar cane, which is noCollision and
+    // so fails the heuristic from the second segment up.
+    bool HasModelledSurvivalRule(BlockID id);
+
+    // Placement state for blocks whose orientation depends on the WORLD rather
+    // than on how the player was standing — today just redstone dust, which
+    // resolves its four connections against its neighbours.
+    //
+    // Separate from ComputePlacementState because that one takes a
+    // UseOnContext whose `world` the client predictor deliberately leaves null
+    // ("the placement rules read no world state"). This takes the block access
+    // both sides already have, so server and client compute the same answer
+    // and a placed wire does not visibly snap when the ack lands.
+    //
+    // Returns `fallback` unchanged for blocks with no world-aware rule.
+    uint8_t ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
+                                       BlockID id, uint8_t fallback);
 
 } // namespace Game

@@ -17,6 +17,16 @@ namespace Network {
         glm::vec3 position;
         glm::vec2 rotation;     // yaw, pitch (head look direction)
         bool      isCrouching = false;
+        // MC LivingEntity.hurtTime, counting down from 10. Rides the position
+        // broadcast rather than an entity event because that broadcast already
+        // runs every tick for every player — a separate event would be a second
+        // packet carrying one byte.
+        uint8_t   hurtTime = 0;
+        // MC LivingEntity.deathTime, 0..20 — drives the corpse's topple
+        // (LivingEntityRenderer.setupRotations). Rides here for the same reason
+        // hurtTime does: it is per-tick state every watcher needs and the
+        // position broadcast is already going out.
+        uint8_t   deathTime = 0;
         uint32_t  sequenceNumber;
     };
 
@@ -31,6 +41,8 @@ namespace Network {
             buffer.WriteFloat(packet.rotation.x);
             buffer.WriteFloat(packet.rotation.y);
             buffer.WriteByte(packet.isCrouching ? 1 : 0);
+            buffer.WriteByte(packet.hurtTime);
+            buffer.WriteByte(packet.deathTime);
             buffer.WriteVarInt(packet.sequenceNumber);
             return buffer.GetData();
         }
@@ -45,6 +57,8 @@ namespace Network {
             packet.rotation.x = reader.ReadFloat();
             packet.rotation.y = reader.ReadFloat();
             packet.isCrouching = reader.ReadByte() != 0;
+            packet.hurtTime = reader.ReadByte();
+            packet.deathTime = reader.ReadByte();
             packet.sequenceNumber = reader.ReadVarInt();
             return packet;
         }

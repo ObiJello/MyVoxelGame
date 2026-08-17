@@ -20,17 +20,33 @@ namespace Server {
                   packet.username.c_str(), static_cast<unsigned>(packet.colorId));
         Log::Debug("[LoginPacketListener] Connection ID: %u", m_connection.GetConnectionId());
 
-        // Enable compression if configured (Minecraft uses 256 bytes by default)
-        if (m_compressionThreshold > 0) {
-            // Send SetCompression packet
+        // ── Compression (MC ServerLoginPacketListenerImpl.java:147) ─────────
+        //
+        //     if (server.getCompressionThreshold() >= 0 && !connection.isMemoryConnection()) {
+        //        connection.send(new ClientboundLoginCompressionPacket(threshold),
+        //           PacketSendListener.thenRun(() ->
+        //              connection.setupCompression(threshold, true)));
+        //     }
+        //
+        // Two details matter and both are reproduced below. The skip for a
+        // memory connection — ours is the loopback test, since singleplayer
+        // talks to the integrated server over 127.0.0.1 rather than an in-process
+        // pipe — and the ORDER: SetCompression itself goes out uncompressed, and
+        // the encoder only switches on afterwards. Enabling first would send the
+        // client a compressed frame announcing compression it has not enabled.
+        if (m_compressionThreshold >= 0 && !m_connection.IsLoopback()) {
             Network::PacketBuffer buffer;
             buffer.WriteVarInt(m_compressionThreshold);
-            m_connection.SendPacket(static_cast<uint8_t>(Network::PacketId::SetCompression), buffer.GetData());
+            m_connection.SendPacket(static_cast<uint8_t>(Network::PacketId::SetCompression),
+                                    buffer.GetData());
 
-            // Enable compression on the connection (posted to I/O thread)
-            // TODO: m_connection.postEnableCompression(m_compressionThreshold);
+            m_connection.EnableCompression(m_compressionThreshold);
 
-            Log::Info("[LoginPacketListener] Enabled compression with threshold: %d", m_compressionThreshold);
+            Log::Info("[LoginPacketListener] Compression enabled, threshold %d bytes",
+                      m_compressionThreshold);
+        } else if (m_connection.IsLoopback()) {
+            Log::Info("[LoginPacketListener] Loopback peer — compression skipped "
+                      "(MC does the same for its in-process connection)");
         }
 
         // Stash the player's chosen colour on the connection BEFORE finalizeLogin

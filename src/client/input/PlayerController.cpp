@@ -1,5 +1,7 @@
 // File: src/client/input/PlayerController.cpp
 #include "PlayerController.hpp"
+#include "client/entity/RemotePlayerManager.hpp"
+#include "common/core/Mth.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/MiningSpeed.hpp"
 #include "common/world/level/World.hpp"
@@ -10,6 +12,7 @@
 #include "../world/ClientChunkManager.hpp"
 #include "../world/ClientBlockAccess.hpp"
 #include "../world/ClientUsePlayer.hpp"
+#include "../entity/ClientMobManager.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockPlacement.hpp"
 #include "common/core/Features.hpp"
@@ -46,7 +49,8 @@ namespace Game {
     }
 
     uint32_t ClientPlayerController::SendDigPacket(Network::BlockActionType action,
-                                                   const glm::ivec3& pos, BlockID blockId) {
+                                                   const glm::ivec3& pos, BlockID blockId,
+                                                   uint8_t blockState) {
         if (!networkClient || !networkClient->IsConnected()) return 0;
         Network::BlockActionC2SPacket packet;
         packet.worldX = pos.x;
@@ -54,6 +58,7 @@ namespace Game {
         packet.worldZ = pos.z;
         packet.action = action;
         packet.blockId = blockId;
+        packet.blockState = blockState;
         packet.face = 0;
         packet.sequenceNumber = ++interactSeq;
         auto data = Network::Serialization::Serialize(packet);
@@ -87,9 +92,8 @@ namespace Game {
         yawDeg = 0.0f; pitchDeg = 0.0f;
         if (!player) return;
         const glm::vec3& d = player->lookDir;
-        constexpr float kRadToDeg = 57.29577951308232f;
-        yawDeg   = std::atan2(d.z, d.x) * kRadToDeg;
-        pitchDeg = std::asin(glm::clamp(d.y, -1.0f, 1.0f)) * kRadToDeg;
+        yawDeg   = Game::Mth::YRotFromVector(d);
+        pitchDeg = Game::Mth::XRotFromVector(d);
     }
 
     BlockID ClientPlayerController::ReadBlock(const glm::ivec3& pos) const {
@@ -205,11 +209,14 @@ namespace Game {
         digState.destroyBlockPos = pos;
         digState.lastSwingTick   = -1000;
 
-        // Cache block ID at start — the world may already be Air by the time
-        // we want to finalise (integrated server shares the world).
-        digState.destroyingBlockId = ReadBlock(pos);
+        // Cache block ID and state at start — the world may already be Air by
+        // the time we want to finalise (integrated server shares the world),
+        // and the server reads both back out of the finish packet.
+        digState.destroyingBlockId    = ReadBlock(pos);
+        digState.destroyingBlockState = ReadBlockState(pos);
 
-        SendDigPacket(Network::BlockActionType::START_DESTROY, pos, digState.destroyingBlockId);
+        SendDigPacket(Network::BlockActionType::START_DESTROY, pos,
+                      digState.destroyingBlockId, digState.destroyingBlockState);
         // First swing fires immediately on press.
         armSwingPending = true;
     }
@@ -217,7 +224,8 @@ namespace Game {
     void ClientPlayerController::AbortDig() {
         if (!digState.isDestroying) return;
         SendDigPacket(Network::BlockActionType::ABORT_DESTROY,
-                      digState.destroyBlockPos, digState.destroyingBlockId);
+                      digState.destroyBlockPos, digState.destroyingBlockId,
+                      digState.destroyingBlockState);
         digState.isDestroying    = false;
         digState.destroyProgress = 0.0f;
         digState.destroyTicks    = 0;
@@ -228,7 +236,8 @@ namespace Game {
         // and credits the player's inventory.
         const uint32_t sequence = SendDigPacket(Network::BlockActionType::STOP_DESTROY,
                                                 digState.destroyBlockPos,
-                                                digState.destroyingBlockId);
+                                                digState.destroyingBlockId,
+                                                digState.destroyingBlockState);
 
         // Local prediction — the block disappears NOW rather than one round
         // trip from now. Registered under the packet's sequence so the
@@ -253,11 +262,12 @@ namespace Game {
 
         // Set up the minimal dig state FinishDig's packet + local-prediction
         // path expects, then finish immediately.
-        digState.destroyBlockPos   = pos;
-        digState.destroyingBlockId = target;
-        digState.destroyProgress   = 1.0f;
-        digState.destroyTicks      = 0;
-        digState.isDestroying      = true;
+        digState.destroyBlockPos      = pos;
+        digState.destroyingBlockId    = target;
+        digState.destroyingBlockState = ReadBlockState(pos);
+        digState.destroyProgress      = 1.0f;
+        digState.destroyTicks         = 0;
+        digState.isDestroying         = true;
         armSwingPending            = true;
         // MC's creative path concludes with START_DESTROY_BLOCK (its server
         // shortcuts straight to destroyAndAck on that action). Our protocol
@@ -414,14 +424,14 @@ namespace Game {
         }
 
         // --- Can the block survive there? (server: step 7) ----------------
-        // Mirrors CanSurviveOn so we never predict a placement the server is
-        // about to reject — e.g. a 4-segment clump resolving to the cell above
-        // itself, where leaf litter has nothing sturdy to sit on.
-        {
-            const glm::ivec3 below{ target.x, target.y - 1, target.z };
-            if (!Game::CanSurviveOn(resolved, ReadBlock(below), ReadBlockState(below))) {
-                return false;
-            }
+        // The SAME CanSurviveAt the server calls, so we never predict a
+        // placement it is about to reject — e.g. a 4-segment clump resolving to
+        // the cell above itself, where leaf litter has nothing sturdy to sit
+        // on, or a seed clicked onto plain grass instead of farmland. Calling a
+        // weaker check here is what would make a rejected planting flash into
+        // existence for one round trip.
+        if (blockAccess) {
+            if (!Game::CanSurviveAt(*blockAccess, target, resolved)) return false;
         }
 
         // --- Would the block land inside the player? ---------------------
@@ -465,6 +475,17 @@ namespace Game {
         // `state.setValue(segment, n + 1)`); everything else derives its
         // orientation from how the player is standing.
         outState = grewInPlace ? targetState : Game::ComputePlacementState(resolved, ctx);
+        // Neighbour-derived orientation (redstone dust). Uses the SAME function
+        // the server calls, against the client's own block access, so the wire
+        // predicts with the exact connections the server is about to send.
+        if (!grewInPlace && blockAccess) {
+            outState = Game::ComputeWorldPlacementState(*blockAccess, target, resolved, outState);
+            // State-aware survival, mirroring the server's second gate: a
+            // button's support depends on the face it ends up attached to, so
+            // this can only be asked once the state is known. Predicting a
+            // placement the server will refuse would flash a floating button.
+            if (!Game::CanSurviveAt(*blockAccess, target, resolved, outState)) return false;
+        }
         return true;
     }
 
@@ -528,11 +549,18 @@ namespace Game {
         if (!consumed && somethingInHands) {
             const Game::Item& heldItem = Game::ItemRegistry::Get(heldId);
             if (heldItem.useOn) {
-                // Creative count preservation, mirroring the server (and MC's
-                // ServerPlayerGameMode.useItemOn lines 365-371).
-                const int countBefore = heldStack.count;
+                // Creative stack preservation, mirroring the server (and MC's
+                // ServerPlayerGameMode.useItemOn lines 365-371) — only the
+                // COUNT, so a callback's component writes survive. See the
+                // long note at the server's copy in
+                // PlayerSession::HandleUseItemOn for why the whole-stack
+                // restore is kept for the emptied case only.
+                const Game::ItemStack stackBefore = heldStack;
                 Game::UseResult r = heldItem.useOn(ctx, heldStack);
-                if (player->IsCreative()) heldStack.count = countBefore;
+                if (player->IsCreative()) {
+                    if (heldStack.IsEmpty()) heldStack = stackBefore;
+                    else                     heldStack.count = stackBefore.count;
+                }
                 // Fail also stops the chain — the server won't fall through to
                 // placement either, so neither should our caller.
                 consumed = Game::ConsumesAction(r) || (r == Game::UseResult::Fail);
@@ -565,9 +593,11 @@ namespace Game {
             player->inventory.MutableSlot(usePlayer.handSlotIndex(hand));
 
         Client::g_clientBlockAccess->BeginPrediction(sequence);
-        const int countBefore = heldStack.count;
+        // Same whole-stack restore as the useOn path above: an emptied stack
+        // has had its item id cleared, so putting the count back is not enough.
+        const Game::ItemStack stackBefore = heldStack;
         heldItem.use(Client::g_clientBlockAccess, &usePlayer, hand, heldStack);
-        if (player->IsCreative()) heldStack.count = countBefore;
+        if (player->IsCreative()) heldStack = stackBefore;
         Client::g_clientBlockAccess->EndPrediction();
     }
 
@@ -580,15 +610,11 @@ namespace Game {
 
         // Derive fresh yaw/pitch from the live look vector (the player's
         // yaw/pitch members are stale — mouse-look writes the camera
-        // directly; see the lookDir comment in Player.hpp). Convention
-        // matches Player.cpp's front-vector build: yaw=0 → +X,
-        // front.y = sin(pitch).
+        // directly; see the lookDir comment in Player.hpp).
         float yRot = 0.0f, xRot = 0.0f;
         if (player) {
-            const glm::vec3& d = player->lookDir;
-            constexpr float kRadToDeg = 57.29577951308232f;
-            yRot = std::atan2(d.z, d.x) * kRadToDeg;
-            xRot = std::asin(glm::clamp(d.y, -1.0f, 1.0f)) * kRadToDeg;
+            yRot = Game::Mth::YRotFromVector(player->lookDir);
+            xRot = Game::Mth::XRotFromVector(player->lookDir);
         }
 
         Network::UseItemC2SPacket packet;
@@ -711,6 +737,37 @@ namespace Game {
             return;
         }
 
+#if ENABLE_PORTAL_GUN
+        // The PortalGun hijacks left-click for the blue portal, and
+        // StartAttack returns early for it — but it sets breakButtonHeld
+        // BEFORE that return, so this tick still saw a held mine button and
+        // went on to break the block the portal had just been shot at
+        // (instantly, in creative). The guard has to be here as well, not only
+        // on the click edge.
+        {
+            const Game::ItemID held = player->inventory.GetSelectedItem();
+            if (held != Game::ItemID(0) && held == Game::Items::PortalGun) {
+                if (digState.isDestroying) AbortDig();
+                return;
+            }
+        }
+#endif
+
+        // MC Minecraft.continueAttack only continues a dig when
+        // `hitResult.getType() == BLOCK`, and hitResult is ONE result — an
+        // entity nearer than the block replaces it outright. So a mob standing
+        // in front of a wall makes the wall unmineable for as long as you are
+        // aiming at the mob.
+        //
+        // Without this, StartAttack's `TryAttackEntity() -> return` was not
+        // enough: it sets breakButtonHeld BEFORE that return, so the very next
+        // tick started digging the block behind the mob anyway — instantly, in
+        // creative.
+        if (PickEntity() != 0) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
+
         const auto& currentHit = player->lastBlockHit;
         const bool haveTarget = currentHit.has_value();
         const glm::ivec3 hitPos = haveTarget ? currentHit->blockPos : glm::ivec3(0, -1024, 0);
@@ -751,7 +808,10 @@ namespace Game {
             const BlockID worldBlock = ReadBlock(hitPos);
             if (worldBlock != BlockID::Air) {
                 currentBlock = worldBlock;
-                digState.destroyingBlockId = worldBlock;
+                digState.destroyingBlockId    = worldBlock;
+                // Refresh the state with it — a crop that finished growing
+                // mid-dig should still drop as the age it was broken at.
+                digState.destroyingBlockState = ReadBlockState(hitPos);
             }
         }
         const Block& block = BlockRegistry::Get(currentBlock);
@@ -797,9 +857,18 @@ namespace Game {
 
         // Only re-fire for items that actually place blocks; for tools we
         // already fired on the edge and shouldn't keep spamming.
+        //
+        // `IsBlockItem` alone is not that question: a seed is a pure item that
+        // nonetheless places a block (Item::placesBlock — see ItemBehaviors'
+        // seed table). Testing only the former would let you hold right-click
+        // to lay a row of stone but not a row of wheat, which is the sort of
+        // inconsistency nobody reports and everybody feels.
         const Game::ItemID held = player->inventory.GetSelectedItem();
         if (held == Game::Items::Air) return;
-        if (!ItemRegistry::IsBlockItem(held)) return;
+        if (!ItemRegistry::IsBlockItem(held) &&
+            ItemRegistry::Get(held).placesBlock == BlockID::Air) {
+            return;
+        }
 
 #if ENABLE_PORTAL_GUN
         // PortalGun: continuous-RMB does NOT spam projectiles (its StartUseItem edge
@@ -819,11 +888,13 @@ namespace Game {
         const uint32_t sequence = SendUseItemOn(*currentHit, 0);
         const bool usedOn = PredictUseItemOn(*currentHit, 0, sequence);
         if (!usedOn && predictable) PredictBlock(predictPos, predictBlock, sequence, predictState);
-        // Same two guards as the edge path in StartUseItem: a block that
-        // swallowed the click consumes nothing server-side, and creative never
-        // consumes at all. Without them, holding RMB on a crafting table walks
-        // the held stack down until the server corrects it.
-        if (!usedOn && !player->IsCreative() && player->GetSelectedBlock() != BlockID::Air) {
+        // Same guards as the edge path in StartUseItem: a block that swallowed
+        // the click consumes nothing server-side, creative never consumes at
+        // all, and a placement the server will reject consumes nothing either
+        // (which `predictable` is exactly the test for — see the longer note
+        // there about carrots). Without them, holding RMB on a crafting table
+        // walks the held stack down until the server corrects it.
+        if (!usedOn && predictable && !player->IsCreative()) {
             player->inventory.ConsumeSelectedBlock();
         }
         rightClickDelay = PLACE_REFIRE_TICKS;
@@ -907,6 +978,142 @@ namespace Game {
         Log::Debug("Respawn request (TODO: Implement for multiplayer)");
     }
 
+    int32_t ClientPlayerController::PickEntity() const {
+        if (!player) return 0;
+        if (!Client::g_clientMobManager) return 0;
+
+        // MC's entity pick distance in survival is 3.0 blocks
+        // (Attributes.ENTITY_INTERACTION_RANGE). The server re-checks with a
+        // more generous 6.0 to absorb latency — see HandleInteract.
+        constexpr float kPickRange = 3.0f;
+
+        const glm::vec3 origin = player->GetEyePosition();
+        const glm::vec3 dir = glm::normalize(player->lookDir);
+
+        // Ray-vs-AABB over the mobs in range, nearest wins. MC inflates each
+        // candidate box by 0.3 (EntityHitResult's pick margin) so a target is
+        // hittable slightly outside its collision box, which is what makes
+        // combat feel responsive rather than pixel-perfect.
+        constexpr float kPickInflate = 0.3f;
+
+        int32_t bestId = 0;
+        float bestT = kPickRange;
+
+        // Other players first, so the loop below can only beat them on
+        // distance. A remote player's id IS its connection id, which is what
+        // lets the server tell it from a mob without a kind byte on the wire.
+        if (Client::g_remotePlayerManager) {
+            for (const auto& [pid, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                if (!rp.positionInitialized) continue;
+
+                // MC's player box: 0.6 wide, 1.8 tall, feet at the position.
+                Game::AABB box;
+                box.min = rp.position - glm::vec3(0.3f, 0.0f, 0.3f)
+                        - glm::vec3(kPickInflate);
+                box.max = rp.position + glm::vec3(0.3f, 1.8f, 0.3f)
+                        + glm::vec3(kPickInflate);
+
+                float tMin = 0.0f, tMax = bestT;
+                bool hit = true;
+                for (int a = 0; a < 3 && hit; ++a) {
+                    const float o = origin[a], d = dir[a];
+                    const float lo = box.min[a], hi = box.max[a];
+                    if (std::abs(d) < 1e-8f) {
+                        if (o < lo || o > hi) { hit = false; break; }
+                        continue;
+                    }
+                    float t1 = (lo - o) / d, t2 = (hi - o) / d;
+                    if (t1 > t2) std::swap(t1, t2);
+                    tMin = std::max(tMin, t1);
+                    tMax = std::min(tMax, t2);
+                    if (tMin > tMax) { hit = false; break; }
+                }
+                if (!hit || tMin >= bestT) continue;
+                if (player->lastBlockHit.has_value()) {
+                    const float blockDist =
+                        glm::length(player->lastBlockHit->hitPoint - origin);
+                    if (blockDist < tMin) continue;
+                }
+                bestT = tMin;
+                bestId = static_cast<int32_t>(pid);
+            }
+        }
+
+        for (const auto& [id, entry] : Client::g_clientMobManager->All()) {
+            const Game::Mob& mob = *entry.mob;
+            if (!mob.IsAlive()) continue;
+
+            Game::AABB box = mob.GetAABB();
+            box.min -= glm::vec3(kPickInflate);
+            box.max += glm::vec3(kPickInflate);
+
+            // Slab method. A zero direction component is handled by the
+            // infinities that division produces, which compare correctly
+            // against the finite bounds.
+            float tMin = 0.0f;
+            float tMax = bestT;
+            bool hit = true;
+            for (int axis = 0; axis < 3; ++axis) {
+                const float o = origin[axis];
+                const float d = dir[axis];
+                const float lo = box.min[axis];
+                const float hi = box.max[axis];
+
+                if (std::abs(d) < 1e-8f) {
+                    if (o < lo || o > hi) { hit = false; break; }
+                    continue;
+                }
+                float t1 = (lo - o) / d;
+                float t2 = (hi - o) / d;
+                if (t1 > t2) std::swap(t1, t2);
+                tMin = std::max(tMin, t1);
+                tMax = std::min(tMax, t2);
+                if (tMin > tMax) { hit = false; break; }
+            }
+
+            if (!hit || tMin >= bestT) continue;
+
+            // A block between us and the mob wins. lastBlockHit is the
+            // per-frame block raycast, already in the same units.
+            if (player->lastBlockHit.has_value()) {
+                const float blockDist = glm::length(player->lastBlockHit->hitPoint - origin);
+                if (blockDist < tMin) continue;
+            }
+
+            bestT = tMin;
+            bestId = id;
+        }
+
+        return bestId;
+    }
+
+    bool ClientPlayerController::TryAttackEntity() {
+        if (!player || !networkClient) return false;
+
+        const int32_t bestId = PickEntity();
+        if (bestId == 0) return false;
+
+        Network::InteractC2SPacket packet;
+        packet.entityId = bestId;
+        packet.action = Network::InteractC2SPacket::Action::Attack;
+        packet.sneaking = player->sneakPressed;
+        packet.sprinting = player->physics.isSprinting;
+
+        // Mirror the server's ticker so the attack indicator reads the same
+        // charge the server will use. MC does exactly this — the bar is the
+        // CLIENT's copy of attackStrengthTicker, reset locally on the swing.
+        player->attackStrengthTicker = 0;
+
+        auto connection = networkClient->GetConnection();
+        if (connection) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InteractC2S),
+                                   Network::Serialization::Serialize(packet));
+        }
+
+        armSwingPending = true;
+        return true;
+    }
+
     void ClientPlayerController::StartAttack() {
         if (!player) return;
 
@@ -925,6 +1132,12 @@ namespace Game {
                 return;  // skip the normal block-break path
             }
 #endif
+
+            // MC Minecraft.startAttack picks an ENTITY before a block: the
+            // crosshair target is whichever is nearer, and an entity in front
+            // of a wall must be hittable. Doing this after the block path
+            // would make mobs unhittable whenever anything was behind them.
+            if (TryAttackEntity()) return;
 
             // MC parity: startDestroyBlock runs SYNCHRONOUSLY on the click —
             // it doesn't wait for the next continueDestroyBlock tick AND it
@@ -955,10 +1168,11 @@ namespace Game {
                     if (inc >= 1.0f) {
                         // Instant break — set up minimal state so FinishDig's
                         // packet/inventory path runs, then fire it.
-                        digState.destroyBlockPos    = currentHit->blockPos;
-                        digState.destroyingBlockId  = hereBlock;
-                        digState.destroyProgress   = 1.0f;
-                        digState.isDestroying      = true;
+                        digState.destroyBlockPos      = currentHit->blockPos;
+                        digState.destroyingBlockId    = hereBlock;
+                        digState.destroyingBlockState = ReadBlockState(currentHit->blockPos);
+                        digState.destroyProgress      = 1.0f;
+                        digState.isDestroying         = true;
                         armSwingPending            = true;
                         FinishDig();
                         return;
@@ -1059,11 +1273,31 @@ namespace Game {
                 }
 #endif
 
-                // TODO: Check for entity hit first when entity system exists
-                // if (player->lastEntityHit.has_value()) {
-                //     SendUseEntity(*player->lastEntityHit, 0);  // Interact with entity
-                //     ticksSincePlace = 0;
-                // } else
+                // MC Minecraft.startUseItem: `if (hitResult.getType() == ENTITY)`
+                // the interact goes to the ENTITY and the block branch never
+                // runs. PickEntity already clips against the block hit, so a
+                // mob in front of a wall wins and a mob behind it does not.
+                //
+                // This is what dye-on-sheep (and every future saddle / name
+                // tag / shears interaction) arrives through.
+                if (const int32_t pickedEntity = PickEntity(); pickedEntity != 0) {
+                    if (networkClient) {
+                        Network::InteractC2SPacket packet;
+                        packet.entityId = pickedEntity;
+                        packet.action   = Network::InteractC2SPacket::Action::Interact;
+                        packet.sneaking = player->sneakPressed;
+                        if (auto connection = networkClient->GetConnection()) {
+                            connection->SendPacket(
+                                static_cast<uint8_t>(Network::PacketId::InteractC2S),
+                                Network::Serialization::Serialize(packet));
+                        }
+                    }
+                    armSwingPending = true;
+                    rightClickDelay = PLACE_REFIRE_TICKS;
+                    placeButtonHeld = true;
+                    return;
+                }
+
                 if (currentHit.has_value()) {
                     // Targeting a block — send UseItemOn regardless of what we
                     // hold. The server's dispatch order (mirroring MC's
@@ -1117,16 +1351,32 @@ namespace Game {
                     // Server is authoritative — it'll re-sync our inventory
                     // either way. Creative never consumes (MC
                     // ItemStack.consume no-ops with infinite materials).
+                    //
+                    // Gated on `predictable`, not on "am I holding a block":
+                    // ComputePredictedPlacement returns false for exactly the
+                    // cases the server rejects (cell occupied, can't survive
+                    // there, would trap the player), so a rejected placement no
+                    // longer predicts a consumption it will have to take back.
+                    //
+                    // That distinction became load-bearing with seeds. A carrot
+                    // is both a block item and a food: clicking anything but
+                    // farmland with one fails to place and the server eats it
+                    // instead, so the old "holding a block → consume, else eat"
+                    // split would have ticked the stack down and never played
+                    // the eat.
                     if (!usedOn) {
-                        if (player->GetSelectedBlock() != BlockID::Air) {
+                        if (predictable) {
                             if (!player->IsCreative()) {
                                 player->inventory.ConsumeSelectedBlock();
                             }
                         } else {
-                            // Non-block item aimed at a block: the server's
-                            // HandleUseItemOn tail step falls through to the
-                            // use-item path — main hand first, then offhand
-                            // (mirroring MC's hand loop in Minecraft.startUseItem).
+                            // Nothing will be placed: either a non-block item
+                            // aimed at a block, or a block item whose placement
+                            // the server is going to reject. Both end in the
+                            // server's use-item fallthrough — main hand first,
+                            // then offhand (mirroring MC's hand loop in
+                            // Minecraft.startUseItem, and BlockItem.useOn's
+                            // own fallthrough to `use` for consumables).
                             // Mirror the condition by predicting the same hand.
                             StartPredictedUse(PickUseHand());
                         }
@@ -1272,23 +1522,16 @@ namespace Game {
         }
 
         if (breakingSuccessful) {
-            // Creative gets nothing — MC ServerPlayerGameMode.destroyBlock
-            // returns right after removing the block when isCreative(), before
-            // the playerDestroy() call that spawns drops. The server enforces
-            // the same rule; predicting a pickup here would just make the HUD
-            // flash an item that the next inventory sync takes away.
-            if (!player->IsCreative()) {
-                int remaining = player->inventory.AddBlocks(brokenBlock, 1);
-
-                if (remaining > 0) {
-                    Log::Warning("Inventory full - dropped %d %s",
-                               remaining, BlockRegistry::Get(brokenBlock).name.c_str());
-                }
-
-                // Sync server with updated inventory (block was added to a slot)
-                OnHotbarChanged(player->inventory.GetSelectedSlot());
-            }
-
+            // NO predicted pickup. Drops come from the block's loot table, which
+            // is random — uniform counts, random_chance, table_bonus — so the
+            // client cannot guess the outcome without sharing the server's RNG
+            // stream, and a wrong guess would flash the wrong item in the HUD
+            // until the next sync corrected it. MC's client doesn't predict
+            // drops either: the server spawns them and tells the client.
+            //
+            // The authoritative roll lives in PlayerSession::HandleBlockAction,
+            // and its inventory delta arrives via BroadcastContainerChanges in
+            // the same server tick (sub-frame on the integrated server).
             player->stats.blocksBroken++;
             player->stats.lastBrokenBlockId = static_cast<int>(brokenBlock);
 

@@ -12,9 +12,18 @@
 // was before the state index needed a home. 64 bits leaves the id a full 16 and
 // the state a full 8 with room to spare.
 //
-// NOTE: this packet currently has no Serialize / Deserialize implementation
-// (it's plumbed but no live caller emits it yet). Add when the multi-block
-// change broadcast path migrates from MultiBlockChangeS2CPacket.
+// The SENDER is IntegratedServer::SendSectionBlocksUpdateS2CPacket, which
+// hand-rolls the byte layout. The decoder below mirrors it exactly:
+//   chunkX  : 2 bytes, big-endian
+//   chunkZ  : 2 bytes, big-endian
+//   sectionY: 1 byte
+//   count   : VarInt
+//   records : `count` 64-bit VarInts
+//
+// This is what carries a change the player did NOT predict — the second half of
+// a double chest being re-typed when its partner is placed, for one. Without a
+// decoder the client logged "Unhandled packet ID: 0x22" and silently kept the
+// stale state, so the paired chest went on rendering as a single.
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
@@ -55,5 +64,45 @@ namespace Network {
             blockId    = static_cast<uint16_t>((packed >> 20) & 0xFFFF);
         }
     };
+
+    namespace Serialization {
+
+        inline ClientboundSectionBlocksUpdateS2CPacket
+        DeserializeClientboundSectionBlocksUpdate(const std::vector<uint8_t>& data) {
+            ClientboundSectionBlocksUpdateS2CPacket packet;
+            size_t i = 0;
+            auto byte = [&]() -> uint8_t { return i < data.size() ? data[i++] : 0; };
+
+            // Read each byte into its own variable first: the two calls in
+            // `(byte() << 8) | byte()` are UNSEQUENCED, so the compiler may
+            // evaluate them in either order and swap the halves.
+            const uint8_t cxHi = byte(), cxLo = byte();
+            const uint8_t czHi = byte(), czLo = byte();
+            const int16_t cx = static_cast<int16_t>((cxHi << 8) | cxLo);
+            const int16_t cz = static_cast<int16_t>((czHi << 8) | czLo);
+            packet.chunkPos  = Game::Math::ChunkPos{cx, cz};
+            packet.sectionY  = static_cast<int8_t>(byte());
+
+            auto readVarInt64 = [&]() -> uint64_t {
+                uint64_t value = 0; int shift = 0;
+                while (i < data.size()) {
+                    const uint8_t b = data[i++];
+                    value |= static_cast<uint64_t>(b & 0x7F) << shift;
+                    if ((b & 0x80) == 0) break;
+                    shift += 7;
+                    if (shift >= 64) break;
+                }
+                return value;
+            };
+
+            const uint32_t count = static_cast<uint32_t>(readVarInt64());
+            packet.packedRecords.reserve(count);
+            for (uint32_t n = 0; n < count && i < data.size(); ++n) {
+                packet.packedRecords.push_back(readVarInt64());
+            }
+            return packet;
+        }
+
+    } // namespace Serialization
 
 } // namespace Network

@@ -2,6 +2,11 @@
 #pragma once
 
 #include <cstdint>
+// The ChunkPos/SectionPos hashers below use std::size_t and std::hash. Every
+// existing includer happened to pull these in first, so the omission only
+// surfaced when a new header included this one before anything else.
+#include <cstddef>
+#include <functional>
 
 namespace Game::Math {
 

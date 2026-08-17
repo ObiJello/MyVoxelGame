@@ -4,6 +4,7 @@
 #include "../../core/Log.hpp"
 #include "../../core/Profiling_Tracy.hpp"
 #include "../block/BlockRegistry.hpp"
+#include "../block/BlockPlacement.hpp"   // CanSurviveAt / HasModelledSurvivalRule
 #include "../block/entity/BlockEntity.hpp"
 #include "../block/entity/BlockEntityType.hpp"
 #include "../block/entity/BlockEntityTypes.hpp"
@@ -14,6 +15,9 @@
 #include "server/world/tracking/SectionChangeAccumulator.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/packets/game/BlockEntityDataS2CPacket.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/world/loot/LootTables.hpp"
+#include "WorldDrops.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -54,6 +58,12 @@ namespace Game {
             Log::Info("Using Minecraft world path: %s", m_minecraftWorldPath.c_str());
         } else {
             Log::Info("No Minecraft world path set, using procedural generation only");
+        }
+
+        // Read-only worlds get no chunk saver at all (see ChunkProvider).
+        config.readOnly = m_readOnly;
+        if (m_readOnly) {
+            Log::Info("World opened READ-ONLY — no chunk data will be written back");
         }
 
         // Validate config before creating chunk provider
@@ -172,6 +182,36 @@ namespace Game {
         return m_chunkProvider->IsBlockFluid(worldX, worldY, worldZ);
     }
 
+    int World::GetSurfaceHeight(int worldX, int worldZ, HeightmapType type) const {
+        const auto chunkPos = Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
+        // Cache-only: this is called per candidate position by the mob spawner,
+        // which walks the ticket manager's chunk list -- and that list contains
+        // chunks that have never been loaded. A blocking GetChunk here would
+        // generate one synchronously on the server thread, mid-tick.
+        auto chunk = GetLoadedChunk(chunkPos.x, chunkPos.z);
+        if (!chunk) return MIN_Y;
+
+        // An unprimed chunk means it came from a path that skipped both the
+        // generator copy and the NBT restore. Prime it now rather than
+        // answering MIN_Y — a wrong surface height silently misplaces every
+        // spawn in the column, where a one-off scan is merely slow.
+        if (!chunk->AreHeightmapsPrimed()) {
+            chunk->PrimeHeightmaps();
+        }
+
+        const int localX = worldX - chunkPos.x * Math::CHUNK_SIZE_X;
+        const int localZ = worldZ - chunkPos.z * Math::CHUNK_SIZE_Z;
+        return chunk->GetSurfaceHeight(localX, localZ, type);
+    }
+
+    bool World::CanSeeSky(int worldX, int worldY, int worldZ) const {
+        // MC Level.canSeeSky: nothing at or above this position blocks the sky.
+        // WORLD_SURFACE stores the topmost non-air block, so the test is a
+        // single comparison — no column walk, which is what the undead
+        // daylight-burn check and every spawn light test used to pay for.
+        return worldY > GetSurfaceHeight(worldX, worldZ, HeightmapType::WorldSurface);
+    }
+
     bool World::IsValidPosition(int worldX, int worldY, int worldZ) const {
         return worldY >= MIN_Y && worldY <= MAX_Y;
     }
@@ -228,8 +268,18 @@ namespace Game {
                 const int localX = worldX - chunkPos.x * 16;
                 const int localZ = worldZ - chunkPos.z * 16;
 
-                const bool oldHadBE = BlockEntityTypes::HasBlockEntity(oldBlockId);
-                const bool newHasBE = BlockEntityTypes::HasBlockEntity(blockId);
+                // ONLY when the BLOCK changes. A state-only edit (same block,
+                // new facing or chest `type`) must keep its block entity: MC's
+                // setBlock only swaps the BE when the new state's block differs.
+                //
+                // Without this guard, re-typing a chest as it pairs or unpairs
+                // destroys and recreates its block entity — silently emptying
+                // the chest next to the one you just placed, and churning a
+                // BlockEntityRemove + BlockEntityData pair at the client for a
+                // block that never went away.
+                const bool blockChanged = (oldBlockId != blockId);
+                const bool oldHadBE = blockChanged && BlockEntityTypes::HasBlockEntity(oldBlockId);
+                const bool newHasBE = blockChanged && BlockEntityTypes::HasBlockEntity(blockId);
 
                 if (oldHadBE) {
                     chunk->RemoveBlockEntity(localX, worldY, localZ);
@@ -321,39 +371,141 @@ namespace Game {
         return true;
     }
     
-    void World::NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
-        // TODO: Implement block neighbor notification when BlockRegistry is fully implemented
-        // For now, this is a placeholder that will be expanded later
-        
-        // Get block registry
-        // auto& registry = BlockRegistry::getInstance();
-        
-        // Notify all 6 neighbors
-        const glm::ivec3 offsets[6] = {
-            {1, 0, 0}, {-1, 0, 0},  // +X, -X
-            {0, 1, 0}, {0, -1, 0},  // +Y, -Y
-            {0, 0, 1}, {0, 0, -1}   // +Z, -Z
-        };
-        
-        glm::ivec3 blockPos(worldX, worldY, worldZ);
-        
-        for (const auto& offset : offsets) {
-            glm::ivec3 neighborPos = blockPos + offset;
-            
-            // Skip invalid positions
-            if (!IsValidPosition(neighborPos.x, neighborPos.y, neighborPos.z)) {
-                continue;
-            }
-            
-            // TODO: Get the neighbor block and notify it
-            // BlockID neighborId = GetBlock(neighborPos.x, neighborPos.y, neighborPos.z);
-            // auto* neighborBlock = registry.getBlock(neighborId);
-            // 
-            // if (neighborBlock) {
-            //     // Notify the neighbor that this block changed
-            //     neighborBlock->onNeighborChanged(this, neighborPos, blockPos);
-            // }
+    bool World::CanBlockSurviveAt(int worldX, int worldY, int worldZ) const {
+        const BlockID id = GetBlock(worldX, worldY, worldZ);
+        if (id == BlockID::Air) return true;
+        if (!BlockRegistry::Get(id).needsSupportBelow) return true;
+
+        // Where the block's real MC canSurvive rule is modelled, use it. This
+        // is not an optimisation — the heuristic below is WRONG for anything
+        // that stacks on itself. Sugar cane is `.noCollision()`, so a cane
+        // resting on cane fails "the block below has collision" and the whole
+        // column above the first segment gets destroyed by the next neighbour
+        // update. That is what made a growing stalk lose its middle.
+        //
+        // Only asked for blocks with a modelled rule: CanSurviveAt answers
+        // `true` for everything else, which would turn the support collapse
+        // off entirely for flowers and torches.
+        if (HasModelledSurvivalRule(id)) {
+            return CanSurviveAt(*this, {worldX, worldY, worldZ}, id);
         }
+
+        // MC LeafLitterBlock.canSurvive: isFaceSturdy(below, Direction.UP).
+        // "Has collision" stands in for a sturdy top face — every full cube
+        // and every slab-like block passes, and the non-colliding blocks
+        // (another flower, a torch) correctly do not.
+        //
+        // Divergence, deliberate: MC's VegetationBlock is stricter still and
+        // wants DIRT or farmland specifically, so vanilla flowers cannot sit on
+        // stone. That only shows up in positions normal placement can't create,
+        // and the looser rule fails SAFE — it never deletes a block MC would
+        // have kept.
+        const int belowY = worldY - 1;
+        if (!IsValidPosition(worldX, belowY, worldZ)) return false;
+        const BlockID below = GetBlock(worldX, belowY, worldZ);
+        if (below == BlockID::Air) return false;
+        return BlockRegistry::HasCollision(below);
+    }
+
+    void World::NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
+        // Port of MC BlockState.updateNeighbourShapes → Block.updateOrDestroy
+        // (Block.java): after a block changes, every neighbour re-checks
+        // whether it can still exist, and one that cannot is DESTROYED WITH
+        // DROPS rather than left floating.
+        //
+        // Recursion is real and wanted — breaking the dirt under a stack of
+        // sugar cane has to collapse the whole column — so this re-enters
+        // through SetBlock. MC bounds it with a recursionLeft counter starting
+        // at 512; the same budget is kept here, as a thread_local because
+        // SetBlock can be driven from either the server thread or a worker.
+        static thread_local int s_updateDepth = 0;
+        constexpr int kMaxUpdateDepth = 512;
+        if (s_updateDepth >= kMaxUpdateDepth) return;
+
+        // All six, not just the one above: each neighbour evaluates its OWN
+        // rule, and blocks with no rule fall out in the first line of
+        // CanBlockSurviveAt. Keeping the walk general means a side-attached
+        // rule can be added later without revisiting this loop.
+        // Paired with kOffsets: the direction pointing from the NEIGHBOUR back
+        // at the block that changed, which is what an updateShape rule asks
+        // about ("is the thing I'm attached to still there?").
+        static constexpr glm::ivec3 kOffsets[6] = {
+            {1, 0, 0}, {-1, 0, 0},
+            {0, 1, 0}, {0, -1, 0},
+            {0, 0, 1}, {0, 0, -1}
+        };
+        static constexpr Direction kFromNeighbour[6] = {
+            Direction::West,  Direction::East,
+            Direction::Down,  Direction::Up,
+            Direction::North, Direction::South
+        };
+
+        const glm::ivec3 origin(worldX, worldY, worldZ);
+        const BlockID originId = GetBlock(worldX, worldY, worldZ);
+
+        // MC destroyBlock(pos, true) — drops, then clears. Shared by the
+        // support rule and by an updateShape that answers AIR, because MC's
+        // updateShape returning AIR is a destroy too, not a silent erase.
+        auto destroyWithDrops = [&](const glm::ivec3& p, BlockID id) {
+            // Roll the loot BEFORE clearing: the tables key on the block that
+            // is still there, and on its state.
+            const uint8_t state = GetBlockState(p.x, p.y, p.z);
+            JavaRandom rng(static_cast<uint64_t>(
+                (static_cast<int64_t>(p.x) * 3129871) ^
+                (static_cast<int64_t>(p.z) * 116129781) ^
+                 static_cast<int64_t>(p.y)));
+            LootContext ctx;
+            ctx.block      = id;
+            ctx.blockState = state;
+            ctx.world      = this;
+            ctx.pos        = p;
+            ctx.rng        = &rng;
+
+            for (const ItemStack& drop : LootTables::GetDrops(ctx)) {
+                // Pops out at the block as a real entity. The only way this
+                // fails now is with no server to spawn into, in which case
+                // nothing is simulating the collapse either.
+                DropItemStackNear(p, drop);
+            }
+            SetBlock(p.x, p.y, p.z, BlockID::Air, UpdateFlags::All);
+        };
+
+        ++s_updateDepth;
+        for (int oi = 0; oi < 6; ++oi) {
+            const glm::ivec3 n = origin + kOffsets[oi];
+            if (!IsValidPosition(n.x, n.y, n.z)) continue;
+
+            const BlockID id = GetBlock(n.x, n.y, n.z);
+            if (id == BlockID::Air) continue;
+            const Block& neighbourDef = BlockRegistry::Get(id);
+
+            // MC BlockState.updateShape — a neighbour may TRANSFORM rather than
+            // just survive-or-die. Runs before the support rule below because
+            // the two are alternatives: a block that transformed has already
+            // answered for this change.
+            if (neighbourDef.neighborChanged) {
+                BlockID outBlock = BlockID::Air;
+                uint8_t outState = 0;
+                if (neighbourDef.neighborChanged(*this, n, id,
+                                                 GetBlockState(n.x, n.y, n.z),
+                                                 kFromNeighbour[oi], originId,
+                                                 outBlock, outState)) {
+                    // AIR from updateShape means "I cannot exist any more" —
+                    // MC's RedStoneWireBlock and the face-attached family both
+                    // return it when their support goes, and MC destroys with
+                    // drops rather than erasing.
+                    if (outBlock == BlockID::Air) destroyWithDrops(n, id);
+                    else SetBlock(n.x, n.y, n.z, outBlock, UpdateFlags::All, outState);
+                    continue;
+                }
+            }
+
+            if (!neighbourDef.needsSupportBelow) continue;   // cheap reject
+            if (CanBlockSurviveAt(n.x, n.y, n.z)) continue;
+
+            destroyWithDrops(n, id);
+        }
+        --s_updateDepth;
     }
 
     void World::MarkSectionDirty(int worldX, int worldY, int worldZ) {
@@ -429,6 +581,13 @@ namespace Game {
 
         Math::ChunkPos chunkPos{chunkX, chunkZ};
         return m_chunkProvider->GetChunk(chunkPos);
+    }
+
+    std::shared_ptr<Chunk> World::GetLoadedChunk(int chunkX, int chunkZ) const {
+        if (!m_chunkProvider) {
+            return nullptr;
+        }
+        return m_chunkProvider->GetLoadedChunk(Math::ChunkPos{chunkX, chunkZ});
     }
 
     const Chunk* World::GetChunkForMeshing(int chunkX, int chunkZ) const {
@@ -546,17 +705,102 @@ namespace Game {
         // For now, this is a placeholder for future implementation
     }
 
+    // MC Level.getBlockRandomPos (Level.java:821-825), reproduced exactly:
+    //
+    //     this.randValue = this.randValue * 3 + 1013904223;
+    //     int val = this.randValue >> 2;
+    //     return new BlockPos(xo + (val & 15), yo + (val >> 16 & yMask), zo + (val >> 8 & 15));
+    //
+    // This is NOT three nextInt(16) calls on the world RNG, and substituting
+    // them would change how sampled positions are distributed through a section
+    // — the whole point of the shifts is that X, Y and Z come from different,
+    // non-overlapping bit ranges of one cheap step.
+    //
+    // The multiply overflows int32 by design; MC relies on Java's wrapping
+    // arithmetic, so this goes through uint32_t to keep it defined in C++.
+    glm::ivec3 World::GetBlockRandomPos(int xo, int yo, int zo, int yMask) {
+        m_randValue = static_cast<int32_t>(static_cast<uint32_t>(m_randValue) * 3u + 1013904223u);
+        const int32_t val = m_randValue >> 2;
+        return glm::ivec3(xo + (val & 15),
+                          yo + ((val >> 16) & yMask),
+                          zo + ((val >> 8) & 15));
+    }
+
+    // Port of MC ServerLevel.tickChunk (ServerLevel.java:452-492), block half.
+    //
+    // The precipitation half of tickChunk (ice and snow forming) is deliberately
+    // absent — it needs biome temperature and weather, neither of which exists
+    // here. When either arrives it belongs at the top of this function, in the
+    // same `for i < tickSpeed` shape MC uses.
     void World::PerformRandomBlockTick() {
-        // Perform random block ticks for loaded chunks
-        // This handles:
-        // - Crop growth
-        // - Grass spreading
-        // - Ice melting/freezing
-        // - Leaf decay
-        // - Fire spreading
-        
-        // TODO: Implement random tick selection and processing
-        // In Minecraft, 3 random blocks per chunk section are ticked per game tick
+        PROFILE_ZONE_N("RandomTick");
+
+        const int tickSpeed = m_randomTickSpeed;
+        if (tickSpeed <= 0 || !m_chunkProvider) return;
+
+        for (const Math::ChunkPos& cp : m_blockTickingChunks) {
+            // Cache-only, and it MUST stay that way. m_blockTickingChunks comes
+            // from the ticket manager's level cache, which lists every chunk
+            // inside simulation distance whether or not it has ever been
+            // loaded — 289 of them at the default distance of 8. Calling the
+            // blocking GetChunk here made the first tick after a player joined
+            // synchronously generate every one of them on the server thread:
+            // measured at 7761 ms, during which no tick completed and not a
+            // single chunk was delivered to the client, so the world stayed
+            // empty even though the chunks were arriving.
+            //
+            // MC has no equivalent hazard — ChunkMap.forEachBlockTickingChunk
+            // walks holders that already exist, and a chunk that is not loaded
+            // simply is not ticked.
+            auto chunk = m_chunkProvider->GetLoadedChunk(cp);
+            if (!chunk) continue;
+
+            const int minX = cp.x * Math::CHUNK_SIZE_X;
+            const int minZ = cp.z * Math::CHUNK_SIZE_Z;
+
+            for (int sectionIndex = 0; sectionIndex < Math::SECTIONS_PER_CHUNK; ++sectionIndex) {
+                ChunkSection* section = chunk->GetSection(sectionIndex);
+                // The whole reason ChunkSection keeps a census: nearly every
+                // section in the world answers no here, for one comparison.
+                if (!section || !section->IsRandomlyTicking()) continue;
+
+                const int minYInSection = MIN_Y + sectionIndex * Math::SECTION_HEIGHT;
+
+                for (int i = 0; i < tickSpeed; ++i) {
+                    const glm::ivec3 pos = GetBlockRandomPos(minX, minYInSection, minZ, 15);
+
+                    // Read straight out of the section we already have rather
+                    // than going back through World::GetBlock, which would
+                    // re-resolve the chunk and the section for a position we
+                    // just constructed inside them.
+                    const int lx = pos.x - minX;
+                    const int ly = pos.y - minYInSection;
+                    const int lz = pos.z - minZ;
+                    const BlockID id = section->GetBlockID(lx, ly, lz);
+                    if (id == BlockID::Air) continue;
+
+                    const Block& def = BlockRegistry::Get(id);
+                    if (!def.randomTick) continue;
+
+                    const uint8_t state = section->GetState(lx, ly, lz);
+                    if (def.isRandomlyTicking && !def.isRandomlyTicking(state)) continue;
+
+                    // The callback may SetBlock anywhere — including into this
+                    // same section, invalidating `section` if the write creates
+                    // or destroys one. Nothing after the call touches `section`
+                    // in this iteration, and the next iteration re-fetches
+                    // nothing... which is exactly why the loop re-reads
+                    // `section` below rather than caching a block pointer.
+                    def.randomTick(*this, pos, id, state, m_tickRandom);
+
+                    // Re-fetch: a growth callback that turned farmland to dirt
+                    // (or a cane that grew into the section above) can have
+                    // dropped or replaced this section.
+                    section = chunk->GetSection(sectionIndex);
+                    if (!section) break;
+                }
+            }
+        }
     }
 
     void World::ProcessBlockEvents() {

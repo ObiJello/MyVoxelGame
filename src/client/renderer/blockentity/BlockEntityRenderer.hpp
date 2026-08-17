@@ -51,6 +51,17 @@ namespace Render {
         // BEWLR — held-item path will fall through to the cube fallback).
         virtual void RenderBEWLR(Game::BlockID /*blockId*/,
                                  const glm::mat4& /*mvp*/) {}
+
+        // Whether RenderBEWLR above actually draws anything.
+        //
+        // The held-item path RETURNS once it hands off to a BE renderer, so a
+        // renderer that inherits the no-op RenderBEWLR silently draws nothing
+        // in hand — which is what happened to the campfire: it has a renderer
+        // (for the fire and the cooking items) but its block geometry comes
+        // from an ordinary model, so it needs the normal cube path, not this
+        // one. Only a renderer that owns its item geometry should claim the
+        // shortcut; everything else falls through and renders as a block.
+        virtual bool SupportsBEWLR() const { return false; }
     };
 
 } // namespace Render

@@ -146,11 +146,9 @@ namespace Game {
         bool IsValidLocalCoords(int localX, int localZ) const;
 
         // Calculate heightmaps for chunk
-        std::vector<int64_t> CalculateMotionBlockingHeightmap(const Chunk& chunk);
-        std::vector<int64_t> CalculateWorldSurfaceHeightmap(const Chunk& chunk);
+
 
         // Pack heightmap data into long array format
-        std::vector<int64_t> PackHeightmapToLongs(const std::vector<int>& heights);
     };
 
     // === UTILITY FUNCTIONS ===

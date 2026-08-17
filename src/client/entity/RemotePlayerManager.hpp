@@ -1,6 +1,8 @@
 // File: src/client/entity/RemotePlayerManager.hpp
 #pragma once
 
+#include "common/core/Mth.hpp"
+
 #include "common/entity/PlayerColors.hpp"
 #include <glm/glm.hpp>
 #include <unordered_map>
@@ -9,6 +11,8 @@
 #include <cstdint>
 #include <cmath>
 #include <cctype>
+
+#include <algorithm>
 
 namespace Client {
 
@@ -66,6 +70,17 @@ namespace Client {
         glm::vec2 renderPrevRotation{0.0f};
         float     renderPrevBodyYaw = 0.0f;
 
+        // MC LivingEntity.hurtTime — counts down from 10 and drives the red
+        // flash. Server-set on the hit, then ticked down locally so the flash
+        // is smooth between the 20 Hz position broadcasts.
+        int hurtTime = 0;
+
+        // MC LivingEntity.deathTime — 0..20, drives the corpse's topple. Sent
+        // outright rather than max()'d like hurtTime: a respawn sends 0, and
+        // taking the max would leave the revived player lying on the ground
+        // forever. Advanced locally between broadcasts so the fall is smooth.
+        int deathTime = 0;
+
         // Chat bubble
         std::string chatBubbleText;
         float chatBubbleTimer = 0.0f;
@@ -74,6 +89,21 @@ namespace Client {
 
     class RemotePlayerManager {
     public:
+        // The hurt flash arrives on the position broadcast; taking the MAX
+        // stops a stale packet cutting a flash short when two arrive close
+        // together.
+        void SetHurtTime(uint32_t id, int hurtTime) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) {
+                it->second.hurtTime = std::max(it->second.hurtTime, hurtTime);
+            }
+        }
+
+        void SetDeathTime(uint32_t id, int deathTime) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.deathTime = deathTime;
+        }
+
         void UpdatePlayer(uint32_t id, const glm::vec3& pos, const glm::vec2& rot, bool crouching) {
             auto& rp = m_players[id];
             if (!rp.positionInitialized) {
@@ -105,6 +135,10 @@ namespace Client {
         // Apply one interpolation step + body rotation. Call at 20Hz.
         void Tick() {
             for (auto& [id, rp] : m_players) {
+                if (rp.hurtTime > 0) --rp.hurtTime;
+                // MC LivingEntity.tickDeath, client-side: the corpse keeps
+                // falling between the 10 Hz broadcasts that correct it.
+                if (rp.deathTime > 0 && rp.deathTime < 20) ++rp.deathTime;
                 // Snapshot what THIS tick is starting from — the renderer uses
                 // these as the "previous" point for sub-tick interpolation.
                 // Mirrors MC: LivingEntity.baseTick() updates yRotO/xRotO/
@@ -138,7 +172,7 @@ namespace Client {
                 // Determine body target: movement direction when moving, head when still
                 float bodyTarget;
                 if (speedSq > 0.0001f) {
-                    bodyTarget = glm::degrees(atan2f(vel.z, vel.x));
+                    bodyTarget = Game::Mth::YRotFromVector(vel);
                 } else {
                     bodyTarget = headYaw;
                 }

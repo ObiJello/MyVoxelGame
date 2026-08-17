@@ -2,14 +2,17 @@
 #pragma once
 
 #include "../chunk/IBlockAccess.hpp"
+#include "../chunk/Heightmap.hpp"
 #include "ILevelWrite.hpp"
 #include "server/world/ChunkProvider.hpp"
 #include "../block/Blocks.hpp"
 #include "../math/WorldMath.hpp"
 #include "server/world/tracking/DirtyTracker.hpp"
+#include "common/core/JavaRandom.hpp"
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
 
 namespace Game {
@@ -22,7 +25,14 @@ namespace Game {
             NotifyNeighbors   = 1 << 0,  // Notify neighboring blocks of change
             UpdateShapes      = 1 << 1,  // Update block shapes (for fences, walls, etc.) - TODO
             RecomputeLight    = 1 << 2,  // Recalculate lighting - TODO
-            UpdateHeightmap   = 1 << 3,  // Update chunk heightmap - TODO
+            // Vestigial. Heightmaps are now maintained unconditionally by
+            // Chunk::SetBlock, which is the single funnel every write reaches.
+            // That matches MC: LevelChunk.setBlockState updates its heightmaps
+            // regardless of the flags handed to Level.setBlock — those govern
+            // neighbour updates, lighting and client notification, never the
+            // heightmap. The bit is kept so the `All` combination and existing
+            // call sites keep their numeric value.
+            UpdateHeightmap   = 1 << 3,
             MarkDirty         = 1 << 4,  // Mark section dirty for mesh rebuild
             NoDrops           = 1 << 6,  // Don't drop items when breaking - TODO
             
@@ -33,6 +43,17 @@ namespace Game {
         
         World();
         ~World();
+
+        // MC ChunkAccess.getHeight — topmost matching block in a column, or
+        // MIN_Y when the column is empty or its chunk is not loaded.
+        //
+        // O(1): reads the chunk's maintained heightmap. This is the call that
+        // replaced every "scan down the column to find the surface" loop.
+        int GetSurfaceHeight(int worldX, int worldZ, HeightmapType type) const;
+
+        // MC Level.canSeeSky — is anything between this position and the sky?
+        // Answered from the WORLD_SURFACE heightmap rather than a walk.
+        bool CanSeeSky(int worldX, int worldY, int worldZ) const;
 
         // Core world operations
         void Initialize();
@@ -60,7 +81,14 @@ namespace Game {
         // block's default state — which is what a caller that doesn't know
         // about states means.
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId,
-                      uint32_t updateFlags, uint8_t stateIndex);
+                      uint32_t updateFlags, uint8_t stateIndex) override;
+
+        // The server's world is the authority — MC ServerLevel.isClientSide.
+        bool IsClientSide() const override { return false; }
+
+        // MC BlockBehaviour.canSurvive for the block currently at this cell.
+        // True for anything with no support rule, so callers can ask blindly.
+        bool CanBlockSurviveAt(int worldX, int worldY, int worldZ) const;
 
         // Mesh system integration
         void MarkSectionDirty(int worldX, int worldY, int worldZ);
@@ -83,8 +111,21 @@ namespace Game {
         const std::string& GetMinecraftWorldPath() const;
         bool HasMinecraftWorld() const;
 
+        // Open the world without any ability to write it back. MUST be called
+        // before Initialize() — that is where the chunk provider is built, and
+        // read-only is enforced by never giving it a chunk saver.
+        void SetReadOnly(bool readOnly) { m_readOnly = readOnly; }
+        bool IsReadOnly() const { return m_readOnly; }
+
         // Provide chunk access for mesh system
+        // BLOCKS on a cache miss: goes to disk, then to the generator, and
+        // waits for that chunk to reach FULL. Never call from per-tick
+        // simulation — use GetLoadedChunk.
         std::shared_ptr<Chunk> GetChunk(int chunkX, int chunkZ) const;
+
+        // Cache-only: null when the chunk is not resident. Never loads,
+        // generates or blocks. MC ServerChunkCache.getChunkNow.
+        std::shared_ptr<Chunk> GetLoadedChunk(int chunkX, int chunkZ) const;
 
         // Convenience method for mesh manager
         const Chunk* GetChunkForMeshing(int chunkX, int chunkZ) const;
@@ -151,9 +192,57 @@ namespace Game {
         bool GetDoDaylightCycle() const { return m_doDaylightCycle; }
         void SetDoDaylightCycle(bool enabled) { m_doDaylightCycle = enabled; }
 
+        // MC gamerule `mobGriefing`. Gates world edits made BY mobs — today
+        // just a sheep eating grass; creepers and endermen want the same flag.
+        bool GetDoMobGriefing() const { return m_doMobGriefing; }
+        void SetDoMobGriefing(bool enabled) { m_doMobGriefing = enabled; }
+
+        // MC gamerule `doMobSpawning`. Gates the natural spawner only —
+        // despawning, AI and /summon are all unaffected, exactly as in vanilla,
+        // so turning it off empties the world gradually rather than at once.
+        bool GetDoMobSpawning() const { return m_doMobSpawning; }
+        void SetDoMobSpawning(bool enabled) { m_doMobSpawning = enabled; }
+
+        // ========================================================================
+        // RANDOM TICKING (MC ServerLevel.tickChunk)
+        // ========================================================================
+
+        // MC gamerule `random_tick_speed`: how many random positions are sampled
+        // per chunk SECTION per tick. Vanilla default 3, minimum 0 (which turns
+        // random ticking off entirely). Raising it is the standard way to watch
+        // crops grow without waiting — /gamerule random_tick_speed 1000.
+        static constexpr int kDefaultRandomTickSpeed = 3;
+        int  GetRandomTickSpeed() const { return m_randomTickSpeed; }
+        void SetRandomTickSpeed(int speed) {
+            m_randomTickSpeed = speed < 0 ? 0 : speed;
+        }
+
+        // Which chunks are close enough to a player to simulate. Set by
+        // IntegratedServer each tick from its ChunkTicketManager; empty means
+        // "nothing simulates", which is the correct answer for a world with no
+        // players in it. World deliberately does not reach for the ticket
+        // manager itself — it is a data container and knows nothing about
+        // sessions (see the WorldLoop comment).
+        void SetBlockTickingChunks(std::vector<Math::ChunkPos> chunks) {
+            m_blockTickingChunks = std::move(chunks);
+        }
+
+        // MC Level.getBlockRandomPos — a dedicated LCG, NOT the world RNG.
+        // Exposed for testing; the tick loop is its only real caller.
+        glm::ivec3 GetBlockRandomPos(int xo, int yo, int zo, int yMask);
+
+        // MC LevelReader.getRawBrightness. See IBlockAccess for what this
+        // stands in for; World keeps the base implementation.
+        //
+        // MC Level.isRainingAt — no weather system, so always false. Named and
+        // called anyway so the farmland rule reads like FarmBlock.java and a
+        // future weather system has one obvious place to plug in.
+        bool IsRainingAt(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return false; }
+
     private:
         std::unique_ptr<ChunkProvider> m_chunkProvider;
         std::string m_minecraftWorldPath;
+        bool        m_readOnly = false;   // see SetReadOnly
 
         // Helper functions
         void OnBlockChanged(int worldX, int worldY, int worldZ);
@@ -173,6 +262,29 @@ namespace Game {
         int64_t m_gameTime = 0;
         int64_t m_dayTime = 6000;
         bool m_doDaylightCycle = false;
+        // Vanilla defaults, unlike doDaylightCycle above.
+        bool m_doMobSpawning = true;
+        bool m_doMobGriefing = true;
+
+        // ── Random ticking ──────────────────────────────────────────────────
+        int m_randomTickSpeed = kDefaultRandomTickSpeed;
+
+        // Refreshed by the server every tick. Kept as a plain vector the server
+        // moves in, rather than a set World queries, so the tick loop is a
+        // straight walk with no hashing.
+        std::vector<Math::ChunkPos> m_blockTickingChunks;
+
+        // MC Level.randValue — the state of getBlockRandomPos's own LCG. It is
+        // deliberately NOT the world RNG and deliberately not seeded: vanilla
+        // leaves it at 0 and lets it walk, and the sequence is what spreads
+        // sampled positions evenly through a section.
+        int32_t m_randValue = 0;
+
+        // Reused across every dispatch so a random tick allocates nothing. The
+        // seed is irrelevant to correctness — MC passes the level's shared
+        // RandomSource here too — but a fixed one makes a session reproducible
+        // when debugging a growth rule.
+        JavaRandom m_tickRandom{0};
     };
 
 } // namespace Game

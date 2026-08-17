@@ -16,6 +16,7 @@
 
 #include "common/network/PacketRegistry.hpp"
 #include "common/entity/Item.hpp"
+#include <algorithm>
 
 namespace Network::Serialization {
 
@@ -35,9 +36,13 @@ namespace Network::Serialization {
             return Game::ItemStack{};                            // ItemStack.java:143-144
         }
         Game::ItemStack stack;
-        stack.count      = count;
         stack.itemId     = reader.ReadVarInt();                  // ItemStack.java:146
         stack.components = Game::DataComponentMap::Deserialize(reader); // :147
+        // Clamp to the item's own limit. The wire count is an unbounded VarInt,
+        // and MC validates the same bound on decode (ItemStack.java:132-135
+        // rejects count > getMaxStackSize outright). Clamping rather than
+        // rejecting keeps a desynced peer from dropping the whole packet.
+        stack.count      = std::min(count, Game::ItemRegistry::Get(stack.itemId).maxStackSize);
         return stack;
     }
 

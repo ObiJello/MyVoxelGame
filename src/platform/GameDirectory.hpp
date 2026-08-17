@@ -230,7 +230,8 @@ namespace Platform {
         bool GetHideSplashTexts() const { return GetBool("hideSplashTexts", false); }
         void SetHideSplashTexts(bool enabled) { SetBool("hideSplashTexts", enabled); }
 
-        // 1.0 = 100% on the options slider = the engine's baseline feel.
+        // Multiplier on the baseline 0.1°/px feel; 1.0 = baseline = 50% on the
+        // options slider, which runs 0..200% (stored 0.0..4.0).
         float GetMouseSensitivity() const { return GetFloat("mouseSensitivity", 1.0f); }
         void SetMouseSensitivity(float sensitivity) { SetFloat("mouseSensitivity", sensitivity); }
 
@@ -440,6 +441,34 @@ namespace Platform {
         
         // Check if default save world exists
         bool HasDefaultSaveWorld() const;
+
+        // ── Real Minecraft installation saves ───────────────────────────────
+        // A world the player created in actual Minecraft, listed on the
+        // Singleplayer screen so it can be loaded (read-only) with our renderer.
+
+        // Mirrors what MC's LevelSummary exposes to WorldSelectionList, read
+        // out of the world's level.dat. Fields fall back to sane defaults when
+        // level.dat is unreadable — a world still lists, it just shows less.
+        struct MinecraftWorldInfo {
+            std::string folderName;   // directory name under saves/ (MC's levelId)
+            std::string path;         // absolute path to the world folder
+            std::string levelName;    // Data.LevelName; folderName if absent
+            long long   lastPlayed = 0;  // epoch SECONDS (level.dat stores millis)
+            int         gameMode = 0;    // Data.GameType: 0 survival … 3 spectator
+            bool        hardcore = false;
+            bool        allowCommands = false;
+            std::string versionName;  // Data.Version.Name, e.g. "1.21.6"
+        };
+
+        // The vanilla launcher's saves folder for this platform. Does not check
+        // that it exists — callers use ListMinecraftWorlds for that.
+        static std::string GetMinecraftSavesDirectory();
+
+        // Every subfolder of the above that looks like a playable world: has a
+        // level.dat AND at least one region/*.mca. Newest-played first.
+        // Returns empty when Minecraft isn't installed — that is the normal
+        // case for most players and is not an error.
+        static std::vector<MinecraftWorldInfo> ListMinecraftWorlds();
 
     private:
         std::string m_gameDirectory;

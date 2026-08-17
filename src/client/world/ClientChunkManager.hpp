@@ -11,6 +11,7 @@
 
 // Include mesh job data types
 #include "../renderer/mesh/MeshJobData.hpp"
+#include "../renderer/mesh/RenderRegionCache.hpp"
 #include "../renderer/mesh/SectionMesh.hpp"  // For GPUSectionData
 #include <memory>
 #include <unordered_map>
@@ -76,6 +77,11 @@ namespace Client {
         bool isAllAir = true;         // True when section contains only air
         uint8_t lastNeighborMask = 0; // Which neighbors were present during last mesh (PX=1, NX=2, PZ=4, NZ=8)
         bool builtOnce = false;       // True after first successful build
+        // MC's RenderSection.isDirtyFromPlayer — set when THIS client edited a
+        // block in the section, cleared when it is scheduled. Drives the
+        // "Semi Blocking" / "Fully Blocking" chunk-builder modes, which compile
+        // player edits on the main thread so they appear the same frame.
+        bool dirtyFromPlayer = false;
         
         // Per-task cancellation: reference to last submitted mesh job
         std::shared_ptr<::Client::Render::MeshJobData> lastMeshJob;
@@ -83,8 +89,6 @@ namespace Client {
         // NEW: Direct GPU data ownership (render thread only)
         std::atomic<::Render::GPUSectionData*> gpuData{nullptr};
         
-        // NEW: For deferred deletion (deleted after 2 frames to avoid use-after-free)
-        std::atomic<::Render::GPUSectionData*> pendingDelete{nullptr};
     };
 
     // Client-side chunk data
@@ -175,11 +179,15 @@ namespace Client {
         // Write a block into the client's chunk store and mark the affected
         // sections dirty. This is the shared body behind ProcessBlockChange,
         // predictions and rollbacks.
-        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, uint8_t stateIndex = 0);
+        // fromPlayer marks the touched sections as MC's isDirtyFromPlayer, which
+        // the "Semi Blocking"/"Fully Blocking" chunk-builder modes compile on the
+        // main thread so the edit shows up the same frame.
+        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, uint8_t stateIndex = 0,
+                           bool fromPlayer = false);
         
 
         // Mark individual section dirty for mesh rebuilding
-        void MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY);
+        void MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY, bool fromPlayer = false);
 
         // Mark entire chunk dirty (all 24 sections) for mesh rebuilding
         void MarkChunkDirty(Game::Math::ChunkPos chunkPos);
@@ -268,8 +276,10 @@ namespace Client {
         // Generation counter for staleness control
         std::atomic<uint32_t> m_nextGeneration{1};
 
-        // Throttle mesh scheduling to ~30Hz instead of every frame
-        std::chrono::steady_clock::time_point m_lastMeshScheduleTime{};
+        // (No mesh-schedule throttle any more — matching MC, which compiles
+        // sections every frame. Rate limiting is the upload permit pool, taken
+        // by the mesh workers when a job starts. See
+        // ScheduleMeshBuildsWithSnapshots.)
 
         // Persistent candidate buffer — reused across calls to avoid per-call heap allocation
         struct SectionCandidate {
@@ -300,12 +310,20 @@ namespace Client {
     public:
         // Schedule mesh builds using snapshots (main thread only) - public for ClientMeshManager
         void ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition);
+
+        // MC RenderSection.hasAllNeighbors — are all 8 surrounding chunk columns
+        // loaded? A never-compiled section waits for this before it is meshed.
+        bool HasAllNeighborChunks(Game::Math::ChunkPos pos) const;
         
-        // Build snapshot for a single section with version checking (Minecraft-style)
-        // Returns false if section missing or version changed during capture
-        bool BuildSectionSnapshot(Game::Math::ChunkPos chunkPos, int sectionY, 
-                                 uint32_t expectedVersion, 
-                                 std::shared_ptr<Render::MeshJobData>& outSnapshot);
+        // Build the 3x3x3 region a section is meshed against, with version
+        // checking (MC RenderSection.createCompileTask). `regionCache` is shared
+        // across one scheduling pass so neighbouring sections reuse each other's
+        // copies. Returns false if the section is missing or its version changed
+        // during capture.
+        bool BuildSectionRegion(Game::Math::ChunkPos chunkPos, int sectionY,
+                                uint32_t expectedVersion,
+                                Render::RenderRegionCache& regionCache,
+                                std::shared_ptr<Render::MeshJobData>& outSnapshot);
         
         // Accept or reject mesh build result based on version and state
         MeshAcceptance AcceptMeshResult(const Network::MeshBuildResult& result);

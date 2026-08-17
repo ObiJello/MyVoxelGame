@@ -10,11 +10,12 @@
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "../renderer/mesh/MeshUploadPermits.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
-#include "../renderer/mesh/SnapshotBuilder.hpp"
-#include "../renderer/mesh/SnapshotBlockAccess.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
+#include <thread>
 #include <glm/glm.hpp>
 
 namespace Threading {
@@ -104,108 +105,42 @@ namespace Threading {
         }
         return false;
     }
-    
-    void ClientWorkerPool::SubmitMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
-                                       std::shared_ptr<Game::Chunk> chunkData, float priority) {
-        if (!m_running.load()) {
-            Log::Warning("Cannot submit mesh job - ClientWorkerPool not running");
-            return;
-        }
 
-        if (!chunkData) {
-            Log::Warning("Cannot submit mesh job with null chunk data");
-            return;
-        }
-        
-        // Since we can't use SnapshotBuilder directly (it requires ClientChunk and ClientChunkManager),
-        // we'll create a simple snapshot manually for this legacy path
-        
-        auto* section = chunkData->GetSection(sectionY);
-        if (!section) {
-            Log::Warning("Cannot submit mesh job - section %d not found in chunk (%d, %d)", 
-                        sectionY, chunkPos.x, chunkPos.z);
-            return;
-        }
-        
-        // Create snapshot manually
-        auto snapshot = std::make_shared<Client::Render::MeshJobData>(chunkPos, sectionY);
-        
-        // Copy block data
-        snapshot->sectionData.isEmpty = true;
-        snapshot->sectionData.sectionY = sectionY;
-        
-        for (int y = 0; y < 16; ++y) {
-            for (int z = 0; z < 16; ++z) {
-                for (int x = 0; x < 16; ++x) {
-                    int index = y * 256 + z * 16 + x;
-                    Game::BlockID block = static_cast<Game::BlockID>(section->blocks[index]);
-                    snapshot->sectionData.blocks[index] = block;
-                    
-                    if (block != Game::BlockID::Air) {
-                        snapshot->sectionData.isEmpty = false;
-                    }
-                }
+    void ClientWorkerPool::BuildMeshJobSync(std::shared_ptr<Client::Render::MeshJobData> snapshot) {
+        if (!snapshot) return;
+        PROFILE_ZONE_N("MeshSyncCompile");
+
+        MeshJob job(std::move(snapshot));
+        m_stats.meshJobsSubmitted.fetch_add(1, std::memory_order_relaxed);
+
+        try {
+            Network::MeshBuildResult result = BuildSectionMesh(job);
+            // No permit was acquired for this section — it never entered the
+            // compile queue. See MeshBuildResult::holdsUploadPermit.
+            result.holdsUploadPermit = false;
+
+            const bool succeeded = result.success;
+            const size_t verts = result.meshData.GetTotalVertexCount();
+            const size_t indices = result.meshData.GetTotalIndexCount();
+
+            SendMeshResult(std::move(result));
+
+            m_stats.meshJobsCompleted.fetch_add(1, std::memory_order_relaxed);
+            if (succeeded) {
+                m_stats.sectionsBuilt.fetch_add(1, std::memory_order_relaxed);
+                m_stats.verticesGenerated.fetch_add(verts, std::memory_order_relaxed);
+                m_stats.indicesGenerated.fetch_add(indices, std::memory_order_relaxed);
             }
         }
-
-        // Block states (see ChunkSection::states — normally unallocated)
-        if (section->HasStates()) {
-            snapshot->sectionData.states = section->states;
-        }
-        
-        // Fill light data with default values
-        std::fill(snapshot->sectionData.lightData.begin(), snapshot->sectionData.lightData.end(), 0xFF);
-        
-        // For the legacy path, we'll skip neighbor copying (they'll be empty/air)
-        // This is a limitation of the deprecated method
-        for (auto& neighbor : snapshot->sectionData.neighbors) {
-            std::fill(neighbor.begin(), neighbor.end(), Game::BlockID::Air);
-        }
-        
-        // Calculate priority
-        glm::vec3 playerPos = GetPlayerPosition();
-        if (m_prioritizationEnabled) {
-            priority = CalculatePriority(chunkPos, sectionY, playerPos);
-        }
-        
-        snapshot->distanceToPlayer = priority;
-        snapshot->isHighPriority = priority > 500.0f; // Close chunks are high priority
-        snapshot->submitTime = std::chrono::steady_clock::now();
-        
-        // Submit using snapshot
-        SubmitMeshJobWithSnapshot(snapshot);
-    }
-
-    void ClientWorkerPool::SubmitChunkMeshJobs(Game::Math::ChunkPos chunkPos, 
-                                             std::shared_ptr<Game::Chunk> chunkData, 
-                                             const glm::vec3& playerPosition) {
-        if (!chunkData) {
-            Log::Warning("Cannot submit chunk mesh jobs with null chunk data");
-            return;
-        }
-
-        // Submit mesh jobs for all sections that have data
-        for (int sectionIndex = 0; sectionIndex < Game::Math::SECTIONS_PER_CHUNK; ++sectionIndex) {
-            const auto* section = chunkData->GetSection(sectionIndex);
-            if (section) {
-                // Check if section has any non-air blocks (simple check)
-                bool hasBlocks = false;
-                for (size_t blockIndex = 0; blockIndex < section->blocks.size() && !hasBlocks; ++blockIndex) {
-                    if (section->blocks[blockIndex] != static_cast<uint16_t>(Game::BlockID::Air)) {
-                        hasBlocks = true;
-                    }
-                }
-                
-                if (hasBlocks) {
-                    float priority = 0.0f;
-                    
-                    if (m_prioritizationEnabled) {
-                        priority = CalculatePriority(chunkPos, sectionIndex, playerPosition);
-                    }
-                    
-                    SubmitMeshJob(chunkPos, sectionIndex, chunkData, priority);
-                }
-            }
+        catch (const std::exception& e) {
+            Log::Error("Synchronous mesh build failed: %s", e.what());
+            m_stats.meshJobsFailed.fetch_add(1, std::memory_order_relaxed);
+            // Still send a failed result, or the section stays stuck in MESHING.
+            Network::MeshBuildResult failedResult(job.chunkPos, job.sectionY);
+            failedResult.success = false;
+            failedResult.holdsUploadPermit = false;
+            if (job.snapshot) failedResult.generation = job.snapshot->generation;
+            SendMeshResult(std::move(failedResult));
         }
     }
 
@@ -228,20 +163,19 @@ namespace Threading {
     }
 
     void ClientWorkerPool::CancelAllJobs() {
-        size_t discarded = 0;
         {
             std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-            discarded = m_jobQueue.size();
-            std::priority_queue<MeshJob> empty;
-            std::swap(m_jobQueue, empty);
+            m_jobQueue.clear();
+            m_recompileQuota = kMaxRecompileQuota;
         }
 
-        // These jobs are thrown away without ever running, so they will never
-        // reach SendMeshResult and never reach the render thread's drain —
-        // the only two places that would otherwise hand their permits back.
-        for (size_t i = 0; i < discarded; ++i) {
-            ::Render::GetMeshUploadPermits().Release();
-        }
+        // NO permit releases here. A queued job holds no permit — WorkerLoop
+        // acquires one only when it actually starts the job, so discarding the
+        // queue cannot leak a slot. (Before the queue was decoupled from the
+        // pool this loop released one permit per discarded job; doing that now
+        // would over-release and inflate the pool past its capacity.) Jobs
+        // already in flight still hold theirs and still funnel through
+        // SendMeshResult, which is unchanged.
 
         {
             std::lock_guard<std::mutex> lock(m_cancelMutex);
@@ -313,23 +247,56 @@ namespace Threading {
 
         static std::atomic<uint64_t> jobCounter{0};
 
+        auto& permits = ::Render::GetMeshUploadPermits();
+
         while (m_running.load()) {
             // Use optional to avoid creating deprecated MeshJob unnecessarily
             std::optional<MeshJob> jobOpt;
-            
+
+            // 1. Wait for work WITHOUT holding a permit. Blocking here with a
+            //    permit in hand would idle a pipeline slot for up to 5 ms.
             {
                 std::unique_lock<std::mutex> lock(m_jobQueueMutex);
-                
-                if (m_jobCondition.wait_for(lock, std::chrono::milliseconds(5),
-                                           [this] { return !m_jobQueue.empty() || !m_running.load(); })) {
-                    if (!m_jobQueue.empty()) {
-                        jobOpt = std::move(const_cast<MeshJob&>(m_jobQueue.top()));
-                        m_jobQueue.pop();
-                    }
-                }
+                m_jobCondition.wait_for(lock, std::chrono::milliseconds(5),
+                                        [this] { return !m_jobQueue.empty() || !m_running.load(); });
+                if (!m_running.load()) break;
+                if (m_jobQueue.empty()) continue;
             }
-            
-            if (jobOpt.has_value()) {
+
+            // 2. Claim a pipeline slot. This is MC's runTask() gate —
+            //    `if (!this.bufferPool.isEmpty())` before polling the queue.
+            //    The permit spans compile AND upload and comes back on the
+            //    render thread once the section has been uploaded, so a slow
+            //    upload stage throttles compilation automatically.
+            //
+            //    THIS is the only place meshing is rate-limited. It used to be
+            //    taken by the scheduler before a job was even queued, which made
+            //    throughput `permits x scheduler passes/s` — i.e. proportional
+            //    to frame rate, because the scheduler runs once per frame. That
+            //    is what made a slow backend render a visibly smaller disc of
+            //    world than a fast one.
+            if (!permits.TryAcquire()) {
+                // Pipeline full. The work stays queued and stays sorted by
+                // distance, so nothing is lost or reordered by backing off.
+                std::this_thread::sleep_for(std::chrono::microseconds(250));
+                continue;
+            }
+
+            // 3. Take the nearest job to where the camera is RIGHT NOW.
+            const glm::vec3 cameraPos = GetPlayerPosition();
+            {
+                std::lock_guard<std::mutex> lock(m_jobQueueMutex);
+                jobOpt = PollNearestLocked(cameraPos);
+            }
+
+            if (!jobOpt.has_value()) {
+                // Raced another worker for the last entry, or everything left in
+                // the queue was cancelled. Hand the slot straight back.
+                permits.Release();
+                continue;
+            }
+
+            {
                 uint64_t jobNum = jobCounter.fetch_add(1);
                 const auto& job = jobOpt.value();
                 // Log::Debug("WORKER: Job %llu dequeued - chunk (%d, %d) section %d", 
@@ -430,7 +397,7 @@ namespace Threading {
         }
         
         // Full mesh job - check if section is empty
-        if (job.snapshot->sectionData.isEmpty) {
+        if (job.snapshot->region.CentreIsEmpty()) {
             result.success = true; // Empty section is valid, just no geometry
             return result;
         }
@@ -440,7 +407,7 @@ namespace Threading {
         // snapshot's flat arrays instead of per-block virtual GetBlock calls.
         Render::Mesher mesher;
         Render::SectionMesh sectionMesh;
-        mesher.BuildSectionMesh(job.snapshot->sectionData, job.chunkPos, job.sectionY, sectionMesh);
+        mesher.BuildSectionMesh(job.snapshot->region, job.chunkPos, job.sectionY, sectionMesh);
         
         // Convert SectionMesh to MeshBuildResult format
         result = ConvertSectionMeshToResult(sectionMesh, job.chunkPos, job.sectionY);
@@ -453,28 +420,113 @@ namespace Threading {
 
     bool ClientWorkerPool::EnqueueJob(MeshJob&& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
-        
-        // Check queue size limit
-        if (m_jobQueue.size() >= m_maxQueueSize) {
-            // Don't spam warnings for every dropped job
-            static std::chrono::steady_clock::time_point lastWarning;
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastWarning).count() >= 1) {
-                Log::Warning("Client worker queue full (%zu/%zu), dropping mesh jobs", 
-                           m_jobQueue.size(), m_maxQueueSize);
-                lastWarning = now;
-            }
-            m_stats.meshJobsCancelled.fetch_add(1, std::memory_order_relaxed);
-            return false;
-        }
 
-        m_jobQueue.push(std::move(job));
+        // No capacity limit. MC's compile queue (CompileTaskDynamicQueue) has
+        // none either, and for the same reason it does not need one: a section
+        // is marked not-dirty when it is scheduled, so depth is bounded by the
+        // number of DIRTY VISIBLE sections, not by anything unbounded.
+        //
+        // Execution is gated one stage down by the buffer pool
+        // (SectionRenderDispatcher.runTask -> our MeshUploadPermits), which is
+        // where throughput is supposed to be limited. A cap here limited
+        // ADMISSION instead, which is the mistake this file's scheduler comment
+        // warns about at length.
+        m_jobQueue.push_back(std::move(job));
         lock.unlock();
         m_jobCondition.notify_one();
         return true;
     }
 
-    // DequeueJob method removed - logic is now integrated directly into WorkerLoop
+    // Port of MC CompileTaskDynamicQueue.poll(Vec3) — see
+    // minecraft_code/decompiled_net/minecraft/client/renderer/chunk/CompileTaskDynamicQueue.java
+    //
+    // Two things make this a linear scan rather than a sorted container:
+    //   1. The key is distance to the CAMERA, which moves every frame. Anything
+    //      ordered at insertion time is stale by the time it is polled, and the
+    //      player walking away from a queued section would not reorder it.
+    //   2. The recompile quota needs the best candidate of EACH kind, which a
+    //      single-ordered structure cannot give you in one pop.
+    //
+    // Cost is O(queue) per poll under the lock, exactly as MC does it. Polls are
+    // bounded by pipeline throughput (a poll only happens after a permit is
+    // acquired), not by frame rate, so this is a few thousand distance
+    // computations per second at most.
+    std::optional<MeshJob> ClientWorkerPool::PollNearestLocked(const glm::vec3& cameraPos) {
+        // Phase 1: drop cancelled entries (MC does this inline via
+        // iterator.remove()). Swap-and-pop rather than a shifting erase — the
+        // queue has no meaningful order, since selection is purely by distance.
+        //
+        // Dropping without producing a result is safe, and only because both
+        // Cancel() sites guarantee no one is still waiting on this job:
+        // ClientChunkManager::UnloadChunk cancels while the chunk is going away
+        // (the section is about to stop existing), and
+        // ScheduleMeshBuildsWithSnapshots cancels because the section was
+        // re-dirtied and a REPLACEMENT job was just queued for it. A job polled
+        // and then cancelled is a different case — ProcessMeshJob still sends a
+        // failed result for that one, so the section cannot stick in MESHING.
+        for (size_t i = 0; i < m_jobQueue.size(); ) {
+            if (m_jobQueue[i].snapshot && m_jobQueue[i].snapshot->IsCancelled()) {
+                if (i != m_jobQueue.size() - 1) {       // guard self-move-assign
+                    m_jobQueue[i] = std::move(m_jobQueue.back());
+                }
+                m_jobQueue.pop_back();
+                m_stats.meshJobsCancelled.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                ++i;
+            }
+        }
+        if (m_jobQueue.empty()) return std::nullopt;
+
+        // Phase 2: nearest initial compile and nearest recompile, separately.
+        size_t bestInitial   = SIZE_MAX;
+        size_t bestRecompile = SIZE_MAX;
+        float  bestInitialDistSq   = std::numeric_limits<float>::max();
+        float  bestRecompileDistSq = std::numeric_limits<float>::max();
+
+        for (size_t i = 0; i < m_jobQueue.size(); ++i) {
+            const MeshJob& job = m_jobQueue[i];
+
+            // Section centre in world space. Y is attenuated by 0.1 (squared:
+            // 0.01) — our deliberate deviation from MC's plain distSqr, kept
+            // from the previous scheduler: this world is 384 blocks tall, so
+            // without it a section 300 blocks overhead outranks one 200 blocks
+            // out at eye level, which is not what the player is looking at.
+            const float dx = job.chunkPos.x * 16.0f + 8.0f - cameraPos.x;
+            const float dz = job.chunkPos.z * 16.0f + 8.0f - cameraPos.z;
+            const float dy = (-64.0f + job.sectionY * 16.0f + 8.0f) - cameraPos.y;
+            const float distSq = dx * dx + dz * dz + dy * dy * 0.01f;
+
+            if (!job.isRecompile) {
+                if (distSq < bestInitialDistSq) { bestInitialDistSq = distSq; bestInitial = i; }
+            } else {
+                if (distSq < bestRecompileDistSq) { bestRecompileDistSq = distSq; bestRecompile = i; }
+            }
+        }
+
+        // Phase 3: MC's arbitration. Take the initial compile unless a recompile
+        // is BOTH nearer AND the quota still allows one; running out of quota
+        // forces an initial compile through regardless of distance.
+        const bool hasInitial   = (bestInitial   != SIZE_MAX);
+        const bool hasRecompile = (bestRecompile != SIZE_MAX);
+
+        size_t chosen;
+        if (!hasRecompile || (hasInitial && (m_recompileQuota <= 0 ||
+                                             !(bestRecompileDistSq < bestInitialDistSq)))) {
+            m_recompileQuota = kMaxRecompileQuota;
+            chosen = bestInitial;
+        } else {
+            --m_recompileQuota;
+            chosen = bestRecompile;
+        }
+        if (chosen == SIZE_MAX) return std::nullopt;
+
+        MeshJob job = std::move(m_jobQueue[chosen]);
+        if (chosen != m_jobQueue.size() - 1) {          // guard self-move-assign
+            m_jobQueue[chosen] = std::move(m_jobQueue.back());
+        }
+        m_jobQueue.pop_back();
+        return job;
+    }
 
     float ClientWorkerPool::CalculatePriority(Game::Math::ChunkPos chunkPos, int sectionY, const glm::vec3& playerPos) const {
         // Calculate distance from player to section center
@@ -510,6 +562,8 @@ namespace Threading {
 
     void ClientWorkerPool::SendMeshResult(Network::MeshBuildResult&& result) {
         auto& queue = Render::ClientMeshManager::GetMeshResultQueue();
+        // Read before the push: try_push may move from `result`.
+        const bool holdsPermit = result.holdsUploadPermit;
         if (!queue.try_push(std::move(result))) {
             // Queue was full, so the result is gone and the render thread will
             // never see it — release the permit here or the pipeline loses a
@@ -517,7 +571,10 @@ namespace Threading {
             // capacity this should be unreachable; it is handled anyway
             // because the failure mode is a slow starvation that would be
             // very hard to trace back to here.
-            ::Render::GetMeshUploadPermits().Release();
+            //
+            // Synchronously-compiled results never took a permit, so there is
+            // nothing to hand back for those.
+            if (holdsPermit) ::Render::GetMeshUploadPermits().Release();
             return;
         }
         queue.IncrementProcessed();
@@ -592,20 +649,6 @@ namespace Threading {
         }
     }
 
-    void SubmitClientMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
-                           std::shared_ptr<Game::Chunk> chunkData, float priority) {
-        if (g_clientWorkerPool) {
-            g_clientWorkerPool->SubmitMeshJob(chunkPos, sectionY, chunkData, priority);
-        }
-    }
-
-    void SubmitClientChunkMeshJobs(Game::Math::ChunkPos chunkPos, 
-                                 std::shared_ptr<Game::Chunk> chunkData, 
-                                 const glm::vec3& playerPosition) {
-        if (g_clientWorkerPool) {
-            g_clientWorkerPool->SubmitChunkMeshJobs(chunkPos, chunkData, playerPosition);
-        }
-    }
 
     void SetClientWorkerPlayerPosition(const glm::vec3& position) {
         if (g_clientWorkerPool) {

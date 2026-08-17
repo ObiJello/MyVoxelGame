@@ -3,11 +3,41 @@
 #include "StickFigureGeometry.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Mth.hpp"
+#include "MobRenderer.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <vector>
 #include <cmath>
 
 namespace Render {
+
+    namespace {
+        // MC LivingEntityRenderer.setupRotations' death topple, applied to the
+        // stick figure AFTER it has been baked into world space.
+        //
+        // The geometry builder emits absolute positions rather than a posed
+        // model, so the roll cannot be composed into a model matrix the way the
+        // mob renderer does it — it is applied here instead, about the feet and
+        // around the body's own forward axis, which is what makes the corpse
+        // fall sideways relative to the way it was facing rather than always
+        // toward one compass direction.
+        void ToppleStickFigure(std::vector<StickVertex>& verts, size_t begin,
+                               const glm::vec3& feet, float bodyYawDeg,
+                               float flipDeg) {
+            if (flipDeg == 0.0f) return;
+            const glm::vec3 axis = Game::Mth::HorizontalViewVector(bodyYawDeg);
+            const glm::mat4 rot =
+                glm::rotate(glm::mat4(1.0f), glm::radians(flipDeg), axis);
+            for (size_t i = begin; i < verts.size(); ++i) {
+                const glm::vec3 p(verts[i].x, verts[i].y, verts[i].z);
+                const glm::vec3 q =
+                    feet + glm::vec3(rot * glm::vec4(p - feet, 1.0f));
+                verts[i].x = q.x;
+                verts[i].y = q.y;
+                verts[i].z = q.z;
+            }
+        }
+    } // namespace
 
     // ------------------------------------------------------------------
     // Shader sources (OpenGL 330 core).
@@ -215,11 +245,31 @@ void main() {
 
             const auto& colorEntry = Game::LookupPlayerColor(rp.color);
             PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
+
+            // MC's hurt flash. The overlay texture's red row is 0xB2FF0000 and
+            // the entity shader does `mix(overlay.rgb, color.rgb, overlay.a)`,
+            // so the red contributes 1 - 178/255 = 0.302 — NOT the alpha
+            // itself. Stick figures have no texture to overlay, so the same
+            // blend is applied to the vertex colour and comes out identical.
+            if (rp.hurtTime > 0) {
+                constexpr float kMix = 178.0f / 255.0f;   // how much survives
+                color.r = static_cast<uint8_t>(255.0f * (1.0f - kMix) + color.r * kMix);
+                color.g = static_cast<uint8_t>(color.g * kMix);
+                color.b = static_cast<uint8_t>(color.b * kMix);
+            }
             // Append ring + disc into one shared list — both render with the
             // same triangles + CullMode::Back pipeline, so batching is fine.
+            const size_t lineBegin = lineVerts.size();
+            const size_t triBegin  = triVerts.size();
             BuildStickFigure(lineVerts, triVerts, triVerts, renderPos,
                              renderHeadYaw, renderBodyYaw, renderPitch, rp.isCrouching,
                              color);
+
+            // The corpse falls over. Applied to just this player's slice of the
+            // batch, which is why the two offsets above are taken first.
+            const float flip = MobRenderer::DeathFlipDegrees(rp.deathTime, partialTick);
+            ToppleStickFigure(lineVerts, lineBegin, renderPos, renderBodyYaw, flip);
+            ToppleStickFigure(triVerts,  triBegin,  renderPos, renderBodyYaw, flip);
         }
 
         glm::mat4 mvp = projection * view;
@@ -300,7 +350,8 @@ void main() {
                                       float headYaw, float bodyYaw, float pitch,
                                       bool isCrouching, uint8_t colorId,
                                       const glm::mat4& model,
-                                      const glm::vec4& clipPlane) {
+                                      const glm::vec4& clipPlane,
+                                      float deathFlipDeg) {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
         std::vector<StickVertex> lineVerts;
@@ -312,6 +363,8 @@ void main() {
         PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
         BuildStickFigure(lineVerts, triVerts, triVerts, position,
                          headYaw, bodyYaw, pitch, isCrouching, color);
+        ToppleStickFigure(lineVerts, 0, position, bodyYaw, deathFlipDeg);
+        ToppleStickFigure(triVerts,  0, position, bodyYaw, deathFlipDeg);
 
         // Pre-multiply the per-call `model` transform into the vertex
         // positions on the CPU. This is the portal pair matrix for ghost

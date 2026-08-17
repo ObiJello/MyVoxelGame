@@ -9,7 +9,9 @@
 #include <functional>
 #include <memory>
 #include <atomic>
+#include <optional>
 #include <unordered_set>
+#include <vector>
 #include <queue>
 
 // Forward declarations
@@ -28,11 +30,19 @@ namespace Threading {
         // Section snapshot data
         std::shared_ptr<Client::Render::MeshJobData> snapshot;
         
-        // Fields for priority queue
         Game::Math::ChunkPos chunkPos;
         int sectionY;
+        // Distance at SUBMIT time. Retained for stats/debug only — job selection
+        // re-derives distance against the live camera at poll time, the way MC's
+        // CompileTaskDynamicQueue.poll(cameraPos) does.
         float priority = 0.0f;
         std::chrono::steady_clock::time_point submitTime;
+
+        // MC's CompileTask.isRecompile — true when this section already has a
+        // compiled mesh on screen, false for its first ever compile. Drives the
+        // recompile quota in ClientWorkerPool::PollNearestLocked so re-meshes of
+        // terrain you can already see cannot starve terrain you cannot.
+        bool isRecompile = false;
 
         // Constructor
         MeshJob(std::shared_ptr<Client::Render::MeshJobData> snap)
@@ -40,12 +50,8 @@ namespace Threading {
             , chunkPos(snapshot->chunkPos)
             , sectionY(snapshot->sectionY)
             , priority(snapshot->distanceToPlayer)
-            , submitTime(snapshot->submitTime) {}
-
-        // For priority queue (higher priority = more important)
-        bool operator<(const MeshJob& other) const {
-            return priority > other.priority;
-        }
+            , submitTime(snapshot->submitTime)
+            , isRecompile(snapshot->jobType != Client::Render::MeshJobType::Initial) {}
     };
 
     // Client worker pool dedicated ONLY to mesh building
@@ -77,14 +83,20 @@ namespace Threading {
         // Submit mesh building job using snapshot (THREAD-SAFE)
         // Returns true if job was successfully queued, false if queue is full
         bool SubmitMeshJobWithSnapshot(std::shared_ptr<Client::Render::MeshJobData> snapshot);
+
+        // Compile a section on the CALLING thread and push the result straight
+        // to the render thread's upload queue, skipping the compile queue and
+        // the worker pool entirely. This is MC's
+        // SectionRenderDispatcher.rebuildSectionSync / RenderSection.compileSync,
+        // used by the "Semi Blocking" and "Fully Blocking" chunk-builder modes
+        // so a block the player just placed is visible the same frame.
+        //
+        // MAIN THREAD ONLY, and it costs main-thread milliseconds by design —
+        // that is the trade those two modes exist to make. The result carries
+        // holdsUploadPermit = false because no permit was acquired for it.
+        void BuildMeshJobSync(std::shared_ptr<Client::Render::MeshJobData> snapshot);
         
         // Legacy methods - DEPRECATED (not thread-safe)
-        void SubmitMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
-                          std::shared_ptr<Game::Chunk> chunkData, float priority = 0.0f);
-
-        void SubmitChunkMeshJobs(Game::Math::ChunkPos chunkPos, 
-                               std::shared_ptr<Game::Chunk> chunkData, 
-                               const glm::vec3& playerPosition);
 
         // ========================================================================
         // JOB CANCELLATION
@@ -116,8 +128,6 @@ namespace Threading {
         // CONFIGURATION
         // ========================================================================
 
-        void SetMaxQueueSize(size_t maxSize) { m_maxQueueSize = maxSize; }
-        size_t GetMaxQueueSize() const { return m_maxQueueSize; }
 
         void SetWorkerCount(size_t count);
         size_t GetWorkerCount() const { return m_workerThreads.size(); }
@@ -164,12 +174,29 @@ namespace Threading {
         std::atomic<bool> m_running{false};
         size_t m_workerCount;
 
-        // Job queue (priority queue for distance-based prioritization)
+        // Pending compile queue — MC's SectionRenderDispatcher.compileQueue
+        // (a CompileTaskDynamicQueue). Deliberately NOT a priority_queue: the
+        // ordering key is distance to the camera, and the camera moves, so a
+        // heap ordered at insertion time goes stale the moment the player walks.
+        // MC linear-scans for the nearest task on every poll instead, against
+        // the CURRENT camera position, and so do we — see PollNearestLocked.
+        //
+        // This queue is the backlog. Nothing upstream is allowed to cap it to
+        // the size of the upload permit pool; the pool gates EXECUTION in
+        // WorkerLoop, not admission. That separation is the whole point — see
+        // the header comment on ClientChunkManager::ScheduleMeshBuildsWithSnapshots.
         mutable std::mutex m_jobQueueMutex;
-        std::priority_queue<MeshJob> m_jobQueue;
+        std::vector<MeshJob> m_jobQueue;
         std::condition_variable m_jobCondition;
-        size_t m_maxQueueSize = 2048;  // Increased for better throughput
         bool m_prioritizationEnabled = true;
+
+        // MC's CompileTaskDynamicQueue.MAX_RECOMPILE_QUOTA. After this many
+        // consecutive recompiles the queue forces an initial compile through,
+        // even if a recompile is nearer. Without it, the constant re-meshing of
+        // already-visible sections (our measured ~2.2x remesh factor) can starve
+        // first-time compiles indefinitely and the world stops filling in.
+        static constexpr int kMaxRecompileQuota = 2;
+        int m_recompileQuota = kMaxRecompileQuota;
 
         // Job cancellation tracking
         struct SectionKey {
@@ -225,6 +252,11 @@ namespace Threading {
         // Job queue management
         bool EnqueueJob(MeshJob&& job);
 
+        // Port of MC's CompileTaskDynamicQueue.poll(Vec3): drop cancelled
+        // entries, then take the nearest job to `cameraPos`, subject to the
+        // recompile quota. Caller MUST hold m_jobQueueMutex.
+        std::optional<MeshJob> PollNearestLocked(const glm::vec3& cameraPos);
+
         // Priority calculation
         float CalculatePriority(Game::Math::ChunkPos chunkPos, int sectionY, const glm::vec3& playerPos) const;
 
@@ -253,11 +285,6 @@ namespace Threading {
     void ShutdownClientWorkerPool();
 
     // Direct job submission
-    void SubmitClientMeshJob(Game::Math::ChunkPos chunkPos, int sectionY, 
-                           std::shared_ptr<Game::Chunk> chunkData, float priority = 0.0f);
-    void SubmitClientChunkMeshJobs(Game::Math::ChunkPos chunkPos, 
-                                 std::shared_ptr<Game::Chunk> chunkData, 
-                                 const glm::vec3& playerPosition);
 
     // Player position updates
     void SetClientWorkerPlayerPosition(const glm::vec3& position);

@@ -16,6 +16,9 @@ namespace Game {
 
         std::vector<IngredientItems>            s_ingredients;
         std::vector<CraftingRecipe>             s_recipes;
+        std::vector<CookingRecipe>              s_cookingRecipes;
+        std::vector<StonecuttingRecipe>         s_stonecuttingRecipes;
+        std::unordered_map<ItemID, int>         s_fuelBurnTimes;
         std::unordered_map<std::string, ItemID> s_slugToItem;
         bool                                    s_initialized = false;
 
@@ -135,16 +138,24 @@ namespace Game {
         if (s_initialized) return;
         s_initialized = true;
 
-        // Registry slug → ItemID. Block items reuse the BlockID numerically, so
-        // the block's model name (which IS its registry slug for every block
-        // that came from all_blocks.txt) is the key. State-variant BlockIDs like
-        // SnowGrass share a slug with their base block; first wins, which is the
-        // default state — and no recipe results in a non-default state anyway.
+        // Registry slug → ItemID. Block items reuse the BlockID numerically,
+        // so the block's registry slug is the key. State-variant BlockIDs like
+        // SnowGrass share a slug with their base block; first wins, which is
+        // the default state — and no recipe results in a non-default state
+        // anyway.
+        //
+        // Keyed on registrySlug, NOT modelName: modelName is a rendering
+        // detail that several blocks share, because Init() re-registers some
+        // blocks with a borrowed model. That made this map resolve "stone" to
+        // InfestedStone, "stone_bricks" to InfestedStoneBricks and
+        // "mossy_stone_bricks" to InfestedMossyStoneBricks — all three
+        // Infested* rows sort earlier in BlockDefs.inc, and emplace keeps the
+        // first — so every recipe naming them produced the silverfish block.
         s_slugToItem.reserve(static_cast<size_t>(BlockID::Count) + kPureItemTableSize);
         for (int i = 1; i < static_cast<int>(BlockID::Count); ++i) {
             const auto& block = BlockRegistry::Get(static_cast<BlockID>(i));
-            if (block.modelName.empty()) continue;
-            s_slugToItem.emplace(block.modelName, static_cast<ItemID>(i));
+            if (block.registrySlug.empty()) continue;
+            s_slugToItem.emplace(block.registrySlug, static_cast<ItemID>(i));
         }
         for (size_t i = 0; i < kPureItemTableSize; ++i) {
             s_slugToItem.emplace(kPureItemTable[i].slug,
@@ -200,6 +211,95 @@ namespace Game {
 
         Log::Info("[RecipeManager] %zu crafting recipes loaded (%zu dropped — unknown items)",
                   s_recipes.size(), dropped);
+
+        // ── Furnace family ────────────────────────────────────────────────
+        size_t cookingDropped = 0;
+        s_cookingRecipes.reserve(kCookingRecipeTableSize);
+        for (size_t i = 0; i < kCookingRecipeTableSize; ++i) {
+            const auto& row = kCookingRecipeTable[i];
+            CookingRecipe recipe;
+            recipe.id          = row.id;
+            recipe.kind        = static_cast<CookingKind>(row.kind);
+            recipe.ingredient  = static_cast<int32_t>(row.ingredient);
+            recipe.resultItem  = ItemFromSlug(row.resultSlug);
+            recipe.resultCount = row.resultCount;
+            recipe.cookingTime = row.cookingTime;
+            recipe.experience  = row.experience;
+            // Same drop rules as a crafting recipe: an unknown result, or an
+            // ingredient set that resolved to nothing, can never fire.
+            if (recipe.resultItem == Items::Air ||
+                recipe.ingredient < 0 ||
+                recipe.ingredient >= static_cast<int32_t>(s_ingredients.size()) ||
+                s_ingredients[recipe.ingredient].empty()) {
+                ++cookingDropped;
+                continue;
+            }
+            s_cookingRecipes.push_back(recipe);
+        }
+
+        // ── Stonecutter ───────────────────────────────────────────────────
+        size_t cutDropped = 0;
+        s_stonecuttingRecipes.reserve(kStonecuttingTableSize);
+        for (size_t i = 0; i < kStonecuttingTableSize; ++i) {
+            const auto& row = kStonecuttingTable[i];
+            StonecuttingRecipe recipe;
+            recipe.ingredient  = static_cast<int32_t>(row.ingredient);
+            recipe.resultItem  = ItemFromSlug(row.resultSlug);
+            recipe.resultCount = row.resultCount;
+            if (recipe.resultItem == Items::Air ||
+                recipe.ingredient < 0 ||
+                recipe.ingredient >= static_cast<int32_t>(s_ingredients.size()) ||
+                s_ingredients[recipe.ingredient].empty()) {
+                ++cutDropped;
+                continue;
+            }
+            s_stonecuttingRecipes.push_back(recipe);
+        }
+        Log::Info("[RecipeManager] %zu stonecutting recipes (%zu dropped)",
+                  s_stonecuttingRecipes.size(), cutDropped);
+
+        // ── Fuel ──────────────────────────────────────────────────────────
+        size_t fuelDropped = 0;
+        s_fuelBurnTimes.reserve(kFuelTableSize);
+        for (size_t i = 0; i < kFuelTableSize; ++i) {
+            const ItemID id = ItemFromSlug(kFuelTable[i].slug);
+            if (id == Items::Air) { ++fuelDropped; continue; }
+            s_fuelBurnTimes.emplace(id, kFuelTable[i].burnTicks);
+        }
+
+        Log::Info("[RecipeManager] %zu cooking recipes, %zu fuels "
+                  "(%zu / %zu dropped — unknown items)",
+                  s_cookingRecipes.size(), s_fuelBurnTimes.size(),
+                  cookingDropped, fuelDropped);
+    }
+
+    const CookingRecipe* RecipeManager::FindCooking(CookingKind kind, const ItemStack& input) {
+        if (input.IsEmpty()) return nullptr;
+        // Linear over ~116 rows, filtered by kind first. MC keeps a per-type
+        // list and scans it the same way; a hash index would save nothing at
+        // this size and only fires once per furnace state change, not per tick.
+        for (const CookingRecipe& recipe : s_cookingRecipes) {
+            if (recipe.kind != kind) continue;
+            if (IngredientMatches(recipe.ingredient, input)) return &recipe;
+        }
+        return nullptr;
+    }
+
+    int RecipeManager::GetFuelBurnTime(const ItemStack& stack) {
+        if (stack.IsEmpty()) return 0;
+        auto it = s_fuelBurnTimes.find(stack.itemId);
+        return (it != s_fuelBurnTimes.end()) ? it->second : 0;
+    }
+
+    size_t RecipeManager::CookingRecipeCount() { return s_cookingRecipes.size(); }
+
+    std::vector<const StonecuttingRecipe*> RecipeManager::FindStonecutting(const ItemStack& input) {
+        std::vector<const StonecuttingRecipe*> out;
+        if (input.IsEmpty()) return out;
+        for (const StonecuttingRecipe& recipe : s_stonecuttingRecipes) {
+            if (IngredientMatches(recipe.ingredient, input)) out.push_back(&recipe);
+        }
+        return out;
     }
 
     ItemID RecipeManager::ItemFromSlug(const std::string& slug) {

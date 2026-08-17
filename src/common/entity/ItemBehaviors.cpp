@@ -20,9 +20,15 @@
 
 #include "Item.hpp"
 #include "GeneratedItemList.hpp"
+#include "SpawnEggs.hpp"
+#include "../world/level/WorldMobSpawn.hpp"
+#include "mobs/Animals.hpp"
 #include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/level/World.hpp"
+#include "../world/level/WorldDrops.hpp"
+#include "../core/JavaRandom.hpp"
+#include "../core/Mth.hpp"
 #include "../core/Log.hpp"
 #include "IUsePlayer.hpp"
 
@@ -90,14 +96,11 @@ namespace Game {
         // MC `Block.popResourceFromFace(level, pos, face, itemStack)` —
         // spawns an item entity at the clicked face with a small velocity
         // outward. Used by HoeItem when tilling rooted_dirt (drops a
-        // hanging_roots item). We don't have item entities yet, so log it.
+        // hanging_roots item).
         void PopResourceFromFace(ILevelWrite* world, const glm::ivec3& pos,
                                  int face, BlockID dropId) {
-            (void)world; (void)face;
-            // TODO(item-entities): spawn an ItemEntity(dropId * 1) at face center
-            //                      with small outward velocity, and broadcast.
-            Log::Debug("[ItemDrop] block %u at (%d,%d,%d) (face %d) — TODO: spawn item entity",
-                       static_cast<unsigned>(dropId), pos.x, pos.y, pos.z, face);
+            (void)world;
+            DropItemStackFromFace(pos, face, ItemStack(dropId, 1));
         }
 
         // MC `level.isClientSide()` is `false` server-side. All our useOn
@@ -137,14 +140,35 @@ namespace Game {
             //         && !CandleCakeBlock.canLight(state)) { ...spawn fire... }
             //     else { ...light campfire/candle... }`
             //
-            // TODO(block-state-properties): we don't have block state properties
-            // (campfire LIT, candle LIT) yet. Once those land, this branch should
-            // run FIRST: if the clicked block is an UN-lit campfire, candle, or
-            // candle-cake, set its LIT property to true here, play sound,
-            // gameEvent, hurtAndBreak, and return SUCCESS — without going
-            // through the canBePlacedAt check below.
+            // The relight branch runs FIRST and skips the canBePlacedAt check
+            // entirely — clicking an unlit campfire lights the campfire, it
+            // does not try to put a fire block next to it.
             //
-            // For now we always fall into the place-fire path:
+            // CampfireBlock.canLight also requires !WATERLOGGED; this engine
+            // has no waterlogging, so that term is always true here.
+            //
+            // Candles and candle cakes are still missing — they need their own
+            // `lit` (and `candles`) properties, which nothing declares yet.
+            if (here == BlockID::Campfire || here == BlockID::SoulCampfire) {
+                const auto& def = BlockRegistry::GetStateDefinition(here);
+                const uint8_t cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                if (def.ValueOf(cur, "lit") == "false") {
+                    PlaySound("item.flintandsteel.use", pos);
+                    BlockRegistry::BlockStateDefinition::PropertyMap props;
+                    props["facing"] = std::string(def.ValueOf(cur, "facing"));
+                    props["lit"]    = "true";
+                    if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, here,
+                                             World::UpdateFlags::All,
+                                             def.IndexOf(props))) {
+                        return UseResult::Fail;
+                    }
+                    GameEventEmit("block_change", pos);
+                    HurtAndBreak(stack, 1, ctx.hand);
+                    return UseResult::Success;
+                }
+            }
+
+            // Not a relightable block — fall into the place-fire path:
 
             const glm::ivec3 firePos = ctx.getPlacementPos();
             if (!CanFireBePlacedAt(ctx.world, firePos)) {
@@ -277,24 +301,33 @@ namespace Game {
                 }
                 PlaySound("item.shovel.flatten", pos);
                 newBlock = BlockID::DirtPath;
-            } else if (src == BlockID::Campfire) {
+            } else if (src == BlockID::Campfire || src == BlockID::SoulCampfire) {
                 // MC: `else if (block instanceof CampfireBlock && state.getValue(LIT))`
-                //   — extinguish a lit campfire by toggling LIT to false, plus
-                //     a level event 1009 (extinguish particles+sound) and the
-                //     CampfireBlock.dowse helper that drops contents.
+                //   — extinguish a lit campfire by toggling LIT to false.
                 //
-                // TODO(block-state-properties): once block state properties
-                // exist, gate this on `LIT == true`, then setValue(LIT, false)
-                // instead of replacing the whole block. Until then, leave the
-                // campfire unmodified (return PASS) — flattening it to dirt
-                // would be wrong, and we can't read LIT to know if it's lit.
-                return UseResult::Pass;
-                // Future:
-                //   if (state.getValue(CAMPFIRE_LIT)) {
-                //       LevelEvent(1009, pos);  // extinguish particles+sizzle
-                //       CampfireDowse(world, pos);  // drops items in the campfire
-                //       newBlock = state.with(LIT, false);  // requires real BlockState
-                //   } else return UseResult::Pass;
+                // A PROPERTY edit, not a block swap: the two-argument SetBlock
+                // would write the default state, and a campfire's default is
+                // LIT=true (CampfireBlock.java:77) — so it would relight the
+                // fire the shovel just put out.
+                const auto& def = BlockRegistry::GetStateDefinition(src);
+                const uint8_t cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                if (def.ValueOf(cur, "lit") != "true") return UseResult::Pass;
+
+                PlaySound("block.fire.extinguish", pos);
+                BlockRegistry::BlockStateDefinition::PropertyMap props;
+                props["facing"] = std::string(def.ValueOf(cur, "facing"));
+                props["lit"]    = "false";
+                if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, src,
+                                         World::UpdateFlags::All, def.IndexOf(props))) {
+                    return UseResult::Fail;
+                }
+                GameEventEmit("block_change", pos);
+                HurtAndBreak(stack, 1, ctx.hand);
+                return UseResult::Success;
+                // MC also calls CampfireBlock.dowse, which is particles + a
+                // game event only — the food stays on the fire and simply
+                // stops cooking, which falls out of the state change above
+                // because the block state is what picks the cooking ticker.
             } else {
                 return UseResult::Pass;
             }
@@ -468,6 +501,81 @@ namespace Game {
             return UseResult::Success;                                  // :60
         }
 
+        // ── Dye on a sheep — mirrors DyeItem.interactLivingEntity ───────────
+        //
+        // MC gates on three things, and all three matter: the sheep must be
+        // ALIVE, NOT SHEARED (there is no wool to dye), and not already that
+        // colour (so the click falls through instead of eating a dye for
+        // nothing).
+        UseResult InteractEntity_Dye(ItemStack& stack, LivingEntity& target, uint8_t color) {
+            auto* sheep = dynamic_cast<Sheep*>(&target);
+            if (!sheep) return UseResult::Pass;
+            if (!sheep->IsAlive() || sheep->IsSheared()) return UseResult::Pass;
+            if (sheep->GetColor() == color) return UseResult::Pass;
+
+            PlaySound("item.dye.use", sheep->BlockPosition());
+            sheep->SetColor(color);
+
+            // MC itemStack.shrink(1). Creative is restored by the dispatch's
+            // count snapshot, the same way the useOn path handles it.
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            return UseResult::Success;
+        }
+
+        // One thunk per colour — the callback table stores plain function
+        // pointers, so the colour has to come from the function's identity
+        // rather than from captured state.
+        template <uint8_t Color>
+        UseResult InteractEntity_DyeColor(ItemStack& stack, LivingEntity& target) {
+            return InteractEntity_Dye(stack, target, Color);
+        }
+
+        // ── Spawn eggs — mirrors SpawnEggItem.java:52-89 ────────────────────
+        UseResult UseOn_SpawnEgg(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Fail;
+
+            // :54 `if (!(level instanceof ServerLevel)) return SUCCESS;`
+            // The client cannot predict an entity into existence — it only
+            // exists once the server sends it — and in single-player both
+            // sides share a process, so running on through here would spawn
+            // twice. Returning Success still consumes the click, which is what
+            // stops the placement fallback from firing behind it.
+            if (ctx.world->IsClientSide()) return UseResult::Success;
+
+            const EntityTypeId type = SpawnEggEntityType(stack.itemId);
+            if (type == EntityTypeId::Count) return UseResult::Fail;   // :62 FAIL
+
+            // MC's first branch is a Spawner block entity (a monster spawner
+            // reprogrammed by the egg). There is no Spawner in this port, so
+            // the else branch is the only one.
+            const glm::ivec3 clicked = ctx.hitResult.blockPos;
+
+            // :80-85 spawn INSIDE the clicked cell when it has no collision
+            // (tall grass, a flower, air), otherwise on the face that was hit.
+            const BlockID clickedId = ctx.world->GetBlock(clicked.x, clicked.y, clicked.z);
+            const bool    solid     = BlockRegistry::HasCollision(clickedId);
+
+            const glm::ivec3 spawnPos = solid ? ctx.getPlacementPos() : clicked;
+            // :87 `!Objects.equals(pos, spawnPos) && clickedFace == Direction.UP`
+            const bool movedUp = solid && ctx.hitResult.face == 1;   // 1 = up
+
+            // :91-105 spawnMob. The peaceful-difficulty rule and the placement
+            // slide live server-side with the mob managers; see
+            // IntegratedServer::SpawnMobFromItemUse.
+            if (SpawnMobFromItem(type, spawnPos, /*tryMoveDown=*/true, movedUp)) {
+                // :101 itemStack.consume(1, user) — only on a successful spawn,
+                // so an egg rejected by difficulty is not eaten. Creative is
+                // restored by the dispatch's stack snapshot.
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+                GameEventEmit("entity_place", spawnPos);
+            }
+
+            // :104 SUCCESS regardless — MC swallows the click either way.
+            return UseResult::Success;
+        }
+
         // ── Honeycomb — mirrors HoneycombItem.java:46-73 ────────────────────
         UseResult UseOn_Honeycomb(const UseOnContext& ctx, ItemStack& stack) {
             if (!ctx.world) return UseResult::Pass;
@@ -477,8 +585,10 @@ namespace Game {
             const BlockID waxed = WaxedVariant(src);   // WAXABLES lookup (:50)
             if (waxed == BlockID::Air) return UseResult::Pass;   // :72 PASS
 
-            // :57 itemInHand.shrink(1) — creative count restored by the
-            // dispatch's snapshot (ServerPlayerGameMode-style).
+            // :57 itemInHand.shrink(1) — creative restored by the dispatch's
+            // snapshot (ServerPlayerGameMode-style). Note that Clear() wipes
+            // the id, not just the count, which is why the dispatch snapshots
+            // the WHOLE stack; see PlayerSession::HandleUseItemOn.
             stack.count -= 1;
             if (stack.count <= 0) stack.Clear();
             // :58 setBlock(11); :60 levelEvent 3003 (wax-on particles) TODO.
@@ -491,20 +601,62 @@ namespace Game {
             return UseResult::Success;
         }
 
-        // ── Bone meal — mirrors BoneMealItem.java:35-61, grass branch only ──
-        // Crops/saplings need growth-stage block states (single BlockIDs
-        // here) — BLOCKED: no block growth stages. The grass-block branch
-        // ports GrassBlock.performBonemeal's 128-attempt random-walk scatter.
+        // ── Bone meal — mirrors BoneMealItem.java:35-61 ─────────────────────
+        // Two of MC's three branches are here: growCrop (any BonemealableBlock
+        // — crops, stems, bamboo, cocoa, berry bushes) and the grass-block
+        // scatter. The water/seagrass branch (:83-136) is still skipped; it
+        // needs fluid simulation and coral biome tags.
         UseResult UseOn_BoneMeal(const UseOnContext& ctx, ItemStack& stack) {
             if (!ctx.world) return UseResult::Pass;
             const glm::ivec3 pos = ctx.hitResult.blockPos;
             const BlockID    src = ctx.world->GetBlock(pos.x, pos.y, pos.z);
 
+            // BoneMealItem.growCrop (BoneMealItem.java:63-81):
+            //   if (block instanceof BonemealableBlock b
+            //       && b.isValidBonemealTarget(level, pos, state)) {
+            //       if (b.isBonemealSuccess(...)) b.performBonemeal(...);
+            //       stack.shrink(1);
+            //       return true;
+            //   }
+            // isBonemealSuccess is `true` for every block modelled here, so it
+            // folds into the target test — see BlockRegistry.hpp's note on the
+            // bone-meal hook pair.
+            {
+                const Block& def = BlockRegistry::Get(src);
+                if (def.performBonemeal && def.isValidBonemealTarget) {
+                    const uint8_t state = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                    if (def.isValidBonemealTarget(*ctx.world, pos, state)) {
+                        // Seeded per use rather than kept as a static: this
+                        // runs on the client for prediction too, and a shared
+                        // stream between the two would drift apart anyway.
+                        // Growth amount is re-derived from the server's own
+                        // roll when its block update lands.
+                        JavaRandom random(static_cast<int64_t>(pos.x) * 341873128712LL +
+                                          static_cast<int64_t>(pos.z) * 132897987541LL +
+                                          static_cast<int64_t>(pos.y));
+                        def.performBonemeal(*ctx.world, pos, src, state, random);
+
+                        // MC: `level.levelEvent(1505, pos, 15)` →
+                        // BoneMealItem.addGrowthParticles spawns 15
+                        // happy_villager particles inside the block.
+                        // TODO(particles): no particle system yet.
+                        PlaySound("item.bone_meal.use", pos);
+                        // MC: itemStack.shrink(1). Creative is handled by the
+                        // dispatch's whole-stack snapshot, NOT here — and it
+                        // has to be the whole stack, because Clear() below
+                        // wipes the id as well as the count.
+                        stack.count -= 1;
+                        if (stack.count <= 0) stack.Clear();
+                        return UseResult::Success;
+                    }
+                    // A valid bonemealable block that is already fully grown:
+                    // MC falls through to the water branch and ultimately
+                    // returns PASS, consuming nothing.
+                    return UseResult::Pass;
+                }
+            }
+
             if (src != BlockID::Grass) {
-                // growCrop (BoneMealItem.java:63-81) needs BonemealableBlock —
-                // BLOCKED: no block growth stages (wheat/carrots/… are single
-                // BlockIDs). The water/seagrass branch (:83-136) is skipped
-                // too — no fluid simulation.
                 return UseResult::Pass;
             }
 
@@ -551,7 +703,9 @@ namespace Game {
 
             // :43 levelEvent 1505 (bone-meal particles) — particle system TODO.
             PlaySound("item.bone_meal.use", pos);
-            // :73 itemStack.shrink(1) — creative restored by dispatch snapshot.
+            // :73 itemStack.shrink(1) — creative restored by the dispatch's
+            // whole-stack snapshot (Clear() wipes the id too, so a count-only
+            // restore would lose the last bone meal).
             stack.count -= 1;
             if (stack.count <= 0) stack.Clear();
             return UseResult::Success;
@@ -579,11 +733,8 @@ namespace Game {
             const glm::vec3 eye(static_cast<float>(p.x),
                                 static_cast<float>(p.y) + 1.62f,
                                 static_cast<float>(p.z));
-            const float yaw   = glm::radians(player.getYaw());
-            const float pitch = glm::radians(player.getPitch());
-            const glm::vec3 dir(std::cos(yaw) * std::cos(pitch),
-                                std::sin(pitch),
-                                std::sin(yaw) * std::cos(pitch));
+            const glm::vec3 dir =
+                Mth::ViewVector(player.getPitch(), player.getYaw());
 
             constexpr float kReach = 5.0f;   // blockInteractionRange
             constexpr float kStep  = 0.05f;  // fine march — fluid cells are full cubes
@@ -686,6 +837,51 @@ namespace Game {
             if (it != pureItems.end()) it->second.useOn = fn;
         };
 
+        // ── Seeds: pure items that place a block ────────────────────────────
+        //
+        // In MC every one of these is an ordinary BlockItem whose *name* simply
+        // differs from its block's (Items.java:1548,
+        // createBlockItemWithCustomItemName). This engine derives a block item's
+        // ItemID from its BlockID, so a mismatched pair cannot be expressed that
+        // way and needs the explicit `placesBlock` link instead.
+        //
+        // Wiring it here rather than giving each seed a `useOn` is deliberate:
+        // placement then flows through the SAME BlockItem fallback the server
+        // already runs (PlayerSession::HandleUseItemOn) and the SAME client
+        // prediction (ClientPlayerController::ComputePredictedPlacement) as any
+        // other block — including the survive/replace/obstruction gates. A
+        // per-seed `useOn` would have bypassed prediction entirely, since
+        // ComputePredictedPlacement refuses to predict items that carry one.
+        //
+        // Whether a seed may be planted where you clicked is NOT decided here —
+        // that is CanSurviveOn in BlockPlacement.cpp (MC mayPlaceOn).
+        auto wirePlacesBlock = [&](ItemID id, BlockID block) {
+            auto it = pureItems.find(id);
+            if (it != pureItems.end()) it->second.placesBlock = block;
+        };
+        wirePlacesBlock(Items::WheatSeeds,       BlockID::Wheat);
+        wirePlacesBlock(Items::BeetrootSeeds,    BlockID::Beetroots);
+        wirePlacesBlock(Items::Carrot,           BlockID::Carrots);
+        wirePlacesBlock(Items::Potato,           BlockID::Potatoes);
+        wirePlacesBlock(Items::MelonSeeds,       BlockID::MelonStem);
+        wirePlacesBlock(Items::PumpkinSeeds,     BlockID::PumpkinStem);
+        wirePlacesBlock(Items::NetherWart,       BlockID::NetherWart);
+        wirePlacesBlock(Items::TorchflowerSeeds, BlockID::TorchflowerCrop);
+        wirePlacesBlock(Items::PitcherPod,       BlockID::PitcherCrop);
+        wirePlacesBlock(Items::CocoaBeans,       BlockID::Cocoa);
+        wirePlacesBlock(Items::SweetBerries,     BlockID::SweetBerryBush);
+        // Not seeds, but the identical shape of mismatch — MC builds all of
+        // these with createBlockItemWithCustomItemName too (Items.java).
+        wirePlacesBlock(Items::Redstone,         BlockID::RedstoneWire);
+        wirePlacesBlock(Items::String,           BlockID::Tripwire);
+        wirePlacesBlock(Items::ResinClump,       BlockID::ResinClump);
+        // The one member of that family left out: glow_berries -> cave_vines.
+        // Cave vines hang from a CEILING and carry `age`/`berries` states this
+        // engine does not model, so the mapping alone would place a block that
+        // cannot survive or render correctly. Wire it up with the block.
+        // Sugar cane, cactus and bamboo are already block items — their ItemID
+        // and BlockID coincide, so AsBlockID() finds them without a row here.
+
         // FlintAndSteel — single variant.
         wireUseOn(Items::FlintAndSteel, &UseOn_FlintAndSteel);
 
@@ -719,9 +915,38 @@ namespace Game {
         // Honeycomb waxing (HoneycombItem.java:46-73).
         wireUseOn(Items::Honeycomb, &UseOn_Honeycomb);
 
-        // Bone meal — grass-scatter branch only (BoneMealItem.java:35-61;
-        // crop growth BLOCKED on block growth stages).
+        // Bone meal — growCrop + grass-scatter branches (BoneMealItem.java:35-81).
         wireUseOn(Items::BoneMeal, &UseOn_BoneMeal);
+
+        // Dyes, in DyeColor ordinal order — the index IS the wool value the
+        // sheep stores, so the table must not be reordered.
+        auto wireInteract = [&](ItemID id, ItemInteractEntityFn fn) {
+            auto it = pureItems.find(id);
+            if (it != pureItems.end()) it->second.interactLivingEntity = fn;
+        };
+        wireInteract(Items::WhiteDye,     &InteractEntity_DyeColor<0>);
+        wireInteract(Items::OrangeDye,    &InteractEntity_DyeColor<1>);
+        wireInteract(Items::MagentaDye,   &InteractEntity_DyeColor<2>);
+        wireInteract(Items::LightBlueDye, &InteractEntity_DyeColor<3>);
+        wireInteract(Items::YellowDye,    &InteractEntity_DyeColor<4>);
+        wireInteract(Items::LimeDye,      &InteractEntity_DyeColor<5>);
+        wireInteract(Items::PinkDye,      &InteractEntity_DyeColor<6>);
+        wireInteract(Items::GrayDye,      &InteractEntity_DyeColor<7>);
+        wireInteract(Items::LightGrayDye, &InteractEntity_DyeColor<8>);
+        wireInteract(Items::CyanDye,      &InteractEntity_DyeColor<9>);
+        wireInteract(Items::PurpleDye,    &InteractEntity_DyeColor<10>);
+        wireInteract(Items::BlueDye,      &InteractEntity_DyeColor<11>);
+        wireInteract(Items::BrownDye,     &InteractEntity_DyeColor<12>);
+        wireInteract(Items::GreenDye,     &InteractEntity_DyeColor<13>);
+        wireInteract(Items::RedDye,       &InteractEntity_DyeColor<14>);
+        wireInteract(Items::BlackDye,     &InteractEntity_DyeColor<15>);
+
+        // Spawn eggs, one row per implemented mob (SpawnEggItem.java:52).
+        // Eggs for mobs this port does not have are deliberately left
+        // unwired — see SpawnEggs.hpp.
+        for (const SpawnEggEntry& egg : kSpawnEggTable) {
+            wireUseOn(egg.item, &UseOn_SpawnEgg);
+        }
 
         // Buckets — `use` (air-click + own POV raycast), not `useOn`,
         // matching BucketItem's design (BucketItem.java:43-95).

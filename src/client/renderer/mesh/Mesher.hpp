@@ -21,7 +21,7 @@ namespace Game {
 
 namespace Client {
 namespace Render {
-    struct SectionSnapshot;  // MeshJobData.hpp — fast-path mesh input
+    struct RegionSnapshot;   // MeshJobData.hpp — the 3x3x3 mesh input
 }
 }
 
@@ -77,7 +77,7 @@ namespace Render {
         // snapshot's flat arrays (memcpy for the interior and axis-aligned halo
         // planes) instead of ~10k virtual GetBlock calls per section. Produces
         // identical output to the IBlockAccess path over a SnapshotBlockAccess.
-        void BuildSectionMesh(const Client::Render::SectionSnapshot& snapshot,
+        void BuildSectionMesh(const Client::Render::RegionSnapshot& region,
                               Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
 
         // Convenience: rebuild entire chunk (all 24 sections)
@@ -120,6 +120,7 @@ namespace Render {
                 Biome,     // blend `tintChannel` over the biome grid
                 Constant,  // fixed colour (spruce / birch leaves)
                 FlowerBed, // tintIndex 0 untinted, otherwise grass
+                StemAge,   // melon / pumpkin stem: colour computed from `age`
             };
             TintSource tintSource = TintSource::None;
             uint8_t    tintChannel = 0;            // BiomeChannel
@@ -177,7 +178,7 @@ namespace Render {
         bool    m_stateCacheAllDefault = true;
         // Biome grid for this section (with the blend margin), or null when
         // meshing straight off an IBlockAccess. See ResolveBiome.
-        const Client::Render::SectionSnapshot* m_biomeSource = nullptr;
+        const Client::Render::RegionSnapshot* m_biomeSource = nullptr;
         // Only set on the direct-access path, where biomes come from the world.
         const Game::IBlockAccess* m_biomeAccess = nullptr;
 
@@ -185,7 +186,7 @@ namespace Render {
         int m_sectionBaseWorldY;
         int m_sectionBaseWorldZ;
         void FillBlockCacheFromAccess(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos, int sectionY);
-        void FillBlockCacheFromSnapshot(const Client::Render::SectionSnapshot& snapshot,
+        void FillBlockCacheFromRegion(const Client::Render::RegionSnapshot& region,
                                         Game::Math::ChunkPos chunkPos, int sectionY);
         void DeriveOpaqueCache();
         uint8_t CachedState(int localX, int sectionLocalY, int localZ) const {
@@ -207,10 +208,16 @@ namespace Render {
                          int sectionY, Game::BlockID blockId, uint8_t stateIndex,
                          SectionMesh& mesh);
 
+        // `stateIndex` is carried through because one tint resolver needs it:
+        // MC colours melon/pumpkin stems by their AGE, so two stems of the same
+        // BlockID are different colours. Reading it back out of `blocks` would
+        // work but costs a world lookup per face for a value ProcessBlock
+        // already has in hand.
         void AddBlockFace(const Game::IBlockAccess& blocks,
                          const Game::BlockModel& model, const Game::Element& element,
                          Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                          glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
+                         uint8_t stateIndex,
                          int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
 
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,

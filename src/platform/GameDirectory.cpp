@@ -1,10 +1,16 @@
 // File: src/platform/GameDirectory.cpp
 #include "GameDirectory.hpp"
 #include "common/core/Log.hpp"
+#include "server/world/storage/NBTParser.hpp"
+#include <zlib.h>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <iterator>
+#include <system_error>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -184,7 +190,9 @@ namespace Platform {
         SetBool("darkMojangStudiosBackground", false);
         SetBool("hideLightningFlashes", false);
         SetBool("hideSplashTexts", false);
-        SetFloat("mouseSensitivity", 0.5f);
+        // 1.0 = the engine's baseline 0.1°/px = 50% on the options slider.
+        // Must match GetMouseSensitivity's fallback, which it did not before.
+        SetFloat("mouseSensitivity", 1.0f);
         SetFloat("damageTiltStrength", 1.0f);
 
         // Accessibility
@@ -528,8 +536,140 @@ namespace Platform {
         } catch (const std::filesystem::filesystem_error& e) {
             Log::Debug("Error checking for save world: %s", e.what());
         }
-        
+
         return false;
+    }
+
+    std::string GameDirectory::GetMinecraftSavesDirectory() {
+        // The vanilla launcher's game directory. Note this is NOT
+        // GetUserDataDirectory() + "/minecraft" on every platform — Windows and
+        // Linux use a dotted folder, macOS does not.
+#ifdef _WIN32
+        return GetUserDataDirectory() + "/.minecraft/saves";
+#elif __APPLE__
+        return GetUserDataDirectory() + "/minecraft/saves";
+#else
+        const char* home = getenv("HOME");
+        return (home ? std::string(home) : std::string("/tmp")) + "/.minecraft/saves";
+#endif
+    }
+
+    // Inflate a gzip (or zlib) stream. level.dat is gzipped NBT.
+    // Mirrors RegionDumper's use of inflateInit2(15 + 32) for header auto-detect.
+    static bool InflateAll(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+        if (in.empty()) return false;
+
+        z_stream strm{};
+        strm.next_in  = const_cast<Bytef*>(in.data());
+        strm.avail_in = static_cast<uInt>(in.size());
+        if (inflateInit2(&strm, 15 + 32) != Z_OK) return false;
+
+        out.assign(in.size() * 6 + 1024, 0);
+        strm.next_out  = out.data();
+        strm.avail_out = static_cast<uInt>(out.size());
+
+        int ret;
+        while (true) {
+            ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret == Z_STREAM_END) break;
+            if (ret != Z_OK && ret != Z_BUF_ERROR) { inflateEnd(&strm); return false; }
+            if (strm.avail_out == 0) {
+                const size_t used = strm.total_out;
+                out.resize(out.size() * 2);
+                strm.next_out  = out.data() + used;
+                strm.avail_out = static_cast<uInt>(out.size() - used);
+                continue;
+            }
+            if (ret == Z_BUF_ERROR) { inflateEnd(&strm); return false; }  // truncated
+        }
+        out.resize(strm.total_out);
+        inflateEnd(&strm);
+        return true;
+    }
+
+    // Fill the LevelSummary-equivalent fields from a world's level.dat.
+    // Best-effort: a world with an unreadable level.dat still lists, just with
+    // fewer details, which is what MC does for worlds it can't fully summarise.
+    static void ReadLevelDat(const std::filesystem::path& levelDat,
+                             GameDirectory::MinecraftWorldInfo& info) {
+        std::ifstream f(levelDat, std::ios::binary);
+        if (!f) return;
+        std::vector<uint8_t> raw((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>());
+        if (raw.empty()) return;
+
+        std::vector<uint8_t> nbt;
+        if (!InflateAll(raw, nbt)) return;
+
+        auto root = ::World::NBTParser::Parse(nbt);
+        auto rootCompound = std::dynamic_pointer_cast<::World::NBTTagCompound>(root);
+        if (!rootCompound) return;
+
+        // Everything lives under a single "Data" compound.
+        auto data = std::dynamic_pointer_cast<::World::NBTTagCompound>(rootCompound->GetTag("Data"));
+        if (!data) return;
+
+        const std::string name = data->GetValue<std::string>("LevelName", "");
+        if (!name.empty()) info.levelName = name;
+
+        // LastPlayed is epoch MILLISECONDS in level.dat.
+        const int64_t lastPlayedMs = data->GetValue<int64_t>("LastPlayed", 0);
+        if (lastPlayedMs > 0) info.lastPlayed = static_cast<long long>(lastPlayedMs / 1000);
+
+        info.gameMode      = data->GetValue<int32_t>("GameType", 0);
+        info.hardcore      = data->GetValue<int8_t>("hardcore", 0) != 0;
+        info.allowCommands = data->GetValue<int8_t>("allowCommands", 0) != 0;
+
+        if (auto version = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("Version"))) {
+            info.versionName = version->GetValue<std::string>("Name", "");
+        }
+    }
+
+    std::vector<GameDirectory::MinecraftWorldInfo> GameDirectory::ListMinecraftWorlds() {
+        std::vector<MinecraftWorldInfo> out;
+        const std::string savesDir = GetMinecraftSavesDirectory();
+
+        std::error_code ec;
+        if (!std::filesystem::is_directory(savesDir, ec)) {
+            // Minecraft simply isn't installed. Normal, not an error.
+            return out;
+        }
+
+        for (const auto& dir : std::filesystem::directory_iterator(savesDir, ec)) {
+            if (ec) break;
+            if (!dir.is_directory(ec)) continue;
+
+            const std::filesystem::path worldPath = dir.path();
+            const std::filesystem::path levelDat  = worldPath / "level.dat";
+
+            // level.dat is the ONLY requirement, matching MC. An earlier version
+            // also demanded a region/*.mca and silently hid every world that had
+            // been created but not yet played — MC lists those, so we do too.
+            if (!std::filesystem::exists(levelDat, ec)) continue;
+
+            MinecraftWorldInfo info;
+            info.folderName = worldPath.filename().string();
+            info.path       = worldPath.string();
+            info.levelName  = info.folderName;   // overwritten if level.dat has one
+
+            // Filesystem mtime as the fallback ordering key; level.dat's own
+            // LastPlayed replaces it when readable.
+            const auto t = std::filesystem::last_write_time(levelDat, ec);
+            if (!ec) {
+                info.lastPlayed = static_cast<long long>(
+                    std::chrono::duration_cast<std::chrono::seconds>(
+                        t.time_since_epoch()).count());
+            }
+
+            ReadLevelDat(levelDat, info);
+            out.push_back(std::move(info));
+        }
+
+        std::sort(out.begin(), out.end(),
+                  [](const MinecraftWorldInfo& a, const MinecraftWorldInfo& b) {
+                      return a.lastPlayed > b.lastPlayed;
+                  });
+        return out;
     }
 
     std::string GameDirectory::GetUserDataDirectory() {

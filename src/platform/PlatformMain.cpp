@@ -45,6 +45,7 @@
 #include "client/renderer/portal/PortalCrosshair.hpp"
 #include "common/entity/Item.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
+#include "common/world/loot/LootTables.hpp"
 #include "client/portal/ClientPortalManager.hpp"
 #endif
 #include "client/renderer/gui/GuiAtlas.hpp"
@@ -53,6 +54,7 @@
 #include "client/renderer/gui/GuiGraphics.hpp"
 #include "client/renderer/gui/FontRenderer.hpp"
 #include "client/renderer/gui/HudRenderer.hpp"
+#include "common/entity/GeneratedItemAttributes.hpp"
 #include "client/renderer/gui/ChatComponent.hpp"
 #include <cctype>
 #include "common/network/packets/game/ChatMessageS2CPacket.hpp"
@@ -113,6 +115,13 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 // Multiplayer player visibility
 #include "client/entity/RemotePlayerManager.hpp"
 #include "client/renderer/entity/PlayerRenderer.hpp"
+#include "client/entity/ItemEntityManager.hpp"
+#include "client/renderer/entity/ItemEntityRenderer.hpp"
+#include "client/entity/ClientMobManager.hpp"
+#include "client/ClientTickRateManager.hpp"
+#include "server/entity/MobManager.hpp"
+#include "common/world/spawn/NaturalSpawner.hpp"   // kMagicNumber
+#include "client/renderer/entity/MobRenderer.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -138,6 +147,7 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include <thread>   // frame limiter sleep_until
 
 #include "platform/GameDirectory.hpp"
+#include "platform/CrashHandler.hpp"
 #include "common/core/JobSystem.hpp"
 #include "client/renderer/backend/RenderBackend.hpp"
 
@@ -216,13 +226,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #endif
     }
 
-    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj, const glm::mat4& view) {
+    void RenderBlockHighlight(const Game::ClientPlayer& player, const glm::mat4& proj,
+                              const glm::mat4& view, bool entityPicked) {
+        // MC LevelRenderer.renderHitOutline only runs for
+        // `hitResult.getType() == BLOCK`. With a mob under the crosshair the
+        // hit result IS the entity, so no outline is drawn — which is also the
+        // player's only cue that the click will hit the mob and not the wall.
+        if (entityPicked) return;
+
         const auto& hit = player.lastBlockHit;
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
             // Use the block's actual model-shape bounds so partial blocks (leaf
             // litter, slabs, fences, …) outline their real geometry instead of
             // the enclosing full cube.
-            const auto& shape = Game::BlockRegistry::GetBlockShape(hit->blockId, hit->stateIndex);
+            // World-aware so a paired chest outlines the half that is actually
+            // there — otherwise the selection box stops a pixel short of the
+            // seam that the raycast now accepts.
+            const auto shape = Client::g_clientBlockAccess
+                ? Game::BlockRegistry::GetBlockShapeAt(*Client::g_clientBlockAccess,
+                                                       hit->blockPos, hit->blockId,
+                                                       hit->stateIndex)
+                : Game::BlockRegistry::GetBlockShape(hit->blockId, hit->stateIndex);
             Render::g_blockHighlight.Render(hit->blockPos, proj, view, shape.min, shape.max);
         }
     }
@@ -238,8 +262,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Size the crack overlay to the block's actual shape so partial
         // blocks (leaf litter, slabs, …) don't get a full-cube crack
         // floating above / around their geometry.
-        const auto& shape = Game::BlockRegistry::GetBlockShape(
-            pc.GetBreakingBlockId(), Game::Raycast::GetBlockStateAt(bp.x, bp.y, bp.z));
+        const auto stateIdx = Game::Raycast::GetBlockStateAt(bp.x, bp.y, bp.z);
+        const auto shape = Client::g_clientBlockAccess
+            ? Game::BlockRegistry::GetBlockShapeAt(*Client::g_clientBlockAccess, bp,
+                                                   pc.GetBreakingBlockId(), stateIdx)
+            : Game::BlockRegistry::GetBlockShape(pc.GetBreakingBlockId(), stateIdx);
         Render::g_blockBreakOverlay.SetTarget(bp, stage, shape.min, shape.max);
         Render::g_blockBreakOverlay.Render(proj, view);
     }
@@ -905,6 +932,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     bool InitializeGameSystems(GLFWwindow* window) {
         Log::Info("Initializing game systems...");
 
+        // Biome colour tables. Loads PNGs into CPU tables and precomputes from
+        // the static biome table — depends on no registry, so it can come
+        // first, and it MUST: ItemRegistry::Initialize resolves items' grass /
+        // foliage tints through these, and a bush loaded before them would
+        // cache the no-colormap fallback and render grey forever.
+        // Also has to precede the first mesh build, which it still does.
+        Game::BiomeRegistry::LoadColormaps(GetAssetPath("assets/textures"));
+
         // Initialize block registries
         Game::BlockRegistry::Init();
         // Initialize item registry AFTER blocks so block-items can copy their display names.
@@ -916,6 +951,16 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // uses, which is why the output appears the instant you place the last
         // ingredient rather than a round trip later.
         Game::RecipeManager::Initialize();
+        // Block loot tables borrow RecipeManager's slug → ItemID map, so they
+        // come after it. Client-side too: harmless there (only the server rolls
+        // drops), and it keeps one boot order for both.
+        Game::LootTables::Initialize();
+        // Weapon ATTACK_DAMAGE / ATTACK_SPEED modifiers, same slug map, same
+        // reason to run on both sides: the server scales the damage with it and
+        // the client draws the attack indicator from it. Skipping this does not
+        // fail loudly — every weapon silently resolves to (0, 0), so a
+        // netherite axe hits for the bare-hand 1.0 and recharges in 5 ticks.
+        Game::InitItemAttributes();
 
         // Use platform-specific asset path function
         std::string modelsPath = GetAssetPath("assets/models/block");
@@ -930,11 +975,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // already-resolved models). A missing directory is fine — every block
         // just keeps its default model.
         Game::BlockStateModels::Load(GetAssetPath("assets/blockstates"));
-
-        // Biome colour tables. Must precede the first mesh build — every tint
-        // resolves through them, and until they load the resolvers answer with
-        // vanilla's no-colormap constants.
-        Game::BiomeRegistry::LoadColormaps(GetAssetPath("assets/textures"));
 
         // Initialize texture systems
         if (!InitializeTextureSystem()) {
@@ -1081,6 +1121,30 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
     }
 
     int Run(int argc, char** argv) {
+        // Open the log file FIRST, before anything can fail.
+        //
+        // Everything below logs, and until this runs those lines only reach
+        // stdout — which for a launcher-started build goes nowhere at all
+        // (macOS `open --args` gives the process no terminal). That is why a
+        // player's "it just closed" has never come with any evidence.
+        //
+        // Uses the DEFAULT game directory rather than waiting for
+        // InitializeGameDirectorySystem: that runs hundreds of lines later,
+        // after renderer and asset init, which is exactly the window where the
+        // interesting startup failures happen. The path is the same either way,
+        // and OpenLogFile creates the folder itself.
+        {
+            const std::string logPath =
+                Platform::GameDirectory::GetDefaultGameDirectory() + "/logs/latest.log";
+            if (Log::OpenLogFile(logPath)) {
+                Log::Info("Log file: %s", logPath.c_str());
+            } else {
+                Log::Warning("Could not open log file at %s — "
+                             "this session will leave no diagnostics on disk",
+                             logPath.c_str());
+            }
+        }
+
         // This is the frame thread. Claim it before anything spawns a worker,
         // or the scheduler treats it as just another compute thread and parks
         // it behind terrain generation — which shows up as tens of ms of
@@ -1219,9 +1283,24 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Log::Error("Sentry initialization failed (error %d)", sentryResult);
         }
 
-        // Intentional crash for testing Sentry (run with --crash-test)
+        // Local crash report, installed AFTER sentry_init on purpose: the last
+        // handler registered is the first to run, and ours deliberately chains
+        // back to whatever was there, so Sentry still gets its report.
+        //
+        // Sentry is the better report when it arrives — symbolicated and
+        // automatic — but it needs network, a working crashpad process, and a
+        // crash of a kind crashpad claims. This one always leaves a file the
+        // player can attach to a message.
+        Platform::InstallCrashHandler(
+            Platform::GameDirectory::GetDefaultGameDirectory() + "/crash-reports",
+            GAME_VERSION);
+
+        // Intentional crash for testing the crash pipeline (run with
+        // --crash-test). Exercises BOTH reporters: Sentry via crashpad, and
+        // the local handler above.
         if (crashTest) {
             Log::Info("Crash test requested — crashing in 3 seconds...");
+            Log::Info("Expect a report at: %s", Platform::CrashReportPath());
             std::this_thread::sleep_for(std::chrono::seconds(3));
             volatile int* p = nullptr;
             *p = 42;  // SIGSEGV
@@ -1535,6 +1614,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Log::Warning("Failed to initialize player renderer, remote players won't be visible");
         }
 
+        // Dropped items in the world. Created BEFORE the connection opens so a
+        // spawn packet arriving on the very first tick has somewhere to land.
+        Client::g_itemEntityManager = std::make_unique<Client::ItemEntityManager>();
+        Client::g_clientMobManager = std::make_unique<Client::ClientMobManager>();
+        Render::MobRenderer mobRenderer;
+        if (!mobRenderer.Initialize()) {
+            Log::Warning("[PlatformMain] mob renderer failed to initialize — mobs will be invisible");
+        }
+        Render::ItemEntityRenderer itemEntityRenderer;
+        if (!itemEntityRenderer.Initialize()) {
+            Log::Warning("Failed to initialize item entity renderer, dropped items won't be visible");
+        }
+
         // === MINECRAFT-STYLE ARCHITECTURE INITIALIZATION ===
         Log::Info("Initializing Minecraft Java Edition Architecture...");
 
@@ -1577,9 +1669,20 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             serverConfig.initialDayTime  = titleAction.dayTime;
             serverConfig.doDaylightCycle = titleAction.doDaylightCycle;
 
-            // Automatically use local save directory if available (temporary feature)
-            if (serverConfig.useLocalSaveDirectory && Platform::g_gameDirectory.HasDefaultSaveWorld()) {
-                // Point to the saves/world folder (not /region, as MinecraftChunkLoader adds that)
+            // Read-only worlds (imported from the player's Minecraft install)
+            // must never write chunks back — see IntegratedServerConfig.
+            serverConfig.readOnlyWorld = titleAction.readOnlyWorld;
+
+            if (titleAction.useMinecraftSave && !titleAction.worldPath.empty()) {
+                // A specific world picked on the Select World screen. Point at
+                // the world FOLDER (not /region — MinecraftChunkLoader appends that).
+                serverConfig.minecraftWorldPath = titleAction.worldPath;
+                Log::Info("✓ Loading Anvil world%s: %s",
+                          serverConfig.readOnlyWorld ? " (read-only)" : "",
+                          serverConfig.minecraftWorldPath.c_str());
+            } else if (serverConfig.useLocalSaveDirectory &&
+                       Platform::g_gameDirectory.HasDefaultSaveWorld()) {
+                // Legacy fallback: the auto-detected saves/world.
                 serverConfig.minecraftWorldPath = Platform::g_gameDirectory.GetSavesDirectory() + "/world";
                 Log::Info("✓ Auto-detected Minecraft save at: %s", serverConfig.minecraftWorldPath.c_str());
             } else {
@@ -1980,9 +2083,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             // Apply menu-editable options every frame (cheap settings-map
             // lookups). FOV feeds the projection below; sensitivity/invert
-            // feed Camera::Update's mouse-look. Sensitivity 1.0 (= 100% on
+            // feed Camera::Update's mouse-look. Sensitivity 1.0 (= 50% on
             // the slider, the default) maps to the engine's historical
-            // 0.1°/px feel; the slider scales linearly around that.
+            // 0.1°/px feel; the slider scales linearly around that, up to
+            // 4.0 (200%, 0.4°/px). Stored values keep this meaning across
+            // the slider's rescale, so an existing options.txt is unchanged.
             { PROFILE_ZONE_N("Settings");
             camera.fov              = Platform::g_gameSettings.GetFOV();
             camera.mouseSensitivity = Platform::g_gameSettings.GetMouseSensitivity() * 0.1f;
@@ -2511,19 +2616,69 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
                 // (Mesh scheduling used to live here, in the 20 Hz tick. It is a
                 // FRAME phase now — see the MeshSchedule block next to MeshUpload
-                // below. Each pass can start at most permits.Available() = 10
-                // sections, so calling it at tick rate hard-capped meshing at
-                // 20 x 10 = 200 sections/s ~= 25 chunks/s, which is exactly what
-                // traces showed while the mesh workers sat 1.6% busy.)
+                // below. Back when a pass could start at most permits.Available()
+                // sections, calling it at tick rate hard-capped meshing at
+                // 20 x permits, which is exactly what traces showed while the
+                // mesh workers sat 1.6% busy. The pass is no longer capped by
+                // the permit pool at all, but it still belongs on the frame.)
+
+                // 2b. MC Minecraft.tick line 1742: level.tickRateManager().tick(),
+                //     BEFORE anything reads runsNormally(). It is also what
+                //     counts a /tick step down, so the step ends on its own.
+                Client::g_clientTickRate.Tick();
+
+                // 2c. The local player's own 20 Hz tick (MC Player.tick). Its
+                //     physics half runs per frame; the attack cooldown that
+                //     feeds the crosshair indicator has to count in TICKS, or
+                //     the bar fills at frame rate.
+                player.Tick();
 
                 // 3. Interpolate remote player positions (Minecraft's InterpolationHandler)
                 if (Client::g_remotePlayerManager) {
                     Client::g_remotePlayerManager->Tick();
                 }
 
+                // MC ClientLevel.tickEntities skips every entity for which
+                // tickRateManager.isEntityFrozen() holds — which under /tick
+                // freeze is everything except players. Client-side mobs run
+                // their own animation clock (that is what smooths them between
+                // position packets), so without this they keep walking and
+                // swinging in a world the server has stopped simulating.
+                //
+                // Remote PLAYERS above are deliberately outside the gate:
+                // TickRateManager.isEntityFrozen exempts Player, which is why
+                // you can still walk around a frozen world in vanilla.
+                const bool entitiesFrozen = Client::g_clientTickRate.IsEntityFrozen();
+
+                if (Client::g_itemEntityManager && !entitiesFrozen) {
+                    // Feet position, for pickup animations to fly toward.
+                    Client::g_itemEntityManager->Tick(player.predictedPos);
+                }
+
+                // Mobs run the same physics classes the server does, so
+                // they need the block view and the world clock before they
+                // tick — otherwise they fall through the world between
+                // position packets. The setters run even while frozen so a
+                // resumed mob is not looking at a stale world.
+                if (Client::g_clientMobManager) {
+                    Client::g_clientMobManager->SetBlockAccess(Client::g_clientBlockAccess);
+                    Client::g_clientMobManager->SetTime(
+                        Render::EnvironmentState::Get().GameTime(),
+                        Render::EnvironmentState::Get().DayTime());
+                    if (!entitiesFrozen) Client::g_clientMobManager->Tick();
+                }
+
                 // 3b. Advance local world time (ClientLevel.tickTime mirror —
                 //     smooth day/night between the server's 20-tick syncs).
-                Render::EnvironmentState::Get().TickClient();
+                //     Gated exactly as MC gates it (ClientLevel.tick:269,
+                //     `if (tickRateManager().runsNormally()) { … tickTime(); }`):
+                //     the server stops advancing dayTime while frozen, so
+                //     without this the sky would keep sliding toward a sunset
+                //     the world never reaches, then snap back on the next
+                //     TimeUpdate.
+                if (Client::g_clientTickRate.RunsNormally()) {
+                    Render::EnvironmentState::Get().TickClient();
+                }
 
                 // Screen 20Hz tick (death-screen button delay, caret blink).
                 // The title phase has its own pump; in-game screens only got
@@ -2613,10 +2768,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     // subsequent placements in a contiguous strip.
                     const bool armSwing = playerController.ConsumeMiningSwingTrigger();
 
+                    // View angles for the held-item sway. These are already
+                    // MC's convention now, so they go straight through — the
+                    // pitch used to be negated here to undo the camera's old
+                    // positive-up convention.
                     Render::g_heldItemRenderer.Tick(
                         player.inventory.GetSelectedItem(),
                         player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).itemId,
-                        lmbEdge || placeEdge || armSwing);
+                        lmbEdge || placeEdge || armSwing,
+                        // MC ItemInHandRenderer.tick:564 — getItemSwapScale(1.0F).
+                        player.GetItemSwapScale(1.0f),
+                        camera.pitch, camera.yaw);
                 }
 
                 nextClientTick += CLIENT_TICK_INTERVAL;
@@ -2798,16 +2960,17 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             // 6b. Schedule mesh builds — a FRAME phase, like MC's
             // LevelRenderer compiling sections every frame.
             //
-            // Moved out of the 20 Hz ClientTick: a pass starts at most
-            // permits.Available() = 10 sections, so tick-rate scheduling capped
-            // meshing at 200 sections/s no matter how idle the mesh workers were.
-            // The server was delivering ~570 sections/s, so the client fell
-            // steadily behind and chunks appeared long after they had arrived.
+            // Moved out of the 20 Hz ClientTick: back when a pass was capped by
+            // the permit pool, tick-rate scheduling capped meshing at 20 x
+            // permits no matter how idle the mesh workers were. The server was
+            // delivering ~570 sections/s, so the client fell steadily behind and
+            // chunks appeared long after they had arrived.
             //
-            // Rate limiting belongs to the two mechanisms that can actually see
-            // the load: the ~8ms period inside ScheduleMeshBuildsWithSnapshots,
-            // and the mesh permit pool, which stops handing out slots when
-            // uploads fall behind. Calling this per frame just lets them work.
+            // This pass is now ADMISSION ONLY — it feeds the compile queue and
+            // is not throttled by the permit pool. Rate limiting lives with the
+            // mesh workers, which take a permit when they start a job, so
+            // throughput no longer scales with frame rate. Do not re-add a cap
+            // here; see the comment on ScheduleMeshBuildsWithSnapshots.
             { PROFILE_ZONE_N("MeshSchedule");
             PROFILE_TIMER_START(meshsched);
             Render::ScheduleClientMeshBuilds(player.physics.position);
@@ -2907,6 +3070,24 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
             float farPlane = static_cast<float>(effectiveRenderDist) * 16.0f * 4.0f;
             glm::mat4 proj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, farPlane);
+
+            // MC GameRenderer.bobHurt — the damage tilt and death spin, set on
+            // the camera BEFORE anything reads the view matrix (the chunk
+            // renderer takes its own copy from the same camera).
+            {
+                const float remaining = std::chrono::duration<float>(
+                    nextClientTick - std::chrono::steady_clock::now()).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float partialTickView =
+                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                camera.viewTilt = Render::Camera::MakeViewTilt(
+                    player.hurtTime, player.hurtDuration, player.hurtDir,
+                    player.health <= 0, player.deathTime, partialTickView);
+                // The hand rides the same pose in vanilla.
+                Render::g_heldItemRenderer.SetViewTilt(camera.viewTilt);
+            }
+
             glm::mat4 view = camera.GetViewMatrix();
             glm::mat4 viewProj = proj * view;
             frustum = Frustum::FromMatrix(viewProj);
@@ -2981,8 +3162,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
                 const float tickSeconds =
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                // MC DeltaTracker.Timer.getGameTimeDeltaPartialTick(false)
+                // returns exactly 1.0F while the game is frozen. That single
+                // line is what makes /tick freeze look frozen: an entity
+                // renders at lerp(partialTick, prevTickPos, pos), and prevTick
+                // still holds the position from BEFORE the last tick that ran.
+                // Letting partialTick keep cycling 0..1 would replay that last
+                // tick's movement forever, so a frozen mob would sit there
+                // twitching back and forth once every 50 ms.
                 const float partialTick =
-                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                    Client::g_clientTickRate.IsEntityFrozen()
+                        ? 1.0f
+                        : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
 #if ENABLE_PORTAL_GUN
                 // Phase G (remote): for each remote player straddling an
                 // active portal pair we need BOTH halves drawn — entry-clipped
@@ -3015,6 +3206,14 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 #endif
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
 
+                // Dropped items, drawn with the same partialTick the remote
+                // players use so everything in the world moves on one clock.
+                itemEntityRenderer.Render(proj, view, camera.position, partialTick);
+                if (Client::g_clientMobManager) {
+                    mobRenderer.Render(proj, view, camera.position,
+                                       *Client::g_clientMobManager, partialTick);
+                }
+
                 // Third person: the local player becomes visible (MC renders
                 // the camera entity when the camera is detached). Uses the
                 // SAVED eye yaw/pitch — the ThirdFront flip is a camera-only
@@ -3024,7 +3223,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         proj, view, glm::vec3(player.visualPos),
                         tpSavedYaw, tpSavedYaw, tpSavedPitch,
                         player.physics.isSneaking,
-                        static_cast<uint8_t>(player.color));
+                        static_cast<uint8_t>(player.color),
+                        glm::mat4(1.0f), glm::vec4(0.0f),
+                        // Your own corpse topples too — MC renders the camera
+                        // entity like any other while the camera is detached.
+                        Render::MobRenderer::DeathFlipDegrees(player.deathTime,
+                                                              partialTick));
                 }
 
 #if ENABLE_PORTAL_GUN
@@ -3136,7 +3340,8 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             }
 
             // Render UI overlay elements
-            RenderBlockHighlight(player, proj, view);
+            RenderBlockHighlight(player, proj, view,
+                                 playerController.PickEntity() != 0);
             RenderBlockBreakOverlay(playerController, proj, view);
 
             // BlockEntity per-frame render pass. Iterates every loaded
@@ -3183,6 +3388,23 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         Render::RenderChunksAll(virtCam, virtFrust, obliqueProj);
 
                         const glm::mat4 virtView = virtCam.GetViewMatrix();
+
+                        // Mobs and dropped items from the virtual camera. Both
+                        // were missing here, so a zombie standing in front of a
+                        // portal simply was not in the view through it — the
+                        // terrain came through and the entities did not.
+                        //
+                        // Neither renderer needs the straddle split the players
+                        // get below: that exists so a body half-way through a
+                        // portal is drawn once on each side, and only the local
+                        // and remote players are ever tracked that way.
+                        itemEntityRenderer.Render(obliqueProj, virtView,
+                                                  virtCam.position, partialTickPortal);
+                        if (Client::g_clientMobManager) {
+                            mobRenderer.Render(obliqueProj, virtView, virtCam.position,
+                                               *Client::g_clientMobManager,
+                                               partialTickPortal);
+                        }
 
                         // Remote players (no nametags / bubbles — those are
                         // separate calls in the main pass below). Phase G
@@ -3328,17 +3550,6 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             Render::g_portalParticleSystem.Update(dt, Client::GetClientPortalManager());
             Render::g_portalParticleSystem.Render(proj, view, camera.position);
 
-            // First-person portal-gun viewmodel — drawn AFTER the
-            // particle system so the rim sparks composite behind the
-            // gun. Hidden unless the player is actually holding the gun
-            // (and never in third person).
-            if (camera.IsFirstPerson() &&
-                player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
-                const float fbAspect = (height > 0)
-                    ? static_cast<float>(width) / static_cast<float>(height)
-                    : 16.0f / 9.0f;
-                Render::g_portalGunViewmodel.Render(fbAspect, dt);
-            }
 #endif
 
             // Clouds — MC's cloud pass runs after terrain and particles
@@ -3355,6 +3566,31 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 Render::g_cloudRenderer.Render(proj, view, camera.position,
                                                effectiveRenderDist, cloudPartialTick);
             }
+
+#if ENABLE_PORTAL_GUN
+            // First-person portal-gun viewmodel.
+            //
+            // This MUST come after the cloud pass, not before it. Every
+            // first-person viewmodel here CLEARS THE DEPTH BUFFER before
+            // drawing (so the gun cannot clip into a wall it is standing
+            // against) — and the cloud pass depth-tests against the world.
+            // Rendering the gun first therefore handed the clouds an empty
+            // depth buffer and they drew straight through the terrain, which
+            // looked like the gun making blocks transparent. The vanilla
+            // held-item viewmodel below has always been on this side of the
+            // clouds for the same reason; the portal gun was the odd one out.
+            //
+            // Still after the particle system, so the rim sparks composite
+            // behind the gun. Hidden unless the gun is actually held (and
+            // never in third person).
+            if (camera.IsFirstPerson() &&
+                player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
+                const float fbAspect = (height > 0)
+                    ? static_cast<float>(width) / static_cast<float>(height)
+                    : 16.0f / 9.0f;
+                Render::g_portalGunViewmodel.Render(fbAspect, dt);
+            }
+#endif
 
             // Vanilla held-item viewmodel — both hands (main = selected
             // hotbar item, off = slot 45). The portal gun owns the main
@@ -3402,11 +3638,37 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     player.useAnim,
                     player.useItemRemaining,
                     player.useItemDuration);
+                // Live view angles, MC convention — and they MUST be the same
+                // ones Tick() was given. The sway is a lag term,
+                // `(viewXRot - xBob) * 0.1` (ItemInHandRenderer), where xBob is
+                // the copy Tick chases toward that same angle: feeding Tick
+                // +pitch and Render -pitch made the difference read as -2*pitch
+                // instead of ~0, so instead of settling after a flick the item
+                // sat at a permanent -0.2 * pitch tilt that swung as you looked
+                // up and down.
                 Render::g_heldItemRenderer.Render(fbAspect, partialTickHeld,
-                                                  s_walkDist, renderMainHand);
+                                                  s_walkDist,
+                                                  camera.pitch, camera.yaw,
+                                                  renderMainHand);
             }
             // Push the server-synced stat triple into the HUD before drawing
             // (health/hunger bars read these; SetHealthS2C writes the player).
+            // MC Gui.renderCrosshair reads the CLIENT's own attack ticker.
+            // getAttackStrengthScale(0.0) — the zero is MC's: the bar lags the
+            // damage calculation's 0.5 by half a tick so a full-looking bar
+            // always is one.
+            {
+                g_hudRenderer.SetAttackStrength(
+                    player.GetAttackStrengthScale(0.0f),
+                    player.GetCurrentItemAttackStrengthDelay());
+                // MC only shows the "charged" burst when the crosshair is on
+                // something hittable. Every id PickEntity can return is a
+                // living, alive entity (mobs and other players), so the pick
+                // alone answers MC's `instanceof LivingEntity && isAlive()`.
+                g_hudRenderer.SetCrosshairOnLivingTarget(
+                    playerController.HasEntityUnderCrosshair());
+            }
+
             g_hudRenderer.SetHealth(player.health);
             g_hudRenderer.SetFood(player.food);
             g_hudRenderer.SetSaturation(player.saturation);
@@ -3542,7 +3804,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 auto pipeSession = Server::g_integratedServer ? Server::g_integratedServer->GetPlayerSession() : nullptr;
                 if (pipeSession) {
                     pipeSnap.watchSetSize = pipeSession->GetStats().chunksInWatch;
-                    pipeSnap.sessionPendingLoads = pipeSession->GetPendingChunkLoadsCount();
+                    // Sessions no longer keep a per-player "waiting for load"
+                    // set — delivery is push-based. The meaningful number is
+                    // the server's in-flight load count.
+                    pipeSnap.sessionPendingLoads =
+                        Server::g_integratedServer->GetPendingChunkLoadCount();
                     pipeSnap.readyToSend = pipeSession->GetPendingChunksToSendCount();
                     pipeSnap.sentToClient = pipeSession->GetSentChunkCount();
                     pipeSnap.sendRate = pipeSession->GetDesiredChunksPerTick();
@@ -3629,9 +3895,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 wi.sectionIndex = Game::Math::WorldCoordinates::WorldYToSectionIndex(wi.blockY);
                 wi.yawDeg = camera.yaw;
                 wi.pitchDeg = camera.pitch;
-                // MC's F3 convention: the engine's yaw 0 points +X (east).
-                wi.facingName = std::string(Game::NameOf(
-                    Game::HorizontalFromEngineYaw(camera.yaw)));
+                wi.facingName = std::string(Game::NameOf(Game::FromYRot(camera.yaw)));
 
                 auto biomeName = [](uint16_t id) {
                     return std::string(Game::BiomeRegistry::Get(id).name);
@@ -3722,6 +3986,61 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                 if (world) wi.seed = world->GetGenerationSeed();
 
                 Debug::DebugSystem::SetWorldInfoSnapshot(wi);
+            }
+
+            // ── Entity panel snapshot ──────────────────────────────────────
+            //
+            // Built here rather than in DebugSystem because DebugSystem.cpp is
+            // compiled into the `imgui` target and cannot see IntegratedServer.
+            // Only assembled when the panel is actually open — walking every
+            // mob twice per frame for a hidden window is pure waste.
+            if (Debug::DebugSystem::GetPanelVisibility().entities) {
+                Debug::EntitySnapshot es;
+
+                for (uint16_t i = 0; i < static_cast<uint16_t>(Game::EntityTypeId::Count) &&
+                                     es.typeRowCount < Debug::EntitySnapshot::kTypeCount; ++i) {
+                    es.types[es.typeRowCount].name =
+                        Game::GetEntityTypeInfo(static_cast<Game::EntityTypeId>(i)).slug.data();
+                    ++es.typeRowCount;
+                }
+
+                if (Server::g_integratedServer) {
+                    if (auto* mobs = Server::g_integratedServer->GetMobs()) {
+                        // Atomic counters, NOT a walk of mobs->All(). The mob
+                        // map lives on the server thread and is mutated every
+                        // tick; iterating it from here is a data race that
+                        // crashes rather than merely reporting a stale number.
+                        for (int i = 0; i < es.typeRowCount; ++i) {
+                            es.types[i].serverCount =
+                                mobs->CountForType(static_cast<uint16_t>(i));
+                            es.totalServerMobs += es.types[i].serverCount;
+                        }
+                        es.monsterCount =
+                            mobs->CountForCategory(static_cast<int>(Game::MobCategory::Monster));
+                        es.creatureCount =
+                            mobs->CountForCategory(static_cast<int>(Game::MobCategory::Creature));
+                        es.spawnableChunks = mobs->GetSpawnableChunkCount();
+                    }
+                }
+
+                if (Client::g_clientMobManager) {
+                    for (const auto& [id, entry] : Client::g_clientMobManager->All()) {
+                        const auto idx = static_cast<size_t>(entry.mob->GetType());
+                        if (idx < Debug::EntitySnapshot::kTypeCount) {
+                            ++es.types[idx].clientCount;
+                        }
+                        ++es.totalClientMobs;
+                    }
+                }
+
+                es.monsterCap =
+                    Game::GetMobCategoryInfo(Game::MobCategory::Monster).maxInstancesPerChunk *
+                    es.spawnableChunks / Game::kMagicNumber;
+                es.creatureCap =
+                    Game::GetMobCategoryInfo(Game::MobCategory::Creature).maxInstancesPerChunk *
+                    es.spawnableChunks / Game::kMagicNumber;
+
+                Debug::DebugSystem::SetEntitySnapshot(es);
             }
 
             Debug::DebugSystem::RenderDebugUI(
@@ -3947,6 +4266,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // 8a. Session-scoped render resources
         playerRenderer.Shutdown();
         Client::g_remotePlayerManager.reset();
+        itemEntityRenderer.Shutdown();
+        mobRenderer.Shutdown();
+        Client::g_clientMobManager.reset();
+        Client::g_itemEntityManager.reset();
         // The inventory screens are singletons but their menu is bound to this
         // session's ClientPlayer, which is about to go out of scope.
         Render::SetInventoryScreenPlayer(nullptr);
@@ -4042,6 +4365,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         Log::Info("=== MINECRAFT JAVA EDITION ARCHITECTURE SHUTDOWN COMPLETE ===");
+
+        // Stamp the log as ending deliberately. Without this marker a truncated
+        // log and a clean one look identical, so you cannot tell "crashed" from
+        // "player quit" — which matters most in the case the crash handler
+        // never ran (see CrashHandler.hpp on crashpad winning the race).
+        Log::CloseLogFile();
 
         return 0;
     }

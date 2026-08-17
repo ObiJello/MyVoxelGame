@@ -764,6 +764,59 @@ namespace Game {
         }
     }
 
+    void MinecraftChunkLoaderImpl::LoadHeightmaps(const ::World::NBTTagPtr& nbtData, Chunk& chunk) {
+        // MC SerializableChunkData: read each stored map, and collect the ones
+        // that are missing or the wrong size into a re-prime set. Falling back
+        // to a full prime for the WHOLE chunk when any single map is absent is
+        // what MC does too — priming is per-type but shares one column walk.
+        bool loadedAny = false;
+        bool missingAny = false;
+
+        auto root = std::dynamic_pointer_cast<::World::NBTTagCompound>(nbtData);
+        ::World::NBTTagPtr heightmapsTag;
+
+        if (root) {
+            // 1.18+ keeps Heightmaps at the root; older worlds nest it under
+            // Level, the same split SectionDataUnpacker handles for sections.
+            heightmapsTag = root->GetTag("Heightmaps");
+            if (!heightmapsTag) {
+                if (auto levelTag = root->GetTag("Level")) {
+                    if (auto level =
+                            std::dynamic_pointer_cast<::World::NBTTagCompound>(levelTag)) {
+                        heightmapsTag = level->GetTag("Heightmaps");
+                    }
+                }
+            }
+        }
+
+        if (auto heightmaps =
+                std::dynamic_pointer_cast<::World::NBTTagCompound>(heightmapsTag)) {
+            for (size_t i = 0; i < static_cast<size_t>(HeightmapType::Count); ++i) {
+                const auto type = static_cast<HeightmapType>(i);
+                const auto tag = heightmaps->GetTag(HeightmapSerializationKey(type));
+
+                auto longs = std::dynamic_pointer_cast<::World::NBTTagLongArray>(tag);
+                if (longs && chunk.GetHeightmap(type).UnpackFromLongs(longs->value)) {
+                    loadedAny = true;
+                } else {
+                    missingAny = true;
+                }
+            }
+        } else {
+            missingAny = true;
+        }
+
+        if (missingAny) {
+            // Either no tag at all, or one of ours was absent / a different
+            // world height. Rebuild the lot — a partially-correct heightmap is
+            // worse than a rebuilt one, because nothing downstream can tell
+            // which columns to distrust.
+            chunk.PrimeHeightmaps();
+        } else if (loadedAny) {
+            chunk.MarkHeightmapsPrimed();
+        }
+    }
+
     std::shared_ptr<Chunk> MinecraftChunkLoaderImpl::NBTToChunk(const ::World::NBTTagPtr& nbtData, Math::ChunkPos position) {
         if (!nbtData) {
             return nullptr;
@@ -779,6 +832,8 @@ namespace Game {
                 LogError("NBTToChunk", "Failed to unpack chunk sections");
                 return nullptr;
             }
+
+            LoadHeightmaps(nbtData, *chunk);
 
             return chunk;
 

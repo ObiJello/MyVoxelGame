@@ -40,21 +40,40 @@ namespace Render::TranslucentSort {
     void BuildSortedIndices(const std::vector<glm::vec3>& centroids,
                             const glm::vec3& cameraPos,
                             std::vector<uint16_t>& outIndices,
-                            std::vector<uint32_t>& scratchOrder) {
+                            std::vector<uint32_t>& scratchOrder,
+                            std::vector<float>& scratchKeys) {
         const size_t quads = centroids.size();
         outIndices.clear();
         if (quads == 0) return;
 
-        scratchOrder.resize(quads);
-        for (size_t i = 0; i < quads; ++i) scratchOrder[i] = static_cast<uint32_t>(i);
-
+        // Precompute a flat key array in ONE sequential pass, then sort indices
+        // by comparing those floats. This is exactly what MC does — see
+        // VertexSorting.byDistance (com/mojang/blaze3d/vertex/VertexSorting.java):
+        //
+        //     float[] keys = new float[values.size()];
+        //     for (int i = 0; i < values.size(); indices[i] = i++)
+        //         keys[i] = function.apply(values.get(i, scratch));
+        //     IntArrays.mergeSort(indices, (a, b) -> Floats.compare(keys[b], keys[a]));
+        //
+        // We used to recompute the vector subtract and dot INSIDE the comparator,
+        // which costs ~2*N*log(N) distance evaluations instead of N — about 44k
+        // instead of 2k for a 2000-quad section — and every one of them was a
+        // 12-byte random-access load into `centroids` rather than a 4-byte
+        // sequential one. That comparator was the bulk of ResortTranslucent.
+        //
         // Squared distance is enough: it is monotonic in distance, and MC uses
         // distanceSquared for exactly this reason.
+        scratchKeys.resize(quads);
+        scratchOrder.resize(quads);
+        for (size_t i = 0; i < quads; ++i) {
+            const glm::vec3 d = centroids[i] - cameraPos;
+            scratchKeys[i] = glm::dot(d, d);
+            scratchOrder[i] = static_cast<uint32_t>(i);
+        }
+
         std::stable_sort(scratchOrder.begin(), scratchOrder.end(),
-                         [&](uint32_t a, uint32_t b) {
-                             const glm::vec3 da = centroids[a] - cameraPos;
-                             const glm::vec3 db = centroids[b] - cameraPos;
-                             return glm::dot(da, da) > glm::dot(db, db);  // farthest first
+                         [&scratchKeys](uint32_t a, uint32_t b) {
+                             return scratchKeys[a] > scratchKeys[b];  // farthest first
                          });
 
         // Every quad is re-emitted with the SAME forward winding, so every quad

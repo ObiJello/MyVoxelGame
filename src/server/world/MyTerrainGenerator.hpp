@@ -149,9 +149,38 @@ namespace Game {
         using Task = std::function<void()>;
 
         void submit(Task task) {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_tasks.push(std::move(task));
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_tasks.push(std::move(task));
+            }
+            // MC's LockSupport.unpark half of park/unpark: the server thread
+            // sleeps until the next tick deadline and is woken the instant a
+            // worker hands it something to run.
+            m_cv.notify_one();
         }
+
+        // Block until a task is available or `deadline` passes. Returns true if
+        // there is work.
+        //
+        // MC BlockableEventLoop.waitForTasks, as called from waitUntilNextTick:
+        //
+        //     long waitNanos = this.waitingForNextTick
+        //         ? this.nextTickTimeNanos - Util.getNanos() : 100000L;
+        //     LockSupport.parkNanos("waiting for tasks", waitNanos);
+        //
+        // i.e. inside the idle window it parks for the WHOLE remaining time and
+        // relies on submit() to wake it, rather than polling. Polling at a fixed
+        // interval instead costs a wakeup every interval for an empty queue
+        // check, and adds up to that interval of latency to every chunk handed
+        // back — which is the exact cost this pump exists to remove.
+        template <class Clock, class Duration>
+        bool waitForTasks(const std::chrono::time_point<Clock, Duration>& deadline) {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            return m_cv.wait_until(lock, deadline, [this] { return !m_tasks.empty(); });
+        }
+
+        // Wake anything parked in waitForTasks (shutdown).
+        void wakeAll() { m_cv.notify_all(); }
 
         void runPendingTasks() {
             std::queue<Task> tasksToRun;
@@ -163,6 +192,26 @@ namespace Game {
                 tasksToRun.front()();
                 tasksToRun.pop();
             }
+        }
+
+        // Run at most ONE queued task; returns false when the queue was empty.
+        //
+        // This is the granularity MC's main-thread pump works at
+        // (BlockableEventLoop.pollTask -> one task, then back to the caller's
+        // deadline check). runPendingTasks above drains the whole queue with no
+        // way to stop, which is fine for a caller that has already decided to
+        // block, but is exactly what stops a deadline from being honoured.
+        // The lock is released before the task runs — a task may submit more.
+        bool runOnePendingTask() {
+            Task task;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_tasks.empty()) return false;
+                task = std::move(m_tasks.front());
+                m_tasks.pop();
+            }
+            task();
+            return true;
         }
 
         bool hasPendingTasks() const {
@@ -179,6 +228,7 @@ namespace Game {
     private:
         std::queue<Task> m_tasks;
         mutable std::mutex m_mutex;   // mutable so hasPendingTasks() can be const
+        std::condition_variable m_cv;
     };
 
     /**
@@ -249,16 +299,36 @@ namespace Game {
         // Request chunk generation without blocking. Returns true if request was queued.
         bool RequestChunkGeneration(Math::ChunkPos position);
 
-        // Pump the internal task pipeline (call every server tick).
-        // Runs distance manager updates and main-thread executor tasks.
-        void PumpAsyncTasks();
+        // Run ONE unit of the chunk pipeline. Returns true if work was done, so
+        // the caller can loop until either the pipeline is idle or its own
+        // deadline expires.
+        //
+        // Direct port of MC ServerChunkCache.MainThreadExecutor.pollTask
+        // (minecraft_code/.../server/level/ServerChunkCache.java:583):
+        //
+        //     protected boolean pollTask() {
+        //        if (ServerChunkCache.this.runDistanceManagerUpdates()) return true;
+        //        else { lightEngine.tryScheduleUpdate(); return super.pollTask(); }
+        //     }
+        //
+        // ONE unit, then back to the caller — which is what lets MC's
+        // managedBlock(() -> !haveTime()) re-check the clock before every single
+        // one. This replaced a `while (didWork && iterations < 256)` loop that
+        // checked no clock at all: runDistanceUpdates is unbounded (it propagates
+        // every outstanding ticket) and promoteChunkMap rebuilds the whole
+        // visible chunk map per pass, so at world entry — 1369 chunks ticketed in
+        // one tick — a single call could run for SECONDS. Measured: five, during
+        // which the server thread completed no tick, sent no chunk, and the
+        // already-generated spawn chunk sat in the cache unsent.
+        //
+        // MUST run on the server thread: these touch ChunkMap/DistanceManager,
+        // which the terrain library treats as main-thread-only.
+        bool PumpOneTask();
 
-        // Cheap "is a blocked worker waiting on me?" probe — one mutex-guarded
-        // queue-empty check. The server loop pumps at ~1 kHz in its idle window,
-        // and PumpAsyncTasks() calls runDistanceManagerUpdates() unconditionally,
-        // which is far too heavy to run that often for nothing. Gate on this.
-        bool HasPendingAsyncTasks() const {
-            return m_mainThreadExecutor && m_mainThreadExecutor->hasPendingTasks();
+        // Park until the pipeline has work or `deadline` passes (MC
+        // BlockableEventLoop.waitForTasks). Server thread only.
+        bool WaitForPipelineWork(std::chrono::steady_clock::time_point deadline) {
+            return m_mainThreadExecutor && m_mainThreadExecutor->waitForTasks(deadline);
         }
 
         // Check if a chunk is ready (fully generated). Non-blocking. Must call from server thread.
@@ -325,6 +395,16 @@ namespace Game {
         // section-wise (skipping all-air sections entirely) and writes
         // directly into game ChunkSection arrays. Used by GenerateChunk and
         // GetCompletedChunk.
+        // One library section -> one game section. Palette-to-palette where the
+        // shapes line up, per-voxel otherwise. See the .cpp for why the
+        // per-voxel path is kept.
+        int  ConvertSection(const minecraft::world::LevelChunkSection& libSection,
+                            ChunkSection& outSection) const;
+        bool TryConvertSectionByPalette(const minecraft::world::LevelChunkSection& libSection,
+                                        ChunkSection& outSection, int& outNonAir) const;
+        int  ConvertSectionPerVoxel(const minecraft::world::LevelChunkSection& libSection,
+                                    ChunkSection& outSection) const;
+
         std::shared_ptr<Chunk> ConvertLibChunk(minecraft::world::IChunk* chunk,
                                                Math::ChunkPos position,
                                                int* outBlocksSet) const;

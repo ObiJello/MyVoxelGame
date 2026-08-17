@@ -1,9 +1,11 @@
 // File: src/server/session/PlayerSessionManager.cpp
 #include "PlayerSessionManager.hpp"
+#include "server/IntegratedServer.hpp"
+#include "server/entity/ServerLevelBridge.hpp"
+#include <algorithm>
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
-#include "../world/watch/ChunkWatchIndex.hpp"
 #include "common/core/Log.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "platform/GameDirectory.hpp"
@@ -23,13 +25,11 @@ namespace Server {
     void PlayerSessionManager::Initialize(
         const Config& config,
         ChunkTicketManager* ticketMgr,
-        ChunkWatchIndex* watchIndex,
         ChunkStatusManager* statusMgr,
         SendScheduler* scheduler
     ) {
         m_config = config;
         m_ticketManager = ticketMgr;
-        m_watchIndex = watchIndex;
         m_statusManager = statusMgr;
         m_sendScheduler = scheduler;
         
@@ -225,7 +225,8 @@ namespace Server {
                 for (int dz = -m_config.defaultSimulationDistance; dz <= m_config.defaultSimulationDistance; ++dz) {
                     Game::Math::ChunkPos chunk(spawnChunk.x + dx, spawnChunk.z + dz);
                     int distance = std::max(std::abs(dx), std::abs(dz));
-                    int level = ChunkTicketManager::CalculateTicketLevel(distance);
+                    int level = ChunkTicketManager::CalculateTicketLevel(
+                        distance, m_config.defaultSimulationDistance);
                     m_ticketManager->AddPlayerTicket(playerId, chunk, level);
                 }
             }
@@ -362,20 +363,9 @@ namespace Server {
         // Calculate chunk position
         Game::Math::ChunkPos chunk(worldX >> 4, worldZ >> 4);
         
-        // Get watchers from watch index
-        if (!m_watchIndex) {
-            return;
-        }
-        
-        auto watchers = m_watchIndex->GetWatchers(chunk);
-        
-        // Queue change for each watching player
-        for (uint32_t playerId : watchers) {
-            auto session = GetSession(playerId);
-            if (session) {
-                session->QueueBlockChange(worldX, worldY, worldZ, newBlock);
-            }
-        }
+        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+            session.QueueBlockChange(worldX, worldY, worldZ, newBlock);
+        });
     }
 
     void PlayerSessionManager::BroadcastSectionChanges(
@@ -383,18 +373,9 @@ namespace Server {
         int section,
         const std::vector<Network::MultiBlockChangeS2CPacket::BlockChange>& changes
     ) {
-        if (!m_watchIndex) {
-            return;
-        }
-        
-        auto watchers = m_watchIndex->GetWatchers(chunk);
-        
-        for (uint32_t playerId : watchers) {
-            auto session = GetSession(playerId);
-            if (session) {
-                session->QueueSectionChanges(chunk, section, changes);
-            }
-        }
+        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+            session.QueueSectionChanges(chunk, section, changes);
+        });
     }
 
     void PlayerSessionManager::BroadcastChunkUpdate(Game::Math::ChunkPos chunk) {
@@ -428,6 +409,20 @@ namespace Server {
             packet.position = glm::vec3(srcPlayer->getPosition());
             packet.rotation = srcPlayer->getRotation();
             packet.isCrouching = srcPlayer->IsSneaking();
+            // The hurt flash. LivingEntity::Hurt already set this on the
+            // player's entity view when the damage landed; it is only read here.
+            packet.hurtTime = 0;
+            packet.deathTime = 0;
+            if (Server::g_integratedServer) {
+                if (auto* view = Server::g_integratedServer->GetPlayerEntityView(srcId)) {
+                    packet.hurtTime = static_cast<uint8_t>(
+                        std::clamp(view->hurtTime, 0, 255));
+                    // The corpse's topple clock — see PlayerEntityView::
+                    // TickCombatState, which is what counts it.
+                    packet.deathTime = static_cast<uint8_t>(
+                        std::clamp(view->deathTime, 0, 255));
+                }
+            }
             packet.sequenceNumber = 0;
 
             auto data = Network::Serialization::Serialize(packet);
@@ -563,32 +558,44 @@ namespace Server {
             for (int dz = -simulationDistance; dz <= simulationDistance; ++dz) {
                 Game::Math::ChunkPos chunk(newAnchor.x + dx, newAnchor.z + dz);
                 int distance = std::max(std::abs(dx), std::abs(dz));
-                int level = ChunkTicketManager::CalculateTicketLevel(distance);
+                int level = ChunkTicketManager::CalculateTicketLevel(distance, simulationDistance);
                 m_ticketManager->AddPlayerTicket(playerId, chunk, level);
             }
         }
     }
 
-    void PlayerSessionManager::UpdatePlayerWatchers(
-        uint32_t playerId,
-        const std::vector<Game::Math::ChunkPos>& toAdd,
-        const std::vector<Game::Math::ChunkPos>& toRemove
-    ) {
-        if (!m_watchIndex) {
-            return;
+    // MC ChunkMap.onChunkReadyToSend: iterate players and ask each one's
+    // tracking view. There is no reverse chunk->players index to keep in sync,
+    // and with a handful of players this is cheaper than maintaining one.
+    void PlayerSessionManager::ForEachSessionWatching(
+        Game::Math::ChunkPos chunk,
+        const std::function<void(PlayerSession&)>& fn) const {
+        // Snapshot under the lock, invoke outside it. The callbacks here queue
+        // block changes and chunk sends, and some of those paths read back
+        // through this manager — holding a non-recursive mutex across them
+        // would deadlock. The old GetWatchers()-then-GetSession() shape had the
+        // same property by accident; this keeps it on purpose.
+        std::vector<std::shared_ptr<PlayerSession>> watching;
+        {
+            std::lock_guard<std::mutex> lock(m_sessionMutex);
+            watching.reserve(m_sessions.size());
+            for (const auto& [playerId, session] : m_sessions) {
+                if (session && session->GetTrackingView().Contains(chunk)) {
+                    watching.push_back(session);
+                }
+            }
         }
-        
-        m_watchIndex->RemoveWatchers(playerId, toRemove);
-        m_watchIndex->AddWatchers(playerId, toAdd);
+        for (const auto& session : watching) {
+            fn(*session);
+        }
     }
 
     std::vector<uint32_t> PlayerSessionManager::GetChunkWatchers(Game::Math::ChunkPos chunk) const {
-        if (!m_watchIndex) {
-            return {};
-        }
-        
-        auto watchers = m_watchIndex->GetWatchers(chunk);
-        return std::vector<uint32_t>(watchers.begin(), watchers.end());
+        std::vector<uint32_t> watchers;
+        ForEachSessionWatching(chunk, [&](PlayerSession& session) {
+            watchers.push_back(session.GetPlayerId());
+        });
+        return watchers;
     }
 
     void PlayerSessionManager::ProcessSessionTick(std::shared_ptr<PlayerSession> session) {
@@ -609,18 +616,13 @@ namespace Server {
             );
         }
 
-        // Apply watch index changes from session's watch delta processing
-        const auto& toAdd = session->GetPendingWatchAdds();
-        const auto& toRemove = session->GetPendingWatchRemoves();
-
-        if (!toAdd.empty() || !toRemove.empty()) {
-            Log::Debug("[PlayerSessionManager] Processing watch deltas for player %u: +%zu -%zu chunks",
-                      session->GetPlayerId(), toAdd.size(), toRemove.size());
-            UpdatePlayerWatchers(session->GetPlayerId(), toAdd, toRemove);
-
-            // Clear the consumed deltas
-            session->ClearPendingWatchDeltas();
-        }
+        // No watch-index synchronization: there is no index. "Who is watching
+        // chunk X" is answered by asking each session's tracking view
+        // (ForEachSessionWatching), exactly as MC asks each player's
+        // ChunkTrackingView in ChunkMap.onChunkReadyToSend. That removed a
+        // reverse map that cost ~1300 inserts on join and 70 mutations per
+        // chunk step, to answer a question a handful of players can answer
+        // directly.
     }
 
     bool PlayerSessionManager::IsSessionTimedOut(std::shared_ptr<PlayerSession> session) const {
@@ -653,10 +655,6 @@ namespace Server {
             m_ticketManager->RemoveAllPlayerTickets(playerId);
         }
         
-        // Remove all watchers for this player
-        if (m_watchIndex) {
-            m_watchIndex->RemoveAllWatchersForPlayer(playerId);
-        }
     }
 
 } // namespace Server

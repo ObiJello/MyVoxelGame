@@ -86,6 +86,29 @@ namespace Game {
         // happened" from a polled level is what let a click that dismissed a
         // screen break the block under the crosshair.
         void StartAttack();              // MC Minecraft.startAttack
+
+        // Pick the mob under the crosshair and send an attack for it.
+        // Returns true when an entity was hit, so the caller skips the block
+        // path — MC's startAttack has the same either/or shape.
+        // MC Minecraft.pick — which entity, if any, the crosshair is on.
+        // Returns 0 for none. An entity BEHIND the block the crosshair also
+        // hits does not count: MC clips the entity search at the block hit
+        // distance and keeps whichever is nearer, because Minecraft.hitResult
+        // is a single result, not one of each.
+        //
+        // Public because both the attack path and the block-highlight pass
+        // have to agree on it — an outline drawn on a block you cannot mine is
+        // the visible half of the same bug.
+        int32_t PickEntity() const;
+
+        // MC Minecraft.crosshairPickEntity, reduced to what the attack
+        // indicator needs: is there a LIVING thing under the crosshair right
+        // now. MC only shows the "charged" burst when there is something to
+        // hit, which is what makes the indicator read as a targeting cue
+        // rather than a bare timer.
+        bool HasEntityUnderCrosshair() const { return PickEntity() != 0; }
+
+        bool TryAttackEntity();
         void ContinueAttack(bool down);  // MC Minecraft.continueAttack
         void StartUseItem();             // MC Minecraft.startUseItem
         void StopUseItem();              // RMB release
@@ -152,6 +175,11 @@ namespace Game {
             int        destroyTicks    = 0;
             int        destroyDelay    = 0;       // ticks
             BlockID    destroyingBlockId = BlockID::Air;
+            // Captured alongside the id, and for the same reason: the local
+            // break prediction clears the cell before the server handles the
+            // packet, so the server has no way to read either back. Loot
+            // tables condition on the state (wheat drops wheat only at age=7).
+            uint8_t    destroyingBlockState = 0;
             int        lastSwingTick   = -1000;   // for MINE_SWING_TICKS pump
         };
         DigState digState;
@@ -291,7 +319,8 @@ namespace Game {
         // interaction sequence it was stamped with, which is what a matching
         // block prediction must be registered under (0 if nothing was sent).
         uint32_t SendDigPacket(Network::BlockActionType action,
-                               const glm::ivec3& pos, BlockID blockId);
+                               const glm::ivec3& pos, BlockID blockId,
+                               uint8_t blockState = 0);
     };
 
     // Typedef for compatibility during transition

@@ -32,7 +32,29 @@ namespace Render {
         int         gameMode = 1;      // 0 = Survival, 1 = Creative, 2 = Hardcore
         long long   created    = 0;    // epoch seconds
         long long   lastPlayed = 0;    // epoch seconds
-        bool isMinecraftSave = false;  // the detected Anvil save (not in json)
+        bool isMinecraftSave = false;  // an Anvil save on disk (not in json)
+
+        // Absolute path to the world folder for Anvil saves — empty for
+        // procedural worlds. Set for both the auto-detected saves/world and
+        // worlds imported from a real Minecraft installation.
+        std::string savePath;
+
+        // Worlds from the player's Minecraft install are loaded but never
+        // written back: we do not implement enough of the format to be trusted
+        // with somebody's actual survival world, and a partial rewrite would
+        // corrupt it. Blocks can still be broken in-session; nothing persists.
+        bool readOnly = false;
+
+        // Non-selectable divider row ("Your Minecraft Worlds"). Carried in the
+        // same vector so the list keeps one scroll/index space.
+        bool isHeader = false;
+
+        // Pre-built grey detail lines, MC WorldSelectionList.WorldListEntry:
+        //   [0] levelId + " (" + last played + ")"
+        //   [1] game mode + cheats + ", Version: x.y.z"
+        // Only populated for Anvil worlds read from a level.dat.
+        std::string infoLine1;
+        std::string infoLine2;
 
         // Creation options (MC CreateWorldScreen tabs). Persisted with the
         // world; the engine applies what it supports (world type Default is

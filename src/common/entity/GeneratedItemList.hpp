@@ -501,5 +501,10 @@ namespace Game::Items {
     static constexpr ItemID EndermanSpawnEgg                 = PURE_ITEM_BASE +  490; // "enderman_spawn_egg"
     static constexpr ItemID EndermiteSpawnEgg                = PURE_ITEM_BASE +  491; // "endermite_spawn_egg"
     static constexpr ItemID ShulkerSpawnEgg                  = PURE_ITEM_BASE +  492; // "shulker_spawn_egg"
+    // Hand-appended — see the matching note in GeneratedItemList.cpp. MC
+    // registers these via net.minecraft.references.Items, which gen_items.py's
+    // string-literal regex does not match.
+    static constexpr ItemID MelonSeeds                       = PURE_ITEM_BASE +  493; // "melon_seeds"
+    static constexpr ItemID PumpkinSeeds                     = PURE_ITEM_BASE +  494; // "pumpkin_seeds"
 
 } // namespace Game::Items

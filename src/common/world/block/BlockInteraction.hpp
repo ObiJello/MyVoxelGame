@@ -143,7 +143,7 @@ namespace Game {
         // The horizontal direction the player is facing.
         // MC: UseOnContext.getHorizontalDirection() == player.getDirection().
         Direction getHorizontalDirection() const {
-            return HorizontalFromEngineYaw(playerYaw);
+            return FromYRot(playerYaw);
         }
 
         // The nearest of the six directions to the player's look vector — the
@@ -160,8 +160,8 @@ namespace Game {
             const float vertical = std::fabs(std::sin(pitchRad));
             const float horizontal = std::fabs(std::cos(pitchRad));
             if (vertical > horizontal) {
-                // This engine's pitch is positive looking UP.
-                return playerPitch > 0.0f ? Direction::Up : Direction::Down;
+                // Pitch is positive looking DOWN (MC's convention).
+                return playerPitch > 0.0f ? Direction::Down : Direction::Up;
             }
             return getHorizontalDirection();
         }

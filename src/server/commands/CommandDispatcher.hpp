@@ -33,6 +33,11 @@ namespace Server {
                            ServerConnection& connection,
                            PlayerSessionManager& sessionManager);
 
+        // Every registered command name, sorted. Sent to each client on join
+        // (CommandsS2C) so tab-completion reflects what this server actually
+        // accepts instead of a list the client hardcodes and forgets to update.
+        std::vector<std::string> GetCommandNames() const;
+
     private:
         std::unordered_map<std::string, CommandHandler> m_commands;
 

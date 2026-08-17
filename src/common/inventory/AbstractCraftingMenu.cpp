@@ -118,7 +118,13 @@ namespace Game {
             const ItemStack parked = m_craftContainer->GetItem(m_craftBase + i);
             if (parked.IsEmpty()) continue;
             m_craftContainer->SetItem(m_craftBase + i, ItemStack{});
-            getInventory().AddStack(parked);
+            const int leftover = getInventory().AddStack(parked);
+            if (leftover > 0) {
+                // Full inventory — into the world instead of nowhere.
+                ItemStack overflow = parked;
+                overflow.count = leftover;
+                result.extraDrops.push_back(overflow);
+            }
             MarkChanged(result, m_gridMenuBegin + i);
         }
 

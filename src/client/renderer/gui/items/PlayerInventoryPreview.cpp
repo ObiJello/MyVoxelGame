@@ -104,13 +104,14 @@ namespace Render {
         // MC's preview ALWAYS faces the camera regardless of the player's world
         // yaw — InventoryScreen.java:91-92 sets `bodyRot = 180.0F + xAngle*20`
         // and `yRot = xAngle*20`, ignoring `(void)pose`. Our equivalent of MC's
-        // 180° face-camera bias: in our stick figure, bodyYaw=90° puts bodyFwd
-        // at (0,0,+1) which projects toward the camera (we orthographic-project
-        // X→screenX, Y→screenY, ignore Z).
+        // 180° face-camera bias: bodyYaw=0 puts bodyFwd at (0,0,+1), which
+        // projects toward the camera (we orthographic-project X→screenX,
+        // Y→screenY, ignore Z). It was 90° while the engine used the old
+        // camera yaw convention; the turn direction is unchanged either way.
         (void)pose;  // base pose (player's world facing) intentionally ignored
         StickFigurePose effective{};
-        effective.bodyYawDeg   = 90.0f + xAngle * 20.0f;
-        effective.headYawDeg   = 90.0f + xAngle * 20.0f;
+        effective.bodyYawDeg   = xAngle * 20.0f;
+        effective.headYawDeg   = xAngle * 20.0f;
         effective.headPitchDeg = -yAngle * 20.0f;
         effective.isCrouching  = false;
 

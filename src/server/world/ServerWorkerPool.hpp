@@ -9,6 +9,8 @@
 #include <memory>
 #include <atomic>
 #include <unordered_map>
+#include <vector>
+#include <mutex>
 
 namespace Game {
     class Chunk;
@@ -68,11 +70,9 @@ namespace Threading {
         // Submit chunk generation job
         void SubmitChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
 
-        // Submit chunk loading job (from disk).
-        // Returns false if the job could not be queued (worker queue full), in
-        // which case NO result will ever be produced for this chunk — callers
-        // that track in-flight loads must not mark it pending. See
-        // IntegratedServer::RequestChunkLoad.
+        // Submit chunk loading job (from disk). Always accepted — the queue has
+        // no capacity limit, matching MC's ChunkTaskDispatcher. Returns false
+        // only when the pool is not running.
         bool SubmitChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
 
         // Submit chunk saving job
@@ -99,8 +99,8 @@ namespace Threading {
         // CONFIGURATION
         // ========================================================================
 
-        void SetMaxQueueSize(size_t maxSize) { m_maxQueueSize = maxSize; }
-        size_t GetMaxQueueSize() const { return m_maxQueueSize; }
+        // Refresh the player positions DequeueJob prioritises against.
+        void SetAnchors(std::vector<Game::Math::ChunkPos> anchors);
 
         void SetWorkerCount(size_t count);
         size_t GetWorkerCount() const { return m_workerThreads.size(); }
@@ -142,11 +142,20 @@ namespace Threading {
         std::atomic<bool> m_running{false};
         size_t m_workerCount;
 
+        // Player chunk positions, refreshed each server tick. DequeueJob picks
+        // the queued chunk nearest to any of them — MC re-evaluates its queue
+        // level at poll time for the same reason: the players move, so a key
+        // fixed at submit time is stale by the time the job is taken.
+        mutable std::mutex m_anchorMutex;
+        std::vector<Game::Math::ChunkPos> m_anchors;
+
         // Job queue
         mutable std::mutex m_jobQueueMutex;
-        std::queue<ServerJob> m_jobQueue;
+        // Vector, not a queue: DequeueJob selects by distance to the nearest
+        // player rather than by insertion order (MC ChunkTaskDispatcher's
+        // queue-level priority), so there is no FIFO order to preserve.
+        std::vector<ServerJob> m_jobQueue;
         std::condition_variable m_jobCondition;
-        size_t m_maxQueueSize = 1000;
 
         // Job cancellation via generation IDs
         mutable std::mutex m_cancelMutex;
@@ -203,6 +212,9 @@ namespace Threading {
     // Direct job submission
     void SubmitServerChunkGeneration(Game::Math::ChunkPos chunkPos, int priority = 0);
     bool SubmitServerChunkLoading(Game::Math::ChunkPos chunkPos, int priority = 0);
+
+    // Player chunk positions the pool orders queued chunk work against.
+    void SetServerChunkLoadAnchors(std::vector<Game::Math::ChunkPos> anchors);
     void SubmitServerChunkSaving(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, int priority = 0);
 
 } // namespace Threading

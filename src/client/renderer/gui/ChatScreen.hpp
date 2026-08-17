@@ -9,6 +9,19 @@
 namespace Render {
     class GuiGraphics;
 
+    // ── Server command list (MC ClientboundCommandsPacket) ──────────────────
+    //
+    // Set from CommandsS2C on join; read by tab-completion. This exists so the
+    // client never hardcodes what the server registers — that list drifted
+    // every time a command was added and the new one silently never appeared
+    // in the popup.
+    //
+    // Main-thread only: written by the packet handler and read by the chat
+    // screen, both of which run on the main thread (packets apply there via
+    // IPacket::apply).
+    void SetServerCommandNames(std::vector<std::string> names);
+    const std::vector<std::string>& GetServerCommandNames();
+
     class ChatScreen {
     public:
         static constexpr int MAX_MESSAGE_LENGTH = 256;
@@ -60,6 +73,11 @@ namespace Render {
         int  m_suggestionIndex = 0;
         int  m_suggestionAnchor = 0;   // Start of the word being completed (index in m_inputText)
         bool m_suggestionsOpen = false;
+        // How many characters the completion currently occupies, starting at
+        // m_suggestionAnchor. Needed because TAB now types the suggestion
+        // straight into the field and each further TAB has to replace what the
+        // previous one wrote — not the shrinking partial the player typed.
+        int  m_suggestionCurrentLen = 0;
         // MC's SuggestionsList shows up to 10 entries at once and scrolls
         // for more. Match the constant.
         static constexpr int MAX_VISIBLE_SUGGESTIONS = 10;
@@ -68,7 +86,11 @@ namespace Render {
         // dispatches per command, fills m_suggestions / m_suggestionAnchor.
         void OpenSuggestions();
         void CloseSuggestions();
-        void ApplySelectedSuggestion();
+        // Writes the highlighted suggestion into the input field, replacing
+        // whatever is currently in the completion slot. Both opening the popup
+        // and cycling it go through here, so the field always shows the entry
+        // that is highlighted.
+        void ApplySuggestionInPlace();
         void CycleSuggestion(int delta);
         void RenderSuggestions(GuiGraphics& graphics, int inputX, int inputY);
 

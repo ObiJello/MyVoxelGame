@@ -60,6 +60,18 @@ namespace Client {
         using namespace Network;
         m_packetRegistry.RegisterHandler(PacketId::LoginSuccess,
             [this](const std::vector<uint8_t>& p) { HandleLoginSuccess(p); });
+        // MC ClientHandshakePacketListenerImpl.handleCompression: the decoder
+        // switches on the instant this packet is handled, and every frame after
+        // it carries the extra length VarInt. The packet itself arrived
+        // uncompressed, because the server enables its encoder only after
+        // writing it.
+        m_packetRegistry.RegisterHandler(PacketId::SetCompression,
+            [this](const std::vector<uint8_t>& p) {
+                Network::PacketReader reader(p);
+                const int threshold = static_cast<int>(reader.ReadVarInt());
+                EnableCompression(threshold);
+                Log::Info("[ClientConnection] Compression enabled, threshold %d bytes", threshold);
+            });
         m_packetRegistry.RegisterHandler(PacketId::Disconnect,
             [this](const std::vector<uint8_t>& p) { HandleDisconnect(p); });
         m_packetRegistry.RegisterHandler(PacketId::BlockChangeS2C,
@@ -460,6 +472,10 @@ namespace Client {
                 return std::make_unique<BlockChangeS2CPacketImpl>(std::move(data));
             }
             
+            case PacketId::ClientboundSectionBlocksUpdate: {
+                auto data = Serialization::DeserializeClientboundSectionBlocksUpdate(payload);
+                return std::make_unique<ClientboundSectionBlocksUpdateS2CPacketImpl>(std::move(data));
+            }
             case PacketId::MultiBlockChangeS2C: {
                 auto data = Serialization::DeserializeMultiBlockChangeS2C(payload);
                 return std::make_unique<MultiBlockChangeS2CPacketImpl>(std::move(data));
@@ -473,6 +489,65 @@ namespace Client {
             case PacketId::EntityDestroy: {
                 auto data = Serialization::DeserializeRemoveEntitiesS2C(payload);
                 return std::make_unique<RemoveEntitiesS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ItemEntitySpawnS2C: {
+                auto data = Serialization::DeserializeItemEntitySpawnS2C(payload);
+                return std::make_unique<ItemEntitySpawnS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::ItemEntityMoveS2C: {
+                auto data = Serialization::DeserializeItemEntityMoveS2C(payload);
+                return std::make_unique<ItemEntityMoveS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::TakeItemEntityS2C: {
+                auto data = Serialization::DeserializeTakeItemEntityS2C(payload);
+                return std::make_unique<TakeItemEntityS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::AddEntityS2C: {
+                auto data = Serialization::DeserializeAddEntityS2C(payload);
+                return std::make_unique<AddEntityS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::MoveEntityS2C: {
+                auto data = Serialization::DeserializeMoveEntityS2C(payload);
+                return std::make_unique<MoveEntityS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::EntityPositionSyncS2C: {
+                auto data = Serialization::DeserializeEntityPositionSyncS2C(payload);
+                return std::make_unique<EntityPositionSyncS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::SetEntityMotionS2C: {
+                auto data = Serialization::DeserializeSetEntityMotionS2C(payload);
+                return std::make_unique<SetEntityMotionS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::SetEntityDataS2C: {
+                auto data = Serialization::DeserializeSetEntityDataS2C(payload);
+                return std::make_unique<SetEntityDataS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::HurtAnimationS2C: {
+                auto data = Serialization::DeserializeHurtAnimationS2C(payload);
+                return std::make_unique<HurtAnimationS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::EntityEventS2C: {
+                auto data = Serialization::DeserializeEntityEventS2C(payload);
+                return std::make_unique<EntityEventS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::TickingStateS2C: {
+                auto data = Serialization::DeserializeTickingStateS2C(payload);
+                return std::make_unique<TickingStateS2CPacketImpl>(std::move(data));
+            }
+
+            case PacketId::TickingStepS2C: {
+                auto data = Serialization::DeserializeTickingStepS2C(payload);
+                return std::make_unique<TickingStepS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::Disconnect: {
@@ -506,6 +581,11 @@ namespace Client {
                 return std::make_unique<SetChunkCacheRadiusS2CPacketImpl>(data.viewDistance);
             }
 
+            case PacketId::CommandsS2C: {
+                auto data = Serialization::DeserializeCommandsS2C(payload);
+                return std::make_unique<CommandsS2CPacketImpl>(std::move(data.commandNames));
+            }
+
             case PacketId::InventoryFullS2C: {
                 auto data = Serialization::DeserializeInventoryFullS2C(payload);
                 return std::make_unique<InventoryFullS2CPacketImpl>(std::move(data));
@@ -521,6 +601,10 @@ namespace Client {
                 return std::make_unique<InventorySetCarriedS2CPacketImpl>(data);
             }
 
+            case PacketId::ContainerSetDataS2C: {
+                auto data = Serialization::DeserializeContainerSetDataS2C(payload);
+                return std::make_unique<ContainerSetDataS2CPacketImpl>(std::move(data));
+            }
             case PacketId::OpenScreenS2C: {
                 auto data = Serialization::DeserializeOpenScreenS2C(payload);
                 return std::make_unique<OpenScreenS2CPacketImpl>(std::move(data));

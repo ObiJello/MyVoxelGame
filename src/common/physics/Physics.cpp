@@ -597,23 +597,15 @@ namespace Game {
         }
     }
 
-    bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
-                       const PhysicsContext& context) {
+    bool CollidesAt(const AABB& box, const PhysicsContext& context) {
 
-        // Create AABB at the new position
-        float height = physics.GetCurrentHeight();
-        AABB playerAABB(
-            glm::vec3(position.x, position.y + height * 0.5f, position.z),
-            glm::vec3(PlayerPhysics::WIDTH, height, PlayerPhysics::WIDTH)
-        );
-
-        // Check blocks that the player could be colliding with
-        int minX = static_cast<int>(std::floor(playerAABB.min.x));
-        int maxX = static_cast<int>(std::floor(playerAABB.max.x));
-        int minY = static_cast<int>(std::floor(playerAABB.min.y));
-        int maxY = static_cast<int>(std::floor(playerAABB.max.y));
-        int minZ = static_cast<int>(std::floor(playerAABB.min.z));
-        int maxZ = static_cast<int>(std::floor(playerAABB.max.z));
+        // Check blocks that the box could be colliding with
+        int minX = static_cast<int>(std::floor(box.min.x));
+        int maxX = static_cast<int>(std::floor(box.max.x));
+        int minY = static_cast<int>(std::floor(box.min.y));
+        int maxY = static_cast<int>(std::floor(box.max.y));
+        int minZ = static_cast<int>(std::floor(box.min.z));
+        int maxZ = static_cast<int>(std::floor(box.max.z));
 
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
@@ -650,17 +642,17 @@ namespace Game {
                     blockAABB.min = glm::vec3(x, y, z) + shape.min;
                     blockAABB.max = glm::vec3(x, y, z) + shape.max;
 
-                    if (playerAABB.Intersects(blockAABB)) {
+                    if (box.Intersects(blockAABB)) {
                         // Portal-passthrough exception. The block is
-                        // solid AND the player AABB overlaps it, but
-                        // the portal hook may say "this player at
+                        // solid AND the moving AABB overlaps it, but
+                        // the portal hook may say "this entity at
                         // this position fits inside the portal opening
-                        // — let them through." If the player AABB
+                        // — let them through." If the AABB
                         // exceeds the opening laterally (e.g. they're
                         // approaching from the side), the hook returns
                         // false and the wall stays solid.
                         if (g_portalPassthrough &&
-                            g_portalPassthrough(x, y, z, playerAABB)) {
+                            g_portalPassthrough(x, y, z, box)) {
                             continue;
                         }
                         return true; // Collision detected
@@ -670,6 +662,18 @@ namespace Game {
         }
 
         return false; // No collision
+    }
+
+    bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,
+                       const PhysicsContext& context) {
+        // Player-shaped wrapper over the generic test. Kept as its own
+        // function (rather than inlined at every call site) so the player's
+        // sneak-dependent height stays in one place.
+        const float height = physics.GetCurrentHeight();
+        return CollidesAt(
+            AABB(glm::vec3(position.x, position.y + height * 0.5f, position.z),
+                 glm::vec3(PlayerPhysics::WIDTH, height, PlayerPhysics::WIDTH)),
+            context);
     }
 
     bool HasSupportBelow(const glm::vec3& position, const PlayerPhysics& physics,
@@ -786,6 +790,321 @@ namespace Game {
         } catch (...) {
             physics.isEyeInWater = false;
         }
+    }
+
+    // ── Generic AABB mover (MC Entity.move(MoverType.SELF, …)) ──────────────
+    //
+    // Axis-separated sweep: move one axis at a time and back that axis out
+    // entirely if the resulting box overlaps the world. Separating the axes is
+    // what lets an entity slide along a wall instead of stopping dead, and it
+    // is the same decomposition MC's `collide` makes.
+    //
+    // Y is stepped FIRST, before X and Z. MC does the same thing (its
+    // `collideBoundingBox` resolves Y ahead of the horizontal axes), and the
+    // order is load-bearing here: resolving Y last would let an item that is
+    // falling into the corner of a block get pushed sideways out of the wall
+    // before it ever registers as having landed, so `onGround` would flicker
+    // and the -0.5 bounce would never fire.
+    MoveResult MoveAABB(glm::dvec3& pos, glm::dvec3& velocity,
+                        const glm::vec3& halfExtents,
+                        const PhysicsContext& context) {
+        MoveResult result;
+
+        // Build the entity box for a candidate centre. `pos` is the entity's
+        // FEET (MC convention), so the box is raised by half its height.
+        const auto boxAt = [&](const glm::dvec3& p) {
+            const glm::vec3 c(p.x, p.y + halfExtents.y, p.z);
+            return AABB(c, halfExtents * 2.0f);
+        };
+
+        // Y first — see the ordering note above.
+        if (velocity.y != 0.0) {
+            glm::dvec3 next = pos;
+            next.y += velocity.y;
+            if (CollidesAt(boxAt(next), context)) {
+                // Blocked. A downward block is a landing; either way this
+                // axis' momentum is spent.
+                if (velocity.y < 0.0) result.onGround = true;
+                result.collidedY = true;
+                velocity.y = 0.0;
+            } else {
+                pos.y = next.y;
+            }
+        }
+
+        if (velocity.x != 0.0) {
+            glm::dvec3 next = pos;
+            next.x += velocity.x;
+            if (CollidesAt(boxAt(next), context)) {
+                result.collidedX = true;
+                velocity.x = 0.0;
+            } else {
+                pos.x = next.x;
+            }
+        }
+
+        if (velocity.z != 0.0) {
+            glm::dvec3 next = pos;
+            next.z += velocity.z;
+            if (CollidesAt(boxAt(next), context)) {
+                result.collidedZ = true;
+                velocity.z = 0.0;
+            } else {
+                pos.z = next.z;
+            }
+        }
+
+        // An entity that never moved down this step still needs to know it is
+        // resting on something, or it would re-enter free-fall the moment the
+        // sleep optimisation skips a tick. Probe a hair below the feet.
+        if (!result.onGround) {
+            glm::dvec3 probe = pos;
+            probe.y -= 0.001;
+            result.onGround = CollidesAt(boxAt(probe), context);
+        }
+
+        return result;
+    }
+
+    // ── MC-faithful entity mover ───────────────────────────────────────────
+
+    void CollectBlockColliders(const AABBd& region, const PhysicsContext& context,
+                               std::vector<AABBd>& out) {
+        out.clear();
+
+        const int minX = static_cast<int>(std::floor(region.min.x));
+        const int maxX = static_cast<int>(std::floor(region.max.x));
+        const int minY = static_cast<int>(std::floor(region.min.y));
+        const int maxY = static_cast<int>(std::floor(region.max.y));
+        const int minZ = static_cast<int>(std::floor(region.min.z));
+        const int maxZ = static_cast<int>(std::floor(region.max.z));
+
+        for (int x = minX; x <= maxX; ++x) {
+            for (int y = minY; y <= maxY; ++y) {
+                for (int z = minZ; z <= maxZ; ++z) {
+                    // Same source of truth as CollidesAt — the registry, never
+                    // a render-layer solidity flag. See the long note there for
+                    // why: the two sides run different IBlockAccess impls and
+                    // disagree about "solid", which desyncs host and joiner.
+                    const BlockID bid = context.GetBlock(x, y, z);
+                    if (!BlockRegistry::HasCollision(bid)) continue;
+
+                    const auto& shape =
+                        BlockRegistry::GetBlockShape(bid, context.GetBlockState(x, y, z));
+
+                    // Built in DOUBLES from the integer block coordinate, so
+                    // a collider face is exact at any distance from the origin.
+                    // As floats, `1000000 + 0.5` is not even representable.
+                    AABBd blockAABB;
+                    blockAABB.min = glm::dvec3(x, y, z) + glm::dvec3(shape.min);
+                    blockAABB.max = glm::dvec3(x, y, z) + glm::dvec3(shape.max);
+
+                    // Portal passthrough is deliberately NOT consulted here.
+                    // The hook's answer depends on the moving entity's own box
+                    // (it only opens for something that fits the 1x2 opening
+                    // laterally), and this collider set is reused across the
+                    // step-up candidates — so there is no single box to ask
+                    // about. Mobs therefore treat portal frames as solid, which
+                    // is the intended behaviour: nothing but the player travels
+                    // through a portal.
+                    out.push_back(blockAABB);
+                }
+            }
+        }
+    }
+
+    double CollideAxis(int axis, const AABBd& box, double desired,
+                       const std::vector<AABBd>& colliders) {
+        if (desired == 0.0) return 0.0;
+
+        // The two axes that are NOT being resolved. A collider only blocks
+        // motion along `axis` if the box already overlaps it on both of them.
+        const int a = (axis + 1) % 3;
+        const int b = (axis + 2) % 3;
+
+        const auto lo = [](const AABBd& v, int i) {
+            return i == 0 ? v.min.x : (i == 1 ? v.min.y : v.min.z);
+        };
+        const auto hi = [](const AABBd& v, int i) {
+            return i == 0 ? v.max.x : (i == 1 ? v.max.y : v.max.z);
+        };
+
+        double result = desired;
+
+        for (const AABBd& c : colliders) {
+            // Strict inequality on both cross axes, matching AABB::Intersects —
+            // an entity sliding exactly along a face must not be caught by it.
+            if (hi(box, a) <= lo(c, a) || lo(box, a) >= hi(c, a)) continue;
+            if (hi(box, b) <= lo(c, b) || lo(box, b) >= hi(c, b)) continue;
+
+            if (result > 0.0) {
+                // Moving positive: the collider's near (min) face stops us.
+                const double gap = lo(c, axis) - hi(box, axis);
+                if (gap >= 0.0 && gap < result) result = gap;
+            } else {
+                const double gap = hi(c, axis) - lo(box, axis);
+                if (gap <= 0.0 && gap > result) result = gap;
+            }
+        }
+
+        return result;
+    }
+
+    EntityMoveResult MoveEntity(glm::dvec3& pos, glm::dvec3& velocity,
+                                const glm::vec3& halfExtents,
+                                float maxUpStep, bool wasOnGround,
+                                const PhysicsContext& context) {
+        EntityMoveResult result;
+
+        // MC's equality epsilon (Mth.equal). Anything closer than this counts
+        // as "went the whole way" and does NOT raise a collision flag.
+        constexpr double kEpsilon = 1.0e-5;
+
+        // `pos` is FEET; the box is raised by half the height. Built in
+        // DOUBLES — see the note on AABBd for why this one cannot be float.
+        const auto boxAt = [&](const glm::dvec3& p) {
+            AABBd b;
+            b.min = glm::dvec3(p.x - halfExtents.x, p.y, p.z - halfExtents.z);
+            b.max = glm::dvec3(p.x + halfExtents.x,
+                               p.y + 2.0 * static_cast<double>(halfExtents.y),
+                               p.z + halfExtents.z);
+            return b;
+        };
+
+        const glm::dvec3 desired = velocity;
+        if (desired.x == 0.0 && desired.y == 0.0 && desired.z == 0.0) {
+            // Still owe the caller an accurate onGround: an entity that did not
+            // move this tick is usually one that is standing still ON something,
+            // and free-fall must not restart the moment it stops.
+            glm::dvec3 probe = pos;
+            probe.y -= 0.001;
+            // A boolean overlap query, so the float AABB is fine here.
+            const AABBd p = boxAt(probe);
+            result.onGround = CollidesAt(AABB{ glm::vec3(p.min), glm::vec3(p.max) }, context);
+            return result;
+        }
+
+        const AABBd startBox = boxAt(pos);
+
+        // One collider gather for the whole move, over the swept region. The
+        // extra 1.0 of headroom on +Y covers the step-up candidates.
+        AABBd region = startBox;
+        region.min += glm::dvec3(std::min(0.0, desired.x), std::min(0.0, desired.y), std::min(0.0, desired.z));
+        region.max += glm::dvec3(std::max(0.0, desired.x), std::max(0.0, desired.y), std::max(0.0, desired.z));
+        region.max.y += std::max(1.0, static_cast<double>(maxUpStep));
+        region.min -= glm::dvec3(1.0e-3);
+        region.max += glm::dvec3(1.0e-3);
+
+        std::vector<AABBd> colliders;
+        CollectBlockColliders(region, context, colliders);
+
+        // MC Direction.axisStepOrder: resolve the LARGEST component first, so
+        // a mostly-horizontal move commits to its dominant axis before the
+        // smaller ones can be clipped by geometry it has not reached yet.
+        const auto resolve = [&](const glm::dvec3& move, const AABBd& from) {
+            glm::dvec3 out(0.0);
+            int order[3] = {0, 1, 2};
+            const double mag[3] = {std::abs(move.x), std::abs(move.y), std::abs(move.z)};
+            // Three elements — a hand-rolled descending sort beats pulling in
+            // <algorithm> machinery for a function this hot.
+            if (mag[order[0]] < mag[order[1]]) std::swap(order[0], order[1]);
+            if (mag[order[1]] < mag[order[2]]) std::swap(order[1], order[2]);
+            if (mag[order[0]] < mag[order[1]]) std::swap(order[0], order[1]);
+
+            for (int i = 0; i < 3; ++i) {
+                const int axis = order[i];
+                const double want = axis == 0 ? move.x : (axis == 1 ? move.y : move.z);
+                if (want == 0.0) continue;
+                // Apply what has been resolved so far before testing the next
+                // axis — that partial displacement is exactly what lets an
+                // entity round a corner instead of catching on it.
+                AABBd moved = from;
+                moved.min += out;
+                moved.max += out;
+                const double got = CollideAxis(axis, moved, want, colliders);
+                if (axis == 0) out.x = got; else if (axis == 1) out.y = got; else out.z = got;
+            }
+            return out;
+        };
+
+        glm::dvec3 moved = resolve(desired, startBox);
+
+        const bool blockedX = std::abs(moved.x - desired.x) > kEpsilon;
+        const bool blockedZ = std::abs(moved.z - desired.z) > kEpsilon;
+        const bool onGroundAfter = (std::abs(moved.y - desired.y) > kEpsilon) && desired.y < 0.0;
+
+        // ── Step-up (MC Entity.collide, Entity.java:1089-1118) ─────────────
+        //
+        // Only when the entity is (or just became) grounded AND ran into
+        // something horizontally. MC tries each collider top face inside
+        // (0, maxUpStep] rather than a single fixed height, because on stairs
+        // and slabs the useful height is not maxUpStep — it is whatever the
+        // obstruction's top actually is.
+        if (maxUpStep > 0.0f && (onGroundAfter || wasOnGround) && (blockedX || blockedZ)) {
+            const AABBd groundedBox = onGroundAfter
+                ? [&] { AABBd b = startBox; b.min.y += moved.y; b.max.y += moved.y; return b; }()
+                : startBox;
+
+            // Candidate heights: every collider top face strictly above the
+            // box's floor and within reach, ascending, deduplicated.
+            std::vector<double> candidates;
+            candidates.reserve(8);
+            for (const AABBd& c : colliders) {
+                const double h = c.max.y - groundedBox.min.y;
+                if (h > 1.0e-7 && h <= static_cast<double>(maxUpStep) &&
+                    std::abs(h - moved.y) > 1.0e-7) {
+                    candidates.push_back(h);
+                }
+            }
+            std::sort(candidates.begin(), candidates.end());
+            candidates.erase(std::unique(candidates.begin(), candidates.end(),
+                                         [](double a, double b) { return std::abs(a - b) < 1.0e-7; }),
+                             candidates.end());
+
+            const double bestHorizSq = moved.x * moved.x + moved.z * moved.z;
+            for (double h : candidates) {
+                const glm::dvec3 stepped =
+                    resolve(glm::dvec3(desired.x, h, desired.z), groundedBox);
+                if (stepped.x * stepped.x + stepped.z * stepped.z > bestHorizSq) {
+                    // MC subtracts the grounded box's own Y offset back out, so
+                    // the result stays expressed relative to the ORIGINAL box.
+                    moved = stepped - glm::dvec3(0.0, startBox.min.y - groundedBox.min.y, 0.0);
+                    result.steppedUp = true;
+                    break;
+                }
+            }
+        }
+
+        pos += moved;
+
+        result.collidedX = std::abs(moved.x - desired.x) > kEpsilon;
+        result.collidedZ = std::abs(moved.z - desired.z) > kEpsilon;
+        result.collidedY = std::abs(moved.y - desired.y) > kEpsilon;
+        result.horizontalCollision = result.collidedX || result.collidedZ;
+        result.verticalCollision = result.collidedY;
+        result.onGround = result.collidedY && desired.y < 0.0;
+
+        // Zero the momentum of any axis that hit something. A stepped-up move
+        // is exempt on Y: the entity did not land on anything, it climbed, and
+        // wiping Y here would eat the jump the mob may be part-way through.
+        if (result.collidedX) velocity.x = 0.0;
+        if (result.collidedZ) velocity.z = 0.0;
+        if (result.collidedY && !result.steppedUp) velocity.y = 0.0;
+
+        // Resting contact: an entity that did not move down this tick still
+        // needs to know it is supported, or it re-enters free fall next tick.
+        if (!result.onGround) {
+            glm::dvec3 probe = pos;
+            probe.y -= 0.001;
+            // Reuses the collider set already gathered for this move, so the
+            // probe is answered in doubles like everything else above.
+            const AABBd probeBox = boxAt(probe);
+            for (const AABBd& c : colliders) {
+                if (probeBox.Intersects(c)) { result.onGround = true; break; }
+            }
+        }
+
+        return result;
     }
 
 } // namespace Game

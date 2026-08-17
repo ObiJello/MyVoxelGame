@@ -30,6 +30,31 @@ namespace Game {
         // neighbour dirtying are handled by ClientChunkManager).
         virtual bool SetBlock(int worldX, int worldY, int worldZ,
                               BlockID blockId, uint32_t updateFlags) = 0;
+
+        // Same, carrying the block-state index (MC BlockState.getId()). Needed
+        // by any behaviour that edits a PROPERTY rather than swapping the
+        // block — a shovel dousing a campfire writes the same block back with
+        // `lit=false`, so the two-argument form above would reset it to the
+        // default state and relight it.
+        //
+        // Both implementations already had this overload; it is declared here
+        // so common code can reach it through the interface.
+        virtual bool SetBlock(int worldX, int worldY, int worldZ,
+                              BlockID blockId, uint32_t updateFlags,
+                              uint8_t stateIndex) = 0;
+
+        // MC Level.isClientSide. Item behaviours run on both sides (see the
+        // note above), and most of them WANT that — a tilled block should
+        // appear immediately and be rolled back if the server disagrees.
+        //
+        // Some do not. Anything that spawns an entity has no client-side
+        // equivalent to predict: the entity only exists once the server sends
+        // it, so running the spawn during prediction would either do nothing
+        // or, in single-player where both sides share a process, spawn twice.
+        // MC's own SpawnEggItem opens with `if (!(level instanceof ServerLevel))
+        // return SUCCESS;` for exactly this reason, and this is the flag that
+        // branch needs.
+        virtual bool IsClientSide() const = 0;
     };
 
 } // namespace Game

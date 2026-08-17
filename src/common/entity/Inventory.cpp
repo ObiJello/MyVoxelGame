@@ -138,7 +138,7 @@ namespace Game {
 
     void Inventory::SetSlot(int index, ItemID id, int count) {
         if (index >= 0 && index < TOTAL_SIZE) {
-            slots[index] = {id, count};
+            slots[index] = {id, std::min(count, ItemRegistry::Get(id).maxStackSize)};
         }
     }
 

@@ -30,12 +30,20 @@
             // ========================================================================
             // SERVER → CLIENT PACKETS (0x10-0x7F)
             // ========================================================================
-            // 0x10 and 0x11 reserved (previously ServerChunkData/ServerChunkUnload)
+            // 0x10 and 0x11 were freed when ServerChunkData/ServerChunkUnload
+            // were replaced; they now carry AddEntityS2C /
+            // EntityPositionSyncS2C, declared with the rest of the mob family
+            // below so that group reads together.
             BlockChangeS2C      = 0x12,
             MultiBlockChangeS2C = 0x13,
             PlayerUpdateS2C     = 0x14,
-            EntitySpawn         = 0x15,
-            EntityMove          = 0x16,
+            // 0x15/0x16 were reserved for a generic entity system that never
+            // landed; the only world entities are dropped items, so they carry
+            // those. 0x17 stays generic — it carries RemoveEntitiesS2CPacket
+            // for BOTH players and items, which the client tells apart by id
+            // range (Server::kItemEntityIdBase).
+            ItemEntitySpawnS2C  = 0x15,
+            ItemEntityMoveS2C   = 0x16,
             EntityDestroy       = 0x17,
             ChatMessageS2C      = 0x18,
             TimeUpdate          = 0x19,
@@ -63,6 +71,26 @@
             SetHealthS2C           = 0x33, // health float + food VarInt + saturation float — mirrors MC ClientboundSetHealthPacket
             BlockChangedAckS2C     = 0x34, // Retire client block predictions up to a sequence — mirrors MC ClientboundBlockChangedAckPacket
             OpenScreenS2C          = 0x35, // Open a block container menu (crafting table) — mirrors MC ClientboundOpenScreenPacket
+            ContainerSetDataS2C    = 0x36, // One ContainerData index changed (furnace burn/cook) — mirrors MC ClientboundContainerSetDataPacket
+            CommandsS2C            = 0x37, // Command names this server accepts, for tab completion — MC ClientboundCommandsPacket (names only)
+            TakeItemEntityS2C      = 0x38, // A player collected a dropped item — drives the pickup animation (MC ClientboundTakeItemEntityPacket)
+
+            // ── Mob entities (MC clientbound entity packet family) ─────────
+            // 0x10/0x11 were reserved by the old chunk packets and are reused
+            // here; the rest continue past TakeItemEntity. EntityDestroy (0x17)
+            // is SHARED with players and items — the client tells them apart by
+            // id range (Game::kItemEntityIdBase / Game::kMobEntityIdBase).
+            AddEntityS2C           = 0x10, // MC ClientboundAddEntityPacket
+            EntityPositionSyncS2C  = 0x11, // MC ClientboundEntityPositionSyncPacket
+            MoveEntityS2C          = 0x39, // MC ClientboundMoveEntityPacket.{Pos,Rot,PosRot}
+            SetEntityMotionS2C     = 0x3A, // MC ClientboundSetEntityMotionPacket
+            SetEntityDataS2C       = 0x3B, // MC ClientboundSetEntityDataPacket
+            EntityEventS2C         = 0x3C, // MC ClientboundEntityEventPacket
+            HurtAnimationS2C       = 0x40, // MC ClientboundHurtAnimationPacket
+
+            // ── Tick rate / freeze (MC's two ticking packets) ──────────────
+            TickingStateS2C        = 0x3D, // MC ClientboundTickingStatePacket
+            TickingStepS2C         = 0x3F, // MC ClientboundTickingStepPacket
 #if ENABLE_PORTAL_GUN
             PortalSetS2C            = 0x2C, // Portal placed / moved (per-gun, per-color)
             PortalRemoveS2C         = 0x2D, // Portal pair cleared
@@ -95,6 +123,7 @@
             InventoryClickC2S   = 0x92,  // One inventory action (mirrors MC ContainerInput dispatch)
             InventoryCloseC2S   = 0x93,  // Inventory screen closed (server drops carried item)
             PlayerAbilitiesC2S  = 0x94,  // Client fly-state toggle (mirrors MC ServerboundPlayerAbilitiesPacket)
+            InteractC2S         = 0x95,  // Attack or interact with an entity (mirrors MC ServerboundInteractPacket)
         };
 
         // Convert PacketId to string for logging
@@ -116,8 +145,18 @@
                 case PacketId::ClientboundBlockUpdate: return "ClientboundBlockUpdate";
                 case PacketId::MultiBlockChangeS2C: return "MultiBlockChangeS2C";
                 case PacketId::PlayerUpdateS2C: return "PlayerUpdateS2C";
-                case PacketId::EntitySpawn: return "EntitySpawn";
-                case PacketId::EntityMove: return "EntityMove";
+                case PacketId::ItemEntitySpawnS2C: return "ItemEntitySpawnS2C";
+                case PacketId::ItemEntityMoveS2C: return "ItemEntityMoveS2C";
+                case PacketId::TakeItemEntityS2C: return "TakeItemEntityS2C";
+                case PacketId::AddEntityS2C: return "AddEntityS2C";
+                case PacketId::EntityPositionSyncS2C: return "EntityPositionSyncS2C";
+                case PacketId::MoveEntityS2C: return "MoveEntityS2C";
+                case PacketId::SetEntityMotionS2C: return "SetEntityMotionS2C";
+                case PacketId::SetEntityDataS2C: return "SetEntityDataS2C";
+                case PacketId::EntityEventS2C: return "EntityEventS2C";
+                case PacketId::HurtAnimationS2C: return "HurtAnimationS2C";
+                case PacketId::TickingStateS2C: return "TickingStateS2C";
+                case PacketId::TickingStepS2C: return "TickingStepS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -173,6 +212,7 @@
                 case PacketId::InventoryClickC2S: return "InventoryClickC2S";
                 case PacketId::InventoryCloseC2S: return "InventoryCloseC2S";
                 case PacketId::PlayerAbilitiesC2S: return "PlayerAbilitiesC2S";
+                case PacketId::InteractC2S: return "InteractC2S";
 
                 default: return "Unknown";
             }

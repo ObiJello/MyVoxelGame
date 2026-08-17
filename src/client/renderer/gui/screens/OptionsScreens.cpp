@@ -537,9 +537,27 @@ namespace Render {
         auto& s = Settings();
         auto& mgr = GetScreenManager();
 
+        // Sensitivity. The stored value is a multiplier on the engine's
+        // baseline 0.1°/px (PlatformMain), so the historical feel is 1.0 —
+        // shown here as 50%, the middle of a 0..200% scale rather than its
+        // top. That leaves 4x headroom above the old maximum (200% = 0.4°/px,
+        // roughly MC's 165% setting) for high-DPI/low-DPI extremes, while a
+        // 1% step is 0.002°/px, fine enough for low-sens players down at the
+        // bottom of the range. Extremes get MC's flavour labels
+        // (options.sensitivity.min/max in assets/lang/en_us.json).
         m_list->AddSmall(
-            PercentSlider("Sensitivity", s.GetMouseSensitivity(),
-                          [](float v) { Settings().SetMouseSensitivity(v); }),
+            ValueSlider("Sensitivity", s.GetMouseSensitivity() * 50.0, 0.0, 200.0, 1.0,
+                [](double pct) -> std::string {
+                    if (pct <= 0.0)   return "*yawn*";
+                    if (pct >= 200.0) return "HYPERSPEED!!!";
+                    char buf[16];
+                    std::snprintf(buf, sizeof(buf), "%d%%",
+                                  static_cast<int>(std::lround(pct)));
+                    return buf;
+                },
+                [](double pct) {
+                    Settings().SetMouseSensitivity(static_cast<float>(pct / 50.0));
+                }),
             OnOff("Invert Mouse", s.GetInvertYMouse(),
                   [](bool on) { Settings().SetInvertYMouse(on); }));
 

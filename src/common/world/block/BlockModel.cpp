@@ -4,8 +4,6 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <mutex>
-#include <unordered_set>
 #ifdef __APPLE__
 #include <unistd.h>
 #endif
@@ -515,61 +513,10 @@ namespace Game {
             return it->second;
         }
 
-        // ── Model not found — falling back to s_defaultModel (a stone cube). ──
-        // Track every UNIQUE missing model name and append it to a text file
-        // the user can audit. Without this, blocks with no model silently
-        // render as stone cubes in-world and we have no idea which blocks
-        // need attention.
-        //
-        // File: ./missing_block_models.txt (relative to the cwd the game was
-        // launched from). One name per line; the file is APPENDED to as new
-        // names are discovered, so it grows naturally as the user explores
-        // chunks containing blocks we haven't modelled yet. Existing lines
-        // are preserved across runs so you can collect a master list over
-        // multiple sessions.
-        //
-        // Thread-safety: this gets hit from chunk-mesher worker threads, so
-        // both the seen-set and the file write are mutex-guarded. The set
-        // dedupes BEFORE touching the file, so the per-call cost after the
-        // first occurrence is just a hash lookup + mutex.
-        {
-            static std::unordered_set<std::string> s_missingSeen;
-            static std::mutex                      s_missingMutex;
-
-            std::lock_guard<std::mutex> lock(s_missingMutex);
-            if (s_missingSeen.insert(name).second) {
-                // First time we've seen this name — write it out.
-                const std::filesystem::path outPath = "missing_block_models.txt";
-                std::error_code              ec;
-                const std::filesystem::path  absPath = std::filesystem::absolute(outPath, ec);
-
-                std::ofstream out(outPath, std::ios::app);
-                if (out) {
-                    out << name << '\n';
-                    // Tell the user where the file lives the very first time
-                    // we write to it, so they can find the audit list.
-                    static bool s_announced = false;
-                    if (!s_announced) {
-                        s_announced = true;
-                        Log::Info("[BlockModel] Tracking missing models in %s "
-                                  "(first miss: '%s'). Each unique block model "
-                                  "name that falls back to the stone cube is "
-                                  "appended to that file.",
-                                  absPath.string().c_str(), name.c_str());
-                    }
-                } else {
-                    // File-open failure shouldn't be fatal — log once and move on.
-                    static bool s_warnedOpenFail = false;
-                    if (!s_warnedOpenFail) {
-                        s_warnedOpenFail = true;
-                        Log::Warning("[BlockModel] Could not open %s for append; "
-                                     "missing-model audit list will be lost.",
-                                     absPath.string().c_str());
-                    }
-                }
-            }
-        }
-
+        // Model not found — fall back to s_defaultModel (a stone cube).
+        // Reached from mesh worker threads, so it stays allocation- and
+        // lock-free: anything that writes shared state here serializes every
+        // mesher on the same mutex.
         return s_defaultModel;
     }
 
@@ -616,11 +563,24 @@ namespace Game {
 
         constexpr bool operator==(IVec3 a, IVec3 b) { return a.x==b.x && a.y==b.y && a.z==b.z; }
 
-        // x:90 tips the model so UP→SOUTH, SOUTH→DOWN, DOWN→NORTH, NORTH→UP;
-        // X is fixed. This is the convention MC's blockstates rely on — e.g. a
-        // log's `axis=z` variant is the plain model with `"x": 90`, which must
-        // move the end-grain texture from UP/DOWN onto NORTH/SOUTH.
-        constexpr IVec3 RotX90(IVec3 v) { return { v.x, -v.z, v.y }; }
+        // x:90 tips the model so UP→NORTH, NORTH→DOWN, DOWN→SOUTH, SOUTH→UP;
+        // X is fixed. MC's blockstate `x` is a NEGATIVE quarter-turn about +X
+        // (BlockModelRotation composes the orientation from Quadrant angles the
+        // same way ModelRotation historically did with `-x`), so this is
+        // (x, z, -y) and not (x, -z, y).
+        //
+        // This had the opposite sign, and the log example the comment used to
+        // cite cannot catch it: `axis=z` only needs the end grain to land
+        // somewhere on the Z axis, and both signs do that. The first block that
+        // discriminates is an ASYMMETRIC x-rotated model — a wall button, which
+        // came out on the opposite wall from the one it was placed against.
+        //
+        // Cross-checked against code rather than convention:
+        // ButtonBlock.makeShapes gives `face=wall,facing=north` the box
+        // z∈[8,16] (the cell's SOUTH half), and blockstates/oak_button.json
+        // reaches that state with `x:90` applied to a floor-hugging model.
+        // Only a -90 turn moves the model from y≈1 to z≈15 to match.
+        constexpr IVec3 RotX90(IVec3 v) { return { v.x, v.z, -v.y }; }
 
         // y:90 turns NORTH→EAST→SOUTH→WEST; Y is fixed. A furnace's
         // `facing=east` variant is the plain (north-facing) model with
@@ -696,7 +656,10 @@ namespace Game {
         // Rotate a point in MC model space (0..16) about the block centre.
         glm::vec3 RotPoint(const glm::vec3& p, int xTurns, int yTurns) {
             glm::vec3 c = p - glm::vec3(8.0f);
-            for (int i = 0; i < xTurns; ++i) c = glm::vec3( c.x, -c.z,  c.y);
+            // Must match RotX90's sign exactly — geometry and face normals are
+            // rotated by separate code paths and disagreeing puts the textures
+            // on the wrong faces.
+            for (int i = 0; i < xTurns; ++i) c = glm::vec3( c.x,  c.z, -c.y);
             for (int i = 0; i < yTurns; ++i) c = glm::vec3(-c.z,  c.y,  c.x);
             return c + glm::vec3(8.0f);
         }

@@ -1,6 +1,7 @@
 // File: src/client/renderer/debug/DebugSystem.cpp
 #include "DebugSystem.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Mth.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "../debug/Crosshair.hpp"
@@ -91,6 +92,7 @@ namespace Debug {
     PanelVisibility DebugSystem::s_visibility;
     LogBuffer DebugSystem::s_logBuffer;
     ServerMetricsSnapshot DebugSystem::s_serverSnap;
+    EntitySnapshot DebugSystem::s_entitySnap;
     NetworkMetricsSnapshot DebugSystem::s_netSnap;
     ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
     WorldInfoSnapshot DebugSystem::s_worldInfoSnap;
@@ -291,6 +293,10 @@ namespace Debug {
         s_worldInfoSnap = snap;
     }
 
+    void DebugSystem::SetEntitySnapshot(const EntitySnapshot& snap) {
+        s_entitySnap = snap;
+    }
+
     const PanelVisibility& DebugSystem::GetPanelVisibility() {
         return s_visibility;
     }
@@ -382,6 +388,7 @@ namespace Debug {
         if (s_visibility.controls)       DrawControlsPanel(cursorEnabled, camera);
         if (s_visibility.chunkPipeline)  DrawChunkPipelinePanel();
         if (s_visibility.worldInfo)      DrawWorldInfoPanel();
+        if (s_visibility.entities)       DrawEntitiesPanel(s_entitySnap);
     }
 
     // ========================================================================
@@ -417,6 +424,7 @@ namespace Debug {
 
         ImGui::Checkbox("Chunk Pipeline",  &s_visibility.chunkPipeline);
         ImGui::Checkbox("World Info",      &s_visibility.worldInfo);
+        ImGui::Checkbox("Entities",        &s_visibility.entities);
 
         ImGui::Separator();
         ImGui::TextColored(COL_GRAY, "F3: Overlay | ~: Log | Shift+~+D: Toggle UI");
@@ -1405,8 +1413,11 @@ namespace Debug {
         drawList->AddCircleFilled(center, circleRadius + 2, IM_COL32(255, 255, 255, 255));
         drawList->AddCircle(center, circleRadius + 2, IM_COL32(0, 0, 0, 255), 0, 3.0f);
 
-        float yawRad = glm::radians(camera.yaw);
-        ImVec2 dirEnd(center.x + cos(yawRad) * (circleRadius + 8), center.y + sin(yawRad) * (circleRadius + 8));
+        // Top-down map: world +X is screen right, world +Z is screen DOWN, so
+        // the look direction's x/z components drop straight into screen x/y.
+        const glm::vec3 look = Game::Mth::HorizontalViewVector(camera.yaw);
+        ImVec2 dirEnd(center.x + look.x * (circleRadius + 8),
+                      center.y + look.z * (circleRadius + 8));
         drawList->AddLine(center, dirEnd, IM_COL32(0, 0, 0, 255), 3.0f);
 
         ImGui::InvisibleButton("chunk_viz_canvas", canvasSize);
@@ -1798,5 +1809,70 @@ namespace Debug {
         Render::g_atlasBuilder->RebuildAtlas(useMinecraftStyle);
     }
 
+
+
+    // ========================================================================
+    // ENTITIES PANEL
+    // ========================================================================
+
+    void DebugSystem::DrawEntitiesPanel(const EntitySnapshot& snap) {
+        ImGui::SetNextWindowSize(ImVec2(380, 340), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Entities", &s_visibility.entities)) { ImGui::End(); return; }
+
+        ImGui::Text("Mobs: %d server / %d client", snap.totalServerMobs, snap.totalClientMobs);
+
+        // A persistent gap between the two counts means the tracker is not
+        // telling somebody about something — the first thing to look at when
+        // mobs are invisible but the server thinks they exist.
+        if (snap.totalServerMobs != snap.totalClientMobs) {
+            ImGui::SameLine();
+            ImGui::TextColored(COL_YELLOW, "(delta %d)",
+                               snap.totalServerMobs - snap.totalClientMobs);
+        }
+
+        ImGui::Separator();
+        ImGui::TextColored(COL_GRAY, "Spawn caps  (max * chunks / 289)");
+        ImGui::Text("  spawnable chunks: %d", snap.spawnableChunks);
+        ImGui::Text("  monster : %d / %d", snap.monsterCount, snap.monsterCap);
+        ImGui::Text("  creature: %d / %d", snap.creatureCount, snap.creatureCap);
+        if (snap.monsterCap == 0 && snap.spawnableChunks > 0) {
+            // 70 * chunks / 289 rounds to zero below ~5 chunks, so a small
+            // simulation distance silently disables hostile spawning entirely.
+            ImGui::TextColored(COL_YELLOW,
+                               "  cap is 0 - simulation distance too small to spawn monsters");
+        }
+
+        ImGui::Separator();
+        if (snap.typeRowCount > 0 &&
+            ImGui::BeginTable("mobtypes", 3, ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("type");
+            ImGui::TableSetupColumn("server");
+            ImGui::TableSetupColumn("client");
+            ImGui::TableHeadersRow();
+
+            for (int i = 0; i < snap.typeRowCount && i < EntitySnapshot::kTypeCount; ++i) {
+                const auto& row = snap.types[i];
+                if (row.serverCount == 0 && row.clientCount == 0) continue;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(row.name ? row.name : "?");
+                ImGui::TableNextColumn(); ImGui::Text("%d", row.serverCount);
+                ImGui::TableNextColumn(); ImGui::Text("%d", row.clientCount);
+            }
+            ImGui::EndTable();
+        }
+
+        ImGui::Separator();
+        ImGui::TextColored(COL_GRAY, "Crosshair target");
+        if (!snap.hasSelected) {
+            ImGui::TextDisabled("  (none)");
+        } else {
+            ImGui::Text("  %s", snap.selectedType);
+            ImGui::Text("  health: %.1f / %.1f", snap.selectedHealth, snap.selectedMaxHealth);
+            ImGui::Text("  path nodes: %d", snap.selectedPathNodes);
+            ImGui::Text("  has target: %s", snap.selectedHasTarget ? "yes" : "no");
+        }
+
+        ImGui::End();
+    }
 
 } // namespace Debug

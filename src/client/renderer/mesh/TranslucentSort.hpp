@@ -65,6 +65,7 @@ namespace Render::TranslucentSort {
     void BuildSortedIndices(const std::vector<glm::vec3>& centroids,
                             const glm::vec3& cameraPos,
                             std::vector<uint16_t>& outIndices,
-                            std::vector<uint32_t>& scratchOrder);
+                            std::vector<uint32_t>& scratchOrder,
+                            std::vector<float>& scratchKeys);
 
 } // namespace Render::TranslucentSort

@@ -28,6 +28,17 @@ static constexpr int MAX_Y = MIN_Y + HEIGHT;
 // otherwise alias freshly allocated blocks at reused addresses.
 static std::atomic<uint32_t> s_blockMapEpoch{1};
 
+// Run BOTH conversion paths and compare, logging any disagreement.
+//
+// This is the gate for the palette remap. tools/terrain_parity cannot serve as
+// one: CLAUDE.md is explicit that it "links terrain_library alone (no game
+// code)", so it is unchanged by anything in this file by construction and would
+// pass trivially. Checking against the per-voxel original instead covers every
+// section of every chunk a real session generates, which is strictly more.
+//
+// Costs roughly double conversion when on. Off in every normal build.
+static constexpr bool kVerifyPaletteConvert = false;
+
 namespace Game {
 
     MyTerrainGenerator::MyTerrainGenerator(const GenerationConfig& config)
@@ -193,6 +204,12 @@ namespace Game {
     void MyTerrainGenerator::RequestAbort() {
         if (m_chunkCache) {
             m_chunkCache->requestAbort();
+        }
+        // The server thread may be parked in waitForTasks until the next tick
+        // deadline. Wake it so shutdown does not wait out the remainder of the
+        // idle window.
+        if (m_mainThreadExecutor) {
+            m_mainThreadExecutor->wakeAll();
         }
     }
 
@@ -441,6 +458,141 @@ namespace Game {
         return it->second;
     }
 
+    // Try the palette-to-palette path. Returns false when the shapes cannot be
+    // lined up, leaving `outSection` untouched for the caller's fallback.
+    bool MyTerrainGenerator::TryConvertSectionByPalette(
+            const minecraft::world::LevelChunkSection& libSection,
+            ChunkSection& outSection, int& outNonAir) const {
+
+        const auto& libStates = libSection.getStates();
+        const std::vector<minecraft::world::BlockState*> libPalette =
+            libStates.getPaletteEntries();
+
+        // Empty means the library fell back to a GLOBAL palette, where the
+        // value is its own index in the library's id space — which is not ours.
+        if (libPalette.empty()) return false;
+
+        // Map each DISTINCT state once. Two library states can collapse onto
+        // one game state (a property this port does not model); the resulting
+        // duplicate palette entries are harmless — both indices resolve to the
+        // same value.
+        std::vector<uint32_t> values;
+        values.reserve(libPalette.size());
+        for (auto* st : libPalette) {
+            const MappedBlock mapped = MapBlockType(st);
+            values.push_back(Game::BlockStateIds::Pack(mapped.id, mapped.state));
+        }
+
+        // Unpack the library's indices: pure shift-and-mask over the packed
+        // words. No palette lookups, no map lookups, no virtual calls.
+        std::vector<uint32_t> indices(ChunkSection::TOTAL, 0);
+        const int libBits = libStates.getBitsPerEntry();
+        if (libBits > 0) {
+            const std::vector<int64_t> raw = libStates.getRawData();
+            const int perLong = 64 / libBits;
+            const size_t needed =
+                static_cast<size_t>((ChunkSection::TOTAL + perLong - 1) / perLong);
+            if (raw.size() < needed) return false;
+
+            const uint64_t mask = (1ULL << libBits) - 1ULL;
+            for (int i = 0; i < ChunkSection::TOTAL; ++i) {
+                const int cell = i / perLong;
+                const int bit  = (i - cell * perLong) * libBits;
+                indices[i] = static_cast<uint32_t>(
+                    (static_cast<uint64_t>(raw[cell]) >> bit) & mask);
+            }
+        }
+        // libBits == 0 is a single-value palette: every index is 0, which
+        // `indices` already is.
+
+        Game::PalettedContainer built(
+            Game::PaletteStrategy::ForBlockStates(Game::BlockStateIds::Bits()),
+            Game::BlockStateIds::Pack(BlockID::Air, 0));
+        if (!built.BuildFrom(values, indices)) return false;
+
+        int nonAir = 0;
+        for (int i = 0; i < ChunkSection::TOTAL; ++i) {
+            if (Game::BlockStateIds::Unpack(values[indices[i]]).id != BlockID::Air) ++nonAir;
+        }
+
+        outSection.AdoptStates(std::move(built));
+        outNonAir = nonAir;
+        return true;
+    }
+
+    // Per-voxel conversion. The original path, kept as the fallback AND as the
+    // reference the palette path is checked against — see kVerifyPaletteConvert.
+    int MyTerrainGenerator::ConvertSectionPerVoxel(
+            const minecraft::world::LevelChunkSection& libSection,
+            ChunkSection& outSection) const {
+        int nonAir = 0;
+        for (int ly = 0; ly < 16; ++ly) {
+            for (int lz = 0; lz < 16; ++lz) {
+                for (int lx = 0; lx < 16; ++lx) {
+                    const MappedBlock mapped =
+                        MapBlockType(libSection.getBlockState(lx, ly, lz));
+                    if (mapped.id != BlockID::Air) {
+                        outSection.SetBlockState(lx, ly, lz, mapped.id, mapped.state);
+                        ++nonAir;
+                    }
+                }
+            }
+        }
+        return nonAir;
+    }
+
+    // Translate ONE library section into a game section.
+    //
+    // The library stores sections in its own PalettedContainer — a port of the
+    // same MC class ours now is — so the two agree on everything except which
+    // ids the palette entries carry. That makes the conversion a mapping of the
+    // PALETTE (a handful of entries) plus an unpack of the indices, instead of
+    // 4096 lookups through MapBlockType and 4096 paletted writes.
+    //
+    // MC needs none of this: its generator writes into the container the world
+    // keeps. This is as close to that as a vendored generator allows.
+    int MyTerrainGenerator::ConvertSection(const minecraft::world::LevelChunkSection& libSection,
+                                           ChunkSection& outSection) const {
+        PROFILE_ZONE_N("ConvertSection");
+
+        int nonAir = 0;
+        if (TryConvertSectionByPalette(libSection, outSection, nonAir)) {
+            // Cross-check against the path this replaced. terrain_parity cannot
+            // cover this — it links the library alone, with no game code — so
+            // the palette remap is verified against the per-voxel original
+            // instead, over every section of every chunk actually generated.
+            //
+            // Compiled out entirely by default; flip to true, run a session,
+            // and any disagreement is logged with its coordinates.
+            if constexpr (kVerifyPaletteConvert) {
+                ChunkSection reference;
+                const int refNonAir = ConvertSectionPerVoxel(libSection, reference);
+                if (refNonAir != nonAir) {
+                    Log::Error("[ConvertSection] non-air count differs: palette=%d per-voxel=%d",
+                               nonAir, refNonAir);
+                }
+                for (int ly = 0; ly < 16; ++ly) {
+                    for (int lz = 0; lz < 16; ++lz) {
+                        for (int lx = 0; lx < 16; ++lx) {
+                            if (outSection.Get(lx, ly, lz) != reference.Get(lx, ly, lz) ||
+                                outSection.GetState(lx, ly, lz) != reference.GetState(lx, ly, lz)) {
+                                Log::Error("[ConvertSection] MISMATCH at (%d,%d,%d): "
+                                           "palette=%u/%u per-voxel=%u/%u",
+                                           lx, ly, lz,
+                                           outSection.Get(lx, ly, lz), outSection.GetState(lx, ly, lz),
+                                           reference.Get(lx, ly, lz), reference.GetState(lx, ly, lz));
+                                return nonAir;   // one report per section is enough
+                            }
+                        }
+                    }
+                }
+            }
+            return nonAir;
+        }
+
+        return ConvertSectionPerVoxel(libSection, outSection);
+    }
+
     std::shared_ptr<Chunk> MyTerrainGenerator::ConvertLibChunk(minecraft::world::IChunk* chunk,
                                                                Math::ChunkPos position,
                                                                int* outBlocksSet) const {
@@ -448,15 +600,14 @@ namespace Game {
         auto gameChunk = std::make_shared<Chunk>();
         gameChunk->pos = position;
 
-        // Section-wise conversion: skips all-air sections entirely (most of a
-        // chunk's 384-block column is sky), reads block states through the
-        // section's inline palette accessor instead of per-block virtual
-        // IChunk::getBlockState with BlockPos construction, and writes
-        // directly into the game section arrays instead of per-block
-        // Chunk::SetBlock (which re-validates and re-reads every call).
-        // Equivalent output: SetBlock on a fresh chunk was a no-op for air
-        // and a plain section Set for everything else (onSectionDirty is
-        // unset during conversion).
+        // Section-wise, and PALETTE-WISE — see ConvertSection. All-air sections
+        // are skipped entirely (most of a 384-block column is sky).
+        //
+        // MC has no conversion step at all: its generator writes into the very
+        // container the world keeps, so there is nothing to translate. Ours
+        // exists only because generation lives in a vendored library with its
+        // own palette. Translating palette-to-palette rather than voxel-by-voxel
+        // is as close to MC's absence of a conversion as this shape allows.
         const int libMinY = chunk->getMinBuildHeight();
         const int sectionsCount = chunk->getSectionsCount();
         int blocksSet = 0;
@@ -473,24 +624,7 @@ namespace Game {
             ChunkSection* outSection = gameChunk->GetSection(gameSectionIndex);
             if (!outSection) continue;
 
-            for (int ly = 0; ly < 16; ++ly) {
-                for (int lz = 0; lz < 16; ++lz) {
-                    for (int lx = 0; lx < 16; ++lx) {
-                        auto* blockState = libSection.getBlockState(lx, ly, lz);
-                        const MappedBlock mapped = MapBlockType(blockState);
-                        if (mapped.id != BlockID::Air) {
-                            outSection->Set(lx, ly, lz, mapped.id);
-                            // SetState only allocates the section's state plane
-                            // on the first non-default write, so a section of
-                            // plain stone still costs nothing extra.
-                            if (mapped.state != 0) {
-                                outSection->SetState(lx, ly, lz, mapped.state);
-                            }
-                            ++blocksSet;
-                        }
-                    }
-                }
-            }
+            blocksSet += ConvertSection(libSection, *outSection);
         }
 
         // ── Biomes ──────────────────────────────────────────────────────────
@@ -517,6 +651,50 @@ namespace Game {
             }
         }
 
+        // ── Heightmaps ──────────────────────────────────────────────────────
+        //
+        // COPIED from the library rather than recomputed. The library primes
+        // MOTION_BLOCKING_NO_LEAVES and WORLD_SURFACE at its generateFeatures
+        // stage exactly as MC does, so the values are already there and already
+        // correct; a fresh 256-column scan here would cost real time on the
+        // chunk pipeline — which CLAUDE.md is explicit is the most expensive
+        // thing in the program — to arrive at the same answer.
+        //
+        // One consequence worth knowing: these heights were computed against
+        // the LIBRARY's block predicates, and every later incremental update
+        // uses the GAME's (Heightmap.cpp's table). Those can disagree for a
+        // block whose type mapping is approximate. The drift is bounded and
+        // self-correcting — a column only re-evaluates when something writes to
+        // it, and from then on it is consistently the game's predicate — and
+        // the library's answer is the more MC-faithful of the two to start from.
+        {
+            using LibTypes = minecraft::levelgen::Heightmap::Types;
+
+            struct Mapping { HeightmapType game; LibTypes lib; };
+            // NOTE the library's enum order differs from MC's, so these are
+            // named rather than cast from an index.
+            const Mapping mappings[] = {
+                { HeightmapType::MotionBlockingNoLeaves, LibTypes::MOTION_BLOCKING_NO_LEAVES },
+                { HeightmapType::WorldSurface,           LibTypes::WORLD_SURFACE },
+            };
+
+            for (const Mapping& m : mappings) {
+                Heightmap& out = gameChunk->GetHeightmap(m.game);
+                for (int lx = 0; lx < Math::CHUNK_SIZE_X; ++lx) {
+                    for (int lz = 0; lz < Math::CHUNK_SIZE_Z; ++lz) {
+                        // getHeight is MC's getHighestTaken (the topmost
+                        // matching block); the heightmap stores first-available,
+                        // which is one higher.
+                        const int height =
+                            chunk->getHeight(static_cast<int>(m.lib), lx, lz);
+                        out.SetHeight(lx, lz, height + 1);
+                    }
+                }
+            }
+
+            gameChunk->MarkHeightmapsPrimed();
+        }
+
         if (outBlocksSet) *outBlocksSet = blocksSet;
         return gameChunk;
     }
@@ -536,33 +714,19 @@ namespace Game {
         return true;
     }
 
-    void MyTerrainGenerator::PumpAsyncTasks() {
-        if (!m_initialized || !m_chunkCache) return;
+    bool MyTerrainGenerator::PumpOneTask() {
+        if (!m_initialized || !m_chunkCache) return false;
 
-        // Minecraft pattern: loop until no more work to do.
-        // Reference: ServerChunkCache.MainThreadExecutor.pollTask() calls
-        // runDistanceManagerUpdates() each iteration, which can schedule more
-        // work that feeds into the next iteration.
-        bool didWork = true;
-        int iterations = 0;
-        const int MAX_ITERATIONS = 256; // safety cap
-
-        while (didWork && iterations < MAX_ITERATIONS) {
-            didWork = false;
-
-            // runDistanceManagerUpdates calls runGenerationTasks internally
-            if (m_chunkCache->runDistanceManagerUpdates()) {
-                didWork = true;
-            }
-
-            // Pump main thread executor tasks (generation callbacks)
-            if (m_mainThreadExecutor && m_mainThreadExecutor->hasPendingTasks()) {
-                m_mainThreadExecutor->runPendingTasks();
-                didWork = true;
-            }
-
-            iterations++;
+        // runDistanceManagerUpdates propagates ticket levels, promotes the
+        // visible chunk map and dispatches generation tasks. One pass only —
+        // the loop belongs to the caller, which owns the deadline.
+        if (m_chunkCache->runDistanceManagerUpdates()) {
+            return true;
         }
+
+        // Otherwise one generation callback. MC's pollTask falls through to
+        // super.pollTask() here in exactly the same way.
+        return m_mainThreadExecutor && m_mainThreadExecutor->runOnePendingTask();
     }
 
     bool MyTerrainGenerator::IsChunkReady(Math::ChunkPos position) {

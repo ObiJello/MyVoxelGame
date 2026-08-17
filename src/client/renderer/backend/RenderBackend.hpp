@@ -38,6 +38,17 @@ namespace Render {
         virtual void Clear(bool color, bool depth, bool stencil = false) = 0;
         virtual void SetViewport(int x, int y, int width, int height) = 0;
 
+        // Clip subsequent draws to a rectangle, in FRAMEBUFFER PIXELS with the
+        // origin at the TOP-LEFT (GUI convention). Backends flip as needed —
+        // GL's glScissor is bottom-left, Vulkan's is top-left like ours.
+        //
+        // Callers must pair every SetScissorRect with a ClearScissorRect; the
+        // state is sticky and would otherwise clip the rest of the frame.
+        // Defaults are no-ops so a backend without scissor support simply draws
+        // unclipped rather than failing to draw.
+        virtual void SetScissorRect(int /*x*/, int /*y*/, int /*w*/, int /*h*/) {}
+        virtual void ClearScissorRect() {}
+
         // ====================================================================
         // BUFFER MANAGEMENT
         // ====================================================================
@@ -46,6 +57,26 @@ namespace Render {
                                          const void* data, BufferAccess access = BufferAccess::Static) = 0;
         virtual void UpdateBuffer(BufferHandle handle, size_t offset,
                                  size_t size, const void* data) = 0;
+
+        // Overwrite a range WITHOUT waiting for in-flight draws that read it.
+        //
+        // Only safe when a torn read is still valid to draw. The one caller is
+        // the translucency re-sort, where the write is a PERMUTATION of the same
+        // quad range at the same length (ChunkMegaBuffer::UpdateSectionIndices
+        // rejects anything else), so every index the GPU can observe — old, new,
+        // or a mix — points at a real quad in that section. Worst case is one
+        // frame of imperfect blend order, which the design already tolerates:
+        // sorts go stale between re-sorts by construction.
+        //
+        // Do NOT use for mesh uploads. Those write NEW geometry, so a torn read
+        // is genuine garbage, not a stale ordering.
+        //
+        // Default forwards to the synchronised path, so a backend that has no
+        // cheaper option stays correct by doing the safe thing.
+        virtual void UpdateBufferUnsynchronized(BufferHandle handle, size_t offset,
+                                                size_t size, const void* data) {
+            UpdateBuffer(handle, offset, size, data);
+        }
         virtual void DestroyBuffer(BufferHandle handle) = 0;
 
         // Deferred destroy — delays destruction until GPU is done with the resource.

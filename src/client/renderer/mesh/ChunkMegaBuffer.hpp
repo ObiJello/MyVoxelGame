@@ -59,7 +59,47 @@ namespace Render {
         // ========================================================================
 
         // Initialize with a fixed slab size. The first slab is allocated immediately.
-        void Initialize(size_t slabVertexCapacity = 512000, size_t slabIndexCapacity = 1024000);
+        // perSectionIndexBuffers: give every section its own index buffer instead
+        // of a range inside the shared slab IBO. This is what MC does
+        // (CompiledSectionMesh.uploadLayerIndexBuffer writes to a per-section,
+        // per-layer buffer), and it exists for the TRANSLUCENT pool specifically:
+        // a translucency re-sort rewrites indices every few frames, and writing
+        // into a shared multi-megabyte IBO that has draws in flight makes the GL
+        // driver serialise. Measured at 0.18 ms per write, 16x the cost of the
+        // sort itself. Vertices still live in the shared slab, so baseVertex
+        // batching is unaffected — only the index buffer is split out.
+        //
+        // Cost: the layer can no longer be issued as one multi-draw per slab; it
+        // becomes one bind + draw per section. Worth it only where re-sorts are
+        // frequent, i.e. translucent. Leave false for opaque/cutout.
+        void Initialize(size_t slabVertexCapacity = 512000, size_t slabIndexCapacity = 1024000,
+                        bool perSectionIndexBuffers = false);
+
+        // Per-section IBO for this section, or INVALID_BUFFER when the pool uses
+        // shared slab indices. The renderer binds this before drawing the section.
+        BufferHandle GetSectionIndexBuffer(const MegaBufferSectionKey& key) const;
+
+        bool UsesPerSectionIndexBuffers() const { return m_perSectionIndexBuffers; }
+
+        // Hand back slab ranges freed a few frames ago. MUST be called once per
+        // frame — without it RemoveSection leaks the range permanently.
+        //
+        // Why the delay exists, because it is a correctness fix and not a
+        // tuning knob: RemoveSection used to return a range to the free-list
+        // immediately, and re-meshing a section (breaking a block) is a
+        // RemoveSection followed instantly by an UploadSection that allocates
+        // the SAME range straight back and memcpys new geometry into it. The
+        // GPU is still reading that range for the previous frame, which is
+        // in-flight — uploads run before BeginFrame's fence wait. On OpenGL the
+        // driver hides this because glBufferSubData serialises against pending
+        // draws; on Vulkan the write lands in HOST_VISIBLE memory with nothing
+        // to order it, so the GPU renders a mix of the old and new mesh for one
+        // frame. Symptom: breaking a block occasionally flashes a hole through
+        // the world for a single frame, on Vulkan only.
+        //
+        // Delaying reuse means a re-upload always lands on memory nothing is
+        // reading, and the range the GPU IS reading is never written.
+        void RetireFreedRegions();
         void Shutdown();
         bool IsInitialized() const { return !m_slabs.empty(); }
 
@@ -159,6 +199,7 @@ namespace Render {
         std::vector<Slab> m_slabs;
         size_t m_slabVertexCapacity = 0;
         size_t m_slabIndexCapacity = 0;
+        bool m_perSectionIndexBuffers = false;
 
         // Accumulated by every slab write; drained once a frame by
         // ConsumeUploadedBytes. Render-thread only, so no atomic needed.
@@ -171,8 +212,31 @@ namespace Render {
             size_t vertexCount;
             size_t indexOffset;
             size_t indexCount;
+            // Per-section index buffer, MC-style (CompiledSectionMesh ->
+            // SectionBuffers.getIndexBuffer()). Only used when the pool was
+            // initialised with perSectionIndexBuffers; INVALID_BUFFER otherwise
+            // and indices live in the slab IBO at indexOffset as before.
+            BufferHandle sectionIbo = INVALID_BUFFER;
         };
         std::unordered_map<MegaBufferSectionKey, Region, MegaBufferSectionKeyHash> m_regions;
+
+        // Ranges released by RemoveSection, held back from the free-lists until
+        // no in-flight frame can still be drawing them. See RetireFreedRegions.
+        struct PendingFree {
+            uint32_t slabIndex;
+            size_t   vertexOffset;
+            size_t   vertexCount;
+            size_t   indexOffset;
+            size_t   indexCount;
+            bool     freeIndices;   // false in per-section-IBO mode
+            uint64_t frameFreed;
+        };
+        std::vector<PendingFree> m_pendingFrees;
+        uint64_t m_frameCounter = 0;
+        // MAX_FRAMES_IN_FLIGHT is 2, so frame N can still be reading what frame
+        // N-1 drew. 3 covers that with a frame to spare, and the cost of being
+        // generous is a few hundred KB of briefly-unreusable slab space.
+        static constexpr uint64_t kFreeDelayFrames = 3;
 
         // Slab management
         uint32_t AllocateSlab();

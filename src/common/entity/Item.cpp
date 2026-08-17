@@ -7,11 +7,13 @@
 #include "EquipmentBehavior.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../data/DataComponents.hpp"
+#include "../core/Mth.hpp"
 #include "../core/Log.hpp"
 #include "server/player/ServerPlayer.hpp"  // startUsingItem in Item_DefaultUse
                                            // (common→server precedent: PortalGunBehavior.cpp)
 #include <nlohmann/json.hpp>
 #include <unordered_map>
+#include <string_view>
 #include <vector>
 #include <fstream>
 #include <filesystem>
@@ -78,24 +80,17 @@ namespace Game {
         // Compute the target angle the compass *should* point at, in revolutions [0,1).
         // 0 = needle pointing "up" on the texture (player facing target).
         //
-        // Our yaw convention (per Player.cpp's `front.x = cos(yaw), front.z =
-        // sin(yaw)`): yaw=0 → facing +X. yaw=90 → facing +Z. atan2(z, x) returns
-        // the angle of the (x,z) vector measured from +X toward +Z — matching
-        // our yaw convention exactly. So target_yaw_rev - player_yaw_rev gives
-        // the needle's screen-rotation in revolutions, with 0 meaning "needle
-        // points up the texture" = "target is straight ahead".
+        // Both angles are MC's yaw (0 = +Z, clockwise), so the difference is
+        // the needle's screen rotation directly — no convention shim.
         float ComputeCompassTargetRevolutions(const ItemRenderContext& ctx) {
             const float dx = ctx.compassTargetX - ctx.playerX;
             const float dz = ctx.compassTargetZ - ctx.playerZ;
-            const float kPi = 3.14159265358979323846f;
-            float worldAngleRad = std::atan2(dz, dx);               // angle from +X to (dx,dz)
-            float worldAngleRev = worldAngleRad / (2.0f * kPi);     // -0.5..0.5
-            float playerYawRev  = ctx.playerYaw / 360.0f;
+            const float targetYaw = Game::Mth::YRotFromVector(glm::vec3(dx, 0.0f, dz));
             // The texture's frame 0 points AWAY from the target with the bare
-            // formula (verified by the pointing direction being 180° off). Add
-            // 0.5 (half a revolution) to flip the needle so it points TO the
+            // difference (verified by the pointing direction being 180° off).
+            // Add half a revolution to flip the needle so it points TO the
             // target instead.
-            return WrapToUnit(worldAngleRev - playerYawRev + 0.5f);
+            return WrapToUnit((targetYaw - ctx.playerYaw) / 360.0f + 0.5f);
         }
 
         // Advance the wobble simulation by one fixed tick (1/20 s). Mirrors MC's per-tick
@@ -254,6 +249,18 @@ namespace Game {
             return true;
         };
 
+        // Max stack size for the block items that aren't the default 64 (beds,
+        // signs, banners, boats, shulker boxes). Keyed on registry slug, which
+        // promoted state variants share with their base block — so a top slab
+        // or an upper double-plant half gets the same limit as its base, which
+        // is right: in MC they are one Block.
+        std::unordered_map<std::string_view, int> blockStackOverride;
+        blockStackOverride.reserve(kBlockItemStackSizeCount);
+        for (size_t i = 0; i < kBlockItemStackSizeCount; ++i) {
+            blockStackOverride.emplace(kBlockItemStackSize[i].slug,
+                                       kBlockItemStackSize[i].maxStackSize);
+        }
+
         // Block items — one per BlockID, sharing numeric IDs.
         const int total = static_cast<int>(BlockID::Count);
         g_blockItems.resize(total);
@@ -265,7 +272,8 @@ namespace Game {
             item.renderType   = ItemRenderType::Block;
             item.blockId      = bid;
             item.spriteName   = "";
-            item.maxStackSize = 64;
+            auto stackIt      = blockStackOverride.find(std::string_view(block.registrySlug));
+            item.maxStackSize = (stackIt != blockStackOverride.end()) ? stackIt->second : 64;
             // Authoritative source: MC's assets/items/{slug}.json. Falls back
             // to block.modelName if no client-item file exists (vanilla full
             // cubes like dirt/oak_planks may rely on the block's own model).
@@ -346,7 +354,11 @@ namespace Game {
             auto langIt = lang.find(langKey);
             it.name         = (langIt != lang.end()) ? langIt->second : titleCaseFromSlug(slug);
             it.renderType   = ItemRenderType::Sprite;
-            it.maxStackSize = 64;
+            // MC's MAX_STACK_SIZE component, extracted from Items.java by
+            // tools/gen_items.py: 64 by default (DataComponents.java:220), 1
+            // for anything durable — tools and armour get theirs implicitly
+            // via Properties.durability — and 16 for the odd handful.
+            it.maxStackSize = entry.maxStackSize;
             // Preferred source: MC's assets/items/{slug}.json (modern dispatch tree).
             // Fall back to the legacy assets/models/item/{slug}.json + overrides[]
             // for items whose new-style JSON is missing or unparseable.

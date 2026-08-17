@@ -57,7 +57,11 @@ namespace Render {
         // Slab sizes: fixed-size GPU buffers that never grow (new slabs allocated when full).
         m_opaqueMegaBuffer.Initialize(512000, 1024000);   // 512K verts/slab (~12MB each)
         m_cutoutMegaBuffer.Initialize(256000, 512000);     // 256K verts/slab (~6MB each)
-        m_translucentMegaBuffer.Initialize(256000, 512000);
+        // Per-section index buffers for TRANSLUCENT only — MC's layout
+        // (CompiledSectionMesh -> SectionBuffers per layer). Re-sorts rewrite
+        // this layer's indices constantly, and writing into a shared slab IBO
+        // with draws in flight cost 0.18ms/write against a 0.011ms sort.
+        m_translucentMegaBuffer.Initialize(256000, 512000, /*perSectionIndexBuffers=*/false);
 
         // Create the shared block VAO (GL_ARB_vertex_attrib_binding).
         // One VAO defines the vertex format; mega-buffer VBOs are switched at
@@ -82,7 +86,6 @@ namespace Render {
         {
             std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
             m_gpuData.clear();
-            m_gpuDataGraveyard.clear();  // tombstones die with the world too
         }
 
         // Every GPUSectionData was just destroyed — cached reachable lists in
@@ -152,9 +155,14 @@ namespace Render {
         // Destroy any GPU resources that were deferred during chunk unloads
         ProcessPendingDestroys();
 
-        // Free tombstoned GPUSectionData that no cached reachable list can
-        // reference anymore (see TombstoneGpuDataEntry).
-        ReclaimGpuDataTombstones();
+        // Return slab ranges freed a few frames ago to their free-lists. This
+        // is what stops a re-mesh from overwriting geometry an in-flight frame
+        // is still drawing — the one-frame see-through-the-world flash when
+        // breaking blocks on Vulkan. Must run every frame: RemoveSection parks
+        // ranges here and nothing else ever reclaims them.
+        m_opaqueMegaBuffer.RetireFreedRegions();
+        m_cutoutMegaBuffer.RetireFreedRegions();
+        m_translucentMegaBuffer.RetireFreedRegions();
 
         // Periodic cleanup: remove empty slabs from mega-buffer pools.
         // With slab pool architecture, this just frees unused GPU memory — no data copy.
@@ -215,7 +223,8 @@ namespace Render {
         // problem is the buffer update instead.
         { PROFILE_ZONE_N("Resort.Sort");
         TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
-                                            m_resortIndexScratch, m_resortOrderScratch);
+                                            m_resortIndexScratch, m_resortOrderScratch,
+                                            m_resortKeyScratch);
         }
         if (m_resortIndexScratch.empty()) return false;
 
@@ -403,7 +412,46 @@ namespace Render {
         // QueueDepth is the health metric: with backpressure working it should
         // sit at or below the permit capacity and return to 0 every frame.
         // A rising QueueDepth means a permit is being leaked somewhere.
-        PROFILE_PLOT("Upload/QueueDepth", static_cast<int64_t>(meshResultQueue.Size()));
+        const size_t readyAtFrameStart = meshResultQueue.Size();
+        PROFILE_PLOT("Upload/QueueDepth", static_cast<int64_t>(readyAtFrameStart));
+
+        // Permits are BANKED here and released once, after the loop.
+        //
+        // Releasing inside the loop made it self-feeding: each iteration freed a
+        // permit, a worker parked on its 250us backoff claimed it instantly,
+        // compiled, and pushed a result that this same loop then popped. Queue
+        // depth still read <= capacity (the permits were doing their job) while
+        // 228 sections went up in ONE frame and MeshUpload hit 21 ms.
+        //
+        // MC has the same permit span — compile AND upload, verified:
+        // SectionRenderDispatcher.runTask:79 `supplyAsync(...).thenCompose(f->f)`
+        // flattens onto doTask's uploadFuture (:402), which is runAsync onto the
+        // main-thread upload executor (:227, :57), so bufferPool.release(:91)
+        // happens only after the render thread drained that upload. What MC has
+        // that we lacked is the consecutiveExecutor.schedule hop at :85 — the
+        // release is deferred to a scheduled task instead of firing synchronously
+        // inside the drain. Banking replicates exactly that.
+        //
+        // With no permit freed mid-drain, no compile started during the drain can
+        // enter the queue, so the loop is provably bounded by
+        // queueDepthAtStart + capacity <= 2 x capacity — no arbitrary cap, and no
+        // frame-rate coupling (an earlier cap of "what was pending at frame
+        // start" pinned throughput to permits x fps, measured 896/s at 56 fps).
+        // RAII so an exception out of ProcessMeshBuildResult cannot strand the
+        // banked permits — the per-item guard this replaces gave that for free,
+        // and losing permits permanently shrinks the pipeline until meshing
+        // stops altogether.
+        struct BatchPermitRelease {
+            MeshUploadPermits& p;
+            size_t count = 0;
+            ~BatchPermitRelease() { for (size_t i = 0; i < count; ++i) p.Release(); }
+        };
+
+        // Scoped so the release happens BEFORE the plots below — otherwise
+        // Upload/InFlight would report every permit still held and always read
+        // as a full pipeline.
+        {
+        BatchPermitRelease banked{permits};
 
         while (true) {
             Network::MeshBuildResult result;
@@ -413,19 +461,21 @@ namespace Render {
             }
             }
 
-            // Scope guard, not a plain call at the end: ProcessMeshBuildResult
-            // returns early on four separate drop paths (build failed, failed
-            // validation, chunk unloaded, stale/replaced generation). Each one
-            // would otherwise leak this section's permit.
-            struct PermitGuard {
-                MeshUploadPermits& p;
-                ~PermitGuard() { p.Release(); }
-            } guard{permits};
+            // Banked, not released: ProcessMeshBuildResult returns early on four
+            // separate drop paths (build failed, failed validation, chunk
+            // unloaded, stale/replaced generation), and every one of them still
+            // owes its permit back. Counting before the call covers all of them.
+            //
+            // Synchronously-compiled sections never took a permit — see
+            // MeshBuildResult::holdsUploadPermit.
+            if (result.holdsUploadPermit) ++banked.count;
 
             ProcessMeshBuildResult(result);
             uploadsThisFrame++;
             m_stats.meshUploadsThisFrame++;
         }
+
+        }  // banked releases here — loop is done, so it cannot be re-fed.
 
         PROFILE_PLOT("Upload/Sections",  static_cast<int64_t>(uploadsThisFrame));
         PROFILE_PLOT("Upload/InFlight",  static_cast<int64_t>(permits.InFlight()));
@@ -577,10 +627,10 @@ namespace Render {
             m_cutoutMegaBuffer.RemoveSection(megaKey);
             m_translucentMegaBuffer.RemoveSection(megaKey);
 
-            // Tombstone instead of destroy: cached reachable lists may still
-            // hold the pointer — it stays alive (drawing nothing) until
-            // every list has been rebuilt.
-            TombstoneGpuDataEntry(it);
+            // Plain erase. The renderer's lists carry identity only and
+            // resolve live each frame, so a section that goes away simply
+            // stops resolving — there is no pointer left to keep alive.
+            m_gpuData.erase(it);
 
             if (Render::g_chunkRenderer) {
                 Render::g_chunkRenderer->MarkVisibleSectionsDirty();
@@ -612,12 +662,8 @@ namespace Render {
 
                 m_chunkManager->NotifyRenderGridSectionUpdated(chunkPos, sectionY, nullptr);
 
-                // Tombstone instead of destroy: cached reachable lists may
-                // still hold the pointer — it stays alive (drawing nothing)
-                // until every list has been rebuilt. Avoids the old
-                // MarkSectionDataErased hammer that forced a synchronous
-                // main-thread BFS rebuild on every chunk unload.
-                TombstoneGpuDataEntry(it);
+                // Plain erase — see RemoveSectionGPUData.
+                m_gpuData.erase(it);
             }
         }
 
@@ -634,43 +680,6 @@ namespace Render {
         // RemoveSection (O(1) free-list update). The deferred destroy queue
         // is no longer needed, so just clear any remaining entries.
         m_pendingDestroys.clear();
-    }
-
-    void ClientMeshManager::TombstoneGpuDataEntry(GpuDataMap::iterator it) {
-        GPUSectionData& g = it->second;
-        // Stop every render path cold: cached reachable lists gate all draws
-        // on cachedDrawCmd.valid, and the BFS gates on HasGeometry().
-        g.opaqueDrawCmd = {};
-        g.cutoutDrawCmd = {};
-        g.translucentDrawCmd = {};
-        g.opaqueIndexCount = g.cutoutIndexCount = g.translucentIndexCount = 0;
-        g.opaqueVertexCount = g.cutoutVertexCount = g.translucentVertexCount = 0;
-
-        // extract() preserves the element's address — stale pointers in the
-        // renderer's cached lists stay dereferenceable (and draw nothing)
-        // until ReclaimGpuDataTombstones proves no list can reference them.
-        const uint32_t death = Render::g_chunkRenderer
-            ? Render::g_chunkRenderer->GetPrepareCounter() : 0;
-        m_gpuDataGraveyard.push_back({m_gpuData.extract(it), death});
-    }
-
-    void ClientMeshManager::ReclaimGpuDataTombstones() {
-        PROFILE_ZONE;
-        std::unique_lock<std::shared_mutex> lock(m_gpuDataMutex);
-        if (m_gpuDataGraveyard.empty()) return;
-        if (!Render::g_chunkRenderer) {
-            m_gpuDataGraveyard.clear();  // no renderer, no readers
-            return;
-        }
-        // A cached list built at prepare-counter N was snapshotted from the
-        // section-info atomics, which are nulled before a tombstone's death
-        // counter is stamped — so any list with buildCounter > deathCounter
-        // cannot contain the pointer. Once the OLDEST live list is newer
-        // than a tombstone, it is unreachable and safe to destroy.
-        const uint32_t minLive = Render::g_chunkRenderer->GetMinLiveBuildCounter();
-        std::erase_if(m_gpuDataGraveyard, [minLive](const GpuDataTombstone& t) {
-            return t.deathCounter < minLive;
-        });
     }
 
     void ClientMeshManager::UploadMeshResultToGPU(::Game::Math::ChunkPos chunkPos, int sectionY,
@@ -754,7 +763,8 @@ namespace Render {
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_translucentMegaBuffer.GetDrawCommand(megaKey, cmd)) {
                 gpuData.translucentDrawCmd = {static_cast<int32_t>(cmd.indexCount),
-                                              cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex};
+                                              cmd.indexByteOffset, cmd.baseVertex, true, cmd.slabIndex,
+                                              m_translucentMegaBuffer.GetSectionIndexBuffer(megaKey)};
             }
 
             // Quad centroids for back-to-front re-sorting. MC takes the
@@ -801,7 +811,8 @@ namespace Render {
                 const glm::vec3 cameraPos = GetPlayerPosition();
                 gpuData.translucencyPov = TranslucentSort::PointOfView{};
                 TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
-                                                    m_resortIndexScratch, m_resortOrderScratch);
+                                                    m_resortIndexScratch, m_resortOrderScratch,
+                                            m_resortKeyScratch);
                 if (!m_resortIndexScratch.empty()
                     && m_translucentMegaBuffer.UpdateSectionIndices(
                            megaKey, m_resortIndexScratch.data(), m_resortIndexScratch.size())) {
@@ -833,7 +844,7 @@ namespace Render {
                 // Had geometry, remeshed to empty: cached reachable lists may
                 // still point at it — tombstone (address-preserving) instead
                 // of destroying, so no full cache invalidation is needed.
-                TombstoneGpuDataEntry(it);
+                m_gpuData.erase(it);
             } else {
                 // Fresh entry created by this very call — nothing references it.
                 m_gpuData.erase(it);
@@ -871,9 +882,27 @@ namespace Render {
         m_stats.meshUploadedToGPU.fetch_add(1, std::memory_order_relaxed);
         m_stats.meshUploadsThisFrame++;
 
-        // Notify renderer that visible sections need rebuilding
         if (Render::g_chunkRenderer) {
-            Render::g_chunkRenderer->MarkVisibleSectionsDirty();
+            // MC LevelRenderer.addRecentlyCompiledSection -> schedulePropagationFrom.
+            //
+            // Note what is deliberately NOT here: MarkVisibleSectionsDirty.
+            // A section finishing its compile does not invalidate the occlusion
+            // graph, matching MC — its invalidate() has exactly two callers, an
+            // 8-block camera move in cullTerrain and needsUpdate(). The graph
+            // learns about this section by propagation instead.
+            //
+            // This call WAS here, and removing it once made Sections/Reachable
+            // climb to 5652 and never recover while real draws stayed near
+            // 1962/frame. The reason was not the invalidation itself: the
+            // visible list cached a GPUSectionData* and a layerMask captured at
+            // graph-build time, those went stale on every remesh, and the full
+            // rebuild was quietly acting as the list's garbage collector.
+            //
+            // The list now carries identity only and the draw path resolves
+            // live each frame (ChunkRenderer's frustum filter), so a stale entry
+            // resolves to null and costs one failed lookup instead of a wrong
+            // draw. There is nothing left for a periodic rebuild to collect.
+            Render::g_chunkRenderer->SchedulePropagationFrom(chunkPos, sectionY);
         }
 
         LogMeshActivity("Uploaded mesh result to GPU", chunkPos, sectionY);

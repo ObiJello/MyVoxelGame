@@ -4,6 +4,7 @@
 #include "common/core/Features.hpp"
 
 #include <string>
+#include <vector>
 #include <cstdint>
 
 namespace Network {
@@ -17,11 +18,25 @@ namespace Network {
     struct MultiBlockChangeS2CPacket;
     struct PlayerUpdateS2CPacket;
     struct RemoveEntitiesS2CPacket;
+    struct ItemEntitySpawnS2CPacket;
+    struct ItemEntityMoveS2CPacket;
+    struct TakeItemEntityS2CPacket;
+    struct AddEntityS2CPacket;
+    struct MoveEntityS2CPacket;
+    struct EntityPositionSyncS2CPacket;
+    struct SetEntityMotionS2CPacket;
+    struct SetEntityDataS2CPacket;
+    struct EntityEventS2CPacket;
+    struct HurtAnimationS2CPacket;
+    struct TickingStateS2CPacket;
+    struct TickingStepS2CPacket;
+    struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
     struct InventorySetSlotS2CPacket;
     struct InventorySetCarriedS2CPacket;
     struct OpenScreenS2CPacket;
+    struct ContainerSetDataS2CPacket;
     struct SetHealthS2CPacket;
     struct BlockChangedAckS2CPacket;
     struct PlayerAbilitiesS2CPacket;
@@ -75,8 +90,26 @@ namespace Network {
         // Player updates
         virtual void onPlayerUpdateS2C(const PlayerUpdateS2CPacket& packet) {}
 
-        // Entity removal (Minecraft's ClientboundRemoveEntitiesPacket)
+        // Entity removal (Minecraft's ClientboundRemoveEntitiesPacket).
+        // Carries BOTH players and dropped items — the handler splits them by
+        // id range.
         virtual void onRemoveEntitiesS2C(const RemoveEntitiesS2CPacket& packet) {}
+
+        // Dropped items
+        virtual void onItemEntitySpawnS2C(const ItemEntitySpawnS2CPacket& packet) {}
+        virtual void onItemEntityMoveS2C(const ItemEntityMoveS2CPacket& packet) {}
+        virtual void onTakeItemEntityS2C(const TakeItemEntityS2CPacket& packet) {}
+
+        // ── Mob entities ───────────────────────────────────────────────────
+        virtual void onAddEntityS2C(const AddEntityS2CPacket& packet) {}
+        virtual void onMoveEntityS2C(const MoveEntityS2CPacket& packet) {}
+        virtual void onEntityPositionSyncS2C(const EntityPositionSyncS2CPacket& packet) {}
+        virtual void onSetEntityMotionS2C(const SetEntityMotionS2CPacket& packet) {}
+        virtual void onSetEntityDataS2C(const SetEntityDataS2CPacket& packet) {}
+        virtual void onEntityEventS2C(const EntityEventS2CPacket& packet) {}
+        virtual void onHurtAnimationS2C(const HurtAnimationS2CPacket& packet) {}
+        virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
+        virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
 
         // Inventory sync
         virtual void onHotbarSyncS2C(const HotbarSyncS2CPacket& packet) {}
@@ -86,6 +119,7 @@ namespace Network {
 
         // Block container opened (MC ClientboundOpenScreenPacket)
         virtual void onOpenScreenS2C(const OpenScreenS2CPacket& packet) {}
+        virtual void onContainerSetDataS2C(const ContainerSetDataS2CPacket& packet) {}
 
         // Player stats (MC ClientboundSetHealthPacket)
         virtual void onSetHealthS2C(const SetHealthS2CPacket& packet) {}
@@ -108,6 +142,8 @@ namespace Network {
 
         // View distance
         virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}
+        // Command names this server accepts — drives chat tab-completion.
+        virtual void onCommandsS2C(const std::vector<std::string>& commandNames) {}
         
         // Connection management
         virtual void onDisconnect(const std::string& reason) {}
@@ -132,6 +168,7 @@ namespace Network {
         // release-use, drop, swap-offhand, dig stages)
         virtual void onPlayerActionC2S(const PlayerActionC2SPacket& packet) {}
         virtual void onPlayerAbilitiesC2S(const PlayerAbilitiesC2SPacket& packet) {}
+        virtual void onInteractC2S(const InteractC2SPacket& packet) {}
         
         // Play phase - Player updates
         virtual void onPlayerMoveC2S(const PlayerMoveC2SPacket& packet) {}

@@ -85,6 +85,16 @@ namespace Game {
         // Every other channel is constant per biome.
         uint32_t GrassColor(BiomeId id, int worldX, int worldZ);
         uint32_t FoliageColor(BiomeId id);
+
+        // Sample the colormaps directly at an explicit (temperature, downfall)
+        // rather than via a biome. This is what MC's `minecraft:grass` /
+        // `minecraft:foliage` ITEM tint sources do: an item has no biome, so
+        // its model JSON carries a fixed climate to look up
+        // (e.g. bush's {"type":"minecraft:grass","temperature":0.5,
+        // "downfall":1.0}). Returns vanilla's no-colormap constant until
+        // LoadColormaps has run.
+        uint32_t GrassColorAt(float temperature, float downfall);
+        uint32_t FoliageColorAt(float temperature, float downfall);
         uint32_t DryFoliageColor(BiomeId id);
         uint32_t WaterColor(BiomeId id);
     }

@@ -90,8 +90,11 @@ namespace Server {
             for (int dz = -radius; dz <= radius; ++dz) {
                 Game::Math::ChunkPos chunk(spawnChunk.x + dx, spawnChunk.z + dz);
                 int distance = std::max(std::abs(dx), std::abs(dz));
-                int level = CalculateTicketLevel(distance);
-                
+                // The spawn area's own radius is its simulation distance, so
+                // spawn chunks tick blocks out to radius - 1 the same way a
+                // player's do.
+                int level = CalculateTicketLevel(distance, radius);
+
                 SpawnTicket ticket(TicketType::SPAWN, level, "spawn", m_currentTick);
                 m_spawnTickets[chunk].insert(ticket);
             }
@@ -172,6 +175,23 @@ namespace Server {
         return GetChunkLevel(chunk) <= ENTITY_TICKING_LEVEL;
     }
 
+    std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetBlockTickingChunks() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        RebuildLevelCacheIfNeeded();
+
+        std::vector<Game::Math::ChunkPos> result;
+        result.reserve(m_chunkLevels.size());
+
+        for (const auto& [chunk, level] : m_chunkLevels) {
+            if (level <= BLOCK_TICKING_LEVEL) {
+                result.push_back(chunk);
+            }
+        }
+
+        return result;
+    }
+
     std::vector<Game::Math::ChunkPos> ChunkTicketManager::GetLoadedChunks() const {
         std::lock_guard<std::mutex> lock(m_mutex);
         
@@ -205,14 +225,29 @@ namespace Server {
         return level - ENTITY_TICKING_LEVEL;
     }
 
-    int ChunkTicketManager::CalculateTicketLevel(int chunkDistance) {
-        // Calculate appropriate ticket level for a given chunk distance
-        if (chunkDistance <= 0) {
-            return ENTITY_TICKING_LEVEL;
-        }
-        
-        int level = ENTITY_TICKING_LEVEL + chunkDistance;
-        return std::min(level, MAX_LEVEL);
+    int ChunkTicketManager::CalculateTicketLevel(int chunkDistance, int simulationDistance) {
+        // MC DistanceManager: a player's ticket level is anchored so that the
+        // EDGE of the simulation distance lands on BORDER_LEVEL, and the levels
+        // step inward from there:
+        //
+        //     d == simulationDistance      → 35  border      (generated only)
+        //     d == simulationDistance - 1  → 34  block ticking
+        //     d <= simulationDistance - 2  → 33  entity ticking
+        //
+        // i.e. level(d) = BORDER_LEVEL - simulationDistance + d.
+        //
+        // The previous formula was `ENTITY_TICKING_LEVEL + d`, which anchors the
+        // wrong end: it put level 33 at the player and 34 one chunk out, so
+        // ShouldChunkTickBlocks was true only within a single chunk no matter
+        // how large the simulation distance was. Nothing consumed those two
+        // predicates at the time, so the error was invisible; the random-tick
+        // loop is the first caller, and with the old formula crops would have
+        // stopped growing the moment you walked two chunks from your farm.
+        if (simulationDistance < 1) simulationDistance = 1;
+        const int level = BORDER_LEVEL - simulationDistance + chunkDistance;
+        // Never claim MORE than full simulation at the anchor, and never exceed
+        // the table's ceiling far away.
+        return std::clamp(level, ENTITY_TICKING_LEVEL, MAX_LEVEL);
     }
 
     // === MAINTENANCE ===

@@ -50,6 +50,17 @@ namespace Server {
         return true;
     }
 
+    std::vector<std::string> CommandDispatcher::GetCommandNames() const {
+        std::vector<std::string> names;
+        names.reserve(m_commands.size());
+        // Keys are already lowercase (RegisterCommand normalises them), which
+        // is the form tab-completion wants.
+        for (const auto& [name, handler] : m_commands) names.push_back(name);
+        // The map is unordered, so sort for a stable popup order.
+        std::sort(names.begin(), names.end());
+        return names;
+    }
+
     std::vector<std::string> CommandDispatcher::Tokenize(const std::string& input) {
         std::vector<std::string> tokens;
         std::istringstream iss(input);

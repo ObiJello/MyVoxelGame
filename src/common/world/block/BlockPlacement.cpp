@@ -1,6 +1,8 @@
 // File: src/common/world/block/BlockPlacement.cpp
 #include "BlockPlacement.hpp"
+#include <algorithm>
 #include "BlockRegistry.hpp"
+#include "RedstoneWire.hpp"
 #include "../../core/Log.hpp"
 
 #include <array>
@@ -136,6 +138,121 @@ namespace Game {
         const Direction look    = context.getHorizontalDirection();
         const Direction clicked = context.getClickedFace();
 
+        // ── Chests: MC ChestBlock.getStateForPlacement, verbatim ──────────
+        // Sets FACING and TYPE together. TYPE is the whole point: it records
+        // WHICH neighbour this chest paired with at the moment it was placed,
+        // which geometry alone can never recover — with a lone chest on either
+        // side, both are equally valid partners and only the click says which.
+        if ((id == BlockID::Chest || id == BlockID::TrappedChest) && context.world) {
+            const glm::ivec3 clicked = context.hitResult.blockPos;
+            // face: 0 bottom, 1 top, 2 north, 3 south, 4 west, 5 east.
+            static const glm::ivec3 kFaceOffset[6] = {
+                {0,-1,0}, {0,1,0}, {0,0,-1}, {0,0,1}, {-1,0,0}, {1,0,0},
+            };
+            const int face = std::clamp(context.hitResult.face, 0, 5);
+            const glm::ivec3 placePos = clicked + kFaceOffset[face];
+
+            // MC candidatePartnerFacing: the neighbour must be this same chest
+            // AND still SINGLE — a chest already in a pair cannot take a third.
+            auto candidatePartnerFacing =
+                [&](const glm::ivec3& at) -> std::string_view {
+                    if (context.world->GetBlock(at.x, at.y, at.z) != id) return {};
+                    const uint8_t st = context.world->GetBlockState(at.x, at.y, at.z);
+                    if (def.ValueOf(st, "type") != "single") return {};
+                    return def.ValueOf(st, "facing");
+                };
+            auto axisOf = [](std::string_view f) {
+                return (f == "north" || f == "south") ? 2 : 0;   // 2 = Z, 0 = X
+            };
+            auto clockWise = [](std::string_view f) -> std::string_view {
+                if (f == "north") return "east";  if (f == "east")  return "south";
+                if (f == "south") return "west";  return "north";
+            };
+            auto counterClockWise = [](std::string_view f) -> std::string_view {
+                if (f == "north") return "west";  if (f == "west")  return "south";
+                if (f == "south") return "east";  return "north";
+            };
+            auto offsetOf = [](std::string_view f) -> glm::ivec3 {
+                if (f == "north") return {0,0,-1};  if (f == "south") return {0,0,1};
+                if (f == "west")  return {-1,0,0};  return {1,0,0};
+            };
+
+            // Default: face the player (HorizontalOpposite, MC's
+            // getHorizontalDirection().getOpposite()).
+            std::string_view facing = NameOf(Opposite(look));
+            std::string_view type   = "single";
+
+            // 1. Clicked the SIDE of a chest -> adopt its facing and pair with
+            //    THAT chest (ChestBlock.java:150-156). This is the branch that
+            //    makes "place against the one I clicked" work.
+            const int clickedAxis = (face <= 1) ? 1 : (face <= 3 ? 2 : 0);
+            if (clickedAxis != 1) {
+                const std::string_view nf = candidatePartnerFacing(clicked);
+                if (!nf.empty() && axisOf(nf) != clickedAxis) {
+                    facing = nf;
+                    // MC: type = neighbourFacing.getCounterClockWise() ==
+                    //            clickedFace.getOpposite() ? RIGHT : LEFT
+                    // clickedFace.getOpposite() is the step from the placement
+                    // cell back to the clicked chest.
+                    const glm::ivec3 backToClicked = clicked - placePos;
+                    type = (offsetOf(counterClockWise(nf)) == backToClicked) ? "right" : "left";
+                }
+            }
+
+            // 2. Otherwise fall back to MC's getChestType scan, which joins a
+            //    lone chest sitting to either side of the placement cell.
+            if (type == "single") {
+                if (facing == candidatePartnerFacing(placePos + offsetOf(clockWise(facing)))) {
+                    type = "left";
+                } else if (facing == candidatePartnerFacing(
+                               placePos + offsetOf(counterClockWise(facing)))) {
+                    type = "right";
+                }
+            }
+
+            BlockRegistry::BlockStateDefinition::PropertyMap props;
+            props["facing"] = std::string(facing);
+            props["type"]   = std::string(type);
+            return def.IndexOf(props);
+        }
+
+        // ── Buttons and levers ────────────────────────────────────────────
+        // MC FaceAttachedHorizontalDirectionalBlock.getStateForPlacement walks
+        // context.getNearestLookingDirections() and takes the first direction
+        // whose resulting state can survive. That list is ordered by how
+        // closely each direction matches the look vector, EXCEPT that
+        // BlockPlaceContext moves `clickedFace.getOpposite()` to the front — so
+        // the first candidate, and in practice always the winning one, is the
+        // face you actually clicked.
+        //
+        // Reduced to that first candidate:
+        //   clicked UP    -> opposite DOWN, vertical -> FACE = floor
+        //   clicked DOWN  -> opposite UP,   vertical -> FACE = ceiling
+        //   clicked side  -> FACE = wall, FACING = direction.getOpposite(),
+        //                    and direction is already the clicked face's
+        //                    opposite, so FACING is the clicked face itself —
+        //                    the button points out of the wall it is on.
+        // Vertical placements take FACING from the player, which is what makes
+        // a floor button line up with the way you were standing.
+        {
+            const std::string& name = BlockRegistry::Get(id).modelName;
+            if (name.find("_button") != std::string::npos || name == "lever") {
+                BlockRegistry::BlockStateDefinition::PropertyMap props;
+                if (clicked == Direction::Up) {
+                    props["face"]   = "floor";
+                    props["facing"] = std::string(NameOf(look));
+                } else if (clicked == Direction::Down) {
+                    props["face"]   = "ceiling";
+                    props["facing"] = std::string(NameOf(look));
+                } else {
+                    props["face"]   = "wall";
+                    props["facing"] = std::string(NameOf(clicked));
+                }
+                props["powered"] = "false";
+                return def.IndexOf(props);
+            }
+        }
+
         switch (rule) {
             case PlacementRule::HorizontalOpposite:
                 return def.IndexOfSingle("facing", NameOf(Opposite(look)));
@@ -232,11 +349,11 @@ namespace Game {
         // MC BlockBehaviour.canBeReplaced:
         //   state.canBeReplaced() && (itemInHand.isEmpty() || !itemInHand.is(asItem()))
         //
-        // The `replaceable` property itself is still unmodelled here — only air
-        // qualifies, so grass, snow layers and fluids are not yet placement-
-        // replaceable (same gap the caller has always had). Once that flag
-        // exists, this is the one place it needs to be read.
-        return false;
+        // The second clause is what stops a replaceable block being overwritten
+        // by MORE OF ITSELF — placing tall grass into tall grass does nothing
+        // rather than silently consuming the item.
+        if (!BlockRegistry::Get(existing).replaceable) return false;
+        return held == BlockID::Air || held != existing;
     }
 
     namespace {
@@ -288,8 +405,218 @@ namespace Game {
             return false;
         }
 
+        // ── Farming (MC VegetationBlock.canSurvive → mayPlaceOn) ────────────
+        //
+        // Deliberately NOT gated on light, even though CropBlock.canSurvive is
+        // `hasSufficientLight(level, pos) && super.canSurvive(...)`. This
+        // overload has no world to ask, and the light stand-in is a column walk
+        // that would need one; the growth rule already refuses to advance a
+        // crop in the dark, so what a player sees — plantable but frozen — is
+        // the same outcome by a slightly different route.
+
+        // CropBlock.mayPlaceOn / StemBlock.mayPlaceOn / PitcherCropBlock:
+        // `state.is(Blocks.FARMLAND)`, and nothing else. This is the rule that
+        // stops seeds being planted on plain grass.
+        if (name == "wheat" || name == "carrots" || name == "potatoes" ||
+            name == "beetroots" || name == "torchflower_crop" ||
+            name == "pitcher_crop" ||
+            name == "melon_stem" || name == "pumpkin_stem" ||
+            name == "attached_melon_stem" || name == "attached_pumpkin_stem") {
+            return belowId == BlockID::Farmland;
+        }
+
+        // MC RedStoneWireBlock.canSurvive / TripWireBlock.canSurvive: both want
+        // a sturdy top face underneath (vanilla also allows a hopper for
+        // redstone, which this engine's shape test already accepts). Without
+        // this, dust and string could be placed in mid-air.
+        if (name == "redstone_wire" || name == "tripwire_ns") {
+            return IsFaceSturdyUp(belowId, belowState);
+        }
+
+        // NetherWartBlock.mayPlaceOn: `state.is(Blocks.SOUL_SAND)`.
+        if (name == "nether_wart") {
+            return belowId == BlockID::SoulSand;
+        }
+
+        // SweetBerryBushBlock inherits VegetationBlock.mayPlaceOn:
+        // `state.is(BlockTags.DIRT) || state.is(Blocks.FARMLAND)`.
+        if (name == "sweet_berry_bush") {
+            const std::string& belowName = BlockRegistry::Get(belowId).modelName;
+            if (belowName == "farmland") return true;
+            for (std::string_view d : kDirtTag) if (belowName == d) return true;
+            return false;
+        }
+
         // No modelled rule — placement is unconstrained, as it was before.
         return true;
+    }
+
+    namespace {
+        // data/minecraft/tags/block/sand.json
+        constexpr std::string_view kSandTag[] = { "sand", "red_sand", "suspicious_sand" };
+
+        bool IsInDirtTag(BlockID id) {
+            const std::string& n = BlockRegistry::Get(id).modelName;
+            for (std::string_view d : kDirtTag) if (n == d) return true;
+            return false;
+        }
+        bool IsInSandTag(BlockID id) {
+            const std::string& n = BlockRegistry::Get(id).modelName;
+            for (std::string_view s : kSandTag) if (n == s) return true;
+            return false;
+        }
+    } // namespace
+
+    namespace {
+        // MC Block.isFaceSturdy(state, level, pos, direction) for an arbitrary
+        // face, approximated from the single collision AABB this engine keeps
+        // per state: the box must cover the whole square of that face and reach
+        // it. True for full cubes, for the top of a top slab, and false for
+        // anything `.noCollision()` — which is what stops a button being hung
+        // on another button.
+        bool IsFaceSturdy(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
+            const BlockID id = level.GetBlock(p.x, p.y, p.z);
+            if (id == BlockID::Air) return false;
+            if (!BlockRegistry::HasCollision(id)) return false;
+            const auto& s = BlockRegistry::GetBlockShape(id, level.GetBlockState(p.x, p.y, p.z));
+            constexpr float lo = 0.0001f, hi = 0.9999f;
+            switch (face) {
+                case Direction::Up:    return s.max.y >= hi && s.min.x <= lo && s.max.x >= hi &&
+                                              s.min.z <= lo && s.max.z >= hi;
+                case Direction::Down:  return s.min.y <= lo && s.min.x <= lo && s.max.x >= hi &&
+                                              s.min.z <= lo && s.max.z >= hi;
+                case Direction::North: return s.min.z <= lo && s.min.x <= lo && s.max.x >= hi &&
+                                              s.min.y <= lo && s.max.y >= hi;
+                case Direction::South: return s.max.z >= hi && s.min.x <= lo && s.max.x >= hi &&
+                                              s.min.y <= lo && s.max.y >= hi;
+                case Direction::West:  return s.min.x <= lo && s.min.z <= lo && s.max.z >= hi &&
+                                              s.min.y <= lo && s.max.y >= hi;
+                case Direction::East:  return s.max.x >= hi && s.min.z <= lo && s.max.z >= hi &&
+                                              s.min.y <= lo && s.max.y >= hi;
+            }
+            return false;
+        }
+
+        bool IsFaceAttachedBlock(BlockID id) {
+            const std::string& n = BlockRegistry::Get(id).modelName;
+            return n.find("_button") != std::string::npos || n == "lever";
+        }
+    } // namespace
+
+    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id,
+                      uint8_t stateIndex) {
+        // MC FaceAttachedHorizontalDirectionalBlock.canSurvive:
+        //   canAttach(level, pos, getConnectedDirection(state).getOpposite())
+        // where getConnectedDirection is UP for FLOOR, DOWN for CEILING, and
+        // FACING for WALL — the direction the block POINTS. Its opposite is the
+        // direction of the surface holding it up.
+        if (IsFaceAttachedBlock(id)) {
+            const auto& def = BlockRegistry::GetStateDefinition(id);
+            const std::string_view face   = def.ValueOf(stateIndex, "face");
+            const std::string_view facing = def.ValueOf(stateIndex, "facing");
+
+            Direction connected = Direction::North;
+            if (face == "floor")        connected = Direction::Up;
+            else if (face == "ceiling") connected = Direction::Down;
+            else {
+                if      (facing == "east")  connected = Direction::East;
+                else if (facing == "south") connected = Direction::South;
+                else if (facing == "west")  connected = Direction::West;
+                else                        connected = Direction::North;
+            }
+
+            const Direction toSupport = Opposite(connected);
+            const glm::ivec3 support{pos.x + StepX(toSupport),
+                                     pos.y + StepY(toSupport),
+                                     pos.z + StepZ(toSupport)};
+            // The support's face that we are stuck to points back at us.
+            return IsFaceSturdy(level, support, Opposite(toSupport));
+        }
+        return CanSurviveAt(level, pos, id);
+    }
+
+    uint8_t ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
+                                       BlockID id, uint8_t fallback) {
+        if (id == BlockID::RedstoneWire) {
+            // MC RedStoneWireBlock.getStateForPlacement:
+            //   getConnectionState(level, this.crossState, pos)
+            return RedstonePlacementState(level, pos);
+        }
+        return fallback;
+    }
+
+    bool HasModelledSurvivalRule(BlockID id) {
+        // Every family the two functions above actually branch on. Kept as one
+        // list so adding a rule and advertising it is a single edit.
+        static constexpr std::string_view kModelled[] = {
+            // CanSurviveOn
+            "leaf_litter", "wildflowers", "pink_petals",
+            "wheat", "carrots", "potatoes", "beetroots", "torchflower_crop",
+            "pitcher_crop", "melon_stem", "pumpkin_stem",
+            "attached_melon_stem", "attached_pumpkin_stem",
+            "nether_wart", "sweet_berry_bush",
+            // tripwire is a model name, not a slug — it is re-registered onto
+            // its no-connection sub-model (see BlockRegistry's multipart note).
+            "redstone_wire", "tripwire_ns",
+            // CanSurviveAt (world-aware)
+            "sugar_cane", "cactus", "bamboo", "bamboo_sapling",
+        };
+        const std::string& name = BlockRegistry::Get(id).modelName;
+        for (std::string_view m : kModelled) if (name == m) return true;
+        return false;
+    }
+
+    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id) {
+        const std::string& name = BlockRegistry::Get(id).modelName;
+        const glm::ivec3 below{pos.x, pos.y - 1, pos.z};
+        const BlockID belowId = level.GetBlock(below.x, below.y, below.z);
+
+        // SugarCaneBlock.canSurvive (SugarCaneBlock.java:44-62): stacking on
+        // itself always works; otherwise dirt or sand with water (or frosted
+        // ice, which we don't have) orthogonally adjacent to the block BELOW —
+        // not to the cane itself. Getting that wrong by one block is the
+        // classic reimplementation bug, so note it: the water sits beside the
+        // ground, level with it.
+        if (name == "sugar_cane") {
+            if (belowId == BlockID::SugarCane) return true;
+            if (!IsInDirtTag(belowId) && !IsInSandTag(belowId)) return false;
+            for (Direction d : {Direction::North, Direction::East,
+                                Direction::South, Direction::West}) {
+                if (level.GetBlock(below.x + StepX(d), below.y, below.z + StepZ(d))
+                    == BlockID::Water) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // CactusBlock.canSurvive (CactusBlock.java:60-70): no solid block on any
+        // horizontal side, sand or cactus below, and nothing liquid above.
+        if (name == "cactus") {
+            for (Direction d : {Direction::North, Direction::East,
+                                Direction::South, Direction::West}) {
+                const BlockID n = level.GetBlock(pos.x + StepX(d), pos.y, pos.z + StepZ(d));
+                if (n != BlockID::Air && BlockRegistry::Get(n).opaque) return false;
+                if (n == BlockID::Lava) return false;
+            }
+            if (belowId != BlockID::Cactus && !IsInSandTag(belowId)) return false;
+            const BlockID above = level.GetBlock(pos.x, pos.y + 1, pos.z);
+            return above != BlockID::Water && above != BlockID::Lava;
+        }
+
+        // BambooStalkBlock / BambooSaplingBlock.canSurvive: the
+        // #bamboo_plantable_on tag (dirt + sand + bamboo's own two blocks).
+        if (name == "bamboo" || name == "bamboo_sapling") {
+            return IsInDirtTag(belowId) || IsInSandTag(belowId) ||
+                   belowId == BlockID::Bamboo || belowId == BlockID::BambooSapling;
+        }
+
+        // CocoaBlock.canSurvive is about the block it FACES, not the one below,
+        // and the facing is not known until placement resolves. Left to the
+        // generic path for now — cocoa places like any other block.
+
+        const uint8_t belowState = level.GetBlockState(below.x, below.y, below.z);
+        return CanSurviveOn(id, belowId, belowState);
     }
 
 } // namespace Game

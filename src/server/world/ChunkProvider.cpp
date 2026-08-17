@@ -89,14 +89,26 @@ namespace Game {
                 Log::Info("MinecraftChunkLoaderImpl created");
             }
 
-            // Create chunk saver
-            Log::Info("Creating AsyncChunkSaver...");
-            SaveWorkerConfig saverConfig;
-            saverConfig.workerThreads = 1;
-            saverConfig.enableAnvilFormat = !m_config.minecraftWorldPath.empty();
-            saverConfig.minecraftWorldPath = m_config.minecraftWorldPath;
-            m_chunkSaver = std::make_unique<AsyncChunkSaver>(saverConfig);
-            Log::Info("AsyncChunkSaver created");
+            // Create chunk saver — unless this world is read-only.
+            //
+            // Not constructing one at all is the enforcement, deliberately:
+            // guarding ChunkProvider::SaveChunk would not be enough, because
+            // ChunkCache saves through its OWN saver reference on eviction and
+            // in its destructor (ChunkCache.cpp:20/30/214), which never passes
+            // back through here. With no saver to hand it, every one of those
+            // paths becomes a no-op and there is no way to write a byte to the
+            // player's real Minecraft world by accident.
+            if (m_config.readOnly) {
+                Log::Info("Chunk saver DISABLED — world opened read-only");
+            } else {
+                Log::Info("Creating AsyncChunkSaver...");
+                SaveWorkerConfig saverConfig;
+                saverConfig.workerThreads = 1;
+                saverConfig.enableAnvilFormat = !m_config.minecraftWorldPath.empty();
+                saverConfig.minecraftWorldPath = m_config.minecraftWorldPath;
+                m_chunkSaver = std::make_unique<AsyncChunkSaver>(saverConfig);
+                Log::Info("AsyncChunkSaver created");
+            }
 
             // Create dirty tracker
             Log::Info("Creating DirtyTracker...");
@@ -114,7 +126,7 @@ namespace Game {
                 return false;
             }
 
-            if (!m_chunkSaver->Initialize()) {
+            if (m_chunkSaver && !m_chunkSaver->Initialize()) {
                 Log::Error("Failed to initialize chunk saver");
                 return false;
             }
@@ -218,6 +230,13 @@ namespace Game {
         }
 
         return chunk;
+    }
+
+    std::shared_ptr<Chunk> ChunkProvider::GetLoadedChunk(Math::ChunkPos position) {
+        if (!m_initialized || !m_chunkCache) {
+            return nullptr;
+        }
+        return m_chunkCache->Get(position);
     }
 
     bool ChunkProvider::IsChunkLoaded(Math::ChunkPos position) const {

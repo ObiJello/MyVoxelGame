@@ -5,6 +5,7 @@
 #if ENABLE_PORTAL_GUN
 
 #include "ClientPortalManager.hpp"
+#include "common/core/Mth.hpp"
 
 #include "common/network/packets/game/PortalSetS2CPacket.hpp"
 #include "common/network/packets/game/PortalRemoveS2CPacket.hpp"
@@ -405,29 +406,21 @@ namespace Client {
                 // is genuinely degenerate; fall back to the dst
                 // portal's natural exit direction so the player ends
                 // up aligned with the portal's long axis.
-                const float yawRad   = glm::radians(currYawDeg);
-                const float pitchRad = glm::radians(currPitchDeg);
-                const float cp = std::cos(pitchRad);
-                const glm::vec3 fwd(
-                    std::cos(yawRad) * cp,
-                    std::sin(pitchRad),
-                    std::sin(yawRad) * cp);
+                const glm::vec3 fwd =
+                    Game::Mth::ViewVector(currPitchDeg, currYawDeg);
                 const glm::vec3 newFwd =
                     glm::normalize(glm::mat3(M) * fwd);
 
-                float newPitchDeg = glm::degrees(std::asin(
-                    std::clamp(newFwd.y, -1.0f, 1.0f)));
+                float newPitchDeg = Game::Mth::XRotFromVector(newFwd);
                 newPitchDeg = std::clamp(newPitchDeg, -89.5f, 89.5f);
 
                 float newYawDeg;
                 const float horizLen2 = newFwd.x * newFwd.x +
                                         newFwd.z * newFwd.z;
                 if (horizLen2 > 0.01f) {
-                    newYawDeg = glm::degrees(
-                        std::atan2(newFwd.z, newFwd.x));
+                    newYawDeg = Game::Mth::YRotFromVector(newFwd);
                 } else if (std::abs(s.dst->normal.y) > 0.7f) {
-                    newYawDeg = glm::degrees(std::atan2(
-                        -s.dst->upDir.z, -s.dst->upDir.x));
+                    newYawDeg = Game::Mth::YRotFromVector(-s.dst->upDir);
                 } else {
                     // Wall dst with degenerate horizontal forward
                     // (player looking near-straight up/down). Recover
@@ -437,12 +430,15 @@ namespace Client {
                     // the player's body orientation through the
                     // wall→wall mirror instead of snapping them to
                     // face out of the dst wall.
-                    const glm::vec3 rightH(
-                        -std::sin(yawRad), 0.0f, std::cos(yawRad));
+                    const glm::vec3 rightH = glm::normalize(glm::cross(
+                        Game::Mth::HorizontalViewVector(currYawDeg),
+                        glm::vec3(0.0f, 1.0f, 0.0f)));
                     const glm::vec3 newRight = glm::normalize(
                         glm::mat3(M) * rightH);
-                    newYawDeg = glm::degrees(
-                        std::atan2(-newRight.x, newRight.z));
+                    // Forward is right rotated back a quarter turn:
+                    // cross(worldUp, right) == forward for this basis.
+                    newYawDeg = Game::Mth::YRotFromVector(
+                        glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), newRight));
                 }
 
                 // Any horizontal↔horizontal pair (floor↔floor,

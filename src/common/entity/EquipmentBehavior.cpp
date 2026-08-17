@@ -7,6 +7,7 @@
 #include "GeneratedItemList.hpp"
 #include "Inventory.hpp"
 #include "../core/Log.hpp"
+#include "../world/level/WorldDrops.hpp"
 #include "server/player/ServerPlayer.hpp"
 
 #include <unordered_map>
@@ -93,8 +94,11 @@ namespace Game::EquipmentBehavior {
                 if (placed) break;
             }
             if (!placed) {
-                Log::Debug("[Equip] displaced equipment lost — inventory full, "
-                           "no item-entity system to drop it");
+                // Inventory full — the armour that just came off goes on the
+                // ground rather than being destroyed. Swapping helmets with a
+                // full pack used to silently eat the old one.
+                DropItemStackNear(glm::ivec3(glm::floor(player.getPosition())),
+                                  inEquipmentSlot);
             }
         }
         return UseResult::Success;

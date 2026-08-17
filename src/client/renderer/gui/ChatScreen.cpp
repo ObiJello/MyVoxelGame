@@ -138,8 +138,19 @@ namespace {
         if (argIndex == 0) {
             // BARE command names (no '/'), MC-style. The '/' is already
             // in the input field and stays put when applying.
-            candidates = {"tp", "teleport", "kick", "gamemode", "kill", "time",
-                          "gamerule", "seed", "clearchat"};
+            //
+            // Sourced from the server's CommandsS2C rather than a literal
+            // list here: the literal drifted from IntegratedServer's
+            // registrations every time a command was added, which is how
+            // /tick shipped without ever appearing in the popup.
+            candidates = Render::GetServerCommandNames();
+            // `clearchat` is handled entirely client-side (PlatformMain
+            // intercepts it before the line is sent), so the server does not
+            // know about it and it has to be added here.
+            candidates.push_back("clearchat");
+            std::sort(candidates.begin(), candidates.end());
+            candidates.erase(std::unique(candidates.begin(), candidates.end()),
+                             candidates.end());
         } else {
             // Command name without the leading '/' for matching.
             std::string cmd = tokens.empty() ? "" : tokens[0];
@@ -184,11 +195,34 @@ namespace {
                     }
                 }
             } else if (cmd == "gamerule") {
-                // /gamerule <rule> [true|false]
+                // /gamerule <rule> [value]. Rule ids mirror GameRuleCommand's
+                // table (snake_case, per the vendored decompile); the legacy
+                // camelCase aliases still work but are not suggested.
                 if (argIndex == 1) {
-                    candidates = {"doDaylightCycle"};
+                    candidates = {"random_tick_speed", "advance_time"};
                 } else if (argIndex == 2) {
-                    candidates = {"true", "false"};
+                    // Only boolean rules have a fixed value set — an int rule
+                    // takes a number, which there is nothing useful to suggest
+                    // for. Offering true/false for random_tick_speed would be
+                    // actively misleading.
+                    const std::string rule = tokens.size() > 1 ? tokens[1] : "";
+                    if (rule == "advance_time" || rule == "doDaylightCycle") {
+                        candidates = {"true", "false"};
+                    }
+                }
+            } else if (cmd == "tick") {
+                // /tick <query|rate|freeze|unfreeze|step|sprint>
+                if (argIndex == 1) {
+                    candidates = {"query", "rate", "freeze", "unfreeze", "step", "sprint"};
+                } else if (argIndex == 2) {
+                    const std::string sub = tokens.size() > 1 ? tokens[1] : "";
+                    if (sub == "rate") {
+                        candidates = {"20"};            // MC's DEFAULT_TICKRATE suggestion
+                    } else if (sub == "step") {
+                        candidates = {"stop", "1t", "1s"};   // MC's step suggestions
+                    } else if (sub == "sprint") {
+                        candidates = {"stop", "60s", "1d", "3d"};  // MC's sprint suggestions
+                    }
                 }
             }
         }
@@ -205,6 +239,25 @@ namespace {
 }
 
 namespace Render {
+
+    namespace {
+        // Populated by CommandsS2C on join. The fallback below is what a
+        // pre-CommandsS2C server (or a session where the packet hasn't landed
+        // yet) gets: the commands that existed when tab-completion was written.
+        // It is deliberately NOT kept up to date — the whole point of the
+        // packet is that this list stops mattering.
+        std::vector<std::string> s_serverCommandNames = {
+            "tp", "teleport", "kick", "gamemode", "kill", "time", "gamerule", "seed",
+        };
+    } // namespace
+
+    void SetServerCommandNames(std::vector<std::string> names) {
+        s_serverCommandNames = std::move(names);
+    }
+
+    const std::vector<std::string>& GetServerCommandNames() {
+        return s_serverCommandNames;
+    }
 
     void ChatScreen::Open(bool withSlash) {
         m_open = true;
@@ -263,6 +316,21 @@ namespace Render {
         }
     }
 
+    // ── Cycle-in-place completion ───────────────────────────────────────────
+    //
+    // Deliberately NOT MC's model. Vanilla opens a popup, leaves the field
+    // alone, and only splices the highlighted entry in when you press TAB a
+    // second time. Here the first TAB both opens the list AND types the first
+    // entry into the field; every further TAB overwrites it with the next one,
+    // wrapping at the end. The list stays visible the whole time so you can see
+    // what you are cycling through, and typing anything — a space, most
+    // usefully — closes the popup and keeps whatever word is showing.
+    //
+    // The suggestions are computed ONCE, from the partial word as originally
+    // typed, and never recomputed while cycling. Recomputing would be wrong:
+    // after the first TAB the field holds a complete command, which matches
+    // only itself, and the list would collapse to one entry after a single
+    // press.
     void ChatScreen::OpenSuggestions() {
         int anchor = 0;
         auto sugg = ComputeSuggestionsFor(m_inputText, m_cursorPos, anchor);
@@ -274,43 +342,63 @@ namespace Render {
         m_suggestionAnchor = anchor;
         m_suggestionIndex  = 0;
         m_suggestionsOpen  = true;
+        // The slot currently holds the partial word the player typed, so the
+        // first apply replaces exactly that.
+        m_suggestionCurrentLen = std::max(0, m_cursorPos - anchor);
+        ApplySuggestionInPlace();
     }
 
     void ChatScreen::CloseSuggestions() {
         m_suggestionsOpen = false;
         m_suggestions.clear();
         m_suggestionIndex = 0;
+        m_suggestionCurrentLen = 0;
     }
 
     void ChatScreen::CycleSuggestion(int delta) {
         if (!m_suggestionsOpen || m_suggestions.empty()) return;
         const int n = static_cast<int>(m_suggestions.size());
         m_suggestionIndex = ((m_suggestionIndex + delta) % n + n) % n;
+        ApplySuggestionInPlace();
     }
 
-    void ChatScreen::ApplySelectedSuggestion() {
+    void ChatScreen::ApplySuggestionInPlace() {
         if (!m_suggestionsOpen || m_suggestions.empty()) return;
         if (m_suggestionIndex < 0 || m_suggestionIndex >= (int)m_suggestions.size()) return;
 
+        const int textLen = static_cast<int>(m_inputText.size());
+        // The anchor can go stale if the text changed under us (history recall,
+        // a paste). Bail rather than splice at a nonsense offset.
+        if (m_suggestionAnchor < 0 || m_suggestionAnchor > textLen) {
+            CloseSuggestions();
+            return;
+        }
+
         const std::string& sel = m_suggestions[m_suggestionIndex];
-        // Replace [m_suggestionAnchor, m_cursorPos) with sel, place caret
-        // after the inserted text (MC: SuggestionsList.useSuggestion does
-        // the same — splice + advance cursor).
-        m_inputText.replace(m_suggestionAnchor,
-                            m_cursorPos - m_suggestionAnchor,
-                            sel);
+        const int replaceLen = std::clamp(m_suggestionCurrentLen, 0, textLen - m_suggestionAnchor);
+
+        // Refuse a replacement that would overflow the field — MC clamps the
+        // same limit on insertText. Leaving the previous entry showing is
+        // better than silently producing a truncated command.
+        if (textLen - replaceLen + static_cast<int>(sel.size()) > MAX_MESSAGE_LENGTH) {
+            return;
+        }
+
+        m_inputText.replace(m_suggestionAnchor, replaceLen, sel);
+        m_suggestionCurrentLen = static_cast<int>(sel.size());
         SetCursorPosition(m_suggestionAnchor + static_cast<int>(sel.size()));
-        CloseSuggestions();
     }
 
     bool ChatScreen::OnKeyDown(int glfwKey) {
         if (!m_open) return false;
 
-        // TAB — MC's CommandSuggestions: if popup is closed, open it; if
-        // it's open, apply the highlighted suggestion. SHIFT+TAB isn't
-        // distinct in MC, but plain TAB is the universal trigger.
+        // TAB — first press opens the list AND fills in its first entry; each
+        // further press walks down the list, replacing the filled-in word and
+        // wrapping around at the end. Whatever is showing when you type a space
+        // (or anything else) is the one you keep. See OpenSuggestions for why
+        // this is not MC's two-step model.
         if (glfwKey == GLFW_KEY_TAB) {
-            if (m_suggestionsOpen) ApplySelectedSuggestion();
+            if (m_suggestionsOpen) CycleSuggestion(+1);
             else                   OpenSuggestions();
             return true;
         }

@@ -510,10 +510,31 @@ void main() {
                 g_renderBackend->BindTexture(m_dummyTexture, 0);
             }
 
-            // TODO: Scissor rect support via glScissor/vkCmdSetScissor
+            // Scissor. The batching above already splits on any scissor change,
+            // so one Set per batch is exact. Rects arrive in GUI-SCALED
+            // coordinates (what the widgets work in) and the backend wants
+            // framebuffer pixels, hence the guiScale multiply.
+            //
+            // This was a TODO for a long time and the whole clip system was
+            // inert because of it: EnableScissor recorded rects, batches split
+            // on them correctly, and then nothing ever clipped — so scrolled
+            // list rows drew straight over the rest of the screen.
+            if (batch.hasScissor) {
+                const int sx0 = static_cast<int>(batch.scissor.x0 * guiScale);
+                const int sy0 = static_cast<int>(batch.scissor.y0 * guiScale);
+                const int sx1 = static_cast<int>(batch.scissor.x1 * guiScale);
+                const int sy1 = static_cast<int>(batch.scissor.y1 * guiScale);
+                g_renderBackend->SetScissorRect(sx0, sy0, sx1 - sx0, sy1 - sy0);
+            } else {
+                g_renderBackend->ClearScissorRect();
+            }
 
             g_renderBackend->DrawIndexed(fb.mesh, batch.indexCount, batch.firstIndex);
         }
+
+        // Sticky state — leaving it set would clip everything drawn after the
+        // GUI (and the whole next frame on GL).
+        g_renderBackend->ClearScissorRect();
 
         g_renderBackend->UnbindMesh();
 

@@ -411,11 +411,36 @@ namespace Game {
         // Heightmaps
         WriteCompoundStart(nbtData, "Heightmaps");
         
-        auto motionBlocking = CalculateMotionBlockingHeightmap(chunk);
+        // Write the heightmaps the chunk already maintains rather than
+        // recomputing them. They are primed at generation and kept current by
+        // every SetBlock, so a rescan here would be both slower and — for
+        // WORLD_SURFACE — differently wrong: the old code returned a copy of
+        // MOTION_BLOCKING for it, so saved worlds claimed leaves and water were
+        // not surface.
+        //
+        // An unprimed chunk (loaded from a file that had no Heightmaps tag and
+        // never touched since) is primed here rather than written empty.
+        Chunk& mutableChunk = const_cast<Chunk&>(chunk);
+        if (!mutableChunk.AreHeightmapsPrimed()) {
+            mutableChunk.PrimeHeightmaps();
+        }
+
+        // MC writes MOTION_BLOCKING and MOTION_BLOCKING_NO_LEAVES as the two
+        // client-facing maps. This engine maintains NO_LEAVES (the spawner's)
+        // and WORLD_SURFACE, so MOTION_BLOCKING is written from NO_LEAVES —
+        // they differ only in leaf columns, and vanilla re-primes anything it
+        // finds missing or inconsistent on load.
+        const auto noLeaves =
+            mutableChunk.GetHeightmap(HeightmapType::MotionBlockingNoLeaves).PackToLongs();
         WriteTagHeader(nbtData, static_cast<uint8_t>(NBTType::TAG_Long_Array), "MOTION_BLOCKING");
-        WriteLongArray(nbtData, motionBlocking);
-        
-        auto worldSurface = CalculateWorldSurfaceHeightmap(chunk);
+        WriteLongArray(nbtData, noLeaves);
+
+        WriteTagHeader(nbtData, static_cast<uint8_t>(NBTType::TAG_Long_Array),
+                       "MOTION_BLOCKING_NO_LEAVES");
+        WriteLongArray(nbtData, noLeaves);
+
+        const auto worldSurface =
+            mutableChunk.GetHeightmap(HeightmapType::WorldSurface).PackToLongs();
         WriteTagHeader(nbtData, static_cast<uint8_t>(NBTType::TAG_Long_Array), "WORLD_SURFACE");
         WriteLongArray(nbtData, worldSurface);
         
@@ -494,60 +519,17 @@ namespace Game {
         }
     }
 
-    std::vector<int64_t> AnvilRegionWriter::CalculateMotionBlockingHeightmap(const Chunk& chunk) {
-        std::vector<int> heights(256); // 16x16 heightmap
-        
-        for (int x = 0; x < 16; ++x) {
-            for (int z = 0; z < 16; ++z) {
-                int height = Config::MinY;
-                
-                // Find highest non-air block
-                for (int y = Config::MaxY; y >= Config::MinY; --y) {
-                    if (chunk.GetBlock(x, y, z) != BlockID::Air) {
-                        height = y + 1; // Heightmap is height of space above block
-                        break;
-                    }
-                }
-                
-                heights[z * 16 + x] = height - Config::MinY; // Relative to chunk base
-            }
-        }
-        
-        return PackHeightmapToLongs(heights);
-    }
-
-    std::vector<int64_t> AnvilRegionWriter::CalculateWorldSurfaceHeightmap(const Chunk& chunk) {
-        // For simplicity, use same as motion blocking
-        return CalculateMotionBlockingHeightmap(chunk);
-    }
-
-    std::vector<int64_t> AnvilRegionWriter::PackHeightmapToLongs(const std::vector<int>& heights) {
-        // Minecraft uses 9 bits per height value, packed into longs
-        // 256 values * 9 bits = 2304 bits = 36 longs
-        std::vector<int64_t> longs(36, 0);
-        
-        const int bitsPerValue = 9;
-        const int64_t mask = (1LL << bitsPerValue) - 1;
-        
-        for (size_t i = 0; i < heights.size() && i < 256; ++i) {
-            int64_t value = std::clamp(heights[i], 0, (1 << bitsPerValue) - 1);
-            size_t bitIndex = i * bitsPerValue;
-            size_t longIndex = bitIndex / 64;
-            int bitOffset = bitIndex % 64;
-            
-            if (longIndex < longs.size()) {
-                longs[longIndex] |= (value & mask) << bitOffset;
-                
-                // Handle overflow to next long
-                if (bitOffset + bitsPerValue > 64 && longIndex + 1 < longs.size()) {
-                    int remainingBits = (bitOffset + bitsPerValue) - 64;
-                    longs[longIndex + 1] |= (value & mask) >> (bitsPerValue - remainingBits);
-                }
-            }
-        }
-        
-        return longs;
-    }
+    // The three heightmap helpers that used to live here are gone.
+    //
+    // They rescanned every column at save time, WORLD_SURFACE was just a copy
+    // of MOTION_BLOCKING, and the packer straddled values across long
+    // boundaries into 36 longs. MC's SimpleBitStorage does NOT straddle — it
+    // fits 7 nine-bit values per long with the top bit unused, so 256 columns
+    // need 37 — which meant every heightmap this engine wrote was unreadable
+    // garbage to vanilla.
+    //
+    // Chunk::GetHeightmap(...).PackToLongs() replaces all three; the layout
+    // lives in Heightmap.cpp next to the unpacker that has to agree with it.
 
     // === NBT WRITING HELPERS ===
 

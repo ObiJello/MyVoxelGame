@@ -4,6 +4,7 @@
 #include "common/core/Features.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "common/network/IPacketListener.hpp"
+#include "client/ClientTickRateManager.hpp"
 #include <memory>
 #include <chrono>
 #include <algorithm>
@@ -39,6 +40,31 @@ namespace Client {
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
         void onPlayerUpdateS2C(const Network::PlayerUpdateS2CPacket& packet) override { handlePlayerUpdate(packet); }
         void onRemoveEntitiesS2C(const Network::RemoveEntitiesS2CPacket& packet) override { handleRemoveEntities(packet); }
+        void onItemEntitySpawnS2C(const Network::ItemEntitySpawnS2CPacket& packet) override { handleItemEntitySpawn(packet); }
+
+        // ── Mob entities ───────────────────────────────────────────────────
+        void onAddEntityS2C(const Network::AddEntityS2CPacket& packet) override { handleAddEntity(packet); }
+        void onMoveEntityS2C(const Network::MoveEntityS2CPacket& packet) override { handleMoveEntity(packet); }
+        void onEntityPositionSyncS2C(const Network::EntityPositionSyncS2CPacket& packet) override { handleEntityPositionSync(packet); }
+        void onSetEntityMotionS2C(const Network::SetEntityMotionS2CPacket& packet) override { handleSetEntityMotion(packet); }
+        void onSetEntityDataS2C(const Network::SetEntityDataS2CPacket& packet) override { handleSetEntityData(packet); }
+        void onEntityEventS2C(const Network::EntityEventS2CPacket& packet) override { handleEntityEvent(packet); }
+        void onHurtAnimationS2C(const Network::HurtAnimationS2CPacket& packet) override { handleHurtAnimation(packet); }
+
+        // ── /tick state ────────────────────────────────────────────────────
+        // Handled inline: both are two-field mirrors into the client's
+        // TickRateManager with no other consequence, so routing them through a
+        // handleX in the .cpp would add a hop and nothing else.
+        void onTickingStateS2C(const Network::TickingStateS2CPacket& packet) override {
+            g_clientTickRate.SetTickRate(packet.tickRate);
+            g_clientTickRate.SetFrozen(packet.isFrozen);
+        }
+        void onTickingStepS2C(const Network::TickingStepS2CPacket& packet) override {
+            g_clientTickRate.SetFrozenTicksToRun(packet.tickSteps);
+        }
+
+        void onItemEntityMoveS2C(const Network::ItemEntityMoveS2CPacket& packet) override { handleItemEntityMove(packet); }
+        void onTakeItemEntityS2C(const Network::TakeItemEntityS2CPacket& packet) override { handleTakeItemEntity(packet); }
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
         void onChunkBatchStart() override { handleChunkBatchStart(); }
@@ -48,6 +74,7 @@ namespace Client {
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
         void onInventorySetCarriedS2C(const Network::InventorySetCarriedS2CPacket& packet) override { handleInventorySetCarried(packet); }
         void onOpenScreenS2C(const Network::OpenScreenS2CPacket& packet) override { handleOpenScreen(packet); }
+        void onContainerSetDataS2C(const Network::ContainerSetDataS2CPacket& packet) override { handleContainerSetData(packet); }
         void onSetHealthS2C(const Network::SetHealthS2CPacket& packet) override { handleSetHealth(packet); }
         void onBlockChangedAckS2C(const Network::BlockChangedAckS2CPacket& packet) override { handleBlockChangedAck(packet); }
         void onPlayerAbilitiesS2C(const Network::PlayerAbilitiesS2CPacket& packet) override { handlePlayerAbilities(packet); }
@@ -58,6 +85,7 @@ namespace Client {
         void onPortalFizzleS2C(const Network::PortalFizzleS2CPacket& packet) override { handlePortalFizzle(packet); }
 #endif
         void onSetChunkCacheRadiusS2C(int viewDistance) override { handleSetChunkCacheRadius(viewDistance); }
+        void onCommandsS2C(const std::vector<std::string>& names) override { handleCommands(names); }
 
         // ========================================================================
         // PACKET HANDLERS (called via IPacket::apply on main thread)
@@ -75,8 +103,20 @@ namespace Client {
         // Player updates
         void handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet);
 
-        // Entity removal
+        // Entity removal (players AND dropped items — split by id range)
         void handleRemoveEntities(const Network::RemoveEntitiesS2CPacket& packet);
+
+        // Dropped items
+        void handleItemEntitySpawn(const Network::ItemEntitySpawnS2CPacket& packet);
+        void handleAddEntity(const Network::AddEntityS2CPacket& packet);
+        void handleMoveEntity(const Network::MoveEntityS2CPacket& packet);
+        void handleEntityPositionSync(const Network::EntityPositionSyncS2CPacket& packet);
+        void handleSetEntityMotion(const Network::SetEntityMotionS2CPacket& packet);
+        void handleSetEntityData(const Network::SetEntityDataS2CPacket& packet);
+        void handleEntityEvent(const Network::EntityEventS2CPacket& packet);
+        void handleHurtAnimation(const Network::HurtAnimationS2CPacket& packet);
+        void handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet);
+        void handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet);
 
         // World state
         void handleTimeUpdate(uint64_t worldAge, uint64_t timeOfDay);
@@ -104,6 +144,7 @@ namespace Client {
         void handleInventorySetSlot(const Network::InventorySetSlotS2CPacket& packet);
         void handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet);
         void handleOpenScreen(const Network::OpenScreenS2CPacket& packet);
+        void handleContainerSetData(const Network::ContainerSetDataS2CPacket& packet);
         void handleSetHealth(const Network::SetHealthS2CPacket& packet);
         void handleBlockChangedAck(const Network::BlockChangedAckS2CPacket& packet);
 
@@ -118,6 +159,7 @@ namespace Client {
 
         // View distance
         void handleSetChunkCacheRadius(int viewDistance);
+        void handleCommands(const std::vector<std::string>& commandNames);
 
         // ========================================================================
         // STATISTICS

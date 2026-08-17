@@ -1,11 +1,14 @@
 // File: src/server/session/PlayerSession.hpp
 #pragma once
 
+#include "common/core/JavaRandom.hpp"               // Game::JavaRandom (loot rolls)
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/BlockInteraction.hpp"  // Game::UseResult
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
+#include "../world/watch/ChunkTrackingView.hpp"
 #include <glm/glm.hpp>
+#include <functional>
 #include <array>
 #include <unordered_set>
 #include <unordered_map>
@@ -26,9 +29,9 @@ namespace Server {
     class ServerPlayer;
     class ServerConnection;
     class ChunkTicketManager;
-    class ChunkWatchIndex;
     class ChunkStatusManager;
     class SendScheduler;
+    class ItemEntityManager;
 
     // Coalesced block changes for a chunk section
     struct SectionDiffs {
@@ -125,14 +128,28 @@ namespace Server {
         // Update simulation distance (server config)
         void SetSimulationDistance(int distance);
 
-        // === WATCH SET MANAGEMENT ===
+        // === CHUNK TRACKING (MC ChunkMap.updateChunkTracking) ===
 
-        // Compute and apply watch set changes
-        void UpdateWatchSet();
-        
-        // Check if chunk is in watch set
+        // Recompute this player's tracking view and emit the difference against
+        // the previous one. `onEnter` is called for every chunk newly in view
+        // and `onLeave` for every chunk that left; the caller supplies them
+        // because entering means "send it if it is loaded, otherwise ask for
+        // it", which needs the world and the load queue.
+        //
+        // No-ops when neither the centre chunk nor the view distance changed —
+        // MC's identical early-out, and the reason moving WITHIN a chunk costs
+        // nothing at all.
+        void UpdateChunkTracking(
+            const std::function<void(Game::Math::ChunkPos)>& onEnter,
+            const std::function<void(Game::Math::ChunkPos)>& onLeave);
+
+        // The set of chunks this player tracks. This is the authority for
+        // "does this player care about chunk X" — there is no reverse index.
+        const ChunkTrackingView& GetTrackingView() const { return m_trackingView; }
+
+        // Check if chunk is tracked by this player
         bool IsWatching(Game::Math::ChunkPos chunk) const;
-        
+
         // Check if chunk has been sent
         bool HasSentChunk(Game::Math::ChunkPos chunk) const;
 
@@ -144,8 +161,13 @@ namespace Server {
 
         // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
-        // Mark a chunk as loaded and ready to send (moves from pending loads to pending sends)
-        void MarkChunkReadyToSend(Game::Math::ChunkPos pos);
+        // MC PlayerChunkSender.markChunkPendingToSend. Queue a LOADED chunk for
+        // delivery. Callers must have established the chunk is loaded — an
+        // unloaded chunk is simply not queued, and arrives later when
+        // generation completes and pushes it (IntegratedServer's
+        // onChunkReadyToSend path). There is deliberately no "waiting for this
+        // chunk" list on the session.
+        void MarkChunkPendingToSend(Game::Math::ChunkPos pos);
 
         // Drop a chunk: remove from pending, or send unload if already sent
         void DropChunk(Game::Math::ChunkPos pos);
@@ -155,13 +177,6 @@ namespace Server {
 
         // Handle client's batch acknowledgment (updates send rate)
         void OnChunkBatchAck(float desiredRate);
-
-        // Check if this session is waiting for a chunk to load
-        bool IsWaitingForChunk(Game::Math::ChunkPos pos) const { return m_pendingChunkLoads.count(pos) > 0; }
-
-        // Get pending chunk loads (chunks waiting for generation/loading)
-        const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>& GetPendingChunkLoads() const { return m_pendingChunkLoads; }
-        size_t GetPendingChunkLoadsCount() const { return m_pendingChunkLoads.size(); }
 
         // Chunk sender getters
         size_t GetPendingChunksToSendCount() const { return m_pendingChunksToSend.size(); }
@@ -272,6 +287,17 @@ namespace Server {
         // screen appears on the same packet round as the interaction ack.
         void FlushPendingMenuOpen();
 
+        // A block asked to lay food on a campfire during use dispatch
+        // (IUsePlayer::PlaceCampfireFood). Drained right after the dispatch
+        // returns, alongside FlushPendingMenuOpen and for the same reason.
+        void FlushPendingCampfireFood();
+
+        // Push one block entity's current state to every watcher. Block
+        // entities carry state the block id and state index cannot (chest
+        // contents, campfire food), so a mutation that doesn't change the
+        // block is invisible to clients until this goes out.
+        void BroadcastBlockEntity(const glm::ivec3& pos, Game::BlockEntity* be);
+
         // Client block-prediction acknowledgement (MC
         // ServerGamePacketListenerImpl.ackBlockChangesUpTo). Interaction
         // handlers only RECORD the sequence; the packet is emitted by
@@ -337,12 +363,19 @@ namespace Server {
         int GetViewDistance() const { return m_viewDistance; }
         int GetSimulationDistance() const { return m_simulationDistance; }
 
-        // Watch delta getters (consumed by PlayerSessionManager to update ChunkWatchIndex)
-        const std::vector<Game::Math::ChunkPos>& GetPendingWatchAdds() const { return m_pendingWatchAdds; }
-        const std::vector<Game::Math::ChunkPos>& GetPendingWatchRemoves() const { return m_pendingWatchRemoves; }
-        void ClearPendingWatchDeltas() { m_pendingWatchAdds.clear(); m_pendingWatchRemoves.clear(); }
-
     private:
+        // The world's dropped-item store, or null if the server isn't up.
+        // Every "this produced an item in the world" path in this class goes
+        // through it, so it is worth one accessor rather than repeating the
+        // g_integratedServer null-dance at each site.
+        ItemEntityManager* ItemEntitiesOrNull() const;
+
+        // Throw `stack` into the world from this player's hand, along their
+        // look direction (MC LivingEntity.drop with thrownFromHand). Shared by
+        // the Q keybind and the container THROW / click-outside paths. No-op on
+        // an empty stack.
+        void DropItemFromPlayer(const Game::ItemStack& stack);
+
         // === IDENTIFIERS ===
         uint32_t m_playerId;
         uint32_t m_connectionId;
@@ -355,6 +388,13 @@ namespace Server {
         // === STATE ===
         std::atomic<State> m_state{State::CONNECTING};
         Config m_config;
+
+        // Loot rolls for this player's block breaks. Per-session rather than
+        // global so two players mining at once can't interleave into each
+        // other's sequence; seeded from the player id and the clock because MC
+        // seeds block loot from the level's RandomSource, not a fixed value.
+        Game::JavaRandom m_lootRandom{
+            static_cast<int64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
         
         // === VIEW POSITION ===
         // Note: Authoritative position is in ServerPlayer, these are for view management
@@ -366,23 +406,24 @@ namespace Server {
         int m_simulationDistance = 8;
         int m_viewDistance = 8;
         
-        // === WATCH SETS ===
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_watchSet;
+        // === CHUNK TRACKING ===
+        // MC ServerPlayer.chunkTrackingView. Centre + radius, not a container:
+        // membership is arithmetic and the diff against the previous view
+        // allocates nothing. Starts EMPTY so the first update emits the whole
+        // initial set through the ordinary enter path.
+        ChunkTrackingView m_trackingView = ChunkTrackingView::Empty();
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_sentChunks;
 
         // === CHUNK SENDER STATE (Minecraft's PlayerChunkSender) ===
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunkLoads;    // Chunks waiting for generation/loading
+        // No "waiting for load" set: a chunk that is not loaded when it enters
+        // view is simply not queued, and is pushed here by the server when
+        // generation finishes. MC PlayerChunkSender holds exactly this one set.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunksToSend;  // Chunks loaded and ready to send
         float m_desiredChunksPerTick = 9.0f;
         float m_batchQuota = 0.0f;
         int m_unackedBatches = 0;
         int m_maxUnackedBatches = 1;  // Bumps to 10 after first ack
 
-        // === WATCH INDEX SYNCHRONIZATION ===
-        // Deltas to apply to ChunkWatchIndex (consumed by PlayerSessionManager)
-        std::vector<Game::Math::ChunkPos> m_pendingWatchAdds;
-        std::vector<Game::Math::ChunkPos> m_pendingWatchRemoves;
-        
         // === DIFF MANAGEMENT ===
         std::unordered_map<Game::Math::ChunkPos, 
                           std::unordered_map<int, SectionDiffs>, 
@@ -425,6 +466,24 @@ namespace Server {
         // (SendInventoryFull re-seeds it wholesale).
         std::vector<Game::ItemStack> m_remoteSlots{};
         Game::ItemStack              m_remoteCarried{};
+        // The client's copy of the open menu's ContainerData (furnace burn +
+        // cook timers). Diffed alongside the slots; see BroadcastContainerChanges.
+        std::vector<int>             m_remoteData{};
+
+        // Where the open block menu's container lives, and whether it is
+        // block-backed at all. MC's ContainerLevelAccess + stillValid(): a menu
+        // whose block has gone must be closed, because its slots and data
+        // slots point straight INTO that block entity. See
+        // CloseMenuIfBlockGone.
+        bool       m_menuIsBlockBacked = false;
+        glm::ivec3 m_openMenuPos{0, 0, 0};
+        // The other half of an open double chest. Its block entity is half of
+        // the menu's CompoundContainer, so it has to stay alive too.
+        bool       m_hasMenuPartner = false;
+        glm::ivec3 m_openMenuPartnerPos{0, 0, 0};
+
+        // Returns true when the menu was closed because its block vanished.
+        bool CloseMenuIfBlockGone();
 
         // Last-sent stat triple for the SetHealthS2C dirty-check — mirrors
         // ServerPlayer.lastSentHealth / lastSentFood / lastSaturationLevel.
@@ -436,20 +495,8 @@ namespace Server {
         // === FLAGS ===
         bool m_isChangingDimension = false;
         bool m_isRespawning = false;
-        bool m_needsWatchUpdate = true;
         
         // === INTERNAL METHODS ===
-        
-        // Watch set computation
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> 
-            ComputeWatchSet(Game::Math::ChunkPos anchor, int viewDistance) const;
-        
-        // Watch delta computation
-        void ComputeWatchDeltas(
-            const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>& newWatch,
-            std::vector<Game::Math::ChunkPos>& toAdd,
-            std::vector<Game::Math::ChunkPos>& toRemove
-        ) const;
         
         // Diff coalescing
         void CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,

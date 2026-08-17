@@ -48,4 +48,48 @@ namespace Game {
     extern const RecipeRow           kRecipeTable[];
     extern const size_t              kRecipeTableSize;
 
+    // The furnace family. MC keeps SMELTING / BLASTING / SMOKING /
+    // CAMPFIRE_COOKING as distinct RecipeTypes queried by the block that can
+    // run them, and so do we — a furnace only ever sees Smelting, a blast
+    // furnace only Blasting.
+    enum class CookingKind : uint8_t {
+        Smelting        = 0,
+        Blasting        = 1,
+        Smoking         = 2,
+        CampfireCooking = 3,
+    };
+
+    struct CookingRecipeRow {
+        const char* id;
+        uint8_t     kind;             // CookingKind
+        uint32_t    ingredient;       // index into kRecipeIngredients
+        const char* resultSlug;
+        uint8_t     resultCount;
+        uint16_t    cookingTime;      // ticks (MC's `cookingtime`, default 200)
+        float       experience;       // XP awarded when the result is taken
+    };
+
+    extern const CookingRecipeRow    kCookingRecipeTable[];
+    extern const size_t              kCookingRecipeTableSize;
+
+    // Furnace fuel — MC FuelValues.vanillaBurnTimes, tags flattened.
+    // `burnTicks` is how long ONE of this item keeps a furnace lit.
+    struct FuelRow {
+        const char* slug;
+        uint16_t    burnTicks;
+    };
+    extern const FuelRow             kFuelTable[];
+    extern const size_t              kFuelTableSize;
+
+    // Stonecutter — MC StonecutterRecipe, a SingleItemRecipe. One input maps to
+    // SEVERAL results (andesite gives slab / stairs / wall / …), which is why
+    // the menu shows a pick-list rather than a single output.
+    struct StonecuttingRow {
+        uint32_t    ingredient;   // index into kRecipeIngredients
+        const char* resultSlug;
+        uint8_t     resultCount;
+    };
+    extern const StonecuttingRow     kStonecuttingTable[];
+    extern const size_t              kStonecuttingTableSize;
+
 } // namespace Game

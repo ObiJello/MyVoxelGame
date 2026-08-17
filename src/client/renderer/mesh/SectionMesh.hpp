@@ -112,6 +112,10 @@ namespace Render {
             int32_t baseVertex = 0;
             bool valid = false;
             uint32_t slabIndex = 0;
+            // Per-section index buffer, set only for layers whose pool uses
+            // them (translucent). INVALID_BUFFER means indices live in the
+            // shared slab IBO and the layer is drawn with one multi-draw.
+            BufferHandle ibo = INVALID_BUFFER;
         };
         CachedDrawCmd opaqueDrawCmd;
         CachedDrawCmd cutoutDrawCmd;

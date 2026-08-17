@@ -96,11 +96,10 @@ namespace Game {
     // MC Direction.fromYRot(yRot): BY_2D_DATA[floor(yRot / 90 + 0.5) & 3]
     // with the 2D ordering S, W, N, E.
     //
-    // IMPORTANT: `yaw` here is MINECRAFT's yaw convention (0 = facing south,
-    // increasing clockwise), not this engine's camera yaw. Convert with
-    // EngineYawToMcYaw first — see the note there. Reproducing MC's rounding
-    // exactly matters: a naive (yaw/90) truncation puts the boundaries in the
-    // wrong place and every facing comes out one step off near 45°.
+    // `yRot` is the engine-wide yaw, which IS Minecraft's (0 = facing south,
+    // increasing clockwise) — see Game::Mth::ViewVector. Reproducing MC's
+    // rounding exactly matters: a naive (yaw/90) truncation puts the boundaries
+    // in the wrong place and every facing comes out one step off near 45°.
     inline Direction FromYRot(float mcYaw) {
         const int idx = static_cast<int>(std::floor(mcYaw / 90.0f + 0.5f)) & 3;
         switch (idx) {
@@ -111,19 +110,12 @@ namespace Game {
         }
     }
 
-    // This engine builds its view vector as front.x = cos(yaw), front.z = sin(yaw)
-    // (see the yaw notes in PlayerSession/Camera), so engine yaw 0 looks toward
-    // +X = EAST and increases toward +Z = SOUTH. MC's yaw 0 looks toward +Z =
-    // SOUTH and also increases clockwise, so the two differ by a constant −90°.
-    // Doing the conversion in exactly one place keeps every facing rule honest.
-    constexpr float EngineYawToMcYaw(float engineYaw) { return engineYaw - 90.0f; }
-
-    // Convenience: the horizontal direction the player is looking along,
-    // straight from this engine's yaw. Equivalent to MC's
-    // Entity.getDirection() == Direction.fromYRot(getYRot()).
-    inline Direction HorizontalFromEngineYaw(float engineYaw) {
-        return FromYRot(EngineYawToMcYaw(engineYaw));
-    }
+    // The camera used to keep its own yaw convention (0 = +X) and this header
+    // carried an EngineYawToMcYaw(-90) shim plus a HorizontalFromEngineYaw
+    // wrapper for it. Both are gone: the camera now stores MC's yaw directly,
+    // so FromYRot IS the conversion and there is nothing left to adapt. If you
+    // find yourself reaching for a ±90 offset on a yaw, something upstream is
+    // still on the old convention — fix it there.
 
     // Lowercase names, matching the values used in blockstate JSON property
     // predicates ("facing=east") and in MC's BlockState.toString().

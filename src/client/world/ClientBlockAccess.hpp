@@ -35,12 +35,14 @@ namespace Client {
         // furnace shows the right facing immediately instead of snapping when
         // the server's block change lands.
         bool SetBlock(int worldX, int worldY, int worldZ,
-                      Game::BlockID blockId, uint32_t updateFlags, uint8_t stateIndex);
+                      Game::BlockID blockId, uint32_t updateFlags,
+                      uint8_t stateIndex) override;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
         bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
         bool IsBlockSolid(int worldX, int worldY, int worldZ) const override;
         bool IsBlockFluid(int worldX, int worldY, int worldZ) const override;
         bool IsValidPosition(int worldX, int worldY, int worldZ) const override;
+        bool IsClientSide() const override { return true; }
 
     private:
         uint32_t m_sequence   = 0;

@@ -35,6 +35,11 @@ namespace Game {
         std::string minecraftWorldPath;
         bool enableFallbackGeneration = true;
 
+        // Load the world but never write to it. Set for Anvil worlds imported
+        // from the player's real Minecraft installation. Enforced by simply not
+        // creating a chunk saver — see ChunkProvider::Initialize.
+        bool readOnly = false;
+
         // Generation settings
         GenerationConfig generationConfig;
 
@@ -81,8 +86,22 @@ namespace Game {
 
         // === CORE CHUNK OPERATIONS ===
 
-        // Get chunk (loads if necessary, returns null if not available)
+        // Get chunk (loads if necessary, returns null if not available).
+        //
+        // BLOCKS. A cache miss goes to disk and then to the generator, and the
+        // generator call blocks the calling thread until that chunk reaches
+        // FULL. On the server thread that means the tick does not end until
+        // generation finishes — never call this from per-tick simulation.
         std::shared_ptr<Chunk> GetChunk(Math::ChunkPos position);
+
+        // Cache-only lookup: null when the chunk is not resident. Never loads,
+        // never generates, never blocks. MC ServerChunkCache.getChunkNow.
+        //
+        // This is what per-tick simulation wants: MC only ever ticks chunks
+        // that are already loaded (ChunkMap.forEachBlockTickingChunk walks
+        // existing holders), and a chunk that is not there yet is simply not
+        // ticked this tick.
+        std::shared_ptr<Chunk> GetLoadedChunk(Math::ChunkPos position);
 
         // Check if chunk is loaded
         bool IsChunkLoaded(Math::ChunkPos position) const;

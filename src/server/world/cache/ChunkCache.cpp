@@ -155,7 +155,10 @@ namespace Game {
 
     void ChunkCache::SaveAllDirty() {
         if (!m_chunkSaver) {
-            Log::Warning("No chunk saver configured, cannot save dirty chunks");
+            // Expected on read-only worlds, where ChunkProvider deliberately
+            // never builds a saver — not a warning, and this runs on every
+            // eviction and in the destructor, so warning here would spam.
+            Log::Debug("No chunk saver configured, skipping dirty-chunk save");
             return;
         }
 

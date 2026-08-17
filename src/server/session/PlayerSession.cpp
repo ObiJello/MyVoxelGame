@@ -1,12 +1,13 @@
 // File: src/server/session/PlayerSession.cpp
 #include "PlayerSession.hpp"
+#include "common/core/Mth.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../network/NetworkServer.hpp"
 #include "../network/SendScheduler.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
-#include "../world/watch/ChunkWatchIndex.hpp"
+#include "../entity/ItemEntityManager.hpp"
 #include "PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Assert.hpp"
@@ -17,11 +18,24 @@
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
+#include "common/world/block/entity/CampfireBlockEntity.hpp"
+#include "common/world/block/MiningSpeed.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/loot/LootTables.hpp"
 #include "../IntegratedServer.hpp"
 #include "common/inventory/AbstractContainerMenu.hpp"
+#include "common/inventory/ChestMenu.hpp"
 #include "common/inventory/CraftingMenu.hpp"
+#include "common/world/block/entity/BaseContainerBlockEntity.hpp"
+#include "common/world/block/entity/FurnaceBlockEntity.hpp"
+#include "common/inventory/FurnaceMenu.hpp"
+#include "common/inventory/UtilityMenus.hpp"
+#include "common/inventory/SystemMenus.hpp"
+#include "common/inventory/CompoundContainer.hpp"
+#include "common/world/block/entity/DoubleChest.hpp"
+#include "common/network/packets/game/ContainerSetDataS2CPacket.hpp"
+#include <climits>   // INT_MIN — the "force a resend" sentinel for m_remoteData
 #include "common/core/Features.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../portal/PortalRegistry.hpp"
@@ -32,7 +46,88 @@
 #include <array>
 #include <cmath>
 
+
+namespace {
+    // MC ChestBlock.updateShape, reduced to the two transitions that actually
+    // occur here: a chest is placed (its chosen partner must take the
+    // complementary type) and a chest is removed (its ex-partner must fall back
+    // to SINGLE). Without the first, placing against a lone chest leaves that
+    // chest typed `single`, so it keeps rendering and opening alone; without
+    // the second, breaking one half leaves the other pointing at nothing.
+    //
+    // Server-only on purpose: the resulting block change is broadcast, so the
+    // client corrects itself rather than having to predict the fix-up.
+    void SetChestType(Game::World& world, const glm::ivec3& pos, const char* type) {
+        const Game::BlockID id = world.GetBlock(pos.x, pos.y, pos.z);
+        if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) return;
+        const auto& def = Game::BlockRegistry::GetStateDefinition(id);
+        const uint8_t cur = world.GetBlockState(pos.x, pos.y, pos.z);
+        if (def.ValueOf(cur, "type") == type) return;      // already right
+        Game::BlockRegistry::BlockStateDefinition::PropertyMap props;
+        props["facing"] = std::string(def.ValueOf(cur, "facing"));
+        props["type"]   = type;
+        world.SetBlock(pos.x, pos.y, pos.z, id, Game::World::UpdateFlags::All,
+                       def.IndexOf(props));
+    }
+
+    // The cell this chest's stored type points at, or nullopt when SINGLE.
+    std::optional<glm::ivec3> ChestPartnerCell(Game::BlockID id, uint8_t state,
+                                               const glm::ivec3& pos) {
+        const auto& def = Game::BlockRegistry::GetStateDefinition(id);
+        const std::string_view type = def.ValueOf(state, "type");
+        if (type != "left" && type != "right") return std::nullopt;
+        const std::string_view f = def.ValueOf(state, "facing");
+        // getConnectedDirection: LEFT -> clockwise, RIGHT -> counter-clockwise.
+        auto cw  = [](std::string_view d) -> std::string_view {
+            if (d=="north") return "east"; if (d=="east") return "south";
+            if (d=="south") return "west"; return "north"; };
+        auto ccw = [](std::string_view d) -> std::string_view {
+            if (d=="north") return "west"; if (d=="west") return "south";
+            if (d=="south") return "east"; return "north"; };
+        const std::string_view dir = (type == "left") ? cw(f) : ccw(f);
+        if (dir == "north") return pos + glm::ivec3{0,0,-1};
+        if (dir == "south") return pos + glm::ivec3{0,0, 1};
+        if (dir == "west")  return pos + glm::ivec3{-1,0,0};
+        return pos + glm::ivec3{1,0,0};
+    }
+
+    // A chest at `pos` is going away: any neighbour still claiming it as its
+    // other half falls back to SINGLE.
+    //
+    // MC pushes neighbour updates OUTWARD and lets each neighbour re-evaluate
+    // itself — ChestBlock.updateShape runs on the SURVIVING chest, and is
+    // handed the changed neighbour's position. Asking the survivors is not
+    // just stylistic fidelity here, it is the only thing that works: by the
+    // time the server handles a break in integrated mode, the client's
+    // prediction has already cleared the cell in the shared World, so the
+    // broken chest's own `type` is no longer readable. It reads back as state
+    // 0 — which by the default-first invariant is `single` — so deriving the
+    // ex-partner from it found nothing and quietly left that partner claiming
+    // a chest that no longer exists.
+    //
+    // A neighbour whose connected direction points at `pos` is orphaned by
+    // definition, whatever `pos` used to hold, so this needs no history at all.
+    void ResetOrphanedChestPartners(Game::World& world, const glm::ivec3& pos) {
+        static constexpr glm::ivec3 kHorizontal[4] = {
+            {0, 0, -1}, {1, 0, 0}, {0, 0, 1}, {-1, 0, 0}
+        };
+        for (const glm::ivec3& off : kHorizontal) {
+            const glm::ivec3 n = pos + off;
+            const Game::BlockID id = world.GetBlock(n.x, n.y, n.z);
+            if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) continue;
+            const uint8_t st = world.GetBlockState(n.x, n.y, n.z);
+            const auto claimed = ChestPartnerCell(id, st, n);
+            if (claimed && *claimed == pos) SetChestType(world, n, "single");
+        }
+    }
+}
+
 namespace Server {
+
+    ItemEntityManager* PlayerSession::ItemEntitiesOrNull() const {
+        auto* server = g_integratedServer.get();
+        return server ? server->GetItemEntities() : nullptr;
+    }
 
     PlayerSession::PlayerSession(uint32_t playerId, uint32_t connectionId)
         : m_playerId(playerId)
@@ -73,9 +168,9 @@ namespace Server {
         // Set state to joining
         m_state = State::JOINING;
 
-        // Let the first Tick() → UpdateWatchSet() compute the initial watch set.
-        // This ensures deltas flow through the normal path (ProcessSessionTick → ChunkWatchIndex).
-        m_needsWatchUpdate = true;
+        // The tracking view starts EMPTY; the server's first UpdateChunkTracking
+        // diffs it against the real view, so the whole initial set arrives
+        // through the ordinary enter path with no special-casing.
         
         Log::Info("PlayerSession: Initialized session for player %u in dimension %d",
                  m_playerId, dimensionId);
@@ -113,14 +208,15 @@ namespace Server {
         m_chunksOutThisTick = 0;
         m_diffsOutThisTick = 0;
         
-        // Update watch set if needed
-        if (m_needsWatchUpdate) {
-            UpdateWatchSet();
-            m_needsWatchUpdate = false;
-        }
+        // Chunk tracking is NOT updated here. MC drives it from ChunkMap
+        // (move/updatePlayerStatus), because entering a chunk means "send it if
+        // loaded, else request it" — which needs the world and the load queue,
+        // neither of which the session owns. IntegratedServer calls
+        // UpdateChunkTracking every tick; its centre/view-distance early-out
+        // makes that free when nothing moved.
 
         // Transition to playing state after initial join
-        if (m_state == State::JOINING && (!m_pendingChunkLoads.empty() || !m_pendingChunksToSend.empty())) {
+        if (m_state == State::JOINING && !m_pendingChunksToSend.empty()) {
             m_state = State::PLAYING;
         }
 
@@ -228,7 +324,6 @@ namespace Server {
         m_lastKnownChunk = m_currentChunk;
         m_currentChunk = newChunk;
         m_anchorChunk = newChunk;
-        m_needsWatchUpdate = true;
         
         Log::Info("SESSION CHUNK MOVE: player %u from (%d,%d) to (%d,%d)",
                   m_playerId, m_lastKnownChunk.x, m_lastKnownChunk.z, newChunk.x, newChunk.z);
@@ -246,10 +341,10 @@ namespace Server {
         
         m_isChangingDimension = true;
         
-        // Send unload for all watched chunks
-        for (const auto& chunk : m_watchSet) {
-            SendChunkUnload(chunk);
-        }
+        // Send unload for all tracked chunks. Snapshot the view first —
+        // SendChunkUnload clears it, and ForEach reads it.
+        const ChunkTrackingView previousView = m_trackingView;
+        previousView.ForEach([this](Game::Math::ChunkPos chunk) { SendChunkUnload(chunk); });
         
         // Clear all watch sets
         ClearWatchSets();
@@ -264,7 +359,6 @@ namespace Server {
         m_anchorChunk = m_currentChunk;
         
         // Recompute watch set for new dimension
-        m_needsWatchUpdate = true;
         m_isChangingDimension = false;
     }
 
@@ -282,9 +376,10 @@ namespace Server {
             m_anchorChunk = m_currentChunk;
         }
         
-        // Recompute watch set
-        m_needsWatchUpdate = true;
-        
+        // The tracking view re-centres on its own: m_anchorChunk moved, so the
+        // next UpdateChunkTracking diffs the old view against the new one and
+        // emits the enter/leave pair. Nothing to flag here.
+
         m_state = State::PLAYING;
         m_isRespawning = false;
     }
@@ -298,7 +393,6 @@ namespace Server {
         
         // Clamp to valid range and simulation distance
         m_viewDistance = std::clamp(distance, 2, std::min(32, m_simulationDistance));
-        m_needsWatchUpdate = true;
         
         Log::Info("PlayerSession: Player %u view distance changed to %d", 
                  m_playerId, m_viewDistance);
@@ -316,55 +410,49 @@ namespace Server {
             m_viewDistance = m_simulationDistance;
         }
         
-        m_needsWatchUpdate = true;
         
         Log::Info("PlayerSession: Player %u simulation distance changed to %d", 
                  m_playerId, m_simulationDistance);
     }
 
-    // === WATCH SET MANAGEMENT ===
+    // === CHUNK TRACKING (MC ChunkMap.updateChunkTracking) ===
 
-    void PlayerSession::UpdateWatchSet() {
+    void PlayerSession::UpdateChunkTracking(
+        const std::function<void(Game::Math::ChunkPos)>& onEnter,
+        const std::function<void(Game::Math::ChunkPos)>& onLeave) {
         PROFILE_ZONE;
-        // Compute new watch set
-        auto newWatch = ComputeWatchSet(m_anchorChunk, m_viewDistance);
 
-        // Compute deltas
-        std::vector<Game::Math::ChunkPos> toAdd, toRemove;
-        ComputeWatchDeltas(newWatch, toAdd, toRemove);
+        const ChunkTrackingView next =
+            ChunkTrackingView::Of(m_anchorChunk, m_viewDistance);
 
-        if (!toRemove.empty() || !toAdd.empty()) {
-            Log::Info("UpdateWatchSet: anchor=(%d,%d) viewDist=%d watchSet=%zu newWatch=%zu toAdd=%zu toRemove=%zu",
-                     m_anchorChunk.x, m_anchorChunk.z, m_viewDistance,
-                     m_watchSet.size(), newWatch.size(), toAdd.size(), toRemove.size());
+        // MC ChunkMap.updateChunkTracking's early-out: same centre and same
+        // view distance means the tracked set is identical, so there is nothing
+        // to diff. This runs every tick for every session, and this branch is
+        // what makes that free — a player moving within one chunk does no work.
+        if (m_trackingView.SameAs(next)) {
+            return;
         }
 
-        // Apply removals first
-        for (const auto& chunk : toRemove) {
-            DropChunk(chunk);
-            m_watchSet.erase(chunk);
-        }
+        int entered = 0, left = 0;
+        ChunkTrackingView::Difference(
+            m_trackingView, next,
+            [&](Game::Math::ChunkPos pos) { ++entered; onEnter(pos); },
+            [&](Game::Math::ChunkPos pos) { ++left;    onLeave(pos); });
 
-        // Queue additions — add to pending loads (IntegratedServer will move to ready-to-send when loaded)
-        for (const auto& chunk : toAdd) {
-            m_pendingChunkLoads.insert(chunk);
-            m_watchSet.insert(chunk);
-        }
+        m_trackingView = next;
 
-        // Store deltas for ChunkWatchIndex synchronization (consumed by PlayerSessionManager)
-        m_pendingWatchAdds = toAdd;
-        m_pendingWatchRemoves = toRemove;
+        Log::Info("UpdateChunkTracking: player %u centre=(%d,%d) viewDist=%d entered=%d left=%d",
+                  m_playerId, m_anchorChunk.x, m_anchorChunk.z, m_viewDistance, entered, left);
 
-        // Update stats
         {
             std::lock_guard<std::mutex> lock(m_statsMutex);
-            m_stats.chunksInWatch = m_watchSet.size();
-            m_stats.chunksPending = m_pendingChunkLoads.size() + m_pendingChunksToSend.size();
+            m_stats.chunksInWatch = m_sentChunks.size() + m_pendingChunksToSend.size();
+            m_stats.chunksPending = m_pendingChunksToSend.size();
         }
     }
 
     bool PlayerSession::IsWatching(Game::Math::ChunkPos chunk) const {
-        return m_watchSet.count(chunk) > 0;
+        return m_trackingView.Contains(chunk);
     }
 
     bool PlayerSession::HasSentChunk(Game::Math::ChunkPos chunk) const {
@@ -373,22 +461,30 @@ namespace Server {
 
     // === CHUNK SENDER (Minecraft's PlayerChunkSender) ===
 
-    void PlayerSession::MarkChunkReadyToSend(Game::Math::ChunkPos pos) {
-        m_pendingChunkLoads.erase(pos);    // No longer waiting for load
-
-        // Don't queue for sending if the chunk was removed from the watch set
-        // while we were waiting for it to load (race condition)
-        if (m_watchSet.find(pos) == m_watchSet.end()) {
-            Log::Debug("MarkChunkReadyToSend: chunk (%d, %d) no longer in watch set, skipping",
-                      pos.x, pos.z);
-            return;
-        }
-
-        m_pendingChunksToSend.insert(pos); // Ready to send to client
+    void PlayerSession::MarkChunkPendingToSend(Game::Math::ChunkPos pos) {
+        // Queue unconditionally, exactly like MC
+        // PlayerChunkSender.markChunkPendingToSend, which is a bare
+        // `pendingChunks.add(chunk.getPos().toLong())`.
+        //
+        // There must be NO tracking-view test here. Both callers have already
+        // established membership, and one of them cannot pass such a test:
+        // UpdateChunkTracking runs the enter callbacks while m_trackingView is
+        // still the PREVIOUS view (MC applyChunkTrackingView assigns the new
+        // view after difference() too), so a chunk that just entered is by
+        // definition absent from it. A Contains() guard here therefore drops
+        // every already-loaded chunk at the moment it comes into view — which
+        // meant the spawn chunk, generated before the player joined, was never
+        // sent, and the client then ran its occlusion BFS from a camera chunk
+        // it did not have.
+        //
+        // The push path does the test at its own call site
+        // (PlayerSessionManager::ForEachSessionWatching), where the view is
+        // current, and SendNextChunks re-checks before sending — so a chunk
+        // queued and then walked away from is still dropped correctly.
+        m_pendingChunksToSend.insert(pos);
     }
 
     void PlayerSession::DropChunk(Game::Math::ChunkPos pos) {
-        m_pendingChunkLoads.erase(pos);
         if (!m_pendingChunksToSend.erase(pos)) {
             // Wasn't pending to send — if already sent, send unload to client
             if (m_sentChunks.erase(pos)) {
@@ -422,18 +518,22 @@ namespace Server {
         std::vector<ChunkDist> candidates;
         candidates.reserve(m_pendingChunksToSend.size());
 
-        // Also collect chunks to remove from pending if they left the watch set
+        // Also collect chunks to remove from pending if they left the view
         std::vector<Game::Math::ChunkPos> staleChunks;
 
         for (const auto& pos : m_pendingChunksToSend) {
-            // Skip chunks that are no longer in the watch set (race condition)
-            if (m_watchSet.find(pos) == m_watchSet.end()) {
+            // Skip chunks no longer tracked (queued, then the player walked away)
+            if (!m_trackingView.Contains(pos)) {
                 staleChunks.push_back(pos);
                 continue;
             }
 
-            auto chunk = world->GetChunk(pos.x, pos.z);
-            if (!chunk) continue;  // Not loaded yet — skip, will be picked up later
+            // Cache-only. This chunk was queued because it WAS loaded, but it
+            // can have been evicted since — and the blocking GetChunk would
+            // then regenerate it here, on the server thread, inside the send
+            // loop. Skipping is what the "picked up later" below always meant.
+            auto chunk = world->GetLoadedChunk(pos.x, pos.z);
+            if (!chunk) continue;  // Not resident right now — skip, retried later
 
             int dx = pos.x - m_anchorChunk.x;
             int dz = pos.z - m_anchorChunk.z;
@@ -477,48 +577,50 @@ namespace Server {
             packet.groundUpContinuous = true;
             packet.primaryBitmask = 0;
 
+            // MC ClientboundLevelChunkPacketData.extractChunkData:
+            //
+            //     for (LevelChunkSection section : chunk.getSections())
+            //        section.write(buffer);
+            //
+            // The section's containers ARE the wire format, so this copies a
+            // palette and a block of words rather than re-packing 4096 voxels
+            // per section per player.
+            auto copyContainer = [](const Game::PalettedContainer& src,
+                                    Network::ChunkDataS2CPacket::ContainerData& dst) {
+                dst.bits    = static_cast<uint8_t>(src.StorageBits());
+                dst.palette = src.Palette();
+                dst.words   = src.RawWords();
+            };
+
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 const auto* section = cd.chunk->GetSection(sectionY);
                 if (!section) continue;
-
-                uint16_t nonAirCount = 0;
-                for (size_t j = 0; j < section->blocks.size(); ++j) {
-                    if (section->blocks[j] != static_cast<uint16_t>(Game::BlockID::Air)) {
-                        nonAirCount++;
-                    }
-                }
-                if (nonAirCount == 0) continue;
+                // MC hasOnlyAir() — one comparison against the palette.
+                if (section->IsAllAir()) continue;
 
                 packet.primaryBitmask |= (1 << sectionY);
 
                 Network::ChunkDataS2CPacket::SectionData sectionData;
-                sectionData.blockCount = nonAirCount;
-                sectionData.bitsPerEntry = 16; // Direct block IDs
 
-                const size_t blocksPerSection = 16 * 16 * 16;
-                const size_t blocksPerLong = 64 / 16; // 4 blocks per uint64_t
-                sectionData.dataArray.resize((blocksPerSection + blocksPerLong - 1) / blocksPerLong, 0);
+                // MC nonEmptyBlockCount. Counted off the palette rather than by
+                // walking voxels: the container already knows how many of each
+                // distinct state it holds.
+                uint32_t nonAir = 0;
+                section->States().ForEachValue([&](uint32_t stateId, int count) {
+                    if (Game::BlockStateIds::Unpack(stateId).id != Game::BlockID::Air) {
+                        nonAir += static_cast<uint32_t>(count);
+                    }
+                });
+                sectionData.blockCount = static_cast<uint16_t>(nonAir > 0xFFFFu ? 0xFFFFu : nonAir);
 
-                for (size_t j = 0; j < blocksPerSection; ++j) {
-                    uint16_t blockId = section->blocks[j];
-                    size_t longIndex = j / blocksPerLong;
-                    size_t bitOffset = (j % blocksPerLong) * 16;
-                    sectionData.dataArray[longIndex] |= (static_cast<uint64_t>(blockId) << bitOffset);
-                }
-
-                // Block states ride as their own plane, and only when the
-                // section has any — see the note on SectionData::states.
-                if (section->HasStates()) {
-                    sectionData.states = section->states;
-                }
+                copyContainer(section->States(), sectionData.states);
+                copyContainer(section->Biomes(), sectionData.biomes);
 
                 packet.sections.push_back(std::move(sectionData));
             }
 
-            // Noise biomes ride alongside the blocks — the client needs them to
-            // tint grass, foliage and water, and it has no generator of its own
-            // to derive them from.
-            packet.biomes = cd.chunk->biomes;
+            // Biomes now ride inside each section's container above, where MC
+            // keeps them — not as a flat per-chunk array.
 
             auto data = Network::Serialization::Serialize(packet);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
@@ -565,8 +667,9 @@ namespace Server {
                 static_cast<uint8_t>(Network::PacketId::UnloadChunkS2C), data);
         }
 
-        // Remove from sets
-        m_watchSet.erase(chunk);
+        // Remove from sets. Not from the tracking view — that is a function of
+        // position and view distance, and unloading a chunk changes neither.
+        // (MC's dropChunk likewise only touches the sender's queues.)
         m_sentChunks.erase(chunk);
         m_pendingChunksToSend.erase(chunk);
 
@@ -758,13 +861,20 @@ namespace Server {
         //    (SAFE_FALL_DISTANCE = 3, FALL_DAMAGE_MULTIPLIER = 1).
         //    Sanity clamp: terminal-velocity falls in a 384-block world
         //    can't meaningfully exceed ~512 blocks.
-        (void)dy;
         if (packet.fallDistance > 0.0f && !p.isFlying() && !inWater) {
             const float fd = std::min(packet.fallDistance, 512.0f);
             const int dmg = static_cast<int>(std::floor(fd + 1.0e-6f - 3.0f));
             if (dmg > 0) {
                 p.damage(static_cast<float>(dmg), DamageSource::FALL);
             }
+
+            // NOT ported, by choice: MC FarmBlock.fallOn (FarmBlock.java:91-100)
+            // turns farmland back into dirt when something lands on it hard
+            // enough (`random.nextFloat() < fallDistance - 0.5F`). Deliberately
+            // omitted here — jumping around your own farm should not destroy
+            // it. If it is ever wanted back, this landing hook is where it
+            // goes: `fd` is already the clamped fall distance MC feeds that
+            // roll.
         }
 
         // ── Exhaustion sources — FoodConstants: sprint 0.1/m, swim 0.01/m,
@@ -787,6 +897,34 @@ namespace Server {
                 p.getFoodData().addExhaustion(packet.isSprinting ? 0.2f : 0.05f);
             }
         }
+
+        // ── Airborne state, for the combat rules that read it ──────────────
+        //
+        // MC keeps fallDistance on the SERVER's player entity too, updated by
+        // Entity.checkFallDamage as handleMovePlayer replays the client's
+        // reported position (ServerGamePacketListenerImpl -> player.move ->
+        // checkFallDamage). Player.canCriticalAttack then reads
+        // `fallDistance > 0 && !onGround`, which is what makes a crit a hit
+        // taken on the way DOWN — rising out of a jump accumulates nothing.
+        //
+        // This is a second, independent accumulator from the fall-DAMAGE path
+        // above on purpose: that one wants the client's exact landing distance
+        // (it alone sees ground contact between snapshots), while this one has
+        // to be live mid-air, which a landing-only report can never be.
+        // MC Player.aiStep:435-437 resets it every tick while flying, which is
+        // what stops a creative player from critting on the way down.
+        if (packet.onGround || p.isFlying()) {
+            p.resetFallDistance();
+        } else if (dy < 0.0) {
+            p.addFallDistance(static_cast<float>(-dy));
+        }
+        p.setOnGround(packet.onGround);
+        p.setSprinting(packet.isSprinting);
+
+        // MC LivingEntity.getKnownMovement — the per-tick movement the sweep
+        // check compares against the walk speed. Move packets are one per
+        // client tick (20 Hz, as MC's are), so this delta IS a tick's worth.
+        p.setKnownHorizontalMovement(horizontal < 10.0 ? horizontal : 0.0);
     }
 
     void PlayerSession::HandleBlockAction(const Network::BlockActionC2SPacket& packet) {
@@ -841,6 +979,50 @@ namespace Server {
                                        ? packet.blockId
                                        : world->GetBlock(pos.x, pos.y, pos.z);
                 if (oldBlock == Game::BlockID::Air) return;
+                // The state the block was broken at — loot tables condition on
+                // it (MC passes the BlockState into LootParams,
+                // Block.getDrops:315).
+                //
+                // Taken from the PACKET for exactly the reason blockId is
+                // above: in integrated mode the client's break prediction has
+                // already cleared this cell, so reading the world here returns
+                // the default state. That is what made a fully grown wheat
+                // evaluate as age=0 and drop seeds instead of wheat — and the
+                // same for carrots, potatoes and beetroots. The world is only
+                // consulted as a fallback, for a sender that predates the
+                // field (its state byte decodes as 0 either way).
+                uint8_t oldBlockState = packet.blockState;
+                if (oldBlockState == 0) {
+                    oldBlockState = world->GetBlockState(pos.x, pos.y, pos.z);
+                }
+
+                // MC ChestBlock.updateShape: the surviving half of a broken
+                // pair falls back to SINGLE, or it keeps claiming a partner
+                // that is no longer there — and, worse, stays ineligible as a
+                // future partner, since candidatePartnerFacing only accepts a
+                // neighbour still typed SINGLE. Each un-reset break therefore
+                // burned one neighbour permanently.
+                if (oldBlock == Game::BlockID::Chest ||
+                    oldBlock == Game::BlockID::TrappedChest) {
+                    ResetOrphanedChestPartners(*world, pos);
+                }
+
+                // MC Containers.dropContents (called from BaseEntityBlock's
+                // onRemove): a broken container spills what it held. This has
+                // to happen BEFORE SetBlock, because clearing the cell tears
+                // the block entity down and takes the contents with it.
+                std::vector<Game::ItemStack> spilled;
+                {
+                    const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+                    if (auto chunk = world->GetChunk(cp.x, cp.z)) {
+                        auto* be = chunk->GetBlockEntity(pos.x - cp.x * 16, pos.y,
+                                                         pos.z - cp.z * 16);
+                        if (auto* container =
+                                dynamic_cast<Game::BaseContainerBlockEntity*>(be)) {
+                            spilled = container->TakeAllContents();
+                        }
+                    }
+                }
                 // Bedrock is unbreakable in survival/adventure, but creative
                 // destroys it outright (MC's ServerPlayerGameMode never
                 // consults destroyTime on the creative path).
@@ -868,23 +1050,55 @@ namespace Server {
                     m_player->getFoodData().addExhaustion(0.005f);
                 }
 
-                // Add the broken block to the player's inventory and broadcast slot
-                // deltas. Without this the server-side inventory stays empty even
-                // though the client predicts the pickup, causing inventory clicks to
-                // be no-ops (server sees empty slots) and shift-click-clear to leave
-                // ghost items on screen (no SetSlot deltas for already-empty slots).
+                // Container contents pop out as world entities. They come back
+                // regardless of game mode and regardless of the tool: they were
+                // never the block's loot, they were the player's items being
+                // stored. MC drops them even in creative for the same reason.
+                if (auto* items = ItemEntitiesOrNull()) {
+                    for (const Game::ItemStack& stored : spilled) {
+                        items->PopResource(pos, stored);
+                    }
+                }
+
+                // Roll the block's loot table and pop the result into the world.
                 //
                 // Creative is exempt: MC's ServerPlayerGameMode.destroyBlock
                 // bails out immediately after removing the block when
                 // isCreative(), so no drop is ever produced.
                 if (m_connection && !creativeBreak) {
-                    // Mutate only. BroadcastContainerChanges (this tick, from
-                    // Tick()) diffs the container against m_remoteSlots and
-                    // sends the deltas with a correct stateId. Sending them
-                    // by hand here left m_remoteSlots stale AND stamped
-                    // stateId=0 onto the client, which disabled the click
-                    // staleness guard until the next full sync.
-                    m_player->getInventory().AddBlocks(oldBlock, 1);
+                    const Game::Block& brokenBlock = Game::BlockRegistry::Get(oldBlock);
+                    const Game::ItemStack& heldStack =
+                        m_player->getInventory().GetSelectedStack();
+
+                    // MC's binary drop gate (ServerPlayerGameMode.destroyBlock:278
+                    // → Player.hasCorrectToolForDrops:605): a block flagged
+                    // requiresCorrectTool yields NOTHING to the wrong tool, no
+                    // matter what its loot table says. Blocks without the flag
+                    // always pass. Note this same predicate already picks the
+                    // ×30 vs ×100 mining-speed divisor in MiningSpeed.cpp:71 —
+                    // it just wasn't consulted for drops until now.
+                    if (Game::HasCorrectToolForDrops(heldStack.itemId, brokenBlock)) {
+                        Game::LootContext lootCtx;
+                        lootCtx.block          = oldBlock;
+                        lootCtx.blockState     = oldBlockState;
+                        lootCtx.tool           = &heldStack;
+                        lootCtx.world          = world;
+                        lootCtx.pos            = pos;
+                        lootCtx.brokenByEntity = true;   // a player did this
+                        lootCtx.rng            = &m_lootRandom;
+
+                        // Loot pops into the WORLD, not straight into the
+                        // breaker's inventory (MC Block.dropResources →
+                        // popResource). The player collects it by walking over
+                        // it a moment later. Going through an entity is also
+                        // what stops a full inventory from destroying the drop,
+                        // which is what the old AddStack path did.
+                        if (auto* items = ItemEntitiesOrNull()) {
+                            for (const Game::ItemStack& drop : Game::LootTables::GetDrops(lootCtx)) {
+                                items->PopResource(pos, drop);
+                            }
+                        }
+                    }
                 }
                 break;
             }
@@ -934,8 +1148,60 @@ namespace Server {
         InvalidateRemoteSlot(m_player->container().MenuIndexForInventorySlot(inventoryIndex));
     }
 
+    bool PlayerSession::CloseMenuIfBlockGone() {
+        // MC AbstractContainerMenu.stillValid → ContainerLevelAccess.evaluate:
+        // every tick a block menu re-checks that its block is still there, and
+        // closes if it isn't. That check is not cosmetic here — a block menu's
+        // Slots point straight at the block entity's container, and a furnace
+        // menu's data slots capture the block entity itself, so once SetBlock
+        // frees it (World.cpp's RemoveBlockEntity) the very next slot diff
+        // reads freed memory. Breaking an open chest or furnace was a
+        // use-after-free crash before this.
+        if (!m_player || !m_menuIsBlockBacked || !m_player->hasOpenContainerMenu()) {
+            return false;
+        }
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server || !server->GetWorld()) return false;
+
+        const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(
+            m_openMenuPos.x, m_openMenuPos.z);
+        auto chunk = server->GetWorld()->GetChunk(cp.x, cp.z);
+        Game::BlockEntity* be = chunk
+            ? chunk->GetBlockEntity(m_openMenuPos.x - cp.x * 16, m_openMenuPos.y,
+                                    m_openMenuPos.z - cp.z * 16)
+            : nullptr;
+        if (dynamic_cast<Game::BaseContainerBlockEntity*>(be)) {
+            // A double chest's CompoundContainer points at BOTH block
+            // entities, so losing either half is just as fatal as losing the
+            // one that was clicked.
+            if (!m_hasMenuPartner) return false;
+            const auto pcp = Game::Math::WorldCoordinates::WorldToChunkPos(
+                m_openMenuPartnerPos.x, m_openMenuPartnerPos.z);
+            auto pchunk = server->GetWorld()->GetChunk(pcp.x, pcp.z);
+            Game::BlockEntity* pbe = pchunk
+                ? pchunk->GetBlockEntity(m_openMenuPartnerPos.x - pcp.x * 16,
+                                         m_openMenuPartnerPos.y,
+                                         m_openMenuPartnerPos.z - pcp.z * 16)
+                : nullptr;
+            if (dynamic_cast<Game::BaseContainerBlockEntity*>(pbe)) return false;
+        }
+
+        // Gone (broken, or its chunk unloaded). Drop the menu before anything
+        // can dereference it, and tell the client so its screen comes down.
+        m_menuIsBlockBacked = false;
+        m_hasMenuPartner    = false;
+        m_player->closeContainerMenu();
+        // Re-seeds m_remoteSlots/m_remoteCarried from the menu we just fell
+        // back to, and tells the client to show the plain inventory. The data
+        // diff reseeds on its own next tick, when the slot count changes.
+        SendInventoryFull();
+        return true;
+    }
+
     void PlayerSession::BroadcastContainerChanges() {
         if (!m_player || !m_connection) return;
+        // MUST be the first thing that touches the menu this tick.
+        if (CloseMenuIfBlockGone()) return;
 
         // Walk the OPEN MENU's slots, not the inventory's. For the player's own
         // menu the two are the same list; for a crafting table the menu also
@@ -965,6 +1231,28 @@ namespace Server {
                 static_cast<uint8_t>(Network::PacketId::InventorySetSlotS2C), data);
         }
 
+        // ContainerData deltas (MC AbstractContainerMenu.broadcastChanges sends
+        // one ClientboundContainerSetDataPacket per changed index). These do
+        // NOT bump the container state id: stateId guards CLICK staleness, and
+        // a furnace ticking its flame every tick would otherwise invalidate
+        // every click the player had in flight.
+        const int dataCount = menu.DataCount();
+        if (static_cast<int>(m_remoteData.size()) != dataCount) {
+            m_remoteData.assign(static_cast<size_t>(dataCount), INT_MIN);   // force a resend
+        }
+        for (int i = 0; i < dataCount; ++i) {
+            const int value = menu.GetData(i);
+            if (m_remoteData[static_cast<size_t>(i)] == value) continue;
+            m_remoteData[static_cast<size_t>(i)] = value;
+            Network::ContainerSetDataS2CPacket out;
+            out.containerId = menu.containerId;
+            out.id          = static_cast<uint16_t>(i);
+            out.value       = value;
+            auto data = Network::Serialization::Serialize(out);
+            m_connection->SendPacket(
+                static_cast<uint8_t>(Network::PacketId::ContainerSetDataS2C), data);
+        }
+
         const Game::ItemStack& carried = m_player->getCarried();
         if (!StacksIdentical(carried, m_remoteCarried)) {
             m_remoteCarried = carried;
@@ -987,6 +1275,12 @@ namespace Server {
 
     void PlayerSession::HandleInventoryClick(const Network::InventoryClickC2SPacket& packet) {
         if (!m_player || !m_connection) return;
+        // The other path that dereferences menu slots. A click can arrive
+        // between the block being broken and the next per-tick diff, so the
+        // same stillValid check has to run here — the containerId guard below
+        // would not save us, because reaching it already means touching the
+        // menu whose block entity is gone.
+        if (CloseMenuIfBlockGone()) return;
 
 #if INVENTORY_CLICK_TRACE
         const auto& traceInv = m_player->getInventory();
@@ -1052,10 +1346,37 @@ namespace Server {
 
         // Normal path: send only what the client actually has wrong. A correct
         // prediction sends nothing at all.
-        (void)result;
         BroadcastContainerChanges();
 
-        // TODO: spawn dropped item entity if !result.droppedItem.IsEmpty()
+        // A THROW click (Q on a slot) or a click outside the window with a
+        // carried stack puts the items here. HandleThrow / DropCarriedOutside
+        // have already removed them from the container, so this is the only
+        // thing standing between them and being destroyed.
+        DropItemFromPlayer(result.droppedItem);
+        for (const auto& extra : result.extraDrops) {
+            DropItemFromPlayer(extra);
+        }
+    }
+
+    void PlayerSession::DropItemFromPlayer(const Game::ItemStack& stack) {
+        if (stack.IsEmpty() || !m_player) return;
+
+        auto* items = ItemEntitiesOrNull();
+        if (!items) return;
+
+        // Thrown from eye level so it appears to leave the hand.
+        const glm::dvec3 eye =
+            m_player->getPosition()
+            + glm::dvec3(0.0, Game::PlayerPhysics::EYE_HEIGHT_STANDING, 0.0);
+
+        // Resolved to a VECTOR here so the entity manager stays free of any
+        // angle convention at all — MC's drop formula is written against MC's
+        // angles and transcribing it against stored degrees is how a thrown
+        // item ends up flying backwards.
+        const glm::dvec3 forward = glm::dvec3(
+            Game::Mth::ViewVector(m_player->getPitch(), m_player->getYaw()));
+
+        items->DropFromPlayer(eye, forward, stack);
     }
 
     void PlayerSession::HandleInventoryClose(const Network::InventoryCloseC2SPacket&) {
@@ -1067,12 +1388,12 @@ namespace Server {
                       (unsigned)c.itemId, c.count);
         }
 #endif
-        // MC drops the cursor item as a world entity when the inventory closes,
-        // but since we have no item-entity system yet, dropping = the item just
-        // disappears. Better UX: try to put the carried stack back into the
-        // player's inventory (matching what the user expects when pressing E
-        // without intentionally dropping). Only items that don't fit get
-        // silently dropped (acceptable since the inventory is large).
+        // MC drops the cursor item as a world entity on close. This engine
+        // instead tries to put it back into the player's inventory first, which
+        // is the friendlier reading of "pressed E while holding something", and
+        // is a deliberate divergence kept from before item entities existed.
+        // Only the part that genuinely does not fit now goes into the world —
+        // which is the half that used to be destroyed outright.
         // MC doCloseContainer → menu.removed(player): a menu with its own
         // storage hands it back before it disappears, and containerMenu drops
         // to inventoryMenu so the id the client was clicking against stops
@@ -1084,21 +1405,34 @@ namespace Server {
         // emptied and the id bumped here instead — otherwise items parked in
         // the crafting square would sit there invisibly until next time.
         if (m_player->hasOpenContainerMenu()) {
-            m_player->closeContainerMenu();
+            // Same deal as the else-branch: a block menu hands its inputs back
+            // on close, and whatever didn't fit must not evaporate.
+            Game::ContainerClickResult closed = m_player->closeContainerMenu();
+            for (const auto& extra : closed.extraDrops) {
+                DropItemFromPlayer(extra);
+            }
         } else {
             Game::ContainerClickResult removal;
             m_player->container().Removed(removal);
             m_player->container().containerId++;
+            // Anything the closing menu could not hand back (crafting grid or
+            // anvil inputs against a full inventory) goes into the world.
+            for (const auto& extra : removal.extraDrops) {
+                DropItemFromPlayer(extra);
+            }
         }
 
-        int leftover = 0;
         auto& carried = m_player->getCarried();
         if (!carried.IsEmpty()) {
             // AddStack, not AddItems: the cursor may hold an enchanted book or
             // any other stack with per-stack components, and (id, count) would
             // drop them.
-            leftover = m_player->getInventory().AddStack(carried);
-            // Whatever didn't fit is silently dropped (no item-entity system).
+            const int leftover = m_player->getInventory().AddStack(carried);
+            if (leftover > 0) {
+                Game::ItemStack overflow = carried;
+                overflow.count = leftover;
+                DropItemFromPlayer(overflow);
+            }
             carried.Clear();
         }
 
@@ -1109,11 +1443,6 @@ namespace Server {
         // No hand-rolled per-slot sends here — the snapshot covers the returned
         // cursor and every slot it landed in, and refreshes m_remoteSlots.
         SendInventoryFull();
-
-        if (leftover > 0) {
-            Log::Debug("[HandleInventoryClose] Dropped %d items (no entity system to spawn them)",
-                       leftover);
-        }
     }
 
     void PlayerSession::HandlePlayerAbilities(const Network::PlayerAbilitiesC2SPacket& packet) {
@@ -1166,10 +1495,161 @@ namespace Server {
         m_remoteCarried = out.carried;
     }
 
+    void PlayerSession::BroadcastBlockEntity(const glm::ivec3& pos, Game::BlockEntity* be) {
+        if (!be || !be->GetType()) return;
+        auto* server = Server::g_integratedServer.get();
+        if (!server || !server->GetNetworkServer()) return;
+
+        be->MarkDirty();
+        Network::BlockEntityDataS2CPacket pkt(pos.x, pos.y, pos.z, be->GetType()->TypeId());
+        Network::PacketBuffer scratch;
+        be->Save(scratch);
+        pkt.dataBlob = scratch.GetData();
+        auto data = Network::Serialization::Serialize(pkt);
+        // Every watcher, not just the player who caused it — the block entity
+        // is world state.
+        server->GetNetworkServer()->BroadcastPacket(
+            static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C), data);
+    }
+
+    void PlayerSession::FlushPendingCampfireFood() {
+        if (!m_player) return;
+        auto pending = m_player->takePendingCampfireFood();
+        if (!pending) return;
+
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server || !server->GetWorld()) return;
+        Game::World* world = server->GetWorld();
+
+        const glm::ivec3& pos = pending->pos;
+        const auto chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = world->GetChunk(chunkPos.x, chunkPos.z);
+        if (!chunk) return;
+
+        auto* campfire = dynamic_cast<Game::CampfireBlockEntity*>(
+            chunk->GetBlockEntity(pos.x - chunkPos.x * 16, pos.y, pos.z - chunkPos.z * 16));
+        if (!campfire) return;
+
+        // PlaceFood consumes one from the held stack on success and leaves it
+        // untouched when the fire is full — MC's placeFood contract exactly.
+        Game::ItemStack& held = m_player->getItemInHand(pending->hand);
+        const Game::ItemStack before = held;
+        if (!campfire->PlaceFood(held)) return;
+
+        if (m_player->isCreative()) {
+            held = before;              // creative never runs the stack down
+        } else {
+            m_player->markSlotDirty(m_player->handSlotIndex(pending->hand));
+        }
+
+        // The four food slots live in the block entity, so the client only
+        // learns what is on the fire from a BE update — without this the
+        // campfire renderer would draw nothing until something else forced a
+        // resync.
+        BroadcastBlockEntity(pos, campfire);
+    }
+
     void PlayerSession::FlushPendingMenuOpen() {
         if (!m_player || !m_connection) return;
-        const auto pending = m_player->takePendingMenuOpen();
+        auto pending = m_player->takePendingMenuOpen();
         if (!pending) return;
+
+        // Block-backed menus need the container living at the clicked cell.
+        // MC gets there via state.getMenuProvider(level, pos), which resolves
+        // the block entity; ours is the same lookup the placement path uses.
+        auto containerAt = [this](const glm::ivec3& pos) -> Game::BaseContainerBlockEntity* {
+            IntegratedServer* server = g_integratedServer.get();
+            if (!server || !server->GetWorld()) return nullptr;
+            const auto chunkPos =
+                Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+            auto chunk = server->GetWorld()->GetChunk(chunkPos.x, chunkPos.z);
+            if (!chunk) return nullptr;
+            const int lx = pos.x - chunkPos.x * 16;
+            const int lz = pos.z - chunkPos.z * 16;
+            auto* be = chunk->GetBlockEntity(lx, pos.y, lz);
+
+            // Create one on demand if the block wants a block entity but has
+            // none. Block entities are not persisted yet (see the note in
+            // BlockEntity.hpp) and are only created by SetBlock, so ANY
+            // container that came from world generation, from a loaded chunk,
+            // or from a previous run has no block entity — right-clicking it
+            // would find nothing and silently refuse to open. Only a container
+            // placed during this session would work, which is exactly the
+            // "only the crafting table opens" symptom, since that menu is the
+            // one that needs no block entity.
+            //
+            // This is also what makes the contents survive a chunk reload
+            // becoming a real feature later: the lazy create is the same hook
+            // a load would fill in.
+            if (!be) {
+                const Game::BlockID blockId =
+                    server->GetWorld()->GetBlock(pos.x, pos.y, pos.z);
+                if (const auto* type = Game::BlockEntityTypes::ForBlock(blockId)) {
+                    auto created = type->Create(pos, blockId);
+                    be = created.get();
+                    chunk->SetBlockEntity(lx, pos.y, lz, std::move(created));
+                }
+            }
+
+            // dynamic_cast rather than a static one: plenty of block entities
+            // are not containers (signs, banners), and a right-click on one
+            // must decline rather than reinterpret it as storage.
+            return dynamic_cast<Game::BaseContainerBlockEntity*>(be);
+        };
+
+        // MC EnchantmentMenu.slotsChanged's bookshelf scan: a 5x5 ring two
+        // blocks out, at the table's level and one above, and a shelf only
+        // counts when the cell BETWEEN it and the table is air. That air check
+        // is the whole reason you can wall a table off from its shelves.
+        auto CountBookshelvesAround = [](const glm::ivec3& tablePos) -> int {
+            IntegratedServer* server = g_integratedServer.get();
+            if (!server || !server->GetWorld()) return 0;
+            Game::World* w = server->GetWorld();
+            int power = 0;
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dz == 0) continue;
+                    for (int dy = 0; dy <= 1; ++dy) {
+                        // The cell adjacent to the table must be clear.
+                        if (w->GetBlock(tablePos.x + dx, tablePos.y + dy,
+                                        tablePos.z + dz) != Game::BlockID::Air) {
+                            continue;
+                        }
+                        auto isShelf = [&](int x, int y, int z) {
+                            return w->GetBlock(x, y, z) == Game::BlockID::Bookshelf;
+                        };
+                        if (isShelf(tablePos.x + dx * 2, tablePos.y + dy, tablePos.z + dz * 2)) ++power;
+                        if (dx != 0 && dz != 0) {
+                            if (isShelf(tablePos.x + dx * 2, tablePos.y + dy, tablePos.z + dz)) ++power;
+                            if (isShelf(tablePos.x + dx, tablePos.y + dy, tablePos.z + dz * 2)) ++power;
+                        }
+                    }
+                }
+            }
+            return power;
+        };
+
+        // Screen title = the block's display name, as vanilla does for every
+        // container without a custom name (MC BaseContainerBlockEntity
+        // .getDisplayName falls back to the block's description id).
+        auto blockNameAt = [](const glm::ivec3& pos) -> std::string {
+            IntegratedServer* server = g_integratedServer.get();
+            if (!server || !server->GetWorld()) return {};
+            return Game::BlockRegistry::Get(
+                server->GetWorld()->GetBlock(pos.x, pos.y, pos.z)).name;
+        };
+
+        // Cleared BEFORE the switch: the double-chest branch sets it true, and
+        // clearing afterwards wiped that — leaving the stillValid check blind
+        // to the second half, so breaking it would strand the menu's
+        // CompoundContainer on a freed block entity.
+        //
+        // It must still be cleared on EVERY open. Left stale, a partner
+        // position from a previous double chest outlives it: the next single
+        // chest opens, the very next tick's check looks for a partner that has
+        // since been broken, and closes the menu instantly — which reads as
+        // "the first right-click does nothing, the second works".
+        m_hasMenuPartner = false;
 
         std::unique_ptr<Game::AbstractContainerMenu> menu;
         std::string title;
@@ -1178,13 +1658,171 @@ namespace Server {
                 menu  = std::make_unique<Game::CraftingMenu>(&m_player->getInventory());
                 title = "Crafting";
                 break;
+
+            // Storage. Rows are the only thing that differs (MC keys these on
+            // GENERIC_9xN for exactly that reason); the block entity supplies
+            // the storage and the title follows the block.
+            case Game::MenuType::Generic9x1:
+            case Game::MenuType::Generic9x2:
+            case Game::MenuType::Generic9x3:
+            case Game::MenuType::Generic9x4:
+            case Game::MenuType::Generic9x5:
+            case Game::MenuType::Generic9x6: {
+                Game::BaseContainerBlockEntity* container = containerAt(pending->pos);
+                if (!container) return;   // no BE there — nothing to open
+                int rows = 1 + (static_cast<int>(pending->type) -
+                                static_cast<int>(Game::MenuType::Generic9x1));
+
+                // MC ChestBlock.MENU_PROVIDER_COMBINER: two chests standing
+                // together are ONE 54-slot menu over a CompoundContainer, not
+                // two 27-slot ones. The pair is resolved from the world every
+                // time it opens (DoubleChest.hpp), so breaking one half simply
+                // stops it pairing rather than leaving stale state behind.
+                IntegratedServer* srv = g_integratedServer.get();
+                Game::World* world = srv ? srv->GetWorld() : nullptr;
+                auto pair = world ? Game::FindChestPartner(*world, pending->pos)
+                                  : std::nullopt;
+                if (pair) {
+                    if (auto* other = containerAt(pair->partnerPos)) {
+                        // selfIsFirst decides which chest fills the TOP half —
+                        // MC's RIGHT chest is first (ChestBlock.java:93).
+                        auto compound = pair->selfIsFirst
+                            ? std::make_unique<Game::CompoundContainer>(container, other)
+                            : std::make_unique<Game::CompoundContainer>(other, container);
+                        rows = 6;
+                        menu = std::make_unique<Game::ChestMenu>(
+                            &m_player->getInventory(), std::move(compound), rows);
+                        // Both halves must stay alive for the menu's lifetime.
+                        m_openMenuPartnerPos = pair->partnerPos;
+                        m_hasMenuPartner     = true;
+                        // MC names a paired chest "Large Chest".
+                        title = "Large Chest";
+                        // The client must build a 6-row menu, so correct the
+                        // type it is told about.
+                        pending->type = Game::MenuType::Generic9x6;
+                        break;
+                    }
+                }
+
+                menu  = std::make_unique<Game::ChestMenu>(&m_player->getInventory(),
+                                                          container, rows);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+            // Dispenser / dropper: 3 wide, 3 tall (MC DispenserMenu).
+            case Game::MenuType::Generic3x3: {
+                Game::IContainer* container = containerAt(pending->pos);
+                if (!container) return;
+                menu  = std::make_unique<Game::ChestMenu>(&m_player->getInventory(),
+                                                          container, 3, 3);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+            // Hopper: 5 wide, 1 tall (MC HopperMenu).
+            case Game::MenuType::Hopper: {
+                Game::IContainer* container = containerAt(pending->pos);
+                if (!container) return;
+                menu  = std::make_unique<Game::ChestMenu>(&m_player->getInventory(),
+                                                          container, 1, 5);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+
+            // Furnace family. The block entity carries the CookingKind, so one
+            // branch covers all three.
+            case Game::MenuType::Furnace:
+            case Game::MenuType::BlastFurnace:
+            case Game::MenuType::Smoker: {
+                // Through containerAt so a furnace from a loaded chunk gets
+                // its block entity created on demand too.
+                auto* furnace = dynamic_cast<Game::FurnaceBlockEntity*>(
+                    containerAt(pending->pos));
+                if (!furnace) return;
+                menu  = std::make_unique<Game::FurnaceMenu>(&m_player->getInventory(),
+                                                            furnace);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+
+            // Utility blocks — no block entity, the menu owns its inputs.
+            case Game::MenuType::Stonecutter:
+                menu  = std::make_unique<Game::StonecutterMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::Grindstone:
+                menu  = std::make_unique<Game::GrindstoneMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::CartographyTable:
+                menu  = std::make_unique<Game::CartographyTableMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::Loom:
+                menu  = std::make_unique<Game::LoomMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::Smithing:
+                menu  = std::make_unique<Game::SmithingMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::Anvil:
+                menu  = std::make_unique<Game::AnvilMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+
+            // Blocks with a gameplay system behind them.
+            case Game::MenuType::Enchantment: {
+                auto ench = std::make_unique<Game::EnchantmentMenu>(&m_player->getInventory());
+                // MC EnchantmentMenu counts bookshelves in a 5x5 ring two
+                // blocks out, at the table's level and one above, each needing
+                // clear air between it and the table. Without that scan the
+                // table would always offer level-1 enchantments.
+                ench->SetBookshelfPower(CountBookshelvesAround(pending->pos));
+                menu  = std::move(ench);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+            case Game::MenuType::BrewingStand: {
+                Game::IContainer* container = containerAt(pending->pos);
+                if (!container) return;
+                menu  = std::make_unique<Game::BrewingStandMenu>(&m_player->getInventory(),
+                                                                 container);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+            case Game::MenuType::Beacon:
+                menu  = std::make_unique<Game::BeaconMenu>(&m_player->getInventory());
+                title = blockNameAt(pending->pos);
+                break;
+            case Game::MenuType::Crafter3x3: {
+                Game::IContainer* container = containerAt(pending->pos);
+                if (!container) return;
+                menu  = std::make_unique<Game::CrafterMenu>(&m_player->getInventory(),
+                                                            container);
+                title = blockNameAt(pending->pos);
+                break;
+            }
+
             case Game::MenuType::Inventory:
                 // Not a thing a block can ask for — the player menu is always
                 // open behind whatever else is.
                 return;
-        }
-        if (!menu) return;
 
+            default:
+                // Menu types whose screens land in later phases.
+                return;
+        }
+        if (!menu) {
+            Log::Warning("[Menu] type=%u produced no menu — nothing will open",
+                         static_cast<unsigned>(pending->type));
+            return;
+        }
+
+        // Remember what this menu points INTO. Its slots (and, for a furnace,
+        // its data slots) hold raw pointers to the block entity, so the menu
+        // must not outlive the block — see CloseMenuIfBlockGone.
+        m_menuIsBlockBacked = (pending->type != Game::MenuType::Crafting);
+        m_openMenuPos       = pending->pos;
         m_player->openContainerMenu(std::move(menu), pending->type);
 
         // MC ServerPlayer.openMenu: ClientboundOpenScreenPacket first (so the
@@ -1418,14 +2056,38 @@ namespace Server {
         // (MC.useItemOn line 362: `if (!itemStack.isEmpty() && !player.getCooldowns().isOnCooldown(itemStack))`)
         if (heldItem.useOn && !heldStack.IsEmpty()) {
             // MC's "creative count preservation" trick (ServerPlayerGameMode.java
-            // line 365-371): in creative, snapshot count BEFORE useOn, restore it
+            // line 365-371): in creative, snapshot BEFORE useOn and restore
             // AFTER, so a single block placed/transformed doesn't decrement the
             // infinite stack. We mutate the stack via the &-reference, so the
             // snapshot/restore must wrap the call.
-            const int countBefore = heldStack.count;
+            //
+            // The WHOLE stack is snapshotted, not just the count. MC can get
+            // away with `itemStack.setCount(count)` because its shrink() only
+            // decrements — the item reference survives a drop to zero. Ours
+            // doesn't: every useOn that consumes an item follows `count -= 1`
+            // with `if (count <= 0) Clear()`, and Clear() wipes the id and the
+            // components too. Restoring the count alone therefore left an
+            // itemId of Air behind, and the stack vanished — but only when it
+            // held exactly one, which is why this looked like a bone-meal bug
+            // rather than a dispatch bug. It also hit honeycomb waxing and any
+            // future stack-transforming item.
+            const Game::ItemStack stackBefore = heldStack;
             Game::UseResult r = heldItem.useOn(context, heldStack);
             if (isCreative) {
-                heldStack.count = countBefore;
+                // MC restores only the COUNT. Restoring the WHOLE stack also
+                // undoes any COMPONENT the callback wrote, and at least one
+                // callback writes a component it must keep: the portal gun
+                // lazily assigns itself a PORTAL_GUN_INSTANCE_ID on its first
+                // shot, and that id is what pairs its blue portal with its
+                // orange one. Wiping it made every creative shot allocate a
+                // fresh pair — so portals piled up and never linked.
+                //
+                // The whole-stack restore is still needed for the one case MC
+                // does not have: our shrink helpers call Clear() at zero, which
+                // wipes the id and the components too, leaving no count to put
+                // back. That is the bone-meal case the old comment described.
+                if (heldStack.IsEmpty()) heldStack = stackBefore;
+                else                     heldStack.count = stackBefore.count;
             }
             if (Game::ConsumesAction(r)) {
                 // TODO(advancements): CriteriaTriggers.ITEM_USED_ON_BLOCK.trigger(player, pos, stackCopy);
@@ -1480,7 +2142,35 @@ namespace Server {
             m_lastInteractionSequence = packet.sequence;
             return;
         }
-        
+
+        // MC BlockItem.useOn (BlockItem.java):
+        //
+        //     InteractionResult placeResult = this.place(new BlockPlaceContext(context));
+        //     return !placeResult.consumesAction() && context.getItemInHand().has(CONSUMABLE)
+        //         ? super.use(level, player, hand)
+        //         : placeResult;
+        //
+        // i.e. an item that is BOTH a block and a food falls through to eating
+        // when the placement fails. This matters the moment seeds exist: a
+        // carrot and a potato place carrots/potatoes on farmland, so without
+        // this every rejected planting — which is every right-click that is not
+        // aimed at farmland — would silently swallow the click and you could
+        // never eat one again.
+        //
+        // Used by each placement rejection below in place of a bare
+        // ResyncAndAck.
+        auto failPlacement = [&](const glm::ivec3& targetPos) {
+            if (!heldStack.IsEmpty() && Game::GetUseDuration(heldStack) > 0) {
+                const Game::UseResult used = DispatchUseItem(packet.hand);
+                if (Game::ConsumesAction(used)) {
+                    AckInteraction(packet.sequence, true);
+                    m_lastInteractionSequence = packet.sequence;
+                    return;
+                }
+            }
+            ResyncAndAck(clicked, targetPos, packet.sequence);
+        };
+
         // === 6a. Resolve the placement cell (MC BlockPlaceContext) ===
         //
         // Vanilla asks three questions in a fixed order, and the ORDER is what
@@ -1507,7 +2197,7 @@ namespace Server {
         // Validate target position
         if (!world->IsValidPosition(targetPos.x, targetPos.y, targetPos.z)) {
             Log::Warning("HandleUseItemOn: Target position invalid (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
-            ResyncAndAck(clicked, targetPos, packet.sequence);
+            failPlacement(targetPos);
             return;
         }
 
@@ -1522,7 +2212,7 @@ namespace Server {
             !Game::CanBeReplacedByPlacement(targetBlockId, targetBlockState, blockToPlace, sneaking)) {
             Log::Debug("HandleUseItemOn: Target cell already occupied at (%d,%d,%d) by block %u",
                        targetPos.x, targetPos.y, targetPos.z, static_cast<unsigned>(targetBlockId));
-            ResyncAndAck(clicked, targetPos, packet.sequence);
+            failPlacement(targetPos);
             return;
         }
 
@@ -1590,15 +2280,16 @@ namespace Server {
         // position resolves to the cell ABOVE — and there LeafLitterBlock's
         // canSurvive asks for a sturdy top face below, which a leaf litter's
         // empty collision shape does not provide.
+        // Crops go through the same gate: CanSurviveAt is what refuses a seed
+        // planted on anything but farmland, and what sugar cane consults for
+        // adjacent water.
         {
-            const Game::BlockID belowId =
-                world->GetBlock(targetPos.x, targetPos.y - 1, targetPos.z);
-            const uint8_t belowState =
-                world->GetBlockState(targetPos.x, targetPos.y - 1, targetPos.z);
-            if (!Game::CanSurviveOn(blockToPlace, belowId, belowState)) {
+            if (!Game::CanSurviveAt(*world, targetPos, blockToPlace)) {
                 Log::Debug("HandleUseItemOn: Block cannot survive at (%d,%d,%d)",
                            targetPos.x, targetPos.y, targetPos.z);
-                ResyncAndAck(clicked, targetPos, packet.sequence);
+                // The carrot-on-stone case: placement is impossible, so this
+                // becomes an eat.
+                failPlacement(targetPos);
                 return;
             }
         }
@@ -1630,7 +2321,7 @@ namespace Server {
         
         if (playerCollides) {
             Log::Debug("HandleUseItemOn: Player collides with placement at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
-            ResyncAndAck(clicked, targetPos, packet.sequence);
+            failPlacement(targetPos);
             return;
         }
         
@@ -1645,9 +2336,27 @@ namespace Server {
         // block never visibly flips when this authoritative update lands.
         // Growing a clump carries its existing facing across (see 6b); every
         // other placement derives orientation from how the player was standing.
-        const uint8_t placedState =
+        uint8_t placedState =
             growInPlace ? targetBlockState
                         : Game::ComputePlacementState(blockToPlace, context);
+        // Blocks whose orientation comes from their NEIGHBOURS rather than
+        // from the player — redstone dust resolving its four connections.
+        // A no-op for everything else.
+        if (!growInPlace) {
+            placedState = Game::ComputeWorldPlacementState(*world, targetPos,
+                                                           blockToPlace, placedState);
+        }
+
+        // Second survival gate, now that the state is known. The check in step
+        // 7 above is state-free, and a button's support depends entirely on its
+        // `face`/`facing` — without this you could hang one on any surface,
+        // including nothing at all.
+        if (!Game::CanSurviveAt(*world, targetPos, blockToPlace, placedState)) {
+            Log::Debug("HandleUseItemOn: Block state cannot survive at (%d,%d,%d)",
+                       targetPos.x, targetPos.y, targetPos.z);
+            failPlacement(targetPos);
+            return;
+        }
 
         bool changed = world->SetBlock(
             targetPos.x, targetPos.y, targetPos.z,
@@ -1660,6 +2369,20 @@ namespace Server {
             Log::Warning("HandleUseItemOn: SetBlock failed at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
             ResyncAndAck(clicked, targetPos, packet.sequence);
             return;
+        }
+
+        // A chest that placed itself as LEFT/RIGHT chose a partner; that
+        // partner is still typed SINGLE and has to be told (MC does this
+        // through updateShape on the neighbour). Skipping it leaves the older
+        // chest rendering and opening alone while the new one claims a pair.
+        if (blockToPlace == Game::BlockID::Chest ||
+            blockToPlace == Game::BlockID::TrappedChest) {
+            const auto& cdef = Game::BlockRegistry::GetStateDefinition(blockToPlace);
+            if (const auto partner =
+                    ChestPartnerCell(blockToPlace, placedState, targetPos)) {
+                const bool selfIsLeft = cdef.ValueOf(placedState, "type") == "left";
+                SetChestType(*world, *partner, selfIsLeft ? "right" : "left");
+            }
         }
         
         // === 10. Run block hooks ===
@@ -1693,23 +2416,7 @@ namespace Server {
                     // initial BlockEntityDataS2C went out alongside the block
                     // change. ApplyItemComponents may have mutated it — mark
                     // dirty + re-broadcast so clients see the updated contents.
-                    be->MarkDirty();
-                    if (m_connection) {
-                        Network::BlockEntityDataS2CPacket pkt(
-                            targetPos.x, targetPos.y, targetPos.z,
-                            be->GetType()->TypeId());
-                        Network::PacketBuffer scratch;
-                        be->Save(scratch);
-                        pkt.dataBlob = scratch.GetData();
-                        auto data = Network::Serialization::Serialize(pkt);
-                        // Broadcast via the integrated server (every watcher
-                        // gets the updated facing, not just the placer).
-                        if (Server::g_integratedServer && Server::g_integratedServer->GetNetworkServer()) {
-                            Server::g_integratedServer->GetNetworkServer()->BroadcastPacket(
-                                static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
-                                data);
-                        }
-                    }
+                    BroadcastBlockEntity(targetPos, be);
                 }
             }
         }
@@ -1894,20 +2601,25 @@ namespace Server {
 
             case Network::PlayerAction::DROP_ITEM:
             case Network::PlayerAction::DROP_ALL_ITEMS: {
-                // :1223-1233 — MC: player.drop(all) spawns an ItemEntity in
-                // the world. We have no item entities, so the stack shrinks /
-                // clears and the items are gone (documented gap).
+                // MC ServerPlayer.drop(all) → Inventory.removeFromSelected →
+                // LivingEntity.drop: take the items OUT of the hand and throw
+                // them into the world along the look direction.
                 Game::ItemStack& held = m_player->getItemInHand(0);
                 if (held.IsEmpty()) return;
+
+                // Split off what is being thrown, preserving components — a
+                // dropped enchanted tool has to keep its enchantments.
+                Game::ItemStack thrown = held;
                 if (packet.action == Network::PlayerAction::DROP_ALL_ITEMS) {
                     held.Clear();
                 } else {
+                    thrown.count = 1;
                     held.count--;
                     if (held.count <= 0) held.Clear();
                 }
                 m_player->markSlotDirty(m_player->handSlotIndex(0));
-                Log::Debug("[PlayerSession] Dropped item(s) — no item-entity "
-                           "system, stack shrunk only");
+
+                DropItemFromPlayer(thrown);
                 return;
             }
 
@@ -2125,10 +2837,10 @@ namespace Server {
     }
 
     void PlayerSession::OnChunkUnloadComplete(Game::Math::ChunkPos chunk) {
-        // Ensure chunk is removed from all sets
-        m_watchSet.erase(chunk);
+        // Ensure chunk is removed from all sets. The tracking view is not a
+        // set and is not touched here — it is derived from position and view
+        // distance, and a chunk being unloaded does not change either.
         m_sentChunks.erase(chunk);
-        m_pendingChunkLoads.erase(chunk);
         m_pendingChunksToSend.erase(chunk);
     }
 
@@ -2169,44 +2881,6 @@ namespace Server {
 
     // === INTERNAL METHODS ===
 
-    std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>
-    PlayerSession::ComputeWatchSet(Game::Math::ChunkPos anchor, int viewDistance) const {
-        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> watchSet;
-
-        // Add +2 buffer like Minecraft's chunkRadius = viewRange + 3
-        // This prevents thrashing at the boundary when moving
-        int radius = viewDistance + 2;
-
-        // Use Chebyshev distance (square pattern)
-        for (int dx = -radius; dx <= radius; ++dx) {
-            for (int dz = -radius; dz <= radius; ++dz) {
-                watchSet.emplace(anchor.x + dx, anchor.z + dz);
-            }
-        }
-        
-        return watchSet;
-    }
-
-    void PlayerSession::ComputeWatchDeltas(
-        const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>& newWatch,
-        std::vector<Game::Math::ChunkPos>& toAdd,
-        std::vector<Game::Math::ChunkPos>& toRemove
-    ) const {
-        // Find chunks to add (in new but not in current)
-        for (const auto& chunk : newWatch) {
-            if (m_watchSet.count(chunk) == 0) {
-                toAdd.push_back(chunk);
-            }
-        }
-        
-        // Find chunks to remove (in current but not in new)
-        for (const auto& chunk : m_watchSet) {
-            if (newWatch.count(chunk) == 0) {
-                toRemove.push_back(chunk);
-            }
-        }
-    }
-
     void PlayerSession::CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                            uint8_t localX, uint8_t localY, uint8_t localZ,
                                            Game::BlockID blockId, uint8_t stateIndex) {
@@ -2225,13 +2899,11 @@ namespace Server {
     }
 
     void PlayerSession::ClearWatchSets() {
-        m_watchSet.clear();
+        m_trackingView = ChunkTrackingView::Empty();
         m_sentChunks.clear();
-        m_pendingChunkLoads.clear();
     }
 
     void PlayerSession::ClearQueues() {
-        m_pendingChunkLoads.clear();
         m_pendingChunksToSend.clear();
 
         // Clear diff queue

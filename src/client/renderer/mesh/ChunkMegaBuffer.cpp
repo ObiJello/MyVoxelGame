@@ -15,7 +15,8 @@ namespace Render {
         Shutdown();
     }
 
-    void ChunkMegaBuffer::Initialize(size_t slabVertexCapacity, size_t slabIndexCapacity) {
+    void ChunkMegaBuffer::Initialize(size_t slabVertexCapacity, size_t slabIndexCapacity,
+                                     bool perSectionIndexBuffers) {
         if (!m_slabs.empty()) {
             Log::Warning("ChunkMegaBuffer::Initialize called on already-initialized buffer, shutting down first");
             Shutdown();
@@ -23,6 +24,7 @@ namespace Render {
 
         m_slabVertexCapacity = slabVertexCapacity;
         m_slabIndexCapacity = slabIndexCapacity;
+        m_perSectionIndexBuffers = perSectionIndexBuffers;
 
         // Allocate the first slab
         AllocateSlab();
@@ -36,6 +38,14 @@ namespace Render {
 
     void ChunkMegaBuffer::Shutdown() {
         if (g_renderBackend) {
+            // Per-section IBOs are owned by their region, not by a slab, so they
+            // have to be released here too or the world teardown leaks one buffer
+            // per translucent section.
+            for (auto& [key, region] : m_regions) {
+                if (region.sectionIbo != INVALID_BUFFER) {
+                    g_renderBackend->DestroyBuffer(region.sectionIbo);
+                }
+            }
             for (auto& slab : m_slabs) {
                 if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
                 if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
@@ -43,8 +53,16 @@ namespace Render {
         }
         m_slabs.clear();
         m_regions.clear();
+        m_pendingFrees.clear();
+        m_frameCounter = 0;
         m_slabVertexCapacity = 0;
         m_slabIndexCapacity = 0;
+        m_perSectionIndexBuffers = false;
+    }
+
+    BufferHandle ChunkMegaBuffer::GetSectionIndexBuffer(const MegaBufferSectionKey& key) const {
+        auto it = m_regions.find(key);
+        return it == m_regions.end() ? INVALID_BUFFER : it->second.sectionIbo;
     }
 
     uint32_t ChunkMegaBuffer::AllocateSlab() {
@@ -89,7 +107,10 @@ namespace Render {
         const Slab& slab = m_slabs[slabIndex];
 
         g_renderBackend->BindVertexBuffer(slab.vbo, static_cast<uint32_t>(VERTEX_STRIDE));
-        g_renderBackend->BindIndexBuffer(slab.ibo);
+        // Per-section mode binds the section's own IBO at draw time instead.
+        if (!m_perSectionIndexBuffers) {
+            g_renderBackend->BindIndexBuffer(slab.ibo);
+        }
     }
 
     // ========================================================================
@@ -130,12 +151,16 @@ namespace Render {
         if (!AllocRegion(slab.freeVertexBlocks, slab.vertexHighWater, slab.vboCapacity, vertexCount, vertexOffset))
             return false;
 
-        // Try index allocation
+        // Index allocation. In per-section mode the slab IBO is untouched — the
+        // section gets its own buffer below — so there is nothing to reserve and
+        // nothing to fail on.
         size_t indexOffset = 0;
-        if (!AllocRegion(slab.freeIndexBlocks, slab.indexHighWater, slab.iboCapacity, indexCount, indexOffset)) {
-            // Undo vertex allocation
-            FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
-            return false;
+        if (!m_perSectionIndexBuffers) {
+            if (!AllocRegion(slab.freeIndexBlocks, slab.indexHighWater, slab.iboCapacity, indexCount, indexOffset)) {
+                // Undo vertex allocation
+                FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
+                return false;
+            }
         }
 
         // Upload vertex data
@@ -145,15 +170,28 @@ namespace Render {
                                        vertexData);
 
         // Upload index data
-        g_renderBackend->UpdateBuffer(slab.ibo,
-                                       indexOffset * INDEX_SIZE,
-                                       indexCount * INDEX_SIZE,
-                                       indexData);
+        BufferHandle sectionIbo = INVALID_BUFFER;
+        if (m_perSectionIndexBuffers) {
+            sectionIbo = g_renderBackend->CreateBuffer(
+                BufferUsage::Index,
+                indexCount * INDEX_SIZE,
+                indexData,
+                BufferAccess::Dynamic);
+            if (sectionIbo == INVALID_BUFFER) {
+                FreeRegion(slab.freeVertexBlocks, vertexOffset, vertexCount);
+                return false;
+            }
+        } else {
+            g_renderBackend->UpdateBuffer(slab.ibo,
+                                           indexOffset * INDEX_SIZE,
+                                           indexCount * INDEX_SIZE,
+                                           indexData);
+        }
 
         m_uploadedBytes += vertexCount * VERTEX_STRIDE + indexCount * INDEX_SIZE;
 
         // Store region
-        m_regions[key] = {slabIndex, vertexOffset, vertexCount, indexOffset, indexCount};
+        m_regions[key] = {slabIndex, vertexOffset, vertexCount, indexOffset, indexCount, sectionIbo};
         slab.sectionCount++;
         return true;
     }
@@ -172,10 +210,24 @@ namespace Render {
         if (indexCount != region.indexCount) return false;
         if (region.slabIndex >= m_slabs.size()) return false;
 
-        g_renderBackend->UpdateBuffer(m_slabs[region.slabIndex].ibo,
-                                      region.indexOffset * INDEX_SIZE,
-                                      indexCount * INDEX_SIZE,
-                                      indexData);
+        // Per-section mode writes a buffer only this section draws from, so the
+        // driver has no in-flight draws to serialise against — that stall is the
+        // entire reason this mode exists.
+        if (m_perSectionIndexBuffers) {
+            if (region.sectionIbo == INVALID_BUFFER) return false;
+            g_renderBackend->UpdateBuffer(region.sectionIbo, 0,
+                                          indexCount * INDEX_SIZE, indexData);
+        } else {
+            // Unsynchronised: this is a same-length permutation of the section's
+            // own quad range (enforced above), so a torn read is a mix of two
+            // valid orderings, never an invalid index. See
+            // RenderBackend::UpdateBufferUnsynchronized.
+            g_renderBackend->UpdateBufferUnsynchronized(
+                m_slabs[region.slabIndex].ibo,
+                region.indexOffset * INDEX_SIZE,
+                indexCount * INDEX_SIZE,
+                indexData);
+        }
         m_uploadedBytes += indexCount * INDEX_SIZE;
         return true;
     }
@@ -185,13 +237,46 @@ namespace Render {
         if (it == m_regions.end()) return;
 
         const Region& region = it->second;
+        // Per-section IBO is owned by the region, so it dies with it. Nothing was
+        // reserved in the slab index free-list in that mode, so do not hand a
+        // never-allocated range back to it.
+        if (region.sectionIbo != INVALID_BUFFER && g_renderBackend) {
+            g_renderBackend->DestroyBuffer(region.sectionIbo);
+        }
         if (region.slabIndex < m_slabs.size()) {
             Slab& slab = m_slabs[region.slabIndex];
-            FreeRegion(slab.freeVertexBlocks, region.vertexOffset, region.vertexCount);
-            FreeRegion(slab.freeIndexBlocks, region.indexOffset, region.indexCount);
+            // NOT returned to the free-list yet — an in-flight frame may still
+            // be drawing this range, and handing it straight back would let the
+            // very next UploadSection overwrite it. See RetireFreedRegions.
+            m_pendingFrees.push_back({region.slabIndex,
+                                      region.vertexOffset, region.vertexCount,
+                                      region.indexOffset, region.indexCount,
+                                      !m_perSectionIndexBuffers,
+                                      m_frameCounter});
             if (slab.sectionCount > 0) slab.sectionCount--;
         }
         m_regions.erase(it);
+    }
+
+    void ChunkMegaBuffer::RetireFreedRegions() {
+        m_frameCounter++;
+        if (m_pendingFrees.empty()) return;
+
+        size_t keep = 0;
+        for (const PendingFree& p : m_pendingFrees) {
+            if (m_frameCounter - p.frameFreed < kFreeDelayFrames) {
+                m_pendingFrees[keep++] = p;   // still too young to reuse
+                continue;
+            }
+            if (p.slabIndex < m_slabs.size()) {
+                Slab& slab = m_slabs[p.slabIndex];
+                FreeRegion(slab.freeVertexBlocks, p.vertexOffset, p.vertexCount);
+                if (p.freeIndices) {
+                    FreeRegion(slab.freeIndexBlocks, p.indexOffset, p.indexCount);
+                }
+            }
+        }
+        m_pendingFrees.resize(keep);
     }
 
     bool ChunkMegaBuffer::HasSection(const MegaBufferSectionKey& key) const {
@@ -275,6 +360,19 @@ namespace Render {
             Log::Debug("ChunkMegaBuffer: freed empty slab %zu", m_slabs.size() - 1);
             m_slabs.pop_back();
             removed = true;
+        }
+
+        // Drop parked ranges belonging to slabs that just went away. The bounds
+        // check in RetireFreedRegions would skip them today, but only until a
+        // new slab is allocated into the same index — then a stale range would
+        // be returned to a DIFFERENT slab's free-list and hand out memory that
+        // is already in use. Purge them here so that cannot happen.
+        if (removed) {
+            const uint32_t slabCount = static_cast<uint32_t>(m_slabs.size());
+            m_pendingFrees.erase(
+                std::remove_if(m_pendingFrees.begin(), m_pendingFrees.end(),
+                               [slabCount](const PendingFree& p) { return p.slabIndex >= slabCount; }),
+                m_pendingFrees.end());
         }
         return removed;
     }

@@ -11,6 +11,7 @@
 #include "../texture/AtlasBuilder.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockModel.hpp"
+#include "ItemMeshBuilder.hpp"
 #include "common/world/block/entity/BlockEntityType.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "../blockentity/BlockEntityRenderer.hpp"
@@ -61,10 +62,33 @@ namespace Render {
             { 1.13f / 16.0f, 3.2f / 16.0f, 1.13f / 16.0f },
             0.68f
         };
-        // block/block parent firstperson_righthand.
+        // block/block parent firstperson_righthand:
+        //   rotation [0, 45, 0], translation [0, 0, 0], scale [0.4, 0.4, 0.4].
+        //
+        // The translation was 2.5/16, which is block/block's THIRDPERSON value
+        // ([0, 2.5, 0]) — every held block sat two and a half pixels high. It
+        // only became noticeable once the hand started drawing real model
+        // geometry, because a full cube looks much the same either way but a
+        // button does not.
         constexpr DisplayXf kBlockXf {
             { 0.0f, 45.0f, 0.0f },
-            { 0.0f, 2.5f / 16.0f, 0.0f },
+            { 0.0f, 0.0f, 0.0f },
+            0.40f
+        };
+        // item/template_chest and item/template_shulker_box —
+        // firstperson_righthand: rotation [0, 315, 0], translation [0, 0, 0],
+        // scale [0.4, 0.4, 0.4]. Both templates are identical, so one constant
+        // covers the chest family and the shulker family.
+        //
+        // These blocks do NOT inherit block/block: they are `special` items
+        // whose model is drawn by a renderer, and MC gives them their own
+        // display transforms. Reusing kBlockXf turned the chest 90 degrees (45
+        // vs 315) so it presented its side to the camera instead of its front,
+        // and lifted it 2.5px (kBlockXf carries block/block's THIRDPERSON
+        // translation, not its firstperson [0,0,0]).
+        constexpr DisplayXf kChestLikeXf {
+            { 0.0f, 315.0f, 0.0f },
+            { 0.0f, 0.0f, 0.0f },
             0.40f
         };
 
@@ -195,201 +219,15 @@ namespace Render {
                 {1,0,0});
         }
 
-        // ── 1×1 textured-cube mesh shared by every block item ──
-        // Rebuilt per-frame as one of our scratch buffers so we can
-        // re-UV each face from the relevant block's atlas entry without
-        // baking N separate meshes. Lives in [0,1]³ local space.
-        struct CubeVert { float x,y,z; float u,v; uint8_t r,g,b,a; };
-        static_assert(sizeof(CubeVert) == 24, "CubeVert must be 24 bytes");
-
-        // Append one cube face quad (4 verts + 6 indices) to the scratch
-        // buffer. positions/UVs supplied in CCW order viewed from
-        // outside the face so backface culling keeps the visible side.
-        // Per-vertex tint colour multiplies the sampled texture in the
-        // block fragment shader (`texColor * vertColor`); used for
-        // grass-top biome colouring.
-        void appendCubeFace(std::vector<CubeVert>& verts,
-                            std::vector<uint32_t>& idx,
-                            const glm::vec3 p[4], const glm::vec2 uv[4],
-                            uint8_t r, uint8_t g, uint8_t b) {
-            uint32_t base = (uint32_t)verts.size();
-            for (int i = 0; i < 4; ++i) {
-                verts.push_back({ p[i].x, p[i].y, p[i].z,
-                                  uv[i].x, uv[i].y,
-                                  r, g, b, 255 });
-            }
-            idx.push_back(base + 0); idx.push_back(base + 1); idx.push_back(base + 2);
-            idx.push_back(base + 0); idx.push_back(base + 2); idx.push_back(base + 3);
-        }
-
-        // Default biome-tint colour applied to faces with tintindex=0
-        // (grass top, vine, lily pad, …). Held items have no biome
-        // context so we use the vanilla "default" grass/foliage colour
-        // — the value sampled from the centre of grass.png at the
-        // default plains-biome coords. Without this, grass tops render
-        // grey because the texture itself is greyscale.
-        constexpr uint8_t kDefaultGrassR = 124;
-        constexpr uint8_t kDefaultGrassG = 189;
-        constexpr uint8_t kDefaultGrassB = 107;
-
-        // Per-element resolved face texture + tint. We collect one of
-        // these per (element × face direction) so multi-layer cube
-        // models (grass_block has a base cube + an overlay cube)
-        // emit one quad per layer at the same world position; alpha
-        // blending composites them correctly.
-        struct FaceLayer {
-            float u0, v0, u1, v1;
-            int   tintIndex;
-        };
-
-        // Walk EVERY element of the model that defines this face and
-        // resolve each one to an atlas UV + tint. Returns the layers
-        // in element order (base first, overlays next) so emission can
-        // draw them in that sequence — the overlay's transparent
-        // pixels blend over the base.
-        void collectFaceLayers(const Game::BlockModel& bm, Game::FaceDir dir,
-                               std::vector<FaceLayer>& out) {
-            for (const auto& el : bm.elements) {
-                auto faceIt = el.faces.find(dir);
-                if (faceIt == el.faces.end()) continue;
-                const std::string atlasKey = bm.ResolveTexture(faceIt->second.textureRef);
-                if (atlasKey.empty() || atlasKey == "missingno") continue;
-                AtlasUVRect rect;
-                if (!g_atlasBuilder || !g_atlasBuilder->GetUVRect(atlasKey, rect)) continue;
-                out.push_back({ rect.uvMin.x, rect.uvMin.y,
-                                rect.uvMax.x, rect.uvMax.y,
-                                faceIt->second.tintIndex });
-            }
-        }
-
-        // Resolves a tintindex value to the per-vertex colour to write
-        // for that face. -1 (no tint) = white; 0 (biome tint) = the
-        // default grass/foliage colour above; higher indices are reserved
-        // for other items (banner, dye) and aren't relevant for blocks.
-        void tintToColour(int tintIndex, uint8_t& r, uint8_t& g, uint8_t& b) {
-            if (tintIndex == 0) {
-                r = kDefaultGrassR;
-                g = kDefaultGrassG;
-                b = kDefaultGrassB;
-            } else {
-                r = g = b = 255;
-            }
-        }
-
-        // Fallback: try a couple of typical texture-key patterns for
-        // the block's model name. Used when the BlockModelRegistry
-        // doesn't have the model loaded (unloaded model, custom block,
-        // etc.) — produces a single-texture cube. Returns true if any
-        // pattern hits.
-        bool fallbackBlockUV(const std::string& modelName,
-                             float& u0, float& v0, float& u1, float& v1) {
-            if (!g_atlasBuilder || modelName.empty()) return false;
-            const std::string keys[] = {
-                "block/" + modelName,
-                modelName,
-            };
-            AtlasUVRect rect;
-            for (const auto& k : keys) {
-                if (g_atlasBuilder->GetUVRect(k, rect)) {
-                    u0 = rect.uvMin.x; v0 = rect.uvMin.y;
-                    u1 = rect.uvMax.x; v1 = rect.uvMax.y;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        // Build the 6-face cube mesh on the fly. Each face is UV'd
-        // independently from the block model's per-face texture so
-        // multi-textured blocks (grass, oak log, furnace, …) show the
-        // right face on the right side. Caller owns the scratch
-        // vertex/index buffers.
+        // Look-around sway — MC ItemInHandRenderer.renderHandsWithItems's two
+        // opening mulPose calls, X then Y. Applied straight after the walk bob
+        // so the composition matches vanilla's, where GameRenderer.bobView runs
+        // on the pose stack before renderHandsWithItems touches it.
         //
-        // Winding convention: vertices listed counter-clockwise when
-        // viewed from the OUTSIDE of the face — matches our pipeline
-        // state (CullMode::Back, FrontFace::CounterClockwise), so the
-        // outward-facing side is what survives backface culling.
-        //
-        // Cube occupies [0, 1]³ in local space; the renderer recentres
-        // around the cube's mid-point (0.5, 0.5, 0.5) before applying
-        // the display transform so rotations pivot at the block centre.
-        void buildBlockCubeMesh(Game::BlockID b,
-                                std::vector<CubeVert>& verts,
-                                std::vector<uint32_t>& idx) {
-            verts.clear();
-            idx.clear();
-
-            const auto& blk  = Game::BlockRegistry::Get(b);
-            const auto* bmPtr = &Game::BlockModelRegistry::GetModel(blk.modelName);
-            const bool hasModel = bmPtr && !bmPtr->elements.empty();
-
-            // 8 corners of the unit cube.
-            const glm::vec3 v000{0,0,0}, v100{1,0,0}, v110{1,1,0}, v010{0,1,0};
-            const glm::vec3 v001{0,0,1}, v101{1,0,1}, v111{1,1,1}, v011{0,1,1};
-
-            // Per-face emit helper. For multi-layer cube models
-            // (grass_block has a base cube + an overlay cube at the
-            // same position), we walk EVERY element that defines this
-            // face and emit one quad per layer. The block path uses
-            // depth-test LessOrEqual so coplanar overlay quads aren't
-            // z-rejected after the base writes depth; the alpha-blend
-            // pipeline composites them in the order we emit (base
-            // first, overlay second). Single-element models hit this
-            // path with a layer count of 1 and behave exactly as before.
-            auto emit = [&](Game::FaceDir dir,
-                            const glm::vec3 q[4], const glm::vec2 uv[4]) {
-                std::vector<FaceLayer> layers;
-                if (hasModel) collectFaceLayers(*bmPtr, dir, layers);
-                if (layers.empty()) {
-                    // Fallback when the model has no entry for this
-                    // face (or no model at all): try model-name keys,
-                    // failing that draw with the full atlas range so
-                    // the cube is at least visible.
-                    FaceLayer fb{0,0,1,1,-1};
-                    fallbackBlockUV(blk.modelName, fb.u0, fb.v0, fb.u1, fb.v1);
-                    layers.push_back(fb);
-                }
-                for (const FaceLayer& L : layers) {
-                    uint8_t r, g, b;
-                    tintToColour(L.tintIndex, r, g, b);
-                    glm::vec2 rmap[4];
-                    for (int i = 0; i < 4; ++i) {
-                        rmap[i].x = L.u0 + uv[i].x * (L.u1 - L.u0);
-                        rmap[i].y = L.v0 + uv[i].y * (L.v1 - L.v0);
-                    }
-                    appendCubeFace(verts, idx, q, rmap, r, g, b);
-                }
-            };
-
-            // Template UVs: corners in (s, t) ∈ [0,1] expressing where on
-            // the resolved atlas rect each corner samples. The chosen
-            // mapping puts the texture's top-left at the face's natural
-            // top-left for each side (matches vanilla face UV defaults).
-
-            // +Y top
-            { glm::vec3 q[4] = {v010, v011, v111, v110};
-              glm::vec2 uv[4] = {{0,0},{0,1},{1,1},{1,0}};
-              emit(Game::FaceDir::Up, q, uv); }
-            // -Y bottom
-            { glm::vec3 q[4] = {v000, v100, v101, v001};
-              glm::vec2 uv[4] = {{0,0},{1,0},{1,1},{0,1}};
-              emit(Game::FaceDir::Down, q, uv); }
-            // +Z front (south in MC convention)
-            { glm::vec3 q[4] = {v001, v101, v111, v011};
-              glm::vec2 uv[4] = {{0,1},{1,1},{1,0},{0,0}};
-              emit(Game::FaceDir::South, q, uv); }
-            // -Z back (north)
-            { glm::vec3 q[4] = {v000, v010, v110, v100};
-              glm::vec2 uv[4] = {{1,1},{1,0},{0,0},{0,1}};
-              emit(Game::FaceDir::North, q, uv); }
-            // +X right (east)
-            { glm::vec3 q[4] = {v100, v110, v111, v101};
-              glm::vec2 uv[4] = {{1,1},{1,0},{0,0},{0,1}};
-              emit(Game::FaceDir::East, q, uv); }
-            // -X left (west)
-            { glm::vec3 q[4] = {v000, v001, v011, v010};
-              glm::vec2 uv[4] = {{0,1},{1,1},{1,0},{0,0}};
-              emit(Game::FaceDir::West, q, uv); }
+        // Both angles arrive pre-multiplied by MC's 0.1 factor.
+        void applySwayTransform(glm::mat4& m, float swayPitchDeg, float swayYawDeg) {
+            m = glm::rotate(m, glm::radians(swayPitchDeg), {1, 0, 0});
+            m = glm::rotate(m, glm::radians(swayYawDeg),   {0, 1, 0});
         }
 
         // Scratch GPU buffers reused for the block cube path. Allocated
@@ -398,14 +236,6 @@ namespace Render {
         BufferHandle s_cubeVB    = INVALID_BUFFER;
         BufferHandle s_cubeIB    = INVALID_BUFFER;
         MeshHandle   s_cubeMesh  = INVALID_MESH;
-        // Sized for the worst-case multi-element cube. grass_block has
-        // 6 + 4 = 10 quads; some pumpkin/jack o'lantern variants reach
-        // similar counts. Bumped to 32 quads (128 verts / 192 indices)
-        // for headroom — these buffers are streaming and only one cube
-        // is uploaded per frame, so the extra allocation is negligible.
-        constexpr uint32_t kCubeMaxQuads = 32;
-        constexpr uint32_t kCubeMaxVerts = kCubeMaxQuads * 4;
-        constexpr uint32_t kCubeMaxIdx   = kCubeMaxQuads * 6;
     } // namespace
 
     // ──────────────────────────────────────────────────────────────
@@ -446,10 +276,10 @@ namespace Render {
 
         // Pre-allocate the block-cube scratch buffers.
         s_cubeVB = g_renderBackend->CreateBuffer(
-            BufferUsage::Vertex, kCubeMaxVerts * sizeof(CubeVert),
+            BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
             nullptr, BufferAccess::Streaming);
         s_cubeIB = g_renderBackend->CreateBuffer(
-            BufferUsage::Index,  kCubeMaxIdx  * sizeof(uint32_t),
+            BufferUsage::Index,  kItemCubeMaxIdx  * sizeof(uint32_t),
             nullptr, BufferAccess::Streaming);
         s_cubeMesh = g_renderBackend->CreateMesh(
             s_cubeVB, s_cubeIB, GetBlockVertexLayout());
@@ -477,7 +307,35 @@ namespace Render {
     }
 
     void HeldItemRenderer::Tick(Game::ItemID mainItem, Game::ItemID offhandItem,
-                                bool attackPressedThisTick) {
+                                bool attackPressedThisTick, float mainHandSwapScale,
+                                float viewPitchDeg, float viewYawDeg) {
+        // MC LocalPlayer.applyInput: the lagging view angles advance half the
+        // remaining gap each tick.
+        //
+        // The differences are WRAPPED, which vanilla does not need to do —
+        // MC's getYRot() accumulates without bound, so crossing "south" is
+        // just yaw 179 -> 181. This engine derives yaw from atan2, which wraps
+        // to [-180, 180]; without the wrap a single step across that seam is a
+        // 359-degree gap and the item snaps violently sideways once per
+        // full turn.
+        auto wrapDeg = [](float d) {
+            while (d < -180.0f) d += 360.0f;
+            while (d >  180.0f) d -= 360.0f;
+            return d;
+        };
+
+        if (m_firstTick) {
+            // Snap the lag to the current view so the item does not swing in
+            // from wherever the angles happened to start.
+            m_xBob = m_xBobPrev = viewPitchDeg;
+            m_yBob = m_yBobPrev = viewYawDeg;
+        } else {
+            m_xBobPrev = m_xBob;
+            m_yBobPrev = m_yBob;
+            m_xBob += wrapDeg(viewPitchDeg - m_xBob) * 0.5f;
+            m_yBob += wrapDeg(viewYawDeg   - m_yBob) * 0.5f;
+        }
+
         // First tick of the game: skip the equip slide-in. Otherwise
         // the player sees the very first item they spawn holding slide
         // up into the hand position, which looks like a bug.
@@ -497,18 +355,36 @@ namespace Render {
         m_hands[1].pending = offhandItem;
         m_swingProgressPrev = m_swingProgress;
 
-        // Per-hand equip animation state machine (MC keeps mainHandHeight
-        // and offHandHeight separately). Vanilla pattern:
-        //   • equipProgress lerps toward a target by up to kEquipStep
-        //     per tick (target = 1 when items differ → item hides;
-        //     target = 0 when same → item slides back up).
-        //   • When the item is mostly hidden (progress > 0.9 → the
-        //     equivalent of vanilla's mainHandHeight < 0.1) snap the
-        //     displayed item to the pending one. This is the point
-        //     where the swap is visually invisible.
-        for (HandState& hand : m_hands) {
+        // Per-hand equip animation state machine (MC keeps mainHandHeight and
+        // offHandHeight separately, ItemInHandRenderer.tick:560-573):
+        //   • equipProgress moves toward its target by at most kEquipStep
+        //     (vanilla's 0.4) per tick — the target is 1 (fully hidden) while
+        //     the hand's item differs from the one being drawn.
+        //   • Once the item is mostly hidden (progress > 0.9, i.e. vanilla's
+        //     mainHandHeight < 0.1) the displayed item snaps to the pending
+        //     one. That is the point where the swap is visually invisible.
+        //
+        // Note `equipProgress` here is
+        // vanilla's mainHandHeight INVERTED (1 = fully lowered), so vanilla's
+        // target height maps to `1 - height`.
+        //
+        // The main hand's rest height is NOT 1 — it is
+        // `getItemSwapScale(1.0F)` CUBED, which is what paces the raise to the
+        // held weapon's own attack delay: a bare hand (5 ticks) is back up
+        // almost at once, a netherite axe (20 ticks) takes a full second, and
+        // the cube keeps it low for most of that and then snaps up at the end.
+        // Targeting a flat 1.0, as this did, drew every item at the bare-hand
+        // rate and lost the correlation with the cooldown entirely.
+        for (int h = 0; h < 2; ++h) {
+            HandState& hand = m_hands[h];
             hand.equipProgressPrev = hand.equipProgress;
-            const float target = (hand.displayed != hand.pending) ? 1.0f : 0.0f;
+
+            const float swap = std::clamp(mainHandSwapScale, 0.0f, 1.0f);
+            const float restHeight = (h == 0) ? swap * swap * swap : 1.0f;
+            const float target = (hand.displayed != hand.pending)
+                               ? 1.0f
+                               : 1.0f - restHeight;
+
             const float delta  = std::clamp(target - hand.equipProgress,
                                             -kEquipStep, kEquipStep);
             hand.equipProgress = std::clamp(hand.equipProgress + delta, 0.0f, 1.0f);
@@ -542,11 +418,37 @@ namespace Render {
     }
 
     void HeldItemRenderer::Render(float aspect, float partialTick,
-                                  float walkDistance, bool renderMainHand) {
+                                  float walkDistance,
+                                  float viewPitchDeg, float viewYawDeg,
+                                  bool renderMainHand) {
         if (!m_initialized || !g_renderBackend) return;
         const bool drawMain = renderMainHand && m_hands[0].displayed != 0;
         const bool drawOff  = m_hands[1].displayed != 0;
         if (!drawMain && !drawOff) return;         // both hands empty
+
+        // MC ItemInHandRenderer.renderHandsWithItems, the first four lines:
+        //   xBob = lerp(partialTick, xBobO, xBob)
+        //   yBob = lerp(partialTick, yBobO, yBob)
+        //   mulPose(XP.rotationDegrees((viewXRot - xBob) * 0.1F))
+        //   mulPose(YP.rotationDegrees((viewYRot - yBob) * 0.1F))
+        //
+        // Computed once here rather than per hand because vanilla applies it
+        // to the shared pose stack before either hand is drawn — both hands
+        // sway together, as one rig.
+        //
+        // Both the interpolation and the final difference wrap, for the same
+        // atan2 seam reason as the follow in Tick.
+        {
+            auto wrapDeg = [](float d) {
+                while (d < -180.0f) d += 360.0f;
+                while (d >  180.0f) d -= 360.0f;
+                return d;
+            };
+            const float xBob = m_xBobPrev + wrapDeg(m_xBob - m_xBobPrev) * partialTick;
+            const float yBob = m_yBobPrev + wrapDeg(m_yBob - m_yBobPrev) * partialTick;
+            m_swayPitchDeg = wrapDeg(viewPitchDeg - xBob) * 0.1f;
+            m_swayYawDeg   = wrapDeg(viewYawDeg   - yBob) * 0.1f;
+        }
 
         // MC parity: clear the depth buffer before rendering the viewmodel
         // so it never gets occluded by world geometry pressed up against
@@ -588,14 +490,30 @@ namespace Render {
         // normal cube path: bake the held-item display transform into a
         // model matrix and hand off to the BER's RenderBEWLR. Mirrors MC's
         // BlockEntityWithoutLevelRenderer.renderByItem dispatch.
+        // NOTE the absence of a `renderType == Block` test. Chest and shulker
+        // box declare `{"type":"minecraft:special"}` in assets/items/{slug}.json,
+        // which ClientItemLoader reports as ClientItemKind::Special and
+        // ItemRegistry turns into renderType = Sprite — because MC renders them
+        // through a SpecialModelRenderer rather than a baked block model. So
+        // gating on Block excluded exactly the items this path exists to serve:
+        // a held chest fell through to the sprite path, found no item texture,
+        // and drew nothing at all.
+        //
+        // `blockId != Air` is the real test — it is set for every block item
+        // regardless of renderType, and ForBlock decides the rest.
         const Game::BlockEntityType* beType =
-            (item.renderType == Game::ItemRenderType::Block && item.blockId != Game::BlockID::Air)
+            (item.blockId != Game::BlockID::Air)
                 ? Game::BlockEntityTypes::ForBlock(item.blockId) : nullptr;
         Render::BlockEntityRenderer* beRenderer =
             (beType && Render::g_blockEntityRenderDispatcher)
                 ? Render::g_blockEntityRenderDispatcher->GetRenderer(beType->TypeId())
                 : nullptr;
-        if (beRenderer) {
+        // SupportsBEWLR, not merely "has a renderer": this branch RETURNS, so
+        // handing an item to a renderer that inherits the no-op RenderBEWLR
+        // draws nothing at all. The campfire is exactly that case — it has a
+        // renderer for its fire and cooking items, but its block geometry is an
+        // ordinary model, so it must fall through to the cube path below.
+        if (beRenderer && beRenderer->SupportsBEWLR()) {
             // Build the same hand transform chain as the cube path (see the
             // main chain below for the MC ordering notes), then hand to the
             // BE renderer with the MC-pixel-space mesh recentred to the
@@ -607,6 +525,7 @@ namespace Render {
                 : 0.0f;
             glm::mat4 modelBE(1.0f);
             applyBobTransform(modelBE, walkDistance);
+            applySwayTransform(modelBE, m_swayPitchDeg, m_swayYawDeg);
             if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
                                   m_useAnim == Game::ItemUseAnimation::DRINK)) {
                 applyEatTransform(modelBE, invert,
@@ -623,29 +542,43 @@ namespace Render {
             } else {
                 applyItemArmTransform(modelBE, invert, equipBE);
             }
-            modelBE *= buildDisplayMatrix(kBlockXf, leftHand);
+            modelBE *= buildDisplayMatrix(kChestLikeXf, leftHand);
             // Chest mesh lives in MC pixel-space [0,16]³. Scale to [0,1]
             // block space, then translate to centre the mesh on origin so
             // the display transform's rotation pivots around the chest's
-            // own centre rather than its corner.
+            // own centre rather than its corner. This IS vanilla's
+            // `translate(-0.5,-0.5,-0.5)` pre-display centring, expressed in
+            // pixels — it centres the CELL, not the geometry's bounding box,
+            // which is why a chest (14px tall, sitting on the cell floor)
+            // correctly hangs slightly low rather than being re-centred.
             modelBE = glm::scale(modelBE, glm::vec3(1.0f / 16.0f));
             modelBE = glm::translate(modelBE, glm::vec3(-8.0f, -8.0f, -8.0f));
             const float fovYBE = glm::radians(70.0f);
             const glm::mat4 projBE = glm::perspective(fovYBE, aspect, 0.05f, 8.0f);
-            beRenderer->RenderBEWLR(item.blockId, projBE * modelBE);
+            // m_viewTilt: MC renders the hand inside the SAME bobbed pose as
+            // the level (GameRenderer.bobHurt runs before renderItemInHand), so
+            // the damage tilt and the death spin carry the hand with them. The
+            // hand's own transform is already in view space, so the tilt slots
+            // in exactly where the view matrix would be.
+            beRenderer->RenderBEWLR(item.blockId, projBE * m_viewTilt * modelBE);
             return;
         }
 
         if (item.renderType == Game::ItemRenderType::Block) {
             // Build a 1×1 textured-cube mesh, atlas UVs sampled from
             // the block's representative texture.
-            std::vector<CubeVert> verts;
+            std::vector<ItemCubeVert> verts;
             std::vector<uint32_t> idx;
-            verts.reserve(kCubeMaxVerts);
-            idx.reserve(kCubeMaxIdx);
-            buildBlockCubeMesh(item.blockId, verts, idx);
+            verts.reserve(kItemCubeMaxVerts);
+            idx.reserve(kItemCubeMaxIdx);
+            // Real model geometry first; the textured cube is the fallback for
+            // blocks whose model has no elements (water/lava, and the BEWLR
+            // blocks that never reach here anyway).
+            if (!BuildBlockModelMesh(item.blockId, item.blockModelOverride, verts, idx)) {
+                BuildBlockCubeMesh(item.blockId, verts, idx);
+            }
             g_renderBackend->UpdateBuffer(s_cubeVB, 0,
-                verts.size() * sizeof(CubeVert), verts.data());
+                verts.size() * sizeof(ItemCubeVert), verts.data());
             g_renderBackend->UpdateBuffer(s_cubeIB, 0,
                 idx.size() * sizeof(uint32_t), idx.data());
             mesh        = s_cubeMesh;
@@ -666,7 +599,13 @@ namespace Render {
             if (name.empty() && !item.spriteLayers.empty()) name = item.spriteLayers[0];
             if (name.empty()) return;
 
-            const auto* entry = HeldItemSpriteMesh::GetOrBuild(name);
+            // Layer-0 tint from assets/items/{slug}.json. Plant sprites are
+            // greyscale in vanilla and get their colour from here — without it
+            // a bush or fern renders grey. The GUI icon path already applies
+            // the same value (GuiGraphics), so this keeps the two agreeing.
+            const uint32_t spriteTint =
+                item.layerTints.empty() ? 0u : item.layerTints[0];
+            const auto* entry = HeldItemSpriteMesh::GetOrBuild(name, spriteTint);
             if (!entry) return;
             mesh       = entry->mesh;
             indexCount = entry->indexCount;
@@ -706,6 +645,7 @@ namespace Render {
 
         glm::mat4 model(1.0f);
         applyBobTransform(model, walkDistance);
+        applySwayTransform(model, m_swayPitchDeg, m_swayYawDeg);
         if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
                               m_useAnim == Game::ItemUseAnimation::DRINK)) {
             applyEatTransform(model, invert,
@@ -762,7 +702,8 @@ namespace Render {
         //    world FOV. 70° is the vanilla viewmodel FOV.
         const float fovY = glm::radians(70.0f);
         const glm::mat4 proj = glm::perspective(fovY, aspect, 0.05f, 8.0f);
-        const glm::mat4 mvp  = proj * model;
+        // See the block-entity path above for why the tilt goes here.
+        const glm::mat4 mvp  = proj * m_viewTilt * model;
 
         // ── Pipeline + draw ────────────────────────────────────────
         PipelineState state;

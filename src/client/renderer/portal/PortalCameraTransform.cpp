@@ -5,6 +5,7 @@
 #if ENABLE_PORTAL_GUN
 
 #include "PortalCameraTransform.hpp"
+#include "common/core/Mth.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -142,13 +143,10 @@ namespace Render::PortalTransform {
                                   1.0);
         const glm::dvec3 newPos = glm::dvec3(M * origPos4);
 
-        // Player forward in Camera convention (matches Camera::GetForward).
-        const float yawRad   = glm::radians(orig.yaw);
-        const float pitchRad = glm::radians(orig.pitch);
-        const glm::dvec3 origFwd = glm::normalize(glm::dvec3(
-            std::cos(yawRad) * std::cos(pitchRad),
-            std::sin(pitchRad),
-            std::sin(yawRad) * std::cos(pitchRad)));
+        // Player forward — the one shared formula, so this can never drift
+        // from Camera::GetForward.
+        const glm::dvec3 origFwd =
+            glm::normalize(glm::dvec3(Game::Mth::ViewVector(orig.pitch, orig.yaw)));
         // Player's true camera up that lookAt would compute (cross of
         // right and forward, where right = cross(forward, world-Y)).
         const glm::dvec3 worldY(0.0, 1.0, 0.0);
@@ -159,16 +157,15 @@ namespace Render::PortalTransform {
         const glm::dvec3 newFwd = glm::normalize(Mrot * origFwd);
         const glm::dvec3 newUp  = glm::normalize(Mrot * origUp);
 
-        // Recover yaw/pitch from the rotated forward in Camera convention:
-        //   pitch = asin(fwd.y)
-        //   yaw   = atan2(fwd.z, fwd.x)
-        // Clamp pitch just shy of ±90° so glm::lookAt's cross with worldUp
-        // (used in Camera::GetViewMatrix) doesn't degenerate.
+        // Recover yaw/pitch from the rotated forward — MC's convention, so
+        // pitch comes out POSITIVE DOWN. Clamp just shy of +-90 so
+        // glm::lookAt's cross with worldUp (used in Camera::GetViewMatrix)
+        // doesn't degenerate.
         constexpr float kPitchClampDeg = 89.5f;
-        float newPitchDeg = glm::degrees(std::asin(
-            std::clamp<double>(newFwd.y, -1.0, 1.0)));
+        const glm::vec3 newFwdF(newFwd);
+        float newPitchDeg = Game::Mth::XRotFromVector(newFwdF);
         newPitchDeg = std::clamp(newPitchDeg, -kPitchClampDeg, kPitchClampDeg);
-        const float newYawDeg = glm::degrees(std::atan2(newFwd.z, newFwd.x));
+        const float newYawDeg = Game::Mth::YRotFromVector(newFwdF);
 
         // Roll: signed angle between the (yaw,pitch)-derived "default up"
         // and the M-rotated "true up", measured around newFwd. Non-zero

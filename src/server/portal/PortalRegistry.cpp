@@ -7,6 +7,7 @@
 #if ENABLE_PORTAL_GUN
 
 #include "PortalRegistry.hpp"
+#include "common/core/Mth.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/world/level/World.hpp"
@@ -54,24 +55,18 @@ namespace Game::Portal {
 
         // Snap a yaw to the nearest cardinal as an integer unit vector.
         //
-        // Project convention: yaw values stored on ServerPlayer come straight
-        // from the client's `camera.yaw` (sent via PlayerMoveC2S). Camera
-        // convention uses forward = (cos(yaw), 0, sin(yaw)), i.e.:
-        //   yaw   0  → +X = east
-        //   yaw  90  → +Z = south
-        //   yaw 180  → -X = west
-        //   yaw -90  → -Z = north
-        // (NOT the MC convention you'd guess from the server-thread name.)
+        // Yaw is MC's throughout the engine now (0 = +Z south, clockwise), the
+        // same value the client's camera stores and PlayerMoveC2S carries.
         glm::ivec3 PlayerFacingHorizontal(float yawDeg) {
             float y = std::fmod(std::fmod(yawDeg, 360.0f) + 360.0f, 360.0f);
             int q = static_cast<int>(std::round(y / 90.0f)) & 3;
             switch (q) {
-                case 0: return { 1, 0,  0}; // east
-                case 1: return { 0, 0,  1}; // south
-                case 2: return {-1, 0,  0}; // west
-                case 3: return { 0, 0, -1}; // north
+                case 0: return { 0, 0,  1}; // south
+                case 1: return {-1, 0,  0}; // west
+                case 2: return { 0, 0, -1}; // north
+                case 3: return { 1, 0,  0}; // east
             }
-            return {1, 0, 0};
+            return {0, 0, 1};
         }
 
         // Pack (gunId, color) into a single 64-bit key for the per-player
@@ -720,40 +715,34 @@ namespace Game::Portal {
                     // value (e.g. 0°) while the see-through view shows
                     // ~90° — visible as a 90° tilt the moment the
                     // teleport fires.
-                    const float yawRad   = glm::radians(player->getYaw());
-                    const float pitchRad = glm::radians(player->getPitch());
-                    const double cp = std::cos(pitchRad);
-                    const glm::dvec3 fwd(
-                        std::cos(yawRad) * cp,
-                        std::sin(pitchRad),
-                        std::sin(yawRad) * cp);
+                    const glm::dvec3 fwd = glm::dvec3(Game::Mth::ViewVector(
+                        player->getPitch(), player->getYaw()));
                     const glm::dvec3 newFwd =
                         glm::normalize(glm::dmat3(M) * fwd);
 
-                    float newPitchDeg = glm::degrees(std::asin(
-                        std::clamp<double>(newFwd.y, -1.0, 1.0)));
+                    float newPitchDeg =
+                        Game::Mth::XRotFromVector(glm::vec3(newFwd));
                     newPitchDeg = std::clamp(newPitchDeg, -89.5f, 89.5f);
 
                     float newYawDeg;
                     const double horizLen2 =
                         newFwd.x * newFwd.x + newFwd.z * newFwd.z;
                     if (horizLen2 > 0.01) {
-                        newYawDeg = glm::degrees(
-                            std::atan2(newFwd.z, newFwd.x));
+                        newYawDeg = Game::Mth::YRotFromVector(glm::vec3(newFwd));
                     } else if (std::abs(s.other->normal.y) > 0.7f) {
                         // Floor/ceiling exit — align with -upDir.
-                        newYawDeg = glm::degrees(std::atan2(
-                            -s.other->upDir.z, -s.other->upDir.x));
+                        newYawDeg = Game::Mth::YRotFromVector(-s.other->upDir);
                     } else {
                         // Wall dst with degenerate horizontal forward
                         // — recover yaw from M-rotated RIGHT vector
                         // (matches client; see ClientPortalManager.cpp).
-                        const glm::dvec3 rightH(
-                            -std::sin(yawRad), 0.0, std::cos(yawRad));
+                        const glm::dvec3 rightH = glm::normalize(glm::cross(
+                            glm::dvec3(Game::Mth::HorizontalViewVector(player->getYaw())),
+                            glm::dvec3(0.0, 1.0, 0.0)));
                         const glm::dvec3 newRight = glm::normalize(
                             glm::dmat3(M) * rightH);
-                        newYawDeg = glm::degrees(
-                            std::atan2(-newRight.x, newRight.z));
+                        newYawDeg = Game::Mth::YRotFromVector(glm::vec3(
+                            glm::cross(glm::dvec3(0.0, 1.0, 0.0), newRight)));
                     }
 
                     // Any horizontal↔horizontal pair preserves the

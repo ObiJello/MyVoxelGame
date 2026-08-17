@@ -136,18 +136,28 @@ namespace Input {
 
     static void KeyCallback(GLFWwindow* /*window*/, int glfwKey, int /*scancode*/,
                             int action, int mods) {
-        // GLFW_REPEAT deliberately ignored — MC queues one click per physical
-        // press; auto-repeat is a text-entry concern, not an action one.
-        const bool pressed = (action == GLFW_PRESS);
-        if (!pressed && action != GLFW_RELEASE) return;
-
         // While a screen is up the press belongs to the UI, not the world.
         if (uiActive) {
-            if (pressed && uiKeyPresses.size() < kMaxUiKeyPresses) {
+            // Arrows honour auto-repeat, so holding one keeps nudging a
+            // focused slider instead of demanding a press per step (MC
+            // forwards PRESS and REPEAT to Screen.keyPressed). Every other
+            // key stays one-shot on purpose: ScreenManager defers stack ops
+            // to the next frame, so a repeating ESC would queue several pops
+            // out of one hold and blow through the screen stack.
+            const bool arrow = glfwKey == GLFW_KEY_LEFT || glfwKey == GLFW_KEY_RIGHT ||
+                               glfwKey == GLFW_KEY_UP   || glfwKey == GLFW_KEY_DOWN;
+            const bool wanted = action == GLFW_PRESS ||
+                                (action == GLFW_REPEAT && arrow);
+            if (wanted && uiKeyPresses.size() < kMaxUiKeyPresses) {
                 uiKeyPresses.push_back({glfwKey, mods});
             }
             return;
         }
+
+        // GLFW_REPEAT deliberately ignored — MC queues one click per physical
+        // press; auto-repeat is a text-entry concern, not an action one.
+        const bool pressed = (action == GLFW_PRESS);
+        if (!pressed && action != GLFW_RELEASE) return;
 
         RecordBoundKey(BoundKey::Keyboard(glfwKey), pressed);
 

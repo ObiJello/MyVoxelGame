@@ -44,14 +44,24 @@ namespace Render {
         LayerTranslucent = 1 << 2,
     };
 
-    // Section render data for sorting and culling
+    // A section's IDENTITY in the reachable/visible lists.
+    //
+    // Deliberately carries no mesh state. MC's visibleSections holds bare
+    // RenderSection object references and reads the compiled mesh LIVE at draw
+    // time (LevelRenderer.prepareChunkRenders:1003 -> getBuffers(layer):1009);
+    // a null result simply contributes nothing. We do the same by resolving
+    // through (chunkPos, sectionY) each frame.
+    //
+    // This used to cache a GPUSectionData* and a layerMask captured when the
+    // occlusion graph was built. Those went stale the moment a section was
+    // remeshed, emptied or unloaded, which is why a full BFS rebuild had to be
+    // forced on every mesh upload just to garbage-collect the list — and why
+    // removing that rebuild made Sections/Reachable climb to 5652 and never
+    // recover. Identity cannot go stale, so none of that is needed now.
     struct SectionRenderData {
         ::Game::Math::ChunkPos chunkPos;
         int sectionY;
-        const GPUSectionData* gpuData;
         float distanceToCamera;
-        bool inFrustum;
-        uint8_t layerMask;  // Bitmask of LayerFlag values
         // MC's `isClose` (SectionOcclusionGraph.addSectionsInFrustum:80-89).
         // Set by the PER-FRAME frustum filter, deliberately not by the BFS:
         // distanceToCamera is baked when the reachable list is snapshotted and
@@ -59,8 +69,15 @@ namespace Render {
         // section of camera movement — which is most of the 32-block radius.
         bool nearby = false;
 
-        SectionRenderData(::Game::Math::ChunkPos pos, int secY, const GPUSectionData* gpu, float dist)
-            : chunkPos(pos), sectionY(secY), gpuData(gpu), distanceToCamera(dist), inFrustum(true), layerMask(0) {}
+        // NON-PERSISTENT. Valid only for the duration of the RenderAll that
+        // resolved it, and only in m_visibleSections — entries living in a
+        // ReachableCacheSlot always have this null. Never read it from a list
+        // that survived a frame boundary; that is the exact bug this redesign
+        // removes.
+        const GPUSectionData* resolved = nullptr;
+
+        SectionRenderData(::Game::Math::ChunkPos pos, int secY, float dist)
+            : chunkPos(pos), sectionY(secY), distanceToCamera(dist) {}
     };
 
     // Render statistics for debugging
@@ -151,6 +168,28 @@ namespace Render {
         // Mark visible sections as dirty (call when sections are uploaded/removed)
         void MarkVisibleSectionsDirty() { m_visibleSectionsDirty = true; }
 
+        // A section's mesh just reached the GPU — MC's
+        // LevelRenderer.addRecentlyCompiledSection. Makes it a propagation
+        // source for next frame's incremental occlusion-graph update.
+        // MAIN THREAD ONLY (called from the mesh upload drain).
+        void SchedulePropagationFrom(::Game::Math::ChunkPos chunkPos, int sectionY) {
+            m_occlusionGraph.SchedulePropagationFrom(chunkPos, sectionY);
+        }
+
+        // Post-BFS, post-frustum list for the MAIN camera — MC's
+        // LevelRenderer.visibleSections (getVisibleSections():1356). Holds every
+        // reachable non-air section, meshed or not, exactly as MC's octree walk
+        // does; `resolved` is null for the ones without a mesh yet.
+        //
+        // This is the scheduler's candidate source (MC compileSections:1136).
+        // It is a SNAPSHOT, not m_visibleSections, because the portal pass
+        // overwrites the latter with a virtual camera's view — see the frustum
+        // filter in PrepareVisibleSections.
+        //
+        // One frame stale: PrepareVisibleSections runs in the Render phase,
+        // after MeshSchedule. MC culls and compiles back-to-back in renderLevel.
+        const std::vector<SectionRenderData>& GetMainViewSections() const { return m_mainViewSections; }
+
         // Call when a GPUSectionData object is ERASED (chunk unload, section
         // remeshed to empty, mesh-manager shutdown) — cached reachable lists
         // and any in-flight async BFS result hold raw pointers into those
@@ -159,15 +198,6 @@ namespace Render {
         // token (dropping stale async results on arrival), and rebuilds
         // synchronously. Dirty-only events (uploads) keep the async path.
         void MarkSectionDataErased() { m_sectionDataErased = true; }
-
-        // --- Tombstone reclamation support (see ClientMeshManager) ---
-        // Monotonic per-PrepareVisibleSections counter; stamps when cached
-        // reachable lists were snapshotted and when GPUSectionData died.
-        uint32_t GetPrepareCounter() const { return m_prepareCounter; }
-        // Oldest buildCounter among all live pointer holders (valid cache
-        // slots + the in-flight async BFS job). Tombstones older than this
-        // are unreachable and safe to destroy. Main thread only.
-        uint32_t GetMinLiveBuildCounter();
 
 
         // Debug rendering options
@@ -245,7 +275,6 @@ namespace Render {
             // (BuildInput time, not adoption time) — drives tombstone
             // reclamation in ClientMeshManager: a GPUSectionData that died
             // at counter D can only be referenced by lists built at <= D.
-            uint32_t buildCounter = 0;
             std::vector<SectionRenderData> sections;
         };
         static constexpr int kReachableSlots = 4;  // Main camera + up to 3 portal views
@@ -270,6 +299,11 @@ namespace Render {
         // immediately.
         std::vector<SectionRenderData> m_visibleSections;
 
+        // Copy of m_visibleSections taken only for the MAIN camera, so the mesh
+        // scheduler is never handed a portal recursion's view. See the frustum
+        // filter in PrepareVisibleSections and GetMainViewSections().
+        std::vector<SectionRenderData> m_mainViewSections;
+
         bool m_visibleSectionsDirty = true;
 
         // --- Translucency re-sort scheduling (MC LevelRenderer:165, 953) ---
@@ -284,6 +318,9 @@ namespace Render {
         std::vector<std::vector<int32_t>> m_perSlabCounts;
         std::vector<std::vector<size_t>> m_perSlabOffsets;
         std::vector<std::vector<int32_t>> m_perSlabBaseVertices;
+        // Parallel to the above; only populated for layers using per-section
+        // index buffers (translucent). INVALID_BUFFER elsewhere.
+        std::vector<std::vector<BufferHandle>> m_perSlabIbos;
 
         // Distant cutout multi-draw arrays (rendered as solid in opaque pass)
         std::vector<int32_t> m_distantCutoutCounts;

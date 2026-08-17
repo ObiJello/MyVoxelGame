@@ -3,6 +3,7 @@
 
 #include <glm/glm.hpp>
 #include <functional>
+#include <vector>
 
 namespace Game {
 
@@ -215,6 +216,137 @@ namespace Game {
                             bool sneakPressed,
                             float deltaTime,
                             const PhysicsContext& context);
+
+    // ── Generic (non-player) collision ─────────────────────────────────────
+    //
+    // Does `box` overlap any block with collision? This is the shared core
+    // that CheckCollision is built on — every rule that matters lives here:
+    // `BlockRegistry::HasCollision` is the single source of truth (never a
+    // render-layer solidity flag, which desyncs host and joiner), per-state
+    // shapes come from GetBlockShape, and the portal-passthrough hook gets
+    // its say. Anything that needs to collide a box against the world should
+    // call THIS rather than reimplementing the walk.
+    bool CollidesAt(const AABB& box, const PhysicsContext& context);
+
+    // What MoveAABB ran into. `onGround` is true when the entity is resting on
+    // something after the move, whether it landed this step or was already
+    // supported.
+    struct MoveResult {
+        bool onGround  = false;
+        bool collidedX = false;
+        bool collidedY = false;
+        bool collidedZ = false;
+    };
+
+    // Move an axis-aligned entity through the world, resolving one axis at a
+    // time and zeroing the velocity component of any axis that hit something.
+    // Mirrors MC Entity.move(MoverType.SELF, …).
+    //
+    // `pos` is the entity's FEET position (MC convention) and is updated in
+    // place; `velocity` is in blocks per TICK, not per second, and is likewise
+    // updated. `halfExtents` is (halfWidth, halfHeight, halfWidth).
+    MoveResult MoveAABB(glm::dvec3& pos, glm::dvec3& velocity,
+                        const glm::vec3& halfExtents,
+                        const PhysicsContext& context);
+
+    // ── MC-faithful entity mover ───────────────────────────────────────────
+    //
+    // MoveAABB above is all-or-nothing per axis: a blocked axis is cancelled
+    // outright rather than resolved flush against the surface, and there is no
+    // step height. That is fine for item entities (they settle in a cell and
+    // stay there) but wrong for anything that walks: a mob falling at 0.4
+    // blocks/tick would stop up to 0.4 blocks ABOVE the floor and hover there,
+    // and it could never climb a single block.
+    //
+    // The functions below port MC's real mover. They are additive on purpose —
+    // MoveAABB keeps its behaviour so item entities are untouched.
+
+    // A DOUBLE-PRECISION box, used by the entity mover and nothing else.
+    //
+    // Game::AABB is float, which is fine for the queries it was built for
+    // (overlap tests, culling, selectors) and NOT fine for resolving a
+    // collision: the mover computes how far it may travel as
+    // `colliderFace - boxFace` and then ADDS that to a double position. Round
+    // the position to float first and the subtraction no longer cancels, so an
+    // entity lands a few microns off the surface instead of exactly on it —
+    // above at some coordinates, BELOW at others. Landing below puts the
+    // entity's feet inside the block it is standing on, and MoveControl's
+    // auto-jump ("my own cell has a collision top above my feet") then fires
+    // every single tick. That was the mystery mob bouncing.
+    //
+    // MC's AABB is double throughout for exactly this reason.
+    struct AABBd {
+        glm::dvec3 min{0.0};
+        glm::dvec3 max{0.0};
+
+        bool Intersects(const AABBd& o) const {
+            return (min.x < o.max.x && max.x > o.min.x) &&
+                   (min.y < o.max.y && max.y > o.min.y) &&
+                   (min.z < o.max.z && max.z > o.min.z);
+        }
+    };
+
+    // Widen a float AABB. Lossless — every float is representable as a double.
+    inline AABBd ToAABBd(const AABB& b) {
+        return AABBd{ glm::dvec3(b.min), glm::dvec3(b.max) };
+    }
+
+    // Every block collision box overlapping `region`, in world coordinates.
+    //
+    // Split out from the collide math because the step-up branch needs to
+    // reuse ONE collider set across several candidate heights; re-walking the
+    // block grid per candidate is the same query up to four times over.
+    void CollectBlockColliders(const AABBd& region, const PhysicsContext& context,
+                               std::vector<AABBd>& out);
+
+    // MC Shapes.collide: how far can `box` travel along `axis` (0=X, 1=Y,
+    // 2=Z) before it touches something? Returns a displacement with the same
+    // sign as `desired` and magnitude <= |desired|.
+    //
+    // Only colliders that overlap the box on the OTHER two axes can block it,
+    // which is what makes the per-axis sequence in MoveEntity correct.
+    double CollideAxis(int axis, const AABBd& box, double desired,
+                       const std::vector<AABBd>& colliders);
+
+    // What MoveEntity ran into. Wider than MoveResult because MC's travel()
+    // and the mob auto-jump both read `horizontalCollision`.
+    struct EntityMoveResult {
+        bool onGround              = false;
+        bool horizontalCollision   = false;
+        bool verticalCollision     = false;
+        bool collidedX             = false;
+        bool collidedY             = false;
+        bool collidedZ             = false;
+        // The step-up branch fired this move. Purely diagnostic.
+        bool steppedUp             = false;
+    };
+
+    // Move an entity through the world — MC Entity.move(MoverType.SELF, …)
+    // via Entity.collide (Entity.java:1089) and collideWithShapes (:1170).
+    //
+    // Differences from MoveAABB that matter:
+    //   * axes resolve to the maximum PERMITTED distance, so the entity ends
+    //     up flush against what it hit rather than short of it;
+    //   * axes are resolved largest-component-first (MC Direction.axisStepOrder),
+    //     not in a fixed Y/X/Z order;
+    //   * `maxUpStep` enables MC's candidate-height step-up: every collider top
+    //     face in (0, maxUpStep] is tried in ascending order and the one that
+    //     travels furthest horizontally wins. This is NOT "try 0.6 and revert" —
+    //     that older scheme picks the wrong height on stairs and slabs.
+    //
+    // `pos` is the entity's FEET and is updated in place; `velocity` is in
+    // blocks per TICK. Blocked axes have their velocity component zeroed, and
+    // collision flags use MC's 1.0E-5 comparison epsilon.
+    //
+    // `wasOnGround` is the entity's onGround state BEFORE this move. MC reads
+    // `onGround()` inside collide() for the step-up test, and it matters: a mob
+    // that walks into a step with its Y velocity already zeroed produces no
+    // vertical collision this tick, so without the previous state the step-up
+    // branch would never fire for it.
+    EntityMoveResult MoveEntity(glm::dvec3& pos, glm::dvec3& velocity,
+                                const glm::vec3& halfExtents,
+                                float maxUpStep, bool wasOnGround,
+                                const PhysicsContext& context);
 
     // **UPDATED**: Collision detection functions now take PhysicsContext
     bool CheckCollision(const glm::vec3& position, const PlayerPhysics& physics,

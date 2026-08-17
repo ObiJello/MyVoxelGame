@@ -11,16 +11,16 @@ namespace Server {
 
 ChunkDeltaBroadcaster::ChunkDeltaBroadcaster(IntegratedServer* server,
                                            SectionChangeAccumulator* accumulator,
-                                           ChunkWatchIndex* watchIndex)
+                                           PlayerSessionManager* sessionManager)
     : m_server(server)
     , m_accumulator(accumulator)
-    , m_watchIndex(watchIndex) {
+    , m_sessionManager(sessionManager) {
 }
 
 ChunkDeltaBroadcaster::~ChunkDeltaBroadcaster() = default;
 
 void ChunkDeltaBroadcaster::flush() {
-    if (!m_accumulator || !m_watchIndex || !m_server) {
+    if (!m_accumulator || !m_sessionManager || !m_server) {
         return;
     }
     
@@ -42,16 +42,16 @@ void ChunkDeltaBroadcaster::flush() {
         Log::Info("[ChunkDeltaBroadcaster] Processing section (%d,%d,%d) with %zu changes",
                   sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ, changes.size());
         
-        // Get all players watching this section
-        auto watcherSet = m_watchIndex->GetSectionWatchers(sectionPos);
-        if (watcherSet.empty()) {
+        // Who is watching this section = who is tracking its chunk. Asked of
+        // the sessions directly (MC ChunkMap.onChunkReadyToSend does the same
+        // walk) rather than of a reverse index that has to be kept in sync.
+        const Game::Math::ChunkPos chunkPos{sectionPos.chunkX, sectionPos.chunkZ};
+        std::vector<uint32_t> watchers = m_sessionManager->GetChunkWatchers(chunkPos);
+        if (watchers.empty()) {
             Log::Warning("[ChunkDeltaBroadcaster] No watchers for section (%d,%d,%d), skipping broadcast",
                         sectionPos.chunkX, sectionPos.sectionY, sectionPos.chunkZ);
             continue;  // No one watching, skip
         }
-        
-        // Convert set to vector for easier use
-        std::vector<uint32_t> watchers(watcherSet.begin(), watcherSet.end());
         
         // Decide packet type based on number of changes
         const size_t numChanges = changes.size();

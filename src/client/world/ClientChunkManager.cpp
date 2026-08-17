@@ -9,7 +9,6 @@
 #include "../renderer/core/Frustum.hpp"
 #include "../renderer/mesh/MeshJobData.hpp"
 #include "../renderer/mesh/ClientMeshManager.hpp"
-#include "../renderer/mesh/MeshUploadPermits.hpp"
 #include "../renderer/mesh/ChunkRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include <glad/glad.h>
@@ -199,9 +198,15 @@ namespace Client {
             m_chunks.erase(it);
             Log::Debug("Unloaded chunk (%d, %d)", chunkPos.x, chunkPos.z);
         }
+
+        // The scheduler no longer walks this index (candidates come from the
+        // visible list), so it has to be pruned here — a stale entry would keep
+        // ScheduleMeshBuildsWithSnapshots' empty() early-out from ever firing.
+        m_chunksWithDirtySections.erase(chunkPos);
     }
 
-    void ClientChunkManager::MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY) {
+    void ClientChunkManager::MarkSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY,
+                                              bool fromPlayer) {
         ASSERT_MAIN_THREAD();
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->state == ChunkState::LOADED) {
@@ -209,6 +214,10 @@ namespace Client {
             auto& sectionInfo = it->second->sectionInfos[sectionY];
             sectionInfo.version++;
             sectionInfo.dirty = true;
+            // Sticky until the section is scheduled — a player edit that lands
+            // while an earlier compile is still in flight must not lose its
+            // priority when the version bump re-dirties the section.
+            if (fromPlayer) sectionInfo.dirtyFromPlayer = true;
             it->second->dirtySections.insert(sectionY);  // Keep as index for iteration
             m_chunksWithDirtySections.insert(chunkPos);
             Log::Debug("Marked chunk (%d, %d) section %d as dirty (version now %u)",
@@ -470,9 +479,18 @@ namespace Client {
                 auto* section = chunk->GetSection(sectionIndex);
                 
                 if (section) {
-                    // Copy block data directly
-                    std::memcpy(section->blocks.data(), sectionBlocks, sectionSize);
-                    
+                    // Per voxel: the section's storage is a paletted container
+                    // now, so there is no flat array to memcpy into.
+                    const uint16_t* src = reinterpret_cast<const uint16_t*>(sectionBlocks);
+                    for (int y = 0; y < Game::ChunkSection::SIZE; ++y) {
+                        for (int z = 0; z < Game::ChunkSection::SIZE; ++z) {
+                            for (int x = 0; x < Game::ChunkSection::SIZE; ++x) {
+                                section->Set(x, y, z, src[y * 256 + z * 16 + x]);
+                            }
+                        }
+                    }
+                    (void)sectionSize;
+
                     Log::Debug("Deserialized section {} with block data", sectionIndex);
                 } else {
                     Log::Debug("Failed to create section {} during deserialization", sectionIndex);
@@ -585,7 +603,7 @@ namespace Client {
     }
 
     void ClientChunkManager::SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId,
-                                           uint8_t stateIndex) {
+                                           uint8_t stateIndex, bool fromPlayer) {
         ASSERT_MAIN_THREAD();
         Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
 
@@ -601,17 +619,20 @@ namespace Client {
         chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId, stateIndex);
 
         // Mark section as dirty for remeshing
-        MarkSectionDirty(chunkPos, sectionY);
+        MarkSectionDirty(chunkPos, sectionY, fromPlayer);
 
         // Mark neighbor sections dirty when block is on a chunk/section boundary
-        // (the neighbor's mesh depends on this block for face culling)
+        // (the neighbor's mesh depends on this block for face culling).
+        // fromPlayer propagates to them too — MC's setBlocksDirty carries the
+        // player flag across the whole dirtied range, and a boundary edit whose
+        // neighbour lagged a frame behind would look like a seam.
         int localY = (pos.y + 64) & 0xF;  // position within section (0-15)
-        if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY);
-        if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY);
-        if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY);
-        if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY);
-        if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1);
-        if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1);
+        if (localX == 0)  MarkSectionDirty({chunkPos.x - 1, chunkPos.z}, sectionY, fromPlayer);
+        if (localX == 15) MarkSectionDirty({chunkPos.x + 1, chunkPos.z}, sectionY, fromPlayer);
+        if (localZ == 0)  MarkSectionDirty({chunkPos.x, chunkPos.z - 1}, sectionY, fromPlayer);
+        if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY, fromPlayer);
+        if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1, fromPlayer);
+        if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1, fromPlayer);
     }
 
     Game::BlockID ClientChunkManager::GetBlockAt(const glm::ivec3& pos) const {
@@ -642,7 +663,11 @@ namespace Client {
         // believes is there, which is exactly the pre-write block AND its state.
         const auto [prevBlock, prevState] = GetBlockAndStateAt(pos);
         m_prediction.Retain(pos, prevBlock, prevState, sequence);
-        SetBlockLocal(pos, newBlock, stateIndex);
+        // THIS client placed/broke the block — MC's isDirtyFromPlayer. The
+        // server-echo path (HandleBlockChange) and the prediction-rollback hook
+        // deliberately do not set it: those are corrections, not player intent,
+        // and a rollback compiling synchronously would stutter on packet loss.
+        SetBlockLocal(pos, newBlock, stateIndex, /*fromPlayer=*/true);
     }
 
     void ClientChunkManager::HandleBlockChangedAck(uint32_t sequence) {
@@ -701,84 +726,39 @@ namespace Client {
                     auto* section = chunk->chunkData->GetSection(y);
                     
                     if (section && !sectionData.IsEmpty()) {
-                        // Decode palette/direct data into section->blocks[] directly.
-                        // Blocks are stored in Y-Z-X order: index = y*256 + z*16 + x.
-                        // The packed data iterates linearly through this index, so we
-                        // write directly by index — no coordinate math needed.
-                        bool decodedSuccessfully = false;
-                        auto& blocks = section->blocks;
+                        // MC LevelChunkSection.read: hand the wire's bits,
+                        // palette and words straight to the container. No
+                        // per-voxel unpacking — the words ARE the storage.
+                        Game::PalettedContainer states(
+                            Game::PaletteStrategy::ForBlockStates(Game::BlockStateIds::Bits()),
+                            Game::BlockStateIds::Pack(Game::BlockID::Air, 0));
+                        Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
 
-                        if (sectionData.bitsPerEntry == 0) {
-                            // Single-value section — entire section is one block type
-                            uint16_t blockId = (!sectionData.palette.empty())
-                                ? static_cast<uint16_t>(sectionData.palette[0] & 0xFFFF)
-                                : 0;
-                            std::fill(blocks.begin(), blocks.end(), blockId);
-                            decodedSuccessfully = true;
+                        auto stateWords  = sectionData.states.words;
+                        auto statePal    = sectionData.states.palette;
+                        auto biomeWords  = sectionData.biomes.words;
+                        auto biomePal    = sectionData.biomes.palette;
 
-                        } else if (sectionData.bitsPerEntry <= 8) {
-                            // Palette mode
-                            if (!sectionData.palette.empty() && !sectionData.dataArray.empty()) {
-                                const int bitsPerBlock = sectionData.bitsPerEntry;
-                                const int blocksPerLong = 64 / bitsPerBlock;
-                                const uint64_t mask = (1ULL << bitsPerBlock) - 1;
-                                const size_t paletteSize = sectionData.palette.size();
+                        const bool okStates = states.ReadFrom(
+                            sectionData.states.bits, std::move(statePal), std::move(stateWords));
+                        const bool okBiomes = biomes.ReadFrom(
+                            sectionData.biomes.bits, std::move(biomePal), std::move(biomeWords));
 
-                                int blockIndex = 0;
-                                for (uint64_t packedLong : sectionData.dataArray) {
-                                    for (int i = 0; i < blocksPerLong && blockIndex < 4096; ++i) {
-                                        uint32_t paletteIndex = (packedLong >> (i * bitsPerBlock)) & mask;
-                                        blocks[blockIndex] = (paletteIndex < paletteSize)
-                                            ? static_cast<uint16_t>(sectionData.palette[paletteIndex] & 0xFFFF)
-                                            : 0;
-                                        blockIndex++;
-                                    }
-                                }
-                                decodedSuccessfully = true;
-                            }
-                        } else {
-                            // Direct mode (bitsPerEntry > 8) — global palette block state IDs
-                            const int bitsPerBlock = std::max(15, static_cast<int>(sectionData.bitsPerEntry));
-                            const int blocksPerLong = 64 / bitsPerBlock;
-                            const uint64_t mask = (1ULL << bitsPerBlock) - 1;
+                        if (okStates && okBiomes) {
+                            section->AdoptStates(std::move(states));
+                            section->AdoptBiomes(std::move(biomes));
 
-                            int blockIndex = 0;
-                            for (uint64_t packedLong : sectionData.dataArray) {
-                                for (int i = 0; i < blocksPerLong && blockIndex < 4096; ++i) {
-                                    blocks[blockIndex] = static_cast<uint16_t>(
-                                        (packedLong >> (i * bitsPerBlock)) & mask);
-                                    blockIndex++;
-                                }
-                            }
-                            decodedSuccessfully = true;
-                        }
-                        
-                        // Block-state plane. Absent means every voxel is at its
-                        // block's default state, so drop any stale plane rather
-                        // than leaving one behind from a previous occupant.
-                        if (!sectionData.states.empty() && sectionData.states.size() == 4096) {
-                            section->states = sectionData.states;
-                        } else {
-                            section->states.clear();
-                        }
-
-                        if (decodedSuccessfully) {
-                            // Initialize section state properly (MC-style)
                             auto& sectionInfo = chunk->sectionInfos[y];
                             sectionInfo.hasCpuData = true;
-                            sectionInfo.isAllAir = false;  // Has non-air blocks
-                            sectionInfo.version++;        // 0→1 on first load, +1 on updates
+                            sectionInfo.isAllAir = section->IsAllAir();
+                            sectionInfo.version++;        // 0->1 on first load, +1 on updates
                             sectionInfo.state = SectionState::LOADED;
-                            sectionInfo.dirty = true;  // Needs meshing
-                            
-                            // Also update legacy dirty set for now (will remove later)
+                            sectionInfo.dirty = true;     // Needs meshing
+
                             chunk->dirtySections.insert(y);
                             m_chunksWithDirtySections.insert(chunkPos);
-                            
-                            // Log::Debug("[mesh] loaded cx=%d cz=%d sy=%d ver=%u", 
-                            //      chunkPos.x, chunkPos.z, y, sectionInfo.version);
                         } else {
-                            Log::Warning("Failed to decode section %d for chunk (%d, %d)", 
+                            Log::Warning("Failed to decode section %d for chunk (%d, %d)",
                                        y, chunkPos.x, chunkPos.z);
                         }
                     }
@@ -793,41 +773,32 @@ namespace Client {
             }
         }
         
-        // Noise biomes, one id per 4x4x4 cell. Size-checked rather than trusted
-        // so a malformed or version-skewed packet leaves the chunk with no
-        // biome data (every lookup then answers with the fallback) instead of
-        // handing the mesher a short array to index into.
-        if (packet.biomes.size() == static_cast<size_t>(Game::Chunk::BIOME_COUNT)) {
-            chunk->chunkData->biomes = packet.biomes;
-            // One-shot: confirms biomes survive generation -> wire -> client.
-            // Without it a silent break anywhere upstream just looks like
-            // "every chunk is plains", which is indistinguishable from a
-            // colour bug on screen.
+        // Biomes arrived inside each section's container above (MC keeps them
+        // on LevelChunkSection, not the chunk). This one-shot log stays because
+        // a silent break anywhere upstream just looks like "every chunk is
+        // plains", which is indistinguishable from a colour bug on screen.
+        {
             static bool s_loggedBiomes = false;
-            if (!s_loggedBiomes) {
-                s_loggedBiomes = true;
+            if (!s_loggedBiomes && chunk->chunkData) {
                 std::unordered_map<uint16_t, int> hist;
-                for (uint16_t b : packet.biomes) hist[b]++;
-                std::string summary;
-                for (const auto& [id, n] : hist) {
-                    summary += " " + std::string(Game::BiomeRegistry::Get(id).name)
-                             + "=" + std::to_string(n);
+                for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+                    const auto* sec = chunk->chunkData->GetSection(sy);
+                    if (!sec) continue;
+                    sec->Biomes().ForEachValue([&](uint32_t id, int count) {
+                        hist[static_cast<uint16_t>(id)] += count;
+                    });
                 }
-                Log::Info("First chunk with biomes (%d, %d):%s",
-                          chunkPos.x, chunkPos.z, summary.c_str());
+                if (!hist.empty()) {
+                    s_loggedBiomes = true;
+                    std::string summary;
+                    for (const auto& [id, n] : hist) {
+                        summary += " " + std::string(Game::BiomeRegistry::Get(id).name)
+                                 + "=" + std::to_string(n);
+                    }
+                    Log::Info("First chunk with biomes (%d, %d):%s",
+                              chunkPos.x, chunkPos.z, summary.c_str());
+                }
             }
-        } else if (packet.biomes.empty()) {
-            static bool s_loggedNoBiomes = false;
-            if (!s_loggedNoBiomes) {
-                s_loggedNoBiomes = true;
-                Log::Warning("Chunk (%d, %d) arrived with NO biome data - every tint "
-                             "will resolve to the plains fallback",
-                             chunkPos.x, chunkPos.z);
-            }
-        } else if (!packet.biomes.empty()) {
-            Log::Warning("Chunk (%d, %d) carried %zu biome entries, expected %d - ignoring",
-                         chunkPos.x, chunkPos.z, packet.biomes.size(),
-                         Game::Chunk::BIOME_COUNT);
         }
         
         // Transition to LOADED state
@@ -904,75 +875,160 @@ namespace Client {
     }
     
     // Schedule mesh builds for dirty sections (Minecraft-style per-section)
+    // Port of MC SectionRenderDispatcher.RenderSection.hasAllNeighbors:
+    //
+    //     doesChunkExistAt(WEST) && ... && doesChunkExistAt(1, 0, 1)
+    //
+    // — the four orthogonal and four diagonal chunk COLUMNS around this one,
+    // each required to exist at FULL status. MC additionally requires
+    // lightOnInColumn; we have no light engine, so "loaded" is the whole test.
+    //
+    // The section's own column is deliberately not checked: the caller already
+    // holds it.
+    bool ClientChunkManager::HasAllNeighborChunks(Game::Math::ChunkPos pos) const {
+        static constexpr int kDX[8] = { -1, 0, 1, 0, -1, -1, 1, 1 };
+        static constexpr int kDZ[8] = { 0, -1, 0, 1, -1, 1, -1, 1 };
+        for (int i = 0; i < 8; ++i) {
+            auto it = m_chunks.find(Game::Math::ChunkPos{pos.x + kDX[i], pos.z + kDZ[i]});
+            if (it == m_chunks.end() || !it->second ||
+                it->second->state != ChunkState::LOADED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void ClientChunkManager::ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition) {
         PROFILE_ZONE;
         ASSERT_MAIN_THREAD();
 
-        // Throttle. This is the ceiling on how fast chunks can become visible:
-        // each pass can start at most permits.Available() sections (10, matching
-        // MC's SectionBufferBuilderPool sized at availableProcessors), so the
-        // rate is permits x passes/sec.
+        // ADMISSION ONLY. This function decides what to hand to the compile
+        // queue; it does NOT decide how fast meshing runs. That distinction is
+        // the whole design and it is easy to undo by accident, so:
         //
-        // At the old 33ms (30 passes/sec) that capped us at ~300 sections/s
-        // — measured 197/s — while chunks ARRIVED at ~570 sections/s. Meshing
-        // took 72s to work through what the server delivered in 25s, and that
-        // backlog is what shows up as chunks appearing slowly, long after the
-        // data is already on the client. The mesh workers were 1.6% busy the
-        // whole time; nothing was overloaded, we were just not asking.
+        //   DO NOT gate this pass on the upload permit pool.
         //
-        // MC has no such throttle — LevelRenderer compiles sections every frame.
-        // The period only exists so we do not rescan the dirty set at our full
-        // frame rate; the permit pool above is the real backpressure, and when
-        // uploads fall behind Available() hits 0 and this returns immediately.
+        // MC's structure (LevelRenderer.compileSections:1129) is that every
+        // dirty section is scheduled, every frame, with no cap of any kind —
+        // `for (RenderSection s : sectionsToCompile) s.rebuildSectionAsync(cache)`.
+        // The buffer pool is checked one level down, in
+        // SectionRenderDispatcher.runTask:74, which gates EXECUTION. The queue
+        // between them (CompileTaskDynamicQueue) is unbounded.
         //
-        // Size it against the actual demand, not a round number. Sections needing
-        // a mesh per second is:
+        // We used to take a permit HERE, before a job was even queued, and cap
+        // the pass at permits.Available(). That fused admission to execution and
+        // made throughput `permits x passes/s`. Since this runs once per frame,
+        // throughput became proportional to FRAME RATE — measured at 150-380 fps
+        // on Vulkan versus 60-90 on OpenGL, which is why the two backends filled
+        // visibly different amounts of world. Whenever throughput fell below
+        // demand the backlog never drained, and because candidates are consumed
+        // nearest-first the far corners of the square never got their turn: the
+        // player saw a disc whose radius tracked frame rate.
         //
+        // Demand, for reference:
         //     chunks/s (80.5) x sections/chunk (7.9) x remesh factor (2.2) ~ 1400/s
-        //
-        // and the ceiling is permits (10) x 1000/period. At 8ms that was 1250/s —
-        // 11% BELOW demand, so meshing could never catch up and 17s of arrivals
-        // took 37s to work through. 5ms gives 2000/s, ~43% headroom.
         //
         // The 2.2x remesh factor is NOT a bug to be optimised away: MC does the
         // same thing (ClientPacketListener.enableChunkLight ->
         // setSectionRangeDirty over the chunk AND its 8 neighbours, full Y range),
         // and gating compiles on neighbour availability would only make sections
-        // appear LATER. Budget for it instead.
-        static constexpr float kMeshSchedulePeriodMs = 5.0f;
-        auto now = std::chrono::steady_clock::now();
-        float elapsedMs = std::chrono::duration<float, std::milli>(now - m_lastMeshScheduleTime).count();
-        if (elapsedMs < kMeshSchedulePeriodMs) {
-            return;
-        }
-        m_lastMeshScheduleTime = now;
-
+        // appear LATER. Budget for it instead. MC's answer to it is the
+        // recompile quota in CompileTaskDynamicQueue.poll, which we now have in
+        // ClientWorkerPool::PollNearestLocked.
+        //
+        // No period gate either, matching MC. The dirty set now drains into the
+        // compile queue every pass instead of accumulating behind a cap, so the
+        // scan below is O(newly dirty) rather than O(backlog) — cheaper than the
+        // visibleSections walk MC does unconditionally every frame.
         auto workerPool = Threading::g_clientWorkerPool.get();
         if (!workerPool) return;
 
-        // Buffer pool backpressure, MC-style (SectionBufferBuilderPool +
-        // SectionRenderDispatcher.runTask:74). A permit spans compile AND
-        // upload and only comes back once the render thread has uploaded the
-        // result, so a slow upload stage throttles submission automatically.
+        // Chunk-builder mode — MC's Options.prioritizeChunkUpdates, same three
+        // values and the same default (NONE / fully threaded).
+        //   0 Threaded       — everything async. MC's default, and ours.
+        //   1 Semi Blocking  — PLAYER_AFFECTED: compile the player's own edits
+        //                      on this thread so they appear the same frame.
+        //   2 Fully Blocking — NEARBY: also compile anything within 768 (~27.7
+        //                      blocks) synchronously.
+        // Modes 1 and 2 spend main-thread milliseconds to remove a frame or two
+        // of latency. That is the trade they exist to make; it is not free, and
+        // it is why MC ships with them off.
+        const int chunkBuilderMode = Platform::g_gameSettings.GetPrioritizeChunkUpdates();
+
+        // Candidates come from the VISIBLE section list — MC
+        // LevelRenderer.compileSections:1136, `for (RenderSection s : this.visibleSections)`.
         //
-        // The previous check counted GetActiveJobCount() + GetPendingJobCount()
-        // — both COMPILE-stage numbers. Results that had finished compiling and
-        // were waiting to be uploaded counted as zero, so the result queue grew
-        // without limit behind a check that read as "plenty of room", and the
-        // render thread paid for the whole backlog at the swap.
-        // ::Render, not Client::Render — this TU is inside namespace Client,
-        // which has its own nested Render (MeshJobData et al).
-        auto& permits = ::Render::GetMeshUploadPermits();
-        size_t slotsAvailable = permits.Available();
-        if (slotsAvailable == 0) return;
+        // ── THE SEAM ──────────────────────────────────────────────────────────
+        // This exact switch regressed meshing 954 -> 250 sections/s once before.
+        // If a trace shows meshing collapsing again, flip kScheduleFromVisible
+        // back to false — that single line restores the dirty-set behaviour and
+        // nothing else depends on it.
+        //
+        // Three things had to be true first, and all three now are:
+        //
+        //  1. The visible list must contain UNMESHED sections. It previously
+        //     held only sections that already had geometry, so scheduling from
+        //     it would have queued re-meshes and never first meshes — the
+        //     frontier could not advance at all. SectionOcclusionGraph now emits
+        //     every reachable non-air section (MC runUpdates:253-257).
+        //  2. The occlusion graph must keep pace. It updates incrementally every
+        //     frame now (RunPartialUpdate), and propagation sources survive a
+        //     rebuild instead of being discarded on anchor mismatch.
+        //  3. The list must be the MAIN camera's. m_visibleSections is
+        //     overwritten by the portal pass; GetMainViewSections() is the
+        //     snapshot taken only for the real view.
+        //
+        // Gate to confirm from a trace: Occlusion/PartialAdded per second must
+        // exceed the previous Upload/Sections x fps. If it does not, this switch
+        // regresses by exactly that ratio.
+        static constexpr bool kScheduleFromVisible = true;
 
-        // Collect dirty sections — reuse persistent buffer to avoid per-call heap allocation.
-        // Iterates only the dirty-chunk index (not every loaded chunk); entries whose
-        // chunk is gone or fully clean are lazily erased here.
         m_meshCandidates.clear();
+        bool usedVisibleList = false;
 
+        if (kScheduleFromVisible && ::Render::g_chunkRenderer) {
+            const auto& visible = ::Render::g_chunkRenderer->GetMainViewSections();
+            for (const auto& vs : visible) {
+                auto vIt = m_chunks.find(vs.chunkPos);
+                if (vIt == m_chunks.end()) continue;
+                ClientChunk* chunk = vIt->second.get();
+                if (!chunk || !chunk->chunkData) continue;
+                if (vs.sectionY < 0 || vs.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+
+                auto& si = chunk->sectionInfos[vs.sectionY];
+                if (!si.dirty) continue;
+                if (si.meshingVersion == si.version) continue;  // in flight
+
+                // MC compileSections' admission test:
+                //   isDirty() && (mesh != UNCOMPILED || hasAllNeighbors())
+                // A section that has never been compiled waits until all eight
+                // surrounding columns have arrived, so it is meshed once against
+                // real neighbours instead of once against air and again after.
+                // A section already compiled is always rescheduled.
+                if (!si.builtOnce && !HasAllNeighborChunks(vs.chunkPos)) continue;
+
+                const float dx = vs.chunkPos.x * 16.0f + 8.0f - playerPosition.x;
+                const float dz = vs.chunkPos.z * 16.0f + 8.0f - playerPosition.z;
+                const float dy = (-64.0f + vs.sectionY * 16.0f + 8.0f) - playerPosition.y;
+                m_meshCandidates.push_back(
+                    {vs.chunkPos, vs.sectionY, dx * dx + dz * dz + dy * dy * 0.01f, chunk});
+            }
+
+            usedVisibleList = true;
+        }
+
+        // The dirty walk. It is the whole candidate source when scheduling from
+        // the visible list is off, and in modes 1/2 it additionally runs
+        // alongside it to pick up the player's OWN edits.
+        //
+        // Sync compiles must not be gated on visibility: a block placed behind
+        // the player still has to compile immediately, which is the entire point
+        // of MC's rebuildSectionSync. Anything already collected above is
+        // filtered out by the dirty/meshingVersion checks in the submit loop, so
+        // the overlap costs nothing but a skipped iteration.
+        const bool needDirtyWalk = !usedVisibleList || chunkBuilderMode != 0;
         for (auto dirtyIt = m_chunksWithDirtySections.begin();
-             dirtyIt != m_chunksWithDirtySections.end(); ) {
+             needDirtyWalk && dirtyIt != m_chunksWithDirtySections.end(); ) {
             const Game::Math::ChunkPos chunkPos = *dirtyIt;
             auto chunkIt = m_chunks.find(chunkPos);
             ClientChunk* chunk = (chunkIt != m_chunks.end()) ? chunkIt->second.get() : nullptr;
@@ -989,25 +1045,37 @@ namespace Client {
             }
             ++dirtyIt;
 
-            float dx = chunkPos.x * 16.0f + 8.0f - playerPosition.x;
-            float dz = chunkPos.z * 16.0f + 8.0f - playerPosition.z;
-            float xzDistSq = dx * dx + dz * dz;
+            const float dx = chunkPos.x * 16.0f + 8.0f - playerPosition.x;
+            const float dz = chunkPos.z * 16.0f + 8.0f - playerPosition.z;
+            const float xzDistSq = dx * dx + dz * dz;
 
             for (int sectionY : chunk->dirtySections) {
-                if (sectionY < 0 || sectionY >= 24) continue;
+                if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
                 auto& si = chunk->sectionInfos[sectionY];
                 if (!si.dirty) continue;
                 if (si.meshingVersion == si.version) continue; // in flight
 
-                float sectionCenterY = -64.0f + sectionY * 16.0f + 8.0f;
-                float dy = sectionCenterY - playerPosition.y;
+                // When the visible list already supplied candidates, this pass
+                // exists only for the player's own edits — everything else is
+                // visibility-gated, MC-style.
+                if (usedVisibleList && !si.dirtyFromPlayer) continue;
+
+                // Same admission test as above (MC applies it in one loop).
+                if (!si.builtOnce && !HasAllNeighborChunks(chunkPos)) continue;
+
+                const float dy = (-64.0f + sectionY * 16.0f + 8.0f) - playerPosition.y;
                 // Squared distance with Y attenuated (0.1 factor squared = 0.01)
-                float distSq = xzDistSq + dy * dy * 0.01f;
+                const float distSq = xzDistSq + dy * dy * 0.01f;
 
-                // Initial compiles get 4x priority boost (0.5^2 = 0.25 on squared distance)
-                float effectiveDistSq = (!si.builtOnce && !si.isAllAir) ? distSq * 0.25f : distSq;
-
-                m_meshCandidates.push_back({chunkPos, sectionY, effectiveDistSq, chunk});
+                // No initial-compile boost here any more. It used to multiply
+                // initial compiles by 0.25 to jump them ahead of recompiles,
+                // which only worked while this pass was also the throttle. The
+                // job is now done properly one stage later by MC's recompile
+                // quota (ClientWorkerPool::PollNearestLocked), which is a hard
+                // guarantee rather than a distance fudge that a close enough
+                // recompile could still beat. This ordering only decides who
+                // gets a SNAPSHOT first when the budget below binds.
+                m_meshCandidates.push_back({chunkPos, sectionY, distSq, chunk});
             }
         }
 
@@ -1015,27 +1083,72 @@ namespace Client {
         std::sort(m_meshCandidates.begin(), m_meshCandidates.end(),
                   [](const auto& a, const auto& b) { return a.effectiveDistSq < b.effectiveDistSq; });
 
-        // Submit snapshots
-        const size_t MAX_SNAPSHOTS_PER_FRAME = 128;
-        size_t maxToSubmit = std::min(slotsAvailable, MAX_SNAPSHOTS_PER_FRAME);
+        // Submit snapshots.
+        //
+        // Two caps, and NEITHER is the upload permit pool:
+        //
+        // NO CAP OF ANY KIND. MC LevelRenderer.compileSections walks its whole
+        // visibleSections list every frame and schedules every dirty one:
+        //
+        //     while (iter.hasNext()) { ... sectionsToCompile.add(section); }
+        //     for (RenderSection s : sectionsToCompile) {
+        //         s.rebuildSectionAsync(cache); s.setNotDirty();
+        //     }
+        //
+        // Nothing counts, nothing breaks early. Both former caps are gone: the
+        // compile queue is unbounded (as CompileTaskDynamicQueue is), and the
+        // per-pass snapshot budget that used to sit here is gone too, now that
+        // regions share their section copies through the cache below and
+        // building one is 27 pointer copies plus whatever sections are new to
+        // this pass.
+        //
+        // The ONLY throttle is the permit pool, one stage down in
+        // ClientWorkerPool::WorkerLoop — MC's SectionRenderDispatcher.runTask
+        // checking bufferPool before it starts a compile. Do not reintroduce a
+        // cap here: capping admission rather than execution is what coupled
+        // meshing throughput to frame rate and made a fast backend fill a
+        // visibly larger disc of world than a slow one.
+        // ONE cache for the whole pass, as MC constructs `new RenderRegionCache()`
+        // at the top of compileSections. Every region built below shares its
+        // section copies through it, so a cluster of neighbouring sections costs
+        // roughly one copy per section instead of 27.
+        Render::RenderRegionCache regionCache;
+
         size_t sectionsSubmitted = 0;
+        static constexpr float kNearbySyncDistSq = 768.0f;  // MC LevelRenderer:1143
 
         for (const auto& candidate : m_meshCandidates) {
-            if (sectionsSubmitted >= maxToSubmit) break;
-
             auto* chunk = candidate.chunk;
             auto& sectionInfo = chunk->sectionInfos[candidate.sectionY];
 
             if (!sectionInfo.dirty || sectionInfo.meshingVersion == sectionInfo.version) continue;
 
+            // Decide sync vs async BEFORE building the snapshot — neither input
+            // needs it, and the async path may be out of queue room.
+            //
+            // MC LevelRenderer.compileSections:1140-1160. NEARBY uses a plain
+            // (un-attenuated) squared distance, so recompute rather than reuse
+            // candidate.effectiveDistSq, which de-weights Y for load ordering.
+            bool rebuildSync = false;
+            if (chunkBuilderMode == 2) {
+                const float ddx = candidate.chunkPos.x * 16.0f + 8.0f - playerPosition.x;
+                const float ddz = candidate.chunkPos.z * 16.0f + 8.0f - playerPosition.z;
+                const float ddy = (-64.0f + candidate.sectionY * 16.0f + 8.0f) - playerPosition.y;
+                const bool isNearby = (ddx * ddx + ddy * ddy + ddz * ddz) < kNearbySyncDistSq;
+                rebuildSync = isNearby || sectionInfo.dirtyFromPlayer;
+            } else if (chunkBuilderMode == 1) {
+                rebuildSync = sectionInfo.dirtyFromPlayer;
+            }
+
             const uint32_t expectedVersion = sectionInfo.version;
 
             std::shared_ptr<Render::MeshJobData> snapshot;
-            if (!BuildSectionSnapshot(candidate.chunkPos, candidate.sectionY, expectedVersion, snapshot)) {
+            if (!BuildSectionRegion(candidate.chunkPos, candidate.sectionY, expectedVersion,
+                                    regionCache, snapshot)) {
                 continue;
             }
 
-            if (sectionInfo.isAllAir) {
+            if (snapshot->region.CentreIsEmpty()) {
                 snapshot->jobType = Render::MeshJobType::BorderOnly;
             } else if (!sectionInfo.builtOnce) {
                 snapshot->jobType = Render::MeshJobType::Initial;
@@ -1047,12 +1160,32 @@ namespace Client {
             snapshot->isHighPriority = (candidate.effectiveDistSq < 16384.0f); // 128^2
             snapshot->submitTime = std::chrono::steady_clock::now();
 
-            // Claim the pipeline slot BEFORE submitting. Held until the render
-            // thread has uploaded this section's result (or the result is
-            // dropped/discarded), which is what makes the backpressure span
-            // both stages the way MC's buffer pack does.
-            if (!permits.TryAcquire()) break;   // pipeline full — retry next pass
+            if (rebuildSync) {
+                // Compiled on THIS thread and pushed straight to the upload
+                // queue, which the MeshUpload phase drains later in this same
+                // frame — so the edit is on screen without a round trip through
+                // the worker pool. Bypasses the permit pool exactly like MC's
+                // compileSync bypasses the buffer pool.
+                if (sectionInfo.lastMeshJob) {
+                    sectionInfo.lastMeshJob->Cancel();
+                }
+                sectionInfo.lastMeshJob = snapshot;
+                sectionInfo.meshingVersion = expectedVersion;
+                sectionInfo.state = SectionState::MESHING;
+                sectionInfo.dirty = false;
+                sectionInfo.dirtyFromPlayer = false;
+                chunk->dirtySections.erase(candidate.sectionY);
+                if (chunk->dirtySections.empty()) {
+                    m_chunksWithDirtySections.erase(candidate.chunkPos);
+                }
+                sectionsSubmitted++;
+                workerPool->BuildMeshJobSync(snapshot);
+                continue;
+            }
 
+            // No permit taken here. The job goes onto the compile queue and a
+            // worker claims a pipeline slot when it actually starts the work —
+            // ClientWorkerPool::WorkerLoop, mirroring MC's runTask()/bufferPool.
             if (workerPool->SubmitMeshJobWithSnapshot(snapshot)) {
                 if (sectionInfo.lastMeshJob) {
                     sectionInfo.lastMeshJob->Cancel();
@@ -1061,19 +1194,28 @@ namespace Client {
                 sectionInfo.meshingVersion = expectedVersion;
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
+                sectionInfo.dirtyFromPlayer = false;
                 chunk->dirtySections.erase(candidate.sectionY);
+                if (chunk->dirtySections.empty()) {
+                    m_chunksWithDirtySections.erase(candidate.chunkPos);
+                }
                 sectionsSubmitted++;
             } else {
-                // Rejected before entering the pipeline (pool stopped, queue
-                // full): nothing will ever produce a result for it, so the
-                // permit has to go back here or it is leaked outright.
-                permits.Release();
+                // Only reachable when the pool is shutting down — the queue no
+                // longer refuses work. Nothing to release (no permit was taken)
+                // and the section stays dirty, so nothing is lost either way.
+                break;
             }
         }
 
         if (sectionsSubmitted > 0) {
-            Log::Debug("SCHEDULE: Submitted %zu mesh jobs (%zu slots, %zu candidates)",
-                      sectionsSubmitted, slotsAvailable, m_meshCandidates.size());
+            // DistinctSections is the sharing ratio: with 27 sections per region
+            // it should sit far below 27x the job count, and close to the job
+            // count itself for a clustered visible set.
+            Log::Debug("SCHEDULE: Submitted %zu mesh jobs (%zu candidates, "
+                       "%zu distinct section copies this pass)",
+                      sectionsSubmitted, m_meshCandidates.size(),
+                      regionCache.DistinctSections());
         }
     }
     
@@ -1083,53 +1225,13 @@ namespace Client {
         ScheduleMeshBuildsWithSnapshots(playerPos);
     }
     
-    // Helper: copy a 16x16 boundary plane from a neighbor section into the snapshot.
-    // face: 0=north(z=15), 1=south(z=0), 2=east(x=0), 3=west(x=15), 4=up(y=0), 5=down(y=15)
-    static void CopyNeighborBoundaryPlane(
-        const Game::ChunkSection* neighborSection, int face,
-        std::array<Game::BlockID, 256>& outPlane) {
-
-        if (!neighborSection || neighborSection->blocks.size() < 4096) {
-            std::fill(outPlane.begin(), outPlane.end(), Game::BlockID::Air);
-            return;
-        }
-
-        const auto& blocks = neighborSection->blocks;
-
-        switch (face) {
-            case 0: // North: z=15 plane → indexed as [y*16+x]
-                for (int y = 0; y < 16; ++y)
-                    std::memcpy(&outPlane[y * 16], &blocks[y * 256 + 15 * 16], 16 * sizeof(uint16_t));
-                break;
-            case 1: // South: z=0 plane → indexed as [y*16+x]
-                for (int y = 0; y < 16; ++y)
-                    std::memcpy(&outPlane[y * 16], &blocks[y * 256], 16 * sizeof(uint16_t));
-                break;
-            case 2: // East: x=0 plane → indexed as [y*16+z]
-                for (int y = 0; y < 16; ++y)
-                    for (int z = 0; z < 16; ++z)
-                        outPlane[y * 16 + z] = static_cast<Game::BlockID>(blocks[y * 256 + z * 16 + 0]);
-                break;
-            case 3: // West: x=15 plane → indexed as [y*16+z]
-                for (int y = 0; y < 16; ++y)
-                    for (int z = 0; z < 16; ++z)
-                        outPlane[y * 16 + z] = static_cast<Game::BlockID>(blocks[y * 256 + z * 16 + 15]);
-                break;
-            case 4: // Up: y=0 plane → indexed as [z*16+x]
-                std::memcpy(outPlane.data(), blocks.data(), 256 * sizeof(uint16_t));
-                break;
-            case 5: // Down: y=15 plane → indexed as [z*16+x]
-                std::memcpy(outPlane.data(), &blocks[15 * 256], 256 * sizeof(uint16_t));
-                break;
-        }
-    }
-
-    bool ClientChunkManager::BuildSectionSnapshot(
+    bool ClientChunkManager::BuildSectionRegion(
         Game::Math::ChunkPos chunkPos, int sectionY,
         uint32_t expectedVersion,
+        Render::RenderRegionCache& regionCache,
         std::shared_ptr<Render::MeshJobData>& outSnapshot) {
 
-        PROFILE_ZONE_N("BuildSnapshot");
+        PROFILE_ZONE_N("BuildRegion");
         ASSERT_MAIN_THREAD();
 
         auto it = m_chunks.find(chunkPos);
@@ -1143,144 +1245,33 @@ namespace Client {
         if (!sectionInfo.hasCpuData) return false;
         if (sectionInfo.version != expectedVersion) return false;
 
-        auto* section = chunk->chunkData->GetSection(sectionY);
-
         outSnapshot = std::make_shared<Render::MeshJobData>(chunkPos, sectionY);
         outSnapshot->generation = expectedVersion;
-        outSnapshot->sectionData.sectionY = sectionY;
 
-        // Copy center section blocks via memcpy (BlockID is uint16_t, same as blocks[])
-        if (section) {
-            std::memcpy(outSnapshot->sectionData.blocks.data(),
-                       section->blocks.data(), 4096 * sizeof(uint16_t));
-            // Empty check via memcmp against a zero page — vectorized by libc,
-            // and it still early-outs on the first non-Air block.
-            static const uint16_t kZeroSection[4096] = {};
-            outSnapshot->sectionData.isEmpty =
-                std::memcmp(section->blocks.data(), kZeroSection, 4096 * sizeof(uint16_t)) == 0;
+        // MC LevelRenderer.compileSections hands every section the SAME
+        // RenderRegionCache, so the 3x3x3 neighbourhoods overlap and each
+        // section is copied once per pass no matter how many jobs read it.
+        outSnapshot->region = regionCache.CreateRegion(*this, chunkPos, sectionY);
 
-            // Block states, only when the section actually has any. Both sides
-            // stay unallocated for ordinary terrain (see ChunkSection::states),
-            // so this costs a branch per snapshot in the common case.
-            if (section->HasStates()) {
-                outSnapshot->sectionData.states = section->states;
-            } else {
-                outSnapshot->sectionData.states.clear();
-            }
-
-            // Biomes for this section plus the blend margin. The margin reaches
-            // into the four neighbouring chunks, so each cell is resolved
-            // through the chunk map rather than off `chunk` alone — a border
-            // section otherwise blends against its own biome on one side and
-            // produces a visible seam the vanilla client does not have.
-            auto& snapBiomes = outSnapshot->sectionData;
-            snapBiomes.hasBiomes = false;
-            if (!chunk->chunkData->biomes.empty()) {
-                using SS = Render::SectionSnapshot;
-                const int baseX = chunkPos.x * Game::Math::CHUNK_SIZE_X;
-                const int baseZ = chunkPos.z * Game::Math::CHUNK_SIZE_Z;
-                const int baseY = Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0);
-
-                for (int qy = 0; qy < SS::BIOME_Y; ++qy) {
-                    for (int qz = 0; qz < SS::BIOME_XZ; ++qz) {
-                        for (int qx = 0; qx < SS::BIOME_XZ; ++qx) {
-                            // Grid cell 0 is quart cell -1, i.e. 4 blocks before
-                            // the section's own origin.
-                            const int wx = baseX + (qx - 1) * 4;
-                            const int wz = baseZ + (qz - 1) * 4;
-                            const int wy = baseY + qy * 4;
-                            snapBiomes.biomes[
-                                static_cast<size_t>((qy * SS::BIOME_XZ + qz) * SS::BIOME_XZ + qx)] =
-                                    BiomeAtWorld(wx, wy, wz);
-                        }
-                    }
-                }
-                snapBiomes.hasBiomes = true;
-            }
-        } else {
-            outSnapshot->sectionData.isEmpty = true;
-            std::memset(outSnapshot->sectionData.blocks.data(), 0, 4096 * sizeof(uint16_t));
-        }
-
-        // Copy boundary planes from 6 neighbors (256 blocks each, not full 4096)
+        // Which horizontal neighbours were present, for FinalizeSectionUpload's
+        // re-mesh decision. Derived from the region so it cannot disagree with
+        // the data the mesher actually saw.
         uint8_t neighborMask = 0;
-
-        // North (-z): need z=15 plane from neighbor
-        auto northIt = m_chunks.find({chunkPos.x, chunkPos.z - 1});
-        if (northIt != m_chunks.end() && northIt->second && northIt->second->chunkData) {
-            neighborMask |= 8;
-            CopyNeighborBoundaryPlane(northIt->second->chunkData->GetSection(sectionY), 0,
-                                      outSnapshot->sectionData.neighbors[0]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[0].begin(),
-                     outSnapshot->sectionData.neighbors[0].end(), Game::BlockID::Air);
-        }
-
-        // South (+z): need z=0 plane from neighbor
-        auto southIt = m_chunks.find({chunkPos.x, chunkPos.z + 1});
-        if (southIt != m_chunks.end() && southIt->second && southIt->second->chunkData) {
-            neighborMask |= 4;
-            CopyNeighborBoundaryPlane(southIt->second->chunkData->GetSection(sectionY), 1,
-                                      outSnapshot->sectionData.neighbors[1]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[1].begin(),
-                     outSnapshot->sectionData.neighbors[1].end(), Game::BlockID::Air);
-        }
-
-        // East (+x): need x=0 plane from neighbor
-        auto eastIt = m_chunks.find({chunkPos.x + 1, chunkPos.z});
-        if (eastIt != m_chunks.end() && eastIt->second && eastIt->second->chunkData) {
-            neighborMask |= 1;
-            CopyNeighborBoundaryPlane(eastIt->second->chunkData->GetSection(sectionY), 2,
-                                      outSnapshot->sectionData.neighbors[2]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[2].begin(),
-                     outSnapshot->sectionData.neighbors[2].end(), Game::BlockID::Air);
-        }
-
-        // West (-x): need x=15 plane from neighbor
-        auto westIt = m_chunks.find({chunkPos.x - 1, chunkPos.z});
-        if (westIt != m_chunks.end() && westIt->second && westIt->second->chunkData) {
-            neighborMask |= 2;
-            CopyNeighborBoundaryPlane(westIt->second->chunkData->GetSection(sectionY), 3,
-                                      outSnapshot->sectionData.neighbors[3]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[3].begin(),
-                     outSnapshot->sectionData.neighbors[3].end(), Game::BlockID::Air);
-        }
-
-        // Up (+y): need y=0 plane from section above
-        if (sectionY < 23) {
-            CopyNeighborBoundaryPlane(chunk->chunkData->GetSection(sectionY + 1), 4,
-                                      outSnapshot->sectionData.neighbors[4]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[4].begin(),
-                     outSnapshot->sectionData.neighbors[4].end(), Game::BlockID::Air);
-        }
-
-        // Down (-y): need y=15 plane from section below
-        if (sectionY > 0) {
-            CopyNeighborBoundaryPlane(chunk->chunkData->GetSection(sectionY - 1), 5,
-                                      outSnapshot->sectionData.neighbors[5]);
-        } else {
-            std::fill(outSnapshot->sectionData.neighbors[5].begin(),
-                     outSnapshot->sectionData.neighbors[5].end(), Game::BlockID::Air);
-        }
-
-        // Fill light data with default values
-        std::memset(outSnapshot->sectionData.lightData.data(), 0xFF,
-                   outSnapshot->sectionData.lightData.size());
-
+        if (outSnapshot->region.SectionForLocal(16, 0, 0))  neighborMask |= 1;  // +X
+        if (outSnapshot->region.SectionForLocal(-1, 0, 0))  neighborMask |= 2;  // -X
+        if (outSnapshot->region.SectionForLocal(0, 0, 16))  neighborMask |= 4;  // +Z
+        if (outSnapshot->region.SectionForLocal(0, 0, -1))  neighborMask |= 8;  // -Z
         outSnapshot->neighborMask = neighborMask;
 
-        // Final version check
+        // Final version check — the copies above are only valid for the version
+        // they were taken at.
         if (sectionInfo.version != expectedVersion) {
             return false;
         }
 
         return true;
     }
-    
+
     MeshAcceptance ClientChunkManager::AcceptMeshResult(const Network::MeshBuildResult& result) {
         PROFILE_ZONE_N("AcceptMeshResult");
         ASSERT_MAIN_THREAD();

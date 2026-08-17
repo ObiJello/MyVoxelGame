@@ -75,6 +75,24 @@ namespace Game {
         bool        symmetrical = false;
     };
 
+    // A resolved furnace-family recipe (MC AbstractCookingRecipe).
+    struct CookingRecipe {
+        const char* id = "";
+        CookingKind kind = CookingKind::Smelting;
+        int32_t     ingredient = -1;      // index into the ingredient pool
+        ItemID      resultItem = Items::Air;
+        int         resultCount = 1;
+        int         cookingTime = 200;    // ticks
+        float       experience = 0.0f;
+    };
+
+    // A resolved stonecutter recipe (MC StonecutterRecipe / SingleItemRecipe).
+    struct StonecuttingRecipe {
+        int32_t ingredient = -1;
+        ItemID  resultItem = Items::Air;
+        int     resultCount = 1;
+    };
+
     class RecipeManager {
     public:
         // Resolve the generated tables. Call AFTER BlockRegistry::Initialize
@@ -100,8 +118,22 @@ namespace Game {
         // Items::Air when unknown. Built during Initialize.
         static ItemID ItemFromSlug(const std::string& slug);
 
+        // MC RecipeManager.getRecipeFor(RecipeType.SMELTING, …). A furnace only
+        // ever asks for Smelting, a blast furnace for Blasting, and so on — the
+        // kind IS the block. Null when the input smelts into nothing.
+        static const CookingRecipe* FindCooking(CookingKind kind, const ItemStack& input);
+
+        // MC FuelValues.burnDuration — how many ticks one of this item keeps a
+        // furnace lit. 0 means "not a fuel".
+        static int GetFuelBurnTime(const ItemStack& stack);
+
+        // Every stonecutter result `input` can become, in table order. MC's
+        // StonecutterMenu builds the same list and shows it as the pick-grid.
+        static std::vector<const StonecuttingRecipe*> FindStonecutting(const ItemStack& input);
+
         // Diagnostics.
         static size_t RecipeCount();
+        static size_t CookingRecipeCount();
 
     private:
         // Does `stack` satisfy ingredient `index`? MC's Ingredient.test only

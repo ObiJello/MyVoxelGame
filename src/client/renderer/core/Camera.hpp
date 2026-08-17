@@ -3,8 +3,11 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <cmath>
 #include "../../input/Input.hpp"
 #include "../../input/KeyMapping.hpp"
+#include "common/core/Mth.hpp"
 
 namespace Render {
 
@@ -20,7 +23,15 @@ namespace Render {
     public:
         // Camera parameters
         glm::vec3 position{ 0.0f, 64.0f, 0.0f }; // This will be set by PlayerController
-        float yaw   = -90.0f;  // Facing down –Z by default
+
+        // MINECRAFT'S CONVENTION — see the long note on Game::Mth::ViewVector.
+        //   yaw   0 = facing +Z (south), increasing clockwise from above.
+        //   pitch POSITIVE LOOKING DOWN; -90 is straight up.
+        //
+        // These are the same numbers the wire, the mobs, `facing=` blockstates
+        // and /tp use, so nothing converts between the camera and the rest of
+        // the game any more.
+        float yaw   = 180.0f;  // Facing -Z (north) by default
         float pitch =   0.0f;
         float roll  =   0.0f;  // Camera roll around forward axis (degrees).
                                // Always 0 for the player's real camera.
@@ -42,6 +53,51 @@ namespace Render {
         // src→dst transform and stores it here.
         bool      hasViewOverride = false;
         glm::mat4 viewOverride    {1.0f};
+
+        // MC GameRenderer.bobHurt — the damage tilt and the death spin, as one
+        // VIEW-SPACE rotation. MC pushes these onto the pose stack BEFORE the
+        // camera's own pitch/yaw, which in matrix terms is a left multiply on
+        // the view matrix, so that is exactly how it is applied below.
+        //
+        // Set per frame by the caller (it needs partialTick); identity means
+        // "not hurt, not dying". Deliberately NOT applied to viewOverride: the
+        // portal renderer derives its virtual views from the real view matrix,
+        // so the tilt reaches them through that transform instead — applying it
+        // twice would double the lean when looking through a portal.
+        glm::mat4 viewTilt {1.0f};
+
+        // MC GameRenderer.bobHurt, verbatim. `hurtTime`/`deathTime` are the
+        // tick counters; partialTick is the render fraction between ticks, and
+        // MC SUBTRACTS it from hurtTime (the flash decays) while ADDING it to
+        // deathTime (the spin accumulates).
+        static glm::mat4 MakeViewTilt(int hurtTime, int hurtDuration, float hurtDirDeg,
+                                      bool dying, int deathTime, float partialTick) {
+            glm::mat4 m{1.0f};
+
+            if (dying) {
+                const float duration = std::min(static_cast<float>(deathTime) + partialTick,
+                                                20.0f);
+                // Asymptotic, not linear: most of the roll happens in the first
+                // few ticks and it eases into ~2.4 degrees short of 40.
+                const float angle = 40.0f - 8000.0f / (duration + 200.0f);
+                m = glm::rotate(m, glm::radians(angle), glm::vec3(0.0f, 0.0f, 1.0f));
+            }
+
+            float hurt = static_cast<float>(hurtTime) - partialTick;
+            if (hurt < 0.0f || hurtDuration <= 0) return m;
+
+            // sin(t^4 * pi): a sharp jolt at the start of the flash that fades
+            // out — NOT a linear ramp, which would read as a slow sway.
+            hurt /= static_cast<float>(hurtDuration);
+            hurt = std::sin(hurt * hurt * hurt * hurt * 3.14159265358979323846f);
+
+            // Conjugating the roll by the damage bearing is what aims it: a hit
+            // from the front rolls the screen, a hit from the side pitches it.
+            m = glm::rotate(m, glm::radians(-hurtDirDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+            m = glm::rotate(m, glm::radians(-hurt * 14.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            m = glm::rotate(m, glm::radians(hurtDirDeg),  glm::vec3(0.0f, 1.0f, 0.0f));
+            return m;
+        }
 
         // Movement settings (not used when physics is enabled)
         float moveSpeed      =  10.0f;  // units per second
@@ -67,11 +123,7 @@ namespace Render {
         // Returns a view matrix using glm::lookAt
         glm::mat4 GetViewMatrix() const {
             if (hasViewOverride) return viewOverride;
-            glm::vec3 front;
-            front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-            front.y = sin(glm::radians(pitch));
-            front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-            glm::vec3 dir = glm::normalize(front);
+            glm::vec3 dir = GetForward();
             glm::vec3 right = glm::normalize(glm::cross(dir, {0.0f, 1.0f, 0.0f}));
             glm::vec3 up    = glm::normalize(glm::cross(right, dir));
             if (roll != 0.0f) {
@@ -83,30 +135,27 @@ namespace Render {
                 up    = newUp;
                 right = newRight;
             }
-            return glm::lookAt(position, position + dir, up);
+            return viewTilt * glm::lookAt(position, position + dir, up);
         }
 
-        // Get the camera's forward direction vector
+        // Get the camera's forward direction vector — MC Entity.getLookAngle().
         glm::vec3 GetForward() const {
-            glm::vec3 front;
-            front.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
-            front.y = sin(glm::radians(pitch));
-            front.z = sin(glm::radians(yaw)) * cos(glm::radians(pitch));
-            return glm::normalize(front);
+            return Game::Mth::ViewVector(pitch, yaw);
         }
 
-        // Get the camera's right direction vector
+        // Get the camera's right direction vector.
+        //
+        // cross(forward, worldUp) really is the RIGHT hand in MC's convention:
+        // facing south (+Z), it gives -X = west, which is where your right hand
+        // points. The formula did not have to change with the convention, but
+        // it is easy to "fix" it the wrong way round, so: it is correct.
         glm::vec3 GetRight() const {
             return glm::normalize(glm::cross(GetForward(), {0.0f, 1.0f, 0.0f}));
         }
 
         // Get horizontal-only forward direction (for movement)
         glm::vec3 GetHorizontalForward() const {
-            glm::vec3 front;
-            front.x = cos(glm::radians(yaw));
-            front.y = 0.0f;  // Keep Y at 0 for horizontal movement
-            front.z = sin(glm::radians(yaw));
-            return glm::normalize(front);
+            return Game::Mth::HorizontalViewVector(yaw);
         }
 
         // Get horizontal-only right direction (for movement)
@@ -120,10 +169,15 @@ namespace Render {
             if (enableMouseLook) {
                 auto [dx, dy] = Input::GetMouseDelta();
 
+                // Input::GetMouseDelta already flips dy so that moving the
+                // mouse UP is positive. MC's pitch is positive looking DOWN, so
+                // the sign here is a SUBTRACTION — this is the one line that
+                // decides whether the mouse feels inverted.
                 yaw   += dx * mouseSensitivity;
-                pitch += (invertY ? -dy : dy) * mouseSensitivity;
+                pitch -= (invertY ? -dy : dy) * mouseSensitivity;
 
-                // Clamp pitch to avoid gimbal flip
+                // MC clamps to +-90; we stop just short because
+                // glm::lookAt's cross with world-up degenerates exactly there.
                 if (pitch >  89.0f) pitch =  89.0f;
                 if (pitch < -89.0f) pitch = -89.0f;
             }

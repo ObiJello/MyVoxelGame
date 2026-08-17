@@ -64,6 +64,23 @@ namespace Game {
             (void)type;
             (void)pos;
         }
+
+        // MC CampfireBlock.useItemOn → CampfireBlockEntity.placeFood — lay one
+        // food item on the fire.
+        //
+        // Same request/perform split as OpenMenu, for the same reason: the
+        // block entity holding the four food slots is the server's, so only it
+        // can decide whether a slot is free. The client no-ops and waits for
+        // the BlockEntityData update, which is also what makes its campfire
+        // renderer show the food.
+        //
+        // What the client still gets from running the shared dispatch is the
+        // UseResult — enough to stop it predicting a block placement where the
+        // food was meant to go.
+        virtual void PlaceCampfireFood(const glm::ivec3& pos, uint32_t hand) {
+            (void)pos;
+            (void)hand;
+        }
     };
 
 } // namespace Game

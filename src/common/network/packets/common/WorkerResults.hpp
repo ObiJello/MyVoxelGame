@@ -83,6 +83,16 @@ namespace Network {
         SectionMeshData         meshData;
         Render::VisibilitySet   visibilitySet;  // Occlusion data: which face pairs can see through
         bool                    success = false;
+
+        // False for meshes compiled synchronously on the main thread (the
+        // "Semi Blocking" / "Fully Blocking" chunk-builder modes). Those bypass
+        // the pipeline the way MC's compileSync bypasses the buffer pool — it
+        // builds into `fixedBuffers` rather than acquiring a SectionBufferBuilderPack
+        // — so no upload permit was ever taken for them. The render thread's
+        // drain releases a permit per result, and releasing one that was never
+        // acquired would inflate the pool past capacity and silently destroy the
+        // backpressure that throttles meshing.
+        bool                    holdsUploadPermit = true;
         std::chrono::steady_clock::time_point completeTime;
 
         MeshBuildResult() = default;

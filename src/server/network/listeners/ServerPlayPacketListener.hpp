@@ -47,6 +47,7 @@ namespace Server {
 
         // Fly-state toggle (MC handlePlayerAbilities — only the FLYING bit is client-writable)
         void onPlayerAbilitiesC2S(const Network::PlayerAbilitiesC2SPacket& packet) override;
+        void onInteractC2S(const Network::InteractC2SPacket& packet) override;
         
         // Player updates
         void onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) override;

@@ -228,6 +228,14 @@ namespace Game {
             return Get(id).waterColor;
         }
 
+        uint32_t GrassColorAt(float temperature, float downfall) {
+            return Sample(s_grassMap, temperature, downfall, kGrassDefault);
+        }
+
+        uint32_t FoliageColorAt(float temperature, float downfall) {
+            return Sample(s_foliageMap, temperature, downfall, kFoliageDefault);
+        }
+
     } // namespace BiomeRegistry
 
 } // namespace Game

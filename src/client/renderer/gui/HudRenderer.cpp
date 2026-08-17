@@ -61,6 +61,7 @@ namespace Render {
         }
 
         // MC render order: crosshair (separate) → hotbar → health/food/armor → XP bar
+        RenderAttackIndicator(graphics);
         RenderItemHotbar(graphics, inventory);
 
         graphics.NextStratum();
@@ -97,6 +98,37 @@ namespace Render {
     // ========================================================================
     // Hotbar (MC: Gui.renderItemHotbar)
     // ========================================================================
+
+    void HudRenderer::RenderAttackIndicator(GuiGraphics& graphics) {
+        // MC Gui.renderCrosshair's AttackIndicatorStatus.CROSSHAIR branch,
+        // verbatim including the offsets: the bar sits 16 px below the
+        // crosshair's top edge, is 16x4, and the progress fill is scaled to
+        // SEVENTEEN not sixteen — MC's `(int)(scale * 17.0F)` overshoots the
+        // sprite by a pixel on purpose so a full bar has no gap at the end.
+        const int cx = graphics.GuiWidth() / 2;
+        const int cy = graphics.GuiHeight() / 2;
+        const int x = cx - 8;
+        const int y = cy - 7 + 16;
+
+        // MC hides the bar entirely for a weapon that refills in 5 ticks or
+        // less — a bare hand or a hoe — because it would be full essentially
+        // always and just clutter the crosshair.
+        const bool showFull = m_crosshairTarget
+                           && m_attackStrengthScale >= 1.0f
+                           && m_attackStrengthDelay > 5.0f;
+
+        if (showFull) {
+            graphics.BlitSprite("hud/crosshair_attack_indicator_full", x, y, 16, 16);
+        } else if (m_attackStrengthScale < 1.0f) {
+            const int progress = static_cast<int>(m_attackStrengthScale * 17.0f);
+            graphics.BlitSprite("hud/crosshair_attack_indicator_background",
+                                x, y, 16, 4);
+            if (progress > 0) {
+                graphics.BlitSprite("hud/crosshair_attack_indicator_progress",
+                                    16, 4, 0, 0, x, y, progress, 4);
+            }
+        }
+    }
 
     void HudRenderer::RenderItemHotbar(GuiGraphics& graphics, const Game::Inventory& inventory) {
         int screenCenter = graphics.GuiWidth() / 2;

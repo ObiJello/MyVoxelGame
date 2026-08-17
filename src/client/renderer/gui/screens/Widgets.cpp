@@ -98,9 +98,12 @@ namespace Render {
     void SliderButton::OnDrag(double mouseX, double)  { SetValueFromMouse(mouseX); }
     void SliderButton::OnRelease(double, double)      {}
 
-    bool SliderButton::KeyPressed(int glfwKey, int) {
+    bool SliderButton::KeyPressed(int glfwKey, int glfwMods) {
         double step = m_keyStep > 0.0 ? m_keyStep
                                       : 1.0 / static_cast<double>(m_width - SLIDER_HANDLE_W);
+        // Shift covers ground fast: 10 steps per press (10% on a percent
+        // slider, 10 units on a ValueSlider) against the plain arrow's one.
+        if (glfwMods & GLFW_MOD_SHIFT) step *= 10.0;
         if (glfwKey == GLFW_KEY_LEFT)  { SetValue(m_value - step); return true; }
         if (glfwKey == GLFW_KEY_RIGHT) { SetValue(m_value + step); return true; }
         return false;
@@ -359,6 +362,11 @@ namespace Render {
         }
 
         m_draggedChild = HitTest(mouseX, mouseY);
+        // Clicking a row also selects it for the keyboard — clicking the gaps
+        // between rows deselects, mirroring Screen::MouseClicked's handling of
+        // clicks on empty space. Scrollbar drags return above, so they leave
+        // the selection alone.
+        SetFocusedChild(m_draggedChild);
         if (m_draggedChild) m_draggedChild->OnClick(mouseX, mouseY);
     }
 
@@ -391,6 +399,24 @@ namespace Render {
         m_scroll -= deltaY * ROW_HEIGHT;
         ClampScroll();
         return true;
+    }
+
+    void OptionsList::SetFocusedChild(AbstractWidget* w) {
+        if (m_focusedChild == w) return;
+        if (m_focusedChild) m_focusedChild->SetFocused(false);
+        m_focusedChild = w;
+        if (m_focusedChild) m_focusedChild->SetFocused(m_focused);
+    }
+
+    void OptionsList::SetFocused(bool f) {
+        AbstractWidget::SetFocused(f);
+        // The list is one widget as far as the screen is concerned; the row
+        // it drives should light up and dim along with it.
+        if (m_focusedChild) m_focusedChild->SetFocused(f);
+    }
+
+    bool OptionsList::KeyPressed(int glfwKey, int glfwMods) {
+        return m_focusedChild && m_focusedChild->KeyPressed(glfwKey, glfwMods);
     }
 
     void OptionsList::RenderWidget(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {

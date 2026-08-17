@@ -33,6 +33,14 @@ namespace Render {
         //                           (created via CreateWorldScreen; only the
         //                           metadata persists at this stage).
         bool        useMinecraftSave = true;
+        // Absolute path to the Anvil world folder when useMinecraftSave is set.
+        // Empty falls back to the auto-detected saves/world, which is what the
+        // legacy single-entry behavior did.
+        std::string worldPath;
+        // Set for worlds imported from the player's real Minecraft install:
+        // load the terrain but never write a single byte back. See
+        // WorldEntry::readOnly.
+        bool        readOnlyWorld = false;
         std::string worldName;
         int64_t     seed     = 0;
         int         gameMode = 1;   // 0 = Survival, 1 = Creative

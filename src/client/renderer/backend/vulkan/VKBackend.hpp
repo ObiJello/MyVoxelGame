@@ -34,6 +34,8 @@ namespace Render {
         void SetClearColor(float r, float g, float b, float a) override;
         void Clear(bool color, bool depth, bool stencil = false) override;
         void SetViewport(int x, int y, int width, int height) override;
+        void SetScissorRect(int x, int y, int w, int h) override;
+        void ClearScissorRect() override;
 
         // Buffers
         BufferHandle CreateBuffer(BufferUsage usage, size_t size,
@@ -498,6 +500,35 @@ namespace Render {
 
         // ImGui
         VkDescriptorPool m_imguiDescriptorPool = VK_NULL_HANDLE;
+
+        // ====================================================================
+        // GPU TIMER QUERIES
+        // ====================================================================
+        // VK_QUERY_TYPE_TIMESTAMP pairs. Each timer owns two slots (begin/end)
+        // and the difference x timestampPeriod is the elapsed GPU nanoseconds.
+        //
+        // The pool is partitioned per frame-in-flight because query slots must
+        // be reset before reuse, and vkCmdResetQueryPool is NOT allowed inside
+        // a render pass — our whole frame is one render pass, so the reset
+        // happens in BeginFrame before vkCmdBeginRenderPass, and it can only
+        // safely clear the slots belonging to the frame slot being started.
+        //
+        // Unlike GL's GL_TIME_ELAPSED these do not force a flush, so they are
+        // far cheaper than the ~2.3ms/query the GL path costs on Apple.
+        static constexpr uint32_t kTimersPerFrame = 16;   // 32 query slots each
+        VkQueryPool m_timestampPool = VK_NULL_HANDLE;
+        float m_timestampPeriodNs = 0.0f;   // 0 = device has no usable timestamps
+        struct GPUTimer {
+            uint32_t begin = 0;             // query slot index of the begin stamp
+            bool     ended = false;
+            bool     resolved = false;      // resultMs is final; queries may be gone
+            float    resultMs = -1.0f;
+            uint32_t frameSlot = 0;         // which partition it was allocated from
+        };
+        std::unordered_map<uint32_t, GPUTimer> m_gpuTimers;
+        uint32_t m_timersUsedThisFrame = 0;
+
+        bool CreateTimestampPool();
 
         // ====================================================================
         // INITIALIZATION HELPERS

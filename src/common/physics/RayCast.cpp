@@ -135,7 +135,13 @@ namespace Game {
                 // nothing is drawn.
                 const uint8_t stateIndex =
                     GetBlockStateAt(currentBlock.x, currentBlock.y, currentBlock.z);
-                const auto& shape = BlockRegistry::GetBlockShape(blockId, stateIndex);
+                // World-aware: a paired chest's half reaches the cell edge
+                // toward its partner, so the seam is clickable instead of a
+                // 2px dead strip between the two hitboxes.
+                const auto shape = g_raycastBlockAccess
+                    ? BlockRegistry::GetBlockShapeAt(*g_raycastBlockAccess, currentBlock,
+                                                     blockId, stateIndex)
+                    : BlockRegistry::GetBlockShape(blockId, stateIndex);
                 const glm::vec3 boxMin = glm::vec3(currentBlock) + shape.min;
                 const glm::vec3 boxMax = glm::vec3(currentBlock) + shape.max;
 

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "ChunkSection.hpp"
+#include "Heightmap.hpp"
 #include "../math/WorldMath.hpp"
 #include "../math/WorldCoordinates.hpp"
 #include "../block/Blocks.hpp"
@@ -58,12 +59,47 @@ namespace Game {
         static constexpr int BIOME_HORIZONTAL = 4;                 // 16 blocks / 4
         static constexpr int BIOME_VERTICAL   = Math::SECTIONS_PER_CHUNK * 4;
         static constexpr int BIOME_COUNT      = BIOME_HORIZONTAL * BIOME_VERTICAL * BIOME_HORIZONTAL;
-        std::vector<uint16_t> biomes;
+        // Biomes moved onto ChunkSection (MC LevelChunkSection.biomes). The
+        // BIOME_* constants stay because GetBiome/SetBiomeQuart still speak in
+        // whole-column quart coordinates.
 
         // Biome at chunk-local block coordinates with world Y. Quantises the
         // same way MC does. Returns the fallback when the chunk carries none.
         uint16_t GetBiome(int localX, int worldY, int localZ) const;
         void SetBiomeQuart(int qx, int qy, int qz, uint16_t biomeId);
+
+        // === HEIGHTMAPS ===
+        //
+        // MC ChunkAccess.heightmaps. Primed once (see PrimeHeightmaps or the
+        // copy path in MyTerrainGenerator) and then kept current by SetBlock,
+        // so nothing ever has to scan a column to find the surface.
+        //
+        // `primed` distinguishes "this column is empty" from "nobody has filled
+        // this in yet". A chunk straight from the Anvil loader with no
+        // Heightmaps tag is unprimed, and callers must prime it before reading
+        // — exactly MC's hasPrimedHeightmap contract.
+        Heightmap& GetHeightmap(HeightmapType type) {
+            return m_heightmaps[static_cast<size_t>(type)];
+        }
+        const Heightmap& GetHeightmap(HeightmapType type) const {
+            return m_heightmaps[static_cast<size_t>(type)];
+        }
+
+        bool AreHeightmapsPrimed() const { return m_heightmapsPrimed; }
+        void MarkHeightmapsPrimed() { m_heightmapsPrimed = true; }
+
+        // MC Heightmap.primeHeightmaps — the full column scan. This is the
+        // FALLBACK path: it is what a chunk loaded from disk without a stored
+        // heightmap needs, and it is deliberately the expensive option. Freshly
+        // generated chunks copy the terrain library's already-computed values
+        // instead.
+        void PrimeHeightmaps();
+
+        // MC ChunkAccess.getHeight — topmost matching block in this column.
+        // Chunk-local x/z.
+        int GetSurfaceHeight(int localX, int localZ, HeightmapType type) const {
+            return m_heightmaps[static_cast<size_t>(type)].GetHeight(localX, localZ);
+        }
 
         Chunk();
         // Out-of-line: m_blockEntities holds unique_ptr<BlockEntity> with only
@@ -201,11 +237,17 @@ namespace Game {
                     const ChunkSection* srcSection = this->GetSection(i);
                     ChunkSection* dstSection = cloned->GetSection(i);
 
-                    // Copy the blocks array and palette
-                    dstSection->blocks = srcSection->blocks;
-                    dstSection->palette = srcSection->palette;
+                    // One assignment now: the paletted container carries the
+                    // blocks, their states and the censuses together.
+                    *dstSection = *srcSection;
                 }
             }
+
+            // Heightmaps travel with the copy. Without this a cloned chunk
+            // reports every column empty until something writes to it, which
+            // would show up as mobs spawning at the world floor.
+            cloned->m_heightmaps = this->m_heightmaps;
+            cloned->m_heightmapsPrimed = this->m_heightmapsPrimed;
 
             return cloned;
         }
@@ -226,8 +268,15 @@ namespace Game {
         // Helper to validate coordinates and log errors
         bool ValidateCoordinates(int localX, int worldY, int localZ, const char* operation) const;
 
+        // MC LevelChunk.setBlockState's heightmap pass. Called from both
+        // SetBlock overloads; a no-op until the chunk has been primed.
+        void UpdateHeightmaps(int localX, int worldY, int localZ, BlockID newBlock);
+
         // Per-cell BlockEntity storage. Keyed by (localX, worldY, localZ).
         std::unordered_map<glm::ivec3, std::unique_ptr<BlockEntity>, IVec3Hash> m_blockEntities;
+
+        std::array<Heightmap, static_cast<size_t>(HeightmapType::Count)> m_heightmaps;
+        bool m_heightmapsPrimed = false;
     };
 
 } // namespace Game

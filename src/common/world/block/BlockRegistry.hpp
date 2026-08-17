@@ -2,6 +2,7 @@
 #pragma once
 
 #include "Blocks.hpp"
+#include "BlockStateIds.hpp"
 #include "BlockModel.hpp"
 #include "Direction.hpp"
 #include "../../entity/MiningTier.hpp"
@@ -17,6 +18,8 @@ namespace Server { class ServerPlayer; }
 
 namespace Game {
 
+    class IBlockAccess;
+
     // Forward declarations only — including BlockInteraction.hpp here would
     // also expose its `class World;` forward decl (Game::World) to every TU
     // that pulls BlockRegistry.hpp transitively. That breaks files like
@@ -30,6 +33,7 @@ namespace Game {
     class World;
     class ILevelWrite;
     class IUsePlayer;
+    class JavaRandom;
 
     // Render layer classification — determines which rendering pass a block uses
     enum class RenderLayer : uint8_t {
@@ -59,10 +63,76 @@ namespace Game {
                                            IUsePlayer* player, uint32_t hand,
                                            const BlockHitResult& hit);
 
+    // ── Growth (MC BlockBehaviour random ticking + BonemealableBlock) ───────
+    //
+    // Whether a state wants random ticks at all. Mirrors
+    // `BlockBehaviour.isRandomlyTicking(state)` — note MC asks the STATE, not
+    // the block: a fully grown crop stops ticking (`!isMaxAge(state)`), which
+    // is what keeps a harvested field from costing anything once it matures.
+    // A block whose fn is null never random-ticks.
+    using BlockIsRandomlyTickingFn = bool (*)(uint8_t stateIndex);
+
+    // One random tick. Mirrors `BlockBehaviour.randomTick(state, serverLevel,
+    // pos, random)`. `id` is passed explicitly because one function backs
+    // several blocks (wheat/carrots/potatoes all share CropBlock's tick) and
+    // the growth-speed rule needs to know which block it is comparing
+    // neighbours against.
+    //
+    // Takes ILevelWrite rather than World even though random ticks are
+    // server-only, so the growth helpers can be shared verbatim with the bone
+    // meal path below — which DOES run on both sides.
+    using BlockRandomTickFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                       BlockID id, uint8_t stateIndex,
+                                       JavaRandom& random);
+
+    // MC BonemealableBlock. `isValidBonemealTarget` is the "would bone meal do
+    // anything here" test (crops: not yet max age); `performBonemeal` applies
+    // the growth. MC's third method, `isBonemealSuccess`, returns true for
+    // every block modelled here, so it is folded into the target test rather
+    // than carried as a third pointer. A block with a null pair is not
+    // bonemealable.
+    using BlockIsValidBonemealTargetFn = bool (*)(const IBlockAccess& level,
+                                                  const glm::ivec3& pos,
+                                                  uint8_t stateIndex);
+    using BlockPerformBonemealFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                            BlockID id, uint8_t stateIndex,
+                                            JavaRandom& random);
+
+    // A neighbour of this block changed. Narrowed port of MC's
+    // `BlockBehaviour.updateShape(state, …, direction, neighbourPos,
+    // neighbourState, …)`, which returns the state this block BECOMES —
+    // possibly AIR, which is how vanilla destroys a block whose support went.
+    //
+    // `toNeighbour` is the direction from THIS block toward the one that
+    // changed, and `neighbourId` is what now sits there. Return true and fill
+    // outBlock/outState to transform; return false to leave the block alone.
+    //
+    // This is the hook the existing `needsSupportBelow` rule in
+    // World::NotifyNeighborBlocks could not express: that rule can only
+    // DESTROY, and attached stems need to turn back into a growable stem when
+    // their fruit is picked.
+    using BlockNeighborChangedFn = bool (*)(const IBlockAccess& level, const glm::ivec3& pos,
+                                            BlockID id, uint8_t stateIndex,
+                                            Direction toNeighbour, BlockID neighbourId,
+                                            BlockID& outBlock, uint8_t& outState);
+
     struct Block {
         std::string name;
         bool opaque;
         std::string modelName;  // Reference to BlockModel instead of texture indices
+
+        // The vanilla registry name ("stone", "oak_slab") WITHOUT the
+        // "minecraft:" prefix — column 2 of BlockDefs.inc, and what MC keys
+        // its data files on (loot tables are `blocks/<registrySlug>.json`).
+        //
+        // NOT the same as modelName: Init() deliberately re-registers some
+        // blocks with a different model (Water→"water_still", every Infested*
+        // →its host block's model, double-plants→"<name>_bottom"), so
+        // modelName is a rendering detail that several blocks SHARE. Slugs are
+        // unique per BlockDefs.inc row; promoted state variants (SnowGrass,
+        // *SlabTop, *Top halves) inherit their base block's slug, exactly as
+        // they share one vanilla block.
+        std::string registrySlug;
 
         // Optional override for blocks that don't use standard models
         std::array<uint16_t, 6> legacyTexIdx{0, 0, 0, 0, 0, 0};
@@ -76,6 +146,16 @@ namespace Game {
         // Per-block interaction callbacks. Default nullptr → Pass.
         BlockUseWithoutItemFn useWithoutItem = nullptr;
         BlockUseItemOnFn      useItemOn      = nullptr;
+
+        // Growth callbacks (MC randomTick / BonemealableBlock). All default to
+        // nullptr, which means "does not grow" — the state every block but the
+        // farming set is in. `randomTick` is only ever reached when
+        // `isRandomlyTicking` says yes, so the two are wired as a pair.
+        BlockIsRandomlyTickingFn     isRandomlyTicking     = nullptr;
+        BlockRandomTickFn            randomTick            = nullptr;
+        BlockIsValidBonemealTargetFn isValidBonemealTarget = nullptr;
+        BlockPerformBonemealFn       performBonemeal       = nullptr;
+        BlockNeighborChangedFn       neighborChanged       = nullptr;
 
         // ── Mining data (MC parity) ────────────────────────────────────────
         // destroyTime: MC's `strength(destroyTime, ...)` first arg from
@@ -93,6 +173,28 @@ namespace Game {
         // torches, redstone wire, vines, etc. Default true — every full-cube
         // block keeps its existing solid collision.
         bool        hasCollision        = true;
+
+        // MC's canSurvive, narrowed to the one rule ground vegetation uses:
+        // the block below must present a solid top face
+        // (LeafLitterBlock.canSurvive → isFaceSturdy(below, UP);
+        // VegetationBlock.canSurvive → mayPlaceOn(below)). When it stops being
+        // true the block breaks, which is what stops a flower or a clump of
+        // leaf litter floating after you mine out the dirt under it.
+        //
+        // Deliberately NOT set on side- or ceiling-attached blocks (vines,
+        // glow lichen, hanging roots, wall torches): those survive on a
+        // different face, so treating them as ground vegetation would delete
+        // them the moment anything below changed.
+        bool        needsSupportBelow   = false;
+
+        // MC's `BlockBehaviour.Properties.replaceable()` — the flag behind
+        // `BlockState.canBeReplaced()`. A replaceable block is overwritten by a
+        // block you place into its cell rather than blocking the placement:
+        // water, lava, tall grass, snow layers, fire, vines and friends.
+        //
+        // Read by CanBeReplacedByPlacement, which is the single gate both the
+        // server's placement path and the client's prediction consult.
+        bool        replaceable         = false;
     };
 
     class BlockRegistry {
@@ -138,6 +240,16 @@ namespace Game {
         // the block as authored (north-facing), which is why the outline and
         // the raycast used to sit in the wrong corner.
         static const BlockShape& GetBlockShape(BlockID id, uint8_t stateIndex);
+
+        // World-aware shape. Identical to GetBlockShape except for blocks whose
+        // real extent depends on a NEIGHBOUR — today just a paired chest, which
+        // reaches the cell edge toward its partner so the two halves' hitboxes
+        // meet (MC ChestBlock.HALF_SHAPES). MC can key that off a blockstate
+        // property (ChestBlock.TYPE) and keep it in the static table; we derive
+        // the pairing from the world, so this needs the world and returns by
+        // value rather than caching.
+        static BlockShape GetBlockShapeAt(const IBlockAccess& world, const glm::ivec3& pos,
+                                          BlockID id, uint8_t stateIndex);
 
         // Default-state shape. Correct for the ~99% of blocks that have no
         // state properties at all; prefer the two-argument form anywhere a
@@ -239,5 +351,8 @@ namespace Game {
         static void RegisterLegacyBlock(BlockID id, const std::string& name, bool opaque,
                                       const std::array<uint16_t, 6>& texIndices);
     };
+
+    // Flat block-state id space — see BlockStateIds.hpp, included above.
+
 
 } // namespace Game

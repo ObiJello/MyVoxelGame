@@ -52,12 +52,15 @@ namespace Render {
         // rendering, pass the source→destination portal matrix M and the
         // destination portal's plane equation so only the "emerged" half
         // of the body is drawn (clipped against the destination wall).
+        // `deathFlipDeg` is MC LivingEntityRenderer.setupRotations' topple, in
+        // degrees (MobRenderer::DeathFlipDegrees) — the corpse falling over.
         void RenderSingle(const glm::mat4& projection, const glm::mat4& view,
                           const glm::vec3& position,
                           float headYaw, float bodyYaw, float pitch,
                           bool isCrouching, uint8_t colorId,
                           const glm::mat4& model     = glm::mat4(1.0f),
-                          const glm::vec4& clipPlane = glm::vec4(0.0f));
+                          const glm::vec4& clipPlane = glm::vec4(0.0f),
+                          float deathFlipDeg = 0.0f);
 
         // Render chat bubbles above remote players (screen-space billboarded)
         void RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,

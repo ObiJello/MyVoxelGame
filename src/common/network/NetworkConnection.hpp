@@ -75,6 +75,24 @@ namespace Network {
 
         // Send a packet asynchronously (thread-safe, queues to write strand)
         void SendPacket(uint8_t packetId, const std::vector<uint8_t>& data);
+
+        // ── Compression (MC CompressionEncoder / CompressionDecoder) ────────
+        //
+        // Enabled mid-stream, exactly as MC does it: the server sends
+        // SetCompression and switches its OWN encoder on immediately after that
+        // packet is written; the client switches its decoder on the moment it
+        // handles that packet. Every frame after the switch carries an extra
+        // VarInt (see CompressFrame).
+        //
+        // A negative threshold means off, which is also the initial state.
+        void EnableCompression(int threshold) { m_compressionThreshold = threshold; }
+        bool CompressionEnabled() const { return m_compressionThreshold >= 0; }
+
+        // True when the peer is on this machine. MC skips compression entirely
+        // for its integrated server (Connection.isMemoryConnection, a Netty
+        // LocalChannel); the closest equivalent here is a loopback socket,
+        // where deflating would cost CPU to save bandwidth that is free.
+        bool IsLoopback() const;
         void SendPacket(const RawPacket& packet);
         
         // Send raw bytes (for handshake/protocol negotiation)
@@ -204,6 +222,9 @@ namespace Network {
         // Current packet being read
         RawPacket m_currentPacket;
         bool m_readingHeader = true;
+
+        // < 0 means no compression stage in either direction.
+        int  m_compressionThreshold = -1;
         
         // Send queue (thread-safe)
         std::mutex m_sendMutex;

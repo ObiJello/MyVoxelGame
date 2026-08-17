@@ -58,7 +58,9 @@ namespace Render {
 
         bool IsHovered() const { return m_hovered; }
         bool IsFocused() const { return m_focused; }
-        void SetFocused(bool f) { m_focused = f; }
+        // Virtual so containers (OptionsList) can mirror focus onto the child
+        // row the keyboard is actually driving.
+        virtual void SetFocused(bool f) { m_focused = f; }
 
         // Widget-fade alpha (title-screen fade-in). 0..1, multiplied into all
         // sprite/text colors at render time.
@@ -324,6 +326,14 @@ namespace Render {
         void OnRelease(double mouseX, double mouseY) override;
         bool OnScroll(double deltaY) override;
 
+        // Rows are children of the LIST, not of the screen, so the screen's
+        // focus lands here and the keyboard would otherwise reach nothing.
+        // Clicking a row selects it; keys are forwarded to that row, and its
+        // highlight tracks the list's own focus so Tabbing away and back
+        // keeps the selection.
+        bool KeyPressed(int glfwKey, int glfwMods) override;
+        void SetFocused(bool f) override;
+
         // The child currently being interacted with (mouse held down on it).
         AbstractWidget* GetDraggedChild() { return m_draggedChild; }
 
@@ -347,10 +357,15 @@ namespace Render {
         bool   ScrollbarVisible() const { return MaxScroll() > 0.0; }
         int    ScrollbarX() const { return m_x + m_width / 2 + ROW_WIDTH / 2 + 10; }
 
+        void SetFocusedChild(AbstractWidget* w);
+
         std::vector<Row> m_rows;
         std::vector<std::unique_ptr<AbstractWidget>> m_children;
         double m_scroll = 0.0;
         AbstractWidget* m_draggedChild = nullptr;
+        // Last row clicked — the one arrow keys drive. Borrowed from
+        // m_children, so it stays valid for the list's lifetime.
+        AbstractWidget* m_focusedChild = nullptr;
         bool m_draggingScrollbar = false;
         double m_scrollbarGrabOffset = 0.0;
     };

@@ -24,13 +24,13 @@ layout(location = 1) in vec2 aUV;
 layout(location = 2) in vec4 aColor;
 
 uniform mat4 uMVP;
-uniform vec2 uUvMin;
-uniform vec2 uUvMax;
+uniform vec2 uUVMin;
+uniform vec2 uUVMax;
 
 out vec2 vUV;
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = mix(uUvMin, uUvMax, aUV);
+    vUV = mix(uUVMin, uUVMax, aUV);
 }
 )";
 
@@ -189,8 +189,15 @@ void main() {
         model = glm::scale(model, size);
         glm::mat4 mvp = projectionMatrix * viewMatrix * model;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
-        g_renderBackend->SetUniformVec2(m_shader, "uUvMin", m_stageUVs[m_stage].uvMin);
-        g_renderBackend->SetUniformVec2(m_shader, "uUvMax", m_stageUVs[m_stage].uvMax);
+        // "uUVMin"/"uUVMax" exactly — VKBackend::SetUniformVec2 dispatches on
+        // the literal name to pick a push-constant slot, and silently drops
+        // anything it doesn't recognise. The old "uUvMin"/"uUvMax" spelling
+        // matched no branch, so Vulkan drew the overlay with a stale UV range
+        // and the cracks never showed (GL resolves uniforms by name, so it
+        // worked there). Keep these in sync with the GLSL above, the SPIR-V in
+        // shaders/block_break_overlay_vk.vert, and the backend's dispatch.
+        g_renderBackend->SetUniformVec2(m_shader, "uUVMin", m_stageUVs[m_stage].uvMin);
+        g_renderBackend->SetUniformVec2(m_shader, "uUVMax", m_stageUVs[m_stage].uvMax);
 
         g_renderBackend->DrawIndexed(m_mesh, 36);
         g_renderBackend->UnbindMesh();

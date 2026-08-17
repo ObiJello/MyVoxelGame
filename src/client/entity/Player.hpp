@@ -117,6 +117,37 @@ namespace Game {
         bool jumpPressed = false;
         bool jumpHeld = false;         // True while space is held (for water bobbing)
         bool sprintPressed = false;
+        // MC Player.lastItemInMainHand — see the reset in Tick().
+        uint32_t m_lastItemInMainHand = 0;
+
+        // MC Player.attackStrengthTicker, mirrored client-side. The attack
+        // indicator IS this value — MC's bar is drawn from the client's own
+        // copy, and the server keeps an identical one so the damage it applies
+        // matches what the bar showed.
+        int attackStrengthTicker = 0;
+
+        // MC Player.itemSwapTicker — the SECOND cooldown ticker, and the reason
+        // a slow weapon is slow to raise as well as slow to swing. It counts
+        // against the same delay but is reset only by a change of held item
+        // (Player.resetAttackStrengthTicker resets both; onAttack →
+        // resetOnlyAttackStrengthTicker resets just the attack one), so
+        // swapping to an axe raises it over the axe's full 20-tick delay while
+        // attacking with it leaves the hand where it is.
+        int itemSwapTicker = 0;
+
+        // ── Camera damage tilt / death spin (MC GameRenderer.bobHurt) ──────
+        //
+        // MC LivingEntity.animateHurt sets hurtDuration = hurtTime = 10 when a
+        // hurt-animation packet arrives, and baseTick counts hurtTime down.
+        // hurtDir is the attacker's bearing RELATIVE to our own yaw, which is
+        // why the tilt leans away from the blow instead of always the same way.
+        int   hurtTime     = 0;
+        int   hurtDuration = 10;
+        float hurtDir      = 0.0f;
+        // MC LivingEntity.tickDeath — counts up to 20 while dead and drives the
+        // camera roll toward 40 degrees.
+        int   deathTime    = 0;
+
         bool sneakPressed = false;
 
         // Double-tap-space flight toggle state (MC jumpTriggerTime = 7 ticks).
@@ -142,6 +173,22 @@ namespace Game {
         // Initialize player state
         void Initialize();
         
+        // MC Player.tick — the 20 Hz half of the local player's update. Call it
+        // from the client tick loop, never from the frame loop (UpdatePhysics
+        // is the per-frame half).
+        void Tick();
+
+        // MC Player.getCurrentItemAttackStrengthDelay — 20 / ATTACK_SPEED, in
+        // ticks. The player's base speed is 4.0, so a bare hand is 5 ticks and
+        // a netherite axe (modifier -3.0) is 20.
+        float GetCurrentItemAttackStrengthDelay() const;
+
+        // MC Player.getAttackStrengthScale / getItemSwapScale, both clamped to
+        // [0,1]. `adjust` is the fraction of a tick to add: the HUD passes 0.0,
+        // the held-item renderer 1.0, the damage calculation (server side) 0.5.
+        float GetAttackStrengthScale(float adjust) const;
+        float GetItemSwapScale(float adjust) const;
+
         // Update physics simulation (accepts any IBlockAccess: World*, ClientBlockAccess*, etc.)
         void UpdatePhysics(float deltaTime, IBlockAccess* blockAccess);
         

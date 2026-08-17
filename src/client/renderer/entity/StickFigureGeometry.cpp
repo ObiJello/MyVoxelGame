@@ -1,5 +1,6 @@
 // File: src/client/renderer/entity/StickFigureGeometry.cpp
 #include "StickFigureGeometry.hpp"
+#include "common/core/Mth.hpp"
 #include <cmath>
 
 namespace Render {
@@ -104,14 +105,13 @@ namespace Render {
         constexpr float PI = 3.14159265f;
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
 
-        // Body orientation
-        float bodyRad = glm::radians(bodyYawDeg);
-        glm::vec3 bodyFwd{std::cos(bodyRad), 0.0f, std::sin(bodyRad)};
+        // Body orientation. Yaws are MC's (0 = +Z, clockwise) — the same
+        // numbers that arrive on the wire and that the camera stores.
+        glm::vec3 bodyFwd = Game::Mth::HorizontalViewVector(bodyYawDeg);
         glm::vec3 bodyRight = glm::normalize(glm::cross(bodyFwd, worldUp));
 
         // Head orientation
-        float headRad = glm::radians(headYawDeg);
-        glm::vec3 lookDir{std::cos(headRad), 0.0f, std::sin(headRad)};
+        glm::vec3 lookDir = Game::Mth::HorizontalViewVector(headYawDeg);
         glm::vec3 faceRight = glm::normalize(glm::cross(lookDir, worldUp));
 
         // Crouching (Minecraft's HumanoidModel.java)

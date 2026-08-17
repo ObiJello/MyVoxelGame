@@ -3,9 +3,15 @@
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
 #include "../entity/RemotePlayerManager.hpp"
+#include "../entity/ItemEntityManager.hpp"
+#include "../entity/ClientMobManager.hpp"
+#include "common/entity/ItemEntity.hpp"   // Game::IsItemEntityId
+#include "common/entity/Entity.hpp"       // Game::IsMobEntityId
+#include "common/core/Mth.hpp"            // rotation unpacking
 #include "NetworkClient.hpp"
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
+#include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
 #include <cmath>
 #if ENABLE_PORTAL_GUN
 #include "../portal/ClientPortalManager.hpp"
@@ -23,6 +29,7 @@ namespace Render {
     // AbstractContainerScreen.hpp for why they can't be written straight into
     // the inventory.
     void ApplyContainerSlot(int menuIndex, const Game::ItemStack& stack);
+    void ApplyContainerData(uint32_t containerId, uint16_t index, int32_t value);
     void ApplyContainerFullSync(Game::MenuType menuType, uint32_t containerId,
                                 const std::vector<Game::ItemStack>& slots);
     void OpenClientContainerScreen(Game::MenuType type, uint32_t containerId,
@@ -181,6 +188,8 @@ namespace Client {
     void ClientPacketHandler::handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet) {
         if (g_remotePlayerManager) {
             g_remotePlayerManager->UpdatePlayer(packet.playerId, packet.position, packet.rotation, packet.isCrouching);
+            g_remotePlayerManager->SetHurtTime(packet.playerId, packet.hurtTime);
+            g_remotePlayerManager->SetDeathTime(packet.playerId, packet.deathTime);
         }
         m_stats.playerUpdates++;
         m_stats.packetsProcessed++;
@@ -191,11 +200,142 @@ namespace Client {
     // ========================================================================
 
     void ClientPacketHandler::handleRemoveEntities(const Network::RemoveEntitiesS2CPacket& packet) {
-        if (g_remotePlayerManager) {
-            for (int32_t entityId : packet.entityIds) {
+        // This packet carries both player and dropped-item ids. The id RANGE is
+        // what tells them apart — item entities are allocated from
+        // Game::kItemEntityIdBase upward, players use their (small) connection
+        // ids. Routing every id at the player map, as this used to, would make
+        // a despawning item silently evict a player.
+        for (int32_t entityId : packet.entityIds) {
+            if (Game::IsMobEntityId(entityId)) {
+                if (g_clientMobManager) g_clientMobManager->Remove(entityId);
+            } else if (Game::IsItemEntityId(entityId)) {
+                if (g_itemEntityManager) g_itemEntityManager->Remove(entityId);
+            } else if (g_remotePlayerManager) {
                 g_remotePlayerManager->RemovePlayer(static_cast<uint32_t>(entityId));
                 Log::Info("[ClientPacketHandler] Removed entity %d", entityId);
             }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
+    // DROPPED ITEM ENTITIES
+    // ========================================================================
+
+    void ClientPacketHandler::handleItemEntitySpawn(const Network::ItemEntitySpawnS2CPacket& packet) {
+        if (g_itemEntityManager) {
+            g_itemEntityManager->Spawn(packet.entityId, packet.position,
+                                       packet.velocity, packet.bobOffs,
+                                       packet.stack);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet) {
+        // MC also plays SoundEvents.ITEM_PICKUP here. This engine has no sound
+        // system yet (Game::PlaySound is a logging stub), so the animation goes
+        // out silent — that is the one piece of MC's pickup feedback missing.
+        if (g_itemEntityManager) {
+            g_itemEntityManager->TakeItem(packet.itemEntityId, packet.playerId,
+                                          packet.amount);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet) {
+        if (g_itemEntityManager) {
+            for (const auto& e : packet.entries) {
+                g_itemEntityManager->Move(e.entityId, e.position, e.velocity, e.count);
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    // ========================================================================
+    // MOB ENTITIES
+    // ========================================================================
+
+    void ClientPacketHandler::handleAddEntity(const Network::AddEntityS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->Spawn(packet.entityId, packet.entityType, packet.position,
+                                      packet.velocity,
+                                      Game::Mth::UnpackDegrees(packet.yRot),
+                                      Game::Mth::UnpackDegrees(packet.xRot),
+                                      Game::Mth::UnpackDegrees(packet.yHeadRot),
+                                      packet.health, packet.flags, packet.variantData,
+                                      packet.pose, packet.animState);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleMoveEntity(const Network::MoveEntityS2CPacket& packet) {
+        if (g_clientMobManager) {
+            for (const auto& e : packet.entries) {
+                // Deltas are in 1/4096 of a block — the same scale the sender
+                // encoded with. Decoding at any other scale produces mobs that
+                // drift a fixed fraction behind where the server has them.
+                const glm::dvec3 delta(
+                    Network::DecodeEntityPos(e.dx),
+                    Network::DecodeEntityPos(e.dy),
+                    Network::DecodeEntityPos(e.dz));
+
+                g_clientMobManager->MoveDelta(
+                    e.entityId, (e.mask & 0x01) != 0, delta, (e.mask & 0x02) != 0,
+                    Game::Mth::UnpackDegrees(e.yRot),
+                    Game::Mth::UnpackDegrees(e.xRot),
+                    Game::Mth::UnpackDegrees(e.yHeadRot),
+                    e.onGround);
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleEntityPositionSync(
+            const Network::EntityPositionSyncS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->Teleport(packet.entityId, packet.position, packet.velocity,
+                                         Game::Mth::UnpackDegrees(packet.yRot),
+                                         Game::Mth::UnpackDegrees(packet.xRot),
+                                         Game::Mth::UnpackDegrees(packet.yHeadRot),
+                                         packet.onGround);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleSetEntityMotion(
+            const Network::SetEntityMotionS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->SetMotion(packet.entityId, packet.velocity);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleSetEntityData(const Network::SetEntityDataS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->SetData(packet.entityId, packet.health, packet.flags,
+                                        packet.variantData, packet.hurtTime, packet.deathTime,
+                                        packet.swellDir, packet.swell,
+                                        packet.pose, packet.animState);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleHurtAnimation(const Network::HurtAnimationS2CPacket& packet) {
+        // MC ClientPacketListener.handleHurtAnimation -> entity.animateHurt(yaw),
+        // which for a Player also stores the direction (Player.animateHurt).
+        // The server only sends this to the entity's own client, so there is
+        // nothing to look up: it is always us.
+        if (m_player) {
+            m_player->hurtDuration = 10;
+            m_player->hurtTime     = m_player->hurtDuration;
+            m_player->hurtDir      = packet.yaw;
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleEntityEvent(const Network::EntityEventS2CPacket& packet) {
+        if (g_clientMobManager) {
+            g_clientMobManager->HandleEvent(packet.entityId, packet.event);
         }
         m_stats.packetsProcessed++;
     }
@@ -405,6 +545,15 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::handleContainerSetData(
+            const Network::ContainerSetDataS2CPacket& packet) {
+        // Mirrors ClientPacketListener.handleContainerSetData: write the value
+        // into the open menu's data array. The furnace screen reads it back the
+        // next frame to size its flame and arrow — nothing else to do.
+        ::Render::ApplyContainerData(packet.containerId, packet.id, packet.value);
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleInventorySetCarried(const Network::InventorySetCarriedS2CPacket& packet) {
         // Defined in AbstractContainerScreen.cpp; forward-declared at file scope at the top of this file
         // (avoids pulling in the GUI header from the network handler).
@@ -441,6 +590,15 @@ namespace Client {
         } else {
             ::Render::DismissDeathScreen();
         }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleCommands(const std::vector<std::string>& commandNames) {
+        Log::Info("[ClientPacketHandler] Server advertised %zu commands for tab-completion",
+                  commandNames.size());
+        // Fully qualified: this file lives in namespace Client, so a bare
+        // `Render::` would look for Client::Render first and not find it.
+        ::Render::SetServerCommandNames(commandNames);
         m_stats.packetsProcessed++;
     }
 

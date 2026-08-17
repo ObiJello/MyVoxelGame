@@ -234,6 +234,259 @@ namespace Packets {
     };
 
     // ========================================================================
+    // DROPPED ITEM ENTITIES
+    // ========================================================================
+
+    class ItemEntitySpawnS2CPacketImpl : public IS2CPacket {
+    private:
+        ItemEntitySpawnS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit ItemEntitySpawnS2CPacketImpl(ItemEntitySpawnS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onItemEntitySpawnS2C(m_data);
+        }
+
+        const ItemEntitySpawnS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::ItemEntitySpawnS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ItemEntityMoveS2CPacketImpl : public IS2CPacket {
+    private:
+        ItemEntityMoveS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit ItemEntityMoveS2CPacketImpl(ItemEntityMoveS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onItemEntityMoveS2C(m_data);
+        }
+
+        const ItemEntityMoveS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::ItemEntityMoveS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class TakeItemEntityS2CPacketImpl : public IS2CPacket {
+    private:
+        TakeItemEntityS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit TakeItemEntityS2CPacketImpl(TakeItemEntityS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onTakeItemEntityS2C(m_data);
+        }
+
+        const TakeItemEntityS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::TakeItemEntityS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
+    // MOB ENTITIES (MC clientbound entity packet family)
+    // ========================================================================
+
+    class AddEntityS2CPacketImpl : public IS2CPacket {
+    private:
+        AddEntityS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit AddEntityS2CPacketImpl(AddEntityS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onAddEntityS2C(m_data);
+        }
+
+        const AddEntityS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::AddEntityS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class MoveEntityS2CPacketImpl : public IS2CPacket {
+    private:
+        MoveEntityS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit MoveEntityS2CPacketImpl(MoveEntityS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onMoveEntityS2C(m_data);
+        }
+
+        const MoveEntityS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::MoveEntityS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class EntityPositionSyncS2CPacketImpl : public IS2CPacket {
+    private:
+        EntityPositionSyncS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit EntityPositionSyncS2CPacketImpl(EntityPositionSyncS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onEntityPositionSyncS2C(m_data);
+        }
+
+        const EntityPositionSyncS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::EntityPositionSyncS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class SetEntityMotionS2CPacketImpl : public IS2CPacket {
+    private:
+        SetEntityMotionS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit SetEntityMotionS2CPacketImpl(SetEntityMotionS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onSetEntityMotionS2C(m_data);
+        }
+
+        const SetEntityMotionS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::SetEntityMotionS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class SetEntityDataS2CPacketImpl : public IS2CPacket {
+    private:
+        SetEntityDataS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit SetEntityDataS2CPacketImpl(SetEntityDataS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onSetEntityDataS2C(m_data);
+        }
+
+        const SetEntityDataS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::SetEntityDataS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ClientboundHurtAnimationPacket — the victim's own camera tilt.
+    class HurtAnimationS2CPacketImpl : public IS2CPacket {
+    private:
+        HurtAnimationS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit HurtAnimationS2CPacketImpl(HurtAnimationS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onHurtAnimationS2C(m_data);
+        }
+
+        const HurtAnimationS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::HurtAnimationS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class EntityEventS2CPacketImpl : public IS2CPacket {
+    private:
+        EntityEventS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit EntityEventS2CPacketImpl(EntityEventS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onEntityEventS2C(m_data);
+        }
+
+        const EntityEventS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::EntityEventS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
+    // TICKING STATE / STEP (MC's two /tick packets)
+    // ========================================================================
+
+    class TickingStateS2CPacketImpl : public IS2CPacket {
+    private:
+        TickingStateS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit TickingStateS2CPacketImpl(TickingStateS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onTickingStateS2C(m_data);
+        }
+
+        const TickingStateS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::TickingStateS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class TickingStepS2CPacketImpl : public IS2CPacket {
+    private:
+        TickingStepS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit TickingStepS2CPacketImpl(TickingStepS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onTickingStepS2C(m_data);
+        }
+
+        const TickingStepS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::TickingStepS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // SIMPLE PACKETS (no data payload)
     // ========================================================================
     
@@ -327,6 +580,30 @@ namespace Packets {
     };
 
     // ========================================================================
+    // COMMANDS PACKET (server tells client which commands it accepts)
+    // ========================================================================
+
+    class CommandsS2CPacketImpl : public IS2CPacket {
+    private:
+        std::vector<std::string> m_commandNames;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit CommandsS2CPacketImpl(std::vector<std::string> names)
+            : m_commandNames(std::move(names))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onCommandsS2C(m_commandNames);
+        }
+
+        const std::vector<std::string>& getCommandNames() const { return m_commandNames; }
+
+        PacketId getId() const override { return PacketId::CommandsS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // ========================================================================
     // INVENTORY SYNC PACKETS
     // ========================================================================
 
@@ -383,6 +660,21 @@ namespace Packets {
         void apply(IPacketListener& listener) override { listener.onOpenScreenS2C(m_data); }
         const OpenScreenS2CPacket& getData() const { return m_data; }
         PacketId getId() const override { return PacketId::OpenScreenS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // One ContainerData index of the open menu changed (furnace burn/cook).
+    class ContainerSetDataS2CPacketImpl : public IS2CPacket {
+    private:
+        ContainerSetDataS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit ContainerSetDataS2CPacketImpl(ContainerSetDataS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onContainerSetDataS2C(m_data); }
+        const ContainerSetDataS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::ContainerSetDataS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

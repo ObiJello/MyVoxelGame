@@ -63,6 +63,9 @@ namespace Game {
         // Get the currently selected item.
         ItemID  GetSelectedItem()  const;
         BlockID GetSelectedBlock() const; // returns Air for non-block items
+        // The whole stack, for callers that need its components too (loot
+        // rolls read the tool's enchantments off it). MC Player.getMainHandItem.
+        const ItemStack& GetSelectedStack() const { return GetSlot(HotbarToIndex(selectedSlot)); }
 
         // Get slot at unified index (0..TOTAL_SIZE-1)
         const ItemStack& GetSlot(int index) const;
@@ -103,10 +106,12 @@ namespace Game {
         int  GetBlockCount(BlockID b) const { return GetItemCount(ItemRegistry::FromBlock(b)); }
 
         // Set a slot from server data (server-authoritative sync).
-        // Accepts the full unified index range.
-        void SetSlot(int index, ItemID id, int count = 64);
+        // Accepts the full unified index range. `count` is clamped to the
+        // item's own max stack size — it used to default to 64, which was a
+        // lie for the 256 items that don't stack that high.
+        void SetSlot(int index, ItemID id, int count);
         // Convenience overload for legacy block-only callers.
-        void SetSlot(int index, BlockID b, int count = 64) {
+        void SetSlot(int index, BlockID b, int count) {
             SetSlot(index, ItemRegistry::FromBlock(b), count);
         }
 

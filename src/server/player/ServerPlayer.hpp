@@ -15,6 +15,7 @@
 #include "common/inventory/InventoryMenu.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "FoodData.hpp"
+#include "PlayerExperience.hpp"
 
 namespace Game {
     class World;
@@ -169,6 +170,23 @@ namespace Server {
             return pending;
         }
 
+        // ── IUsePlayer: pending campfire food placement ───────────────────
+        // Recorded for the same reason as the menu request above: reaching the
+        // campfire's block entity needs the world, which PlayerSession has and
+        // the use dispatch does not.
+        struct PendingCampfireFood {
+            glm::ivec3 pos;
+            uint32_t   hand;
+        };
+        void PlaceCampfireFood(const glm::ivec3& pos, uint32_t hand) override {
+            m_pendingCampfireFood = PendingCampfireFood{pos, hand};
+        }
+        std::optional<PendingCampfireFood> takePendingCampfireFood() {
+            auto pending = m_pendingCampfireFood;
+            m_pendingCampfireFood.reset();
+            return pending;
+        }
+
         // === HAND SLOTS ===
         // hand 0 = main hand (hotbar 36 + selected), hand 1 = offhand (slot 45).
         // Mirrors MC Player.getItemInHand / setItemInHand.
@@ -269,6 +287,11 @@ namespace Server {
         FoodData&       getFoodData()       { return m_foodData; }
         const FoodData& getFoodData() const { return m_foodData; }
 
+        // XP — mirrors Player.experienceLevel / .experienceProgress. Read by
+        // the furnace payout, the anvil's level cost and the enchanting table.
+        PlayerExperience&       getExperience()       { return m_experience; }
+        const PlayerExperience& getExperience() const { return m_experience; }
+
         // Mirrors Player.canEat(canAlwaysEat) — canAlwaysEat || needsFood().
         bool canEat(bool canAlwaysEat) const {
             return canAlwaysEat || m_foodData.needsFood();
@@ -286,6 +309,36 @@ namespace Server {
         
         bool isOnGround() const { return m_onGround; }
         void setOnGround(bool onGround) { m_onGround = onGround; }
+
+        // MC Entity.isSprinting. Client-authoritative here (movement is), and
+        // recorded because Player.canCriticalAttack excludes a sprinting
+        // player — a sprint-hit is a KNOCKBACK attack in MC, never a crit.
+        bool isSprinting() const { return m_sprinting; }
+        void setSprinting(bool v) { m_sprinting = v; }
+
+        // MC LivingEntity.getKnownMovement, horizontal component, in blocks per
+        // tick. Read by the sweep-attack check (Player.isSweepAttack), which
+        // refuses to sweep when the attacker is moving faster than walking
+        // pace. Written from the move-packet delta, one packet per client tick.
+        double getKnownHorizontalMovement() const { return m_knownHorizontalMovement; }
+        void   setKnownHorizontalMovement(double v) { m_knownHorizontalMovement = v; }
+
+        // Monotonic count of landed damage events — see the bump in damage().
+        uint32_t getDamageCounter() const { return m_damageCounter; }
+
+        // ── Attack strength (MC Player.attackStrengthTicker) ───────────────
+        //
+        // The cooldown that makes 1.9+ combat what it is: swinging before the
+        // bar refills scales the damage down hard, and only a full-strength hit
+        // can crit or sweep.
+        int  getAttackStrengthTicker() const { return m_attackStrengthTicker; }
+        void resetAttackStrengthTicker() { m_attackStrengthTicker = 0; }
+
+        // 20 / ATTACK_SPEED, in ticks. An iron sword's 1.6/s is 12.5 ticks.
+        float getCurrentItemAttackStrengthDelay() const;
+        // MC clamps to [0,1]; `adjust` is the half-tick MC adds when attacking
+        // so a hit landing on the exact boundary counts as full strength.
+        float getAttackStrengthScale(float adjust) const;
         
         bool IsSneaking() const override { return m_sneaking; }
         void setSneaking(bool sneaking) { m_sneaking = sneaking; }
@@ -316,6 +369,14 @@ namespace Server {
         glm::vec2 m_rotation{0.0f, 0.0f}; // yaw, pitch
         glm::vec3 m_velocity{0.0f};
         bool m_onGround = true;
+        bool m_sprinting = false;
+        double m_knownHorizontalMovement = 0.0;
+        int  m_attackStrengthTicker = 0;
+        // MC Player.lastItemInMainHand — the ticker resets when the held item
+        // CHANGES KIND (ItemStack.isSameItem), so pulling a fresh sword out of
+        // the hotbar never hands you a charged swing. Count is deliberately not
+        // part of it: MC compares the item, not the stack size.
+        uint32_t m_lastItemInMainHand = 0;
         bool m_sneaking = false;
         // TODO: AABB m_boundingBox;
         int m_dimensionId = 0;
@@ -324,10 +385,12 @@ namespace Server {
         // === ATTRIBUTES & STATUS ===
         float m_health = 20.0f;
         bool  m_isDead = false;
+        uint32_t m_damageCounter = 0;
         // Hunger/saturation/exhaustion — MC FoodData port (FoodData.hpp).
         FoodData m_foodData;
-        // TODO: int m_experienceLevel = 0;
-        // TODO: float m_experienceProgress = 0.0f;
+        // XP — MC Player's experienceLevel / experienceProgress /
+        // totalExperience, with the level-curve arithmetic (PlayerExperience.hpp).
+        PlayerExperience m_experience;
         // TODO: std::vector<StatusEffect> m_effects;
         float m_stepHeight = 0.6f;
         float m_fallDistance = 0.0f;
@@ -363,7 +426,8 @@ namespace Server {
         // The menu on top — m_openContainerMenu when one is open, otherwise the
         // player's own.
         Game::AbstractContainerMenu* m_containerMenu = &m_inventoryMenu;
-        std::optional<PendingMenuOpen> m_pendingMenuOpen;
+        std::optional<PendingMenuOpen>     m_pendingMenuOpen;
+        std::optional<PendingCampfireFood> m_pendingCampfireFood;
         // TODO: ItemStack m_mainHand;
         // TODO: ItemStack m_offHand;
         // TODO: std::array<ItemStack, 4> m_armor;

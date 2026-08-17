@@ -6,6 +6,7 @@
 #include "common/core/Assert.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/PacketTypes.hpp"
+#include "server/IntegratedServer.hpp"
 
 namespace Server {
     
@@ -50,6 +51,10 @@ namespace Server {
         // keeps the request out of the many early-return paths, and still puts
         // the screen up on the same round trip as the interaction ack.
         m_session.FlushPendingMenuOpen();
+        // Same deal for a campfire that was handed food during the dispatch
+        // (IUsePlayer::PlaceCampfireFood) — the block entity lookup needs the
+        // world, which the dispatch doesn't carry.
+        m_session.FlushPendingCampfireFood();
     }
     
     void ServerPlayPacketListener::handleUseItem(const Network::UseItemC2SPacket& packet) {
@@ -106,6 +111,17 @@ namespace Server {
 
     void ServerPlayPacketListener::onPlayerAbilitiesC2S(const Network::PlayerAbilitiesC2SPacket& packet) {
         m_session.HandlePlayerAbilities(packet);
+    }
+
+    void ServerPlayPacketListener::onInteractC2S(const Network::InteractC2SPacket& packet) {
+        // Straight to the server rather than through the session: the mob
+        // system is owned by IntegratedServer, and PlayerSession has no reason
+        // to know about it.
+        if (!Server::g_integratedServer) return;
+        Server::g_integratedServer->HandleInteract(
+            m_connection.GetConnectionId(), packet.entityId,
+            packet.action == Network::InteractC2SPacket::Action::Attack,
+            packet.sprinting);
     }
 
     void ServerPlayPacketListener::onInventoryCloseC2S(const Network::InventoryCloseC2SPacket& packet) {

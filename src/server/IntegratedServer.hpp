@@ -8,6 +8,7 @@
 #include "common/world/level/World.hpp"
 #include "common/network/AsioInclude.hpp"
 #include "commands/CommandDispatcher.hpp"
+#include "ServerTickRateManager.hpp"
 #include <memory>
 #include <atomic>
 #include <thread>
@@ -17,13 +18,19 @@
 
 namespace Game {
     class ClientPlayer;
+    class MyTerrainGenerator;
 }
+
+// SummonMobs takes an EntityTypeId by value, so the enum must be complete
+// here rather than forward-declared.
+#include "common/entity/EntityType.hpp"
 
 namespace Server {
 
+    class PlayerEntityView;
+
     // Forward declarations
     class ChunkTicketManager;
-    class ChunkWatchIndex;
     class ChunkStatusManager;
     class SendScheduler;
     class PlayerSessionManager;
@@ -31,7 +38,12 @@ namespace Server {
     class PlayerSession;
     class SectionChangeAccumulator;
     class ChunkDeltaBroadcaster;
-    
+    class ItemEntityManager;
+    class MobManager;
+    class ServerLevelBridge;
+    class ServerEntityTracker;
+    struct ItemPickupEvent;
+
     // Server thread tracking
     extern std::thread::id g_serverThreadId;
 
@@ -51,6 +63,12 @@ namespace Server {
         // never get SetGenerationSeed and GetGenerationSeed() reports the
         // generator default — /seed says so rather than printing a wrong number.
         bool useMinecraftSave = false;
+        // Load the Anvil world but never write to it. Set for worlds imported
+        // from the player's real Minecraft installation: we do not implement
+        // enough of the save format to be trusted with somebody's actual
+        // survival world, and a partial rewrite would corrupt it. Blocks can
+        // still be broken during the session; nothing is persisted.
+        bool readOnlyWorld = false;
         int defaultGameMode = 0;               // World game mode applied to joining players (GameMode raw: 0 survival, 1 creative)
         int64_t initialDayTime = 6000;         // World time restored from world metadata (6000 = noon)
         bool doDaylightCycle = false;          // doDaylightCycle gamerule restored from world metadata
@@ -92,6 +110,10 @@ namespace Server {
 
         // Get the server-owned world instance
         Game::World* GetWorld() const { return m_world.get(); }
+
+        // MC MinecraftServer.tickRateManager(). Owns the tick budget, the
+        // freeze/step state and the sprint machinery that /tick drives.
+        ServerTickRateManager& tickRateManager() { return m_tickRateManager; }
         
         // Get the change accumulator for block updates
         SectionChangeAccumulator* GetChangeAccumulator() const { return m_changeAccumulator.get(); }
@@ -119,6 +141,11 @@ namespace Server {
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
 
+        // Dropped-item entities. Every "this produced an item in the world"
+        // path goes through here — block loot, container spill, player throws,
+        // and Game::DropItemStackNear. Null before the server has started.
+        ItemEntityManager* GetItemEntities() const { return m_itemEntities.get(); }
+
         // Get command dispatcher for server-side command execution
         CommandDispatcher& GetCommandDispatcher() { return m_commandDispatcher; }
 
@@ -137,10 +164,16 @@ namespace Server {
         // Measured 2026-08: a ServerWorker blocked in ServerChunkCache::getChunk
         // waits on THIS queue, so pumping it only at 20 TPS added ~25 ms of pure
         // latency to every chunk (measured wait 32.79 ms of a 68.68 ms load).
-        // onlyIfPending: skip entirely unless a blocked worker is actually
-        // waiting. The ~1 kHz idle-window caller passes true; the per-tick
-        // caller passes false so ticket propagation still runs every tick.
-        void PumpChunkPipeline(bool onlyIfPending = false);
+        //
+        // `deadline` is mandatory and is the ONLY bound on how long this runs.
+        // One unit of pipeline work is bounded; the pipeline is not. Every
+        // caller must pass a deadline it can afford to reach — see
+        // MyTerrainGenerator::PumpOneTask for what happened when nothing did.
+        void PumpChunkPipeline(std::chrono::steady_clock::time_point deadline);
+
+        // The terrain generator behind the chunk provider, or null before the
+        // provider is initialised. Server thread only.
+        Game::MyTerrainGenerator* GetTerrainGenerator() const;
 
         // Unload chunks that no player is watching (periodic cleanup)
         void UnloadUnwatchedChunks();
@@ -167,6 +200,20 @@ namespace Server {
 
         // Called when server receives client settings (render distance, etc.)
         void OnClientSettingsReceived(uint32_t connectionId, int requestedViewDistance);
+
+        // Clamp + apply a client's requested view distance to its session and
+        // echo the effective value back. Shared by the normal path and the
+        // deferred one below.
+        void ApplyClientViewDistance(PlayerSession& session, uint32_t connectionId,
+                                     int requestedViewDistance);
+
+        // Client settings that arrived before their session existed, keyed by
+        // connection id. The client sends ClientConfigC2S once, immediately
+        // after LoginSuccess, and it can beat OnPlayerJoined; dropping it left
+        // the session stuck at its starting view distance of 2 with no retry.
+        // Drained in OnPlayerJoined, and erased on disconnect so a connection
+        // id that gets reused cannot inherit a stale entry.
+        std::unordered_map<uint32_t, int> m_pendingClientViewDistance;
 
         // Send the effective view distance to the client
         void SendSetChunkCacheRadius(uint32_t connectionId, int viewDistance);
@@ -216,7 +263,11 @@ namespace Server {
         
         // New session management system
         std::unique_ptr<ChunkTicketManager> m_ticketManager;
-        std::unique_ptr<ChunkWatchIndex> m_watchIndex;
+
+        // By value, not a unique_ptr: it has no dependencies to construct and
+        // the server loop reads it every iteration, so an indirection would be
+        // on the hot path for nothing.
+        ServerTickRateManager m_tickRateManager{*this};
         std::unique_ptr<ChunkStatusManager> m_statusManager;
         std::unique_ptr<SendScheduler> m_sendScheduler;
         std::unique_ptr<PlayerSessionManager> m_sessionManager;
@@ -225,6 +276,25 @@ namespace Server {
         // Block change accumulation and broadcasting
         std::unique_ptr<SectionChangeAccumulator> m_changeAccumulator;
         std::unique_ptr<ChunkDeltaBroadcaster> m_deltaBroadcaster;
+
+        // Dropped items in the world. Server-authoritative; clients receive
+        // snapshots only. Memory-only by design — item entities do not persist
+        // across a save/load (see the 5-minute despawn).
+        std::unique_ptr<ItemEntityManager> m_itemEntities;
+
+        // ── Mobs ────────────────────────────────────────────────────────────
+        //
+        // Three collaborating pieces, deliberately separate:
+        //   m_mobLevel   the Game::EntityLevel the ported entity code talks to,
+        //                plus the per-session player views mobs target
+        //   m_mobs       ownership, ticking and the spatial index
+        //   m_mobTracker who has been told about what, and the wire encoding
+        //
+        // Memory-only, like item entities: there is no entity NBT layer, so
+        // mobs die with their chunk and natural spawning refills it.
+        std::unique_ptr<ServerLevelBridge>   m_mobLevel;
+        std::unique_ptr<MobManager>          m_mobs;
+        std::unique_ptr<ServerEntityTracker> m_mobTracker;
 
         // Player reference (for integrated server)
         Game::ClientPlayer* m_player = nullptr;
@@ -247,7 +317,15 @@ namespace Server {
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
         // Chunk management
+        // In flight: a load job exists and will produce a result, which pushes
+        // the chunk to every tracking player. Cleared only by that result.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_pendingChunkLoads;
+        // Loads that came back with success=false (I/O error, corrupt region).
+        // The worker queue never refuses a job, so this is the only way a
+        // request can go unanswered — and since delivery is push-based, nothing
+        // would otherwise ask for the chunk again. Drained each tick; in a
+        // healthy session it is always empty.
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_failedChunkLoads;
 
         // Statistics
         ServerStats m_stats;
@@ -290,6 +368,108 @@ namespace Server {
 
         // Process async chunk load results from ServerWorkerPool
         void ProcessAsyncChunkResults();
+
+        // ========================================================================
+        // ITEM ENTITY BROADCAST
+        // ========================================================================
+
+        // Send this tick's item-entity position refreshes. Scoped per chunk —
+        // a client is only told about items in chunks it is actually watching,
+        // which matters because items outnumber players by orders of magnitude.
+        void BroadcastItemEntityUpdates(int64_t serverTick);
+
+        // ========================================================================
+        // MOB ENTITIES
+        // ========================================================================
+
+        // One tick of the whole mob system: sync the player views, tick the
+        // mobs, run the natural spawner, then drain the tracker's packets.
+        void TickMobs(int64_t serverTick);
+
+        // MC NaturalSpawner's per-tick pass over the spawnable chunk set.
+        void RunNaturalSpawner(int64_t serverTick);
+
+        // Handle a client's attack on a mob (MC ServerboundInteractPacket).
+        // Public entry point for the play packet listener.
+    public:
+        // `sprinting` comes from the client because movement is
+        // client-authoritative here; MC reads it from its own copy of the
+        // player. It only ever REMOVES a crit and adds knockback, so a client
+        // lying about it can make its own hits weaker, not stronger.
+        void HandleInteract(uint32_t connectionId, int32_t entityId, bool attack,
+                            bool sprinting);
+
+        // MC's post-hit visuals: entity event 4 for the swing, plus the crit
+        // particle burst. Broadcast so every watcher sees them, not just the
+        // attacker.
+        void BroadcastAttackEffects(const Game::LivingEntity& target, bool crit);
+
+        // MC Player.doSweepAttack — the sword arc that clips everything living
+        // standing next to what was hit. Split out of HandleInteract for the
+        // same reason MC splits it: the conditions that decide whether it
+        // happens are already a paragraph on their own.
+        void DoSweepAttack(Server::PlayerEntityView& attacker,
+                           Game::LivingEntity& target, float strengthScale);
+
+        // MC Entity.onClimbable, reduced to the block the feet are in — this
+        // port has no block tags at runtime, so BlockTags.CLIMBABLE is a switch.
+        bool IsOnClimbable(const ServerPlayer& player) const;
+
+        // The entity view backing a connected player. Exposed because the
+        // player-position broadcast reads its hurtTime for the flash, and the
+        // view is where LivingEntity::Hurt actually set it.
+        Server::PlayerEntityView* GetPlayerEntityView(uint32_t connectionId);
+
+        // MC's crit is a particle burst plus a sound; this port has neither
+        // yet, so the event exists to carry the signal and the client draws
+        // what it can. Numbered clear of MC's own 2/3/10/18/60.
+        static constexpr uint8_t kEntityEventCrit = 200;
+
+        // Spawn `count` mobs of `type` at `pos`, for /summon. Returns how many
+        // were actually created. Scattered slightly so a stack of them does not
+        // spawn inside one another and immediately push apart.
+        int SummonMobs(Game::EntityTypeId type, const glm::dvec3& pos, int count);
+
+        // MC EntityType.spawn(level, stack, user, pos, SPAWN_ITEM_USE,
+        // tryMoveDown, movedUp) — the spawn-egg path. Reached from common code
+        // through Game::SpawnMobFromItem; see WorldMobSpawn.hpp for why the
+        // indirection exists and what the two flags mean.
+        //
+        // Distinct from SummonMobs because the placement rules differ: /summon
+        // puts a mob exactly where it is told, an egg drops it onto the surface
+        // it was clicked against.
+        bool SpawnMobFromItemUse(Game::EntityTypeId type, const glm::ivec3& spawnPos,
+                                 bool tryMoveDown, bool movedUp);
+
+        // Read-only, for the debug panel. Null before the session system is
+        // initialised. Callers must treat this as a same-thread snapshot
+        // source only — the mobs themselves tick on the server thread.
+        MobManager* GetMobs() const { return m_mobs.get(); }
+    private:
+
+        // Tell everyone an item is gone (picked up, merged away, despawned, or
+        // its chunk unloaded). Unscoped: a client that has already dropped the
+        // chunk simply has no such entity and ignores the id, and that is much
+        // cheaper than tracking who was told about what.
+        void BroadcastItemEntityRemovals(const std::vector<int32_t>& ids);
+
+        // Tell clients a player collected items, so they can play the
+        // fly-into-the-player animation. This ALSO retires the entity
+        // client-side for a full pickup — see BroadcastItemEntityRemovals.
+        void BroadcastItemEntityPickups(
+            const std::vector<ItemPickupEvent>& pickups);
+
+        // Full spawn packet for one entity, to the watchers of its chunk.
+        void BroadcastItemEntitySpawn(int32_t id);
+
+        // Send one already-serialized packet to every player watching the chunk
+        // a position falls in. The scoping is the point: item entities are far
+        // more numerous than players, so the naive broadcast-to-everyone used
+        // for player positions would not scale here.
+        void SendToChunkWatchers(const glm::dvec3& pos, Network::PacketId packetId,
+                                 const std::vector<uint8_t>& data);
+        void SendToChunkWatchersAt(Game::Math::ChunkPos chunk, Network::PacketId packetId,
+                                   const std::vector<uint8_t>& data);
 
         // ========================================================================
         // BLOCK CHANGE PROCESSING (Private implementation details)

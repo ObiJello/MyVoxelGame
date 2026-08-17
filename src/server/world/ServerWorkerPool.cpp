@@ -9,6 +9,7 @@
 #include "platform/GameDirectory.hpp"
 #include <algorithm>
 #include <future>
+#include <limits>
 
 namespace Threading {
 
@@ -48,10 +49,10 @@ namespace Threading {
             return;
         }
         
-        // Queue sized for max view distance (32) + margin
-        m_maxQueueSize = 5120;
-        Log::Info("ServerWorkerPool queue size set to %zu", m_maxQueueSize);
-        
+        // No queue capacity to configure: the queue is unbounded, like MC's
+        // ChunkTaskDispatcher, and self-limiting because a chunk can only be
+        // in flight once. See EnqueueJob.
+
         m_running.store(true);
 
         Log::Info("Starting %zu server worker threads...", m_workerCount);
@@ -200,8 +201,7 @@ namespace Threading {
     void ServerWorkerPool::CancelAllJobs() {
         {
             std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-            std::queue<ServerJob> empty;
-            std::swap(m_jobQueue, empty);
+            m_jobQueue.clear();
         }
 
         {
@@ -408,34 +408,86 @@ namespace Threading {
     bool ServerWorkerPool::EnqueueJob(ServerJob&& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
 
-        // Check queue size limit
-        if (m_jobQueue.size() >= m_maxQueueSize) {
-            // Caller MUST handle this. A dropped job produces no result, and
-            // IntegratedServer treats "requested but no result yet" as
-            // permanently in-flight — see RequestChunkLoad.
-            Log::Warning("Server worker queue full (%zu jobs), dropping job for chunk (%d, %d)",
-                         m_jobQueue.size(), job.chunkPos.x, job.chunkPos.z);
-            return false;
-        }
-
-        m_jobQueue.push(std::move(job));
+        // No capacity limit, matching MC: ChunkTaskDispatcher holds one task per
+        // scheduled chunk and never refuses one. The bound here is the same one
+        // MC has — a chunk can only be requested once while in flight
+        // (IntegratedServer::m_pendingChunkLoads), so depth is bounded by the
+        // players' tracking views, ~1k per player.
+        //
+        // Dropping was worse than it looked: a dropped job produces no result,
+        // and the requester treats "requested, no result yet" as permanently in
+        // flight, so the chunk needed an out-of-band retry list to come back at
+        // all. Accepting the job removes that entire failure mode.
+        m_jobQueue.push_back(std::move(job));
         lock.unlock();
         m_jobCondition.notify_one();
         return true;
     }
 
+    // Port of MC ChunkTaskDispatcher's priority ordering, which submits every
+    // generation task with `() -> center.getQueueLevel()` — a key re-evaluated
+    // at poll time rather than fixed at submit time, because the thing it
+    // measures (distance from a player) moves.
+    //
+    // Ours reads the same way: the job whose chunk is nearest to any player is
+    // taken next. Sorting at SUBMIT time instead would be stale the moment the
+    // player walked, and would order a burst of a thousand requests by where
+    // the player was when the burst began.
+    //
+    // Linear scan under the lock, exactly like ClientWorkerPool::PollNearestLocked
+    // (the in-repo port of CompileTaskDynamicQueue.poll). Polls are bounded by
+    // worker throughput, so this is a few hundred distance computations a second.
     bool ServerWorkerPool::DequeueJob(ServerJob& job) {
         std::unique_lock<std::mutex> lock(m_jobQueueMutex);
 
         m_jobCondition.wait(lock, [this] { return !m_jobQueue.empty() || !m_running.load(); });
 
-        if (!m_jobQueue.empty()) {
-            job = std::move(m_jobQueue.front());
-            m_jobQueue.pop();
-            return true;
+        if (m_jobQueue.empty()) {
+            return false;
         }
 
-        return false;
+        std::vector<Game::Math::ChunkPos> anchors;
+        {
+            std::lock_guard<std::mutex> anchorLock(m_anchorMutex);
+            anchors = m_anchors;
+        }
+
+        size_t best = 0;
+        int64_t bestKey = std::numeric_limits<int64_t>::max();
+        for (size_t i = 0; i < m_jobQueue.size(); ++i) {
+            const ServerJob& candidate = m_jobQueue[i];
+
+            // Saves and world I/O carry no meaningful position; run them ahead
+            // of terrain so they cannot be starved behind a streaming burst.
+            int64_t key = -1;
+            if (candidate.type == ServerJobType::CHUNK_GENERATION ||
+                candidate.type == ServerJobType::CHUNK_LOADING) {
+                key = std::numeric_limits<int64_t>::max();
+                for (const auto& anchor : anchors) {
+                    const int64_t dx = candidate.chunkPos.x - anchor.x;
+                    const int64_t dz = candidate.chunkPos.z - anchor.z;
+                    key = std::min(key, dx * dx + dz * dz);
+                }
+            }
+            if (key < bestKey) {
+                bestKey = key;
+                best = i;
+            }
+        }
+
+        job = std::move(m_jobQueue[best]);
+        // Swap-and-pop: selection is purely by key, so the container has no
+        // meaningful order to preserve.
+        if (best != m_jobQueue.size() - 1) {
+            m_jobQueue[best] = std::move(m_jobQueue.back());
+        }
+        m_jobQueue.pop_back();
+        return true;
+    }
+
+    void ServerWorkerPool::SetAnchors(std::vector<Game::Math::ChunkPos> anchors) {
+        std::lock_guard<std::mutex> lock(m_anchorMutex);
+        m_anchors = std::move(anchors);
     }
 
     void ServerWorkerPool::SendChunkGenResult(Game::Math::ChunkPos chunkPos, std::shared_ptr<Game::Chunk> chunk, bool success, const std::string& error) {
@@ -483,6 +535,12 @@ namespace Threading {
     void SubmitServerChunkGeneration(Game::Math::ChunkPos chunkPos, int priority) {
         if (g_serverWorkerPool) {
             g_serverWorkerPool->SubmitChunkGeneration(chunkPos, priority);
+        }
+    }
+
+    void SetServerChunkLoadAnchors(std::vector<Game::Math::ChunkPos> anchors) {
+        if (g_serverWorkerPool) {
+            g_serverWorkerPool->SetAnchors(std::move(anchors));
         }
     }
 

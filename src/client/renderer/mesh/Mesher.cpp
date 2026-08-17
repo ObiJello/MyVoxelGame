@@ -52,6 +52,22 @@ namespace Render {
     // Positions outside the cached halo return Air (the fluid builder and AO
     // only ever sample within +/-1 of the section, which the halo covers).
     namespace {
+        // The `age` of a melon/pumpkin stem, for the StemAge tint. Reads the
+        // state definition rather than assuming state index == age: that
+        // happens to hold today (stems declare `age` as their only property)
+        // but would silently produce wrong colours the moment one gained a
+        // second property.
+        int StemAgeOf(Game::BlockID id, uint8_t stateIndex) {
+            const std::string_view v =
+                Game::BlockRegistry::GetStateDefinition(id).ValueOf(stateIndex, "age");
+            int n = 0;
+            for (char c : v) {
+                if (c < '0' || c > '9') return 0;
+                n = n * 10 + (c - '0');
+            }
+            return n;
+        }
+
         class CacheBlockAccess final : public Game::IBlockAccess {
         public:
             CacheBlockAccess(const Game::BlockID (&cache)[18][18][18],
@@ -270,6 +286,34 @@ namespace Render {
                 } else if (is("attached_melon_stem") || is("attached_pumpkin_stem")) {
                     p.tintSource = TS::Constant;  // BlockColors.java: -2046180
                     p.tintConstant = 0xE0C71C;
+                } else if (is("redstone_wire")) {
+                    // MC BlockColors registers RedStoneWireBlock.getColorForPower;
+                    // RedStoneWireBlock.java:453-461 builds the table as
+                    //   red   = power*0.6 + (power > 0 ? 0.4 : 0.3)
+                    //   green = clamp(power*power*0.7 - 0.5, 0, 1)
+                    //   blue  = clamp(power*power*0.6 - 0.7, 0, 1)
+                    // At power 0 that is (0.3, 0, 0) -> 0x4D0000, the dark red
+                    // of unpowered dust. A CONSTANT is exactly right here: there
+                    // is no redstone power simulation, so every wire is at 0.
+                    // When power arrives this becomes a per-state resolver, the
+                    // same shape as the stem tint below.
+                    //
+                    // The dust texture is greyscale and relies entirely on this
+                    // tint — untinted it renders white.
+                    p.tintSource = TS::Constant;
+                    p.tintConstant = 0x4D0000;
+                } else if (is("melon_stem") || is("pumpkin_stem")) {
+                    // BlockColors.java:54-57 — a growing stem fades from green
+                    // to the attached stem's yellow as it ages:
+                    //   ARGB.color(age * 32, 255 - age * 8, age * 4)
+                    // MC also calls addColoringState(StemBlock.AGE, …), which
+                    // is what tells it to re-bake per state; here the per-state
+                    // part is the stateIndex threaded into AddBlockFace.
+                    //
+                    // There is only ONE stem texture (melon_stem.png), greyscale
+                    // — every stage's colour comes from this tint, so without it
+                    // a whole field of stems renders identically grey-green.
+                    p.tintSource = TS::StemAge;
                 }
             }
             switch (block.renderLayer) {
@@ -319,79 +363,53 @@ namespace Render {
         }
     }
 
-    void Mesher::FillBlockCacheFromSnapshot(const Client::Render::SectionSnapshot& snapshot,
-                                            Game::Math::ChunkPos chunkPos, int sectionY) {
+    void Mesher::FillBlockCacheFromRegion(const Client::Render::RegionSnapshot& region,
+                                          Game::Math::ChunkPos chunkPos, int sectionY) {
         PROFILE_ZONE;
         m_sectionBaseWorldX = chunkPos.x * 16;
         m_sectionBaseWorldY = sectionY * 16 + Config::MinY;
         m_sectionBaseWorldZ = chunkPos.z * 16;
 
-        // Snapshots leave `states` empty for sections that have none, which is
-        // the overwhelming majority — keep the whole state path switched off in
-        // that case rather than memcpying 4 KB of zeroes.
-        m_biomeSource = &snapshot;
+        m_biomeSource = &region;
         m_biomeAccess = nullptr;
 
-        m_stateCacheAllDefault = snapshot.states.empty();
-        if (!m_stateCacheAllDefault) {
-            for (int y = 0; y < 16; ++y)
-                for (int z = 0; z < 16; ++z)
-                    std::memcpy(&m_stateCache[y][z][0], &snapshot.states[y * 256 + z * 16], 16);
+        const Client::Render::SectionCopy* centre = region.Centre();
+
+        // Interior 16^3, walked as one linear pass over the centre section's
+        // container. Index i in the container is the same [y][z][x] ordering
+        // the cache uses (Math::LocalIndex), so the coordinates come out of i
+        // by shifting rather than from a triple loop, and each voxel costs one
+        // container read plus one Unpack for the block AND its state together.
+        //
+        // MC reads its region per voxel in exactly this way
+        // (RenderSectionRegion.getBlockState); there is no contiguous array to
+        // memcpy from once the storage is paletted, and that is the trade the
+        // palette makes everywhere else too.
+        m_stateCacheAllDefault = true;
+        for (int i = 0; i < 4096; ++i) {
+            const int lx = i & 15;
+            const int lz = (i >> 4) & 15;
+            const int ly = (i >> 8) & 15;
+
+            const Game::BlockStateRef ref = Game::BlockStateIds::Unpack(
+                centre ? centre->GetStateId(static_cast<size_t>(i))
+                       : Game::BlockStateIds::Pack(Game::BlockID::Air, 0));
+
+            m_blockCache[ly + 1][lz + 1][lx + 1] = ref.id;
+            m_stateCache[ly][lz][lx] = ref.state;
+            if (ref.state != 0) m_stateCacheAllDefault = false;
         }
 
-        static_assert(sizeof(Game::BlockID) == sizeof(uint16_t),
-                      "BlockID size changed — update FillBlockCacheFromSnapshot memcpys");
-        constexpr size_t ROW_BYTES = 16 * sizeof(Game::BlockID);
-
-        // Interior 16^3: snapshot layout is blocks[y*256 + z*16 + x] (x contiguous),
-        // matching the cache's [y][z][x] layout — one memcpy per (y,z) row.
-        for (int y = 0; y < 16; ++y) {
-            for (int z = 0; z < 16; ++z) {
-                std::memcpy(&m_blockCache[y + 1][z + 1][1],
-                            &snapshot.blocks[y * 256 + z * 16], ROW_BYTES);
-            }
-        }
-
-        // Axis-aligned halo faces from the neighbor boundary planes.
-        // Plane indexing (see SectionSnapshot): N/S = [y*16+x], E/W = [y*16+z], U/D = [z*16+x].
-        for (int z = 0; z < 16; ++z) {  // Down (ly=-1): neighbor below's y=15 plane
-            std::memcpy(&m_blockCache[0][z + 1][1], &snapshot.neighbors[5][z * 16], ROW_BYTES);
-        }
-        for (int z = 0; z < 16; ++z) {  // Up (ly=16): neighbor above's y=0 plane
-            std::memcpy(&m_blockCache[17][z + 1][1], &snapshot.neighbors[4][z * 16], ROW_BYTES);
-        }
-        for (int y = 0; y < 16; ++y) {  // North (lz=-1): north neighbor's z=15 plane
-            std::memcpy(&m_blockCache[y + 1][0][1], &snapshot.neighbors[0][y * 16], ROW_BYTES);
-        }
-        for (int y = 0; y < 16; ++y) {  // South (lz=16): south neighbor's z=0 plane
-            std::memcpy(&m_blockCache[y + 1][17][1], &snapshot.neighbors[1][y * 16], ROW_BYTES);
-        }
-        for (int y = 0; y < 16; ++y) {  // West (lx=-1) / East (lx=16): strided in z
-            for (int z = 0; z < 16; ++z) {
-                m_blockCache[y + 1][z + 1][0]  = snapshot.neighbors[3][y * 16 + z];
-                m_blockCache[y + 1][z + 1][17] = snapshot.neighbors[2][y * 16 + z];
-            }
-        }
-
-        // Halo edges/corners (2+ axes out of range): the snapshot only carries
-        // face planes, so replicate SnapshotBlockAccess's dominant-axis rule
-        // (priority Y > X > Z, other coordinates clamped into [0,15]). Each
-        // such cell equals an already-filled face cell with the non-dominant
-        // coordinates clamped — avoids bright AO seams at section borders.
-        auto clampIn = [](int v) { return v < 0 ? 1 : (v > 15 ? 16 : v + 1); };
+        // The halo: faces, edges AND corners, every one a real block from the
+        // neighbouring section copies rather than a clamped approximation.
         for (int ly = -1; ly <= 16; ++ly) {
-            const bool oy = (ly < 0 || ly > 15);
             for (int lz = -1; lz <= 16; ++lz) {
-                const bool oz = (lz < 0 || lz > 15);
                 for (int lx = -1; lx <= 16; ++lx) {
-                    const bool ox = (lx < 0 || lx > 15);
-                    if (static_cast<int>(oy) + static_cast<int>(oz) + static_cast<int>(ox) < 2)
-                        continue;
-                    Game::BlockID v;
-                    if (oy)      v = m_blockCache[ly + 1][clampIn(lz)][clampIn(lx)];
-                    else if (ox) v = m_blockCache[ly + 1][clampIn(lz)][lx + 1];
-                    else         v = m_blockCache[ly + 1][lz + 1][clampIn(lx)];
-                    m_blockCache[ly + 1][lz + 1][lx + 1] = v;
+                    const bool interior = (lx >= 0 && lx < 16) &&
+                                          (ly >= 0 && ly < 16) &&
+                                          (lz >= 0 && lz < 16);
+                    if (interior) continue;
+                    m_blockCache[ly + 1][lz + 1][lx + 1] = region.BlockAtLocal(lx, ly, lz);
                 }
             }
         }
@@ -436,10 +454,10 @@ namespace Render {
         BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
     }
 
-    void Mesher::BuildSectionMesh(const Client::Render::SectionSnapshot& snapshot,
+    void Mesher::BuildSectionMesh(const Client::Render::RegionSnapshot& region,
                                   Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
         EnsureBlockPropsCache();
-        FillBlockCacheFromSnapshot(snapshot, chunkPos, sectionY);
+        FillBlockCacheFromRegion(region, chunkPos, sectionY);
         BuildSectionMeshFromCache(chunkPos, sectionY, outMesh);
     }
 
@@ -587,7 +605,7 @@ namespace Render {
                 }
 
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
-                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, worldX, worldY, worldZ, blockLayer, mesh);
+                AddBlockFace(blocks, model, element, faceDir, faceDef, worldPos, faceNormal, blockId, stateIndex, worldX, worldY, worldZ, blockLayer, mesh);
                 m_lastStats.facesGenerated++;
             }
         }
@@ -597,6 +615,7 @@ namespace Render {
                              const Game::BlockModel& model, const Game::Element& element,
                              Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                              glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
+                             uint8_t stateIndex,
                              int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh) {
 
         // Lookup UV rect from thread-local cache (persists across Mesher instances,
@@ -648,6 +667,19 @@ namespace Render {
                         tintColor = BlendedBiomeTint(BiomeChannel::Grass, worldX, worldY, worldZ);
                     }
                     break;
+                case TS::StemAge: {
+                    // BlockColors.java:54-57, verbatim:
+                    //   ARGB.color(age * 32, 255 - age * 8, age * 4)
+                    // age 0 = (0, 255, 0) bright green; age 7 = (224, 199, 28),
+                    // which is exactly the attached stem's constant, so a stem
+                    // that matures and attaches does not visibly change colour.
+                    const int age = StemAgeOf(blockId, stateIndex);
+                    tintColor = glm::vec4(static_cast<float>(age * 32)       / 255.0f,
+                                          static_cast<float>(255 - age * 8)  / 255.0f,
+                                          static_cast<float>(age * 4)        / 255.0f,
+                                          1.0f);
+                    break;
+                }
             }
         }
 
@@ -739,9 +771,12 @@ namespace Render {
 
     uint16_t Mesher::ResolveBiome(int worldX, int worldY, int worldZ) const {
         if (m_biomeSource) {
-            return m_biomeSource->GetBiomeLocal(worldX - m_sectionBaseWorldX,
-                                                worldY - m_sectionBaseWorldY,
-                                                worldZ - m_sectionBaseWorldZ);
+            // The region covers the whole 3x3x3 neighbourhood, so the blend
+            // margin resolves against real neighbour biomes rather than against
+            // a clamped edge of a per-job margin grid.
+            return m_biomeSource->BiomeAtLocal(worldX - m_sectionBaseWorldX,
+                                               worldY - m_sectionBaseWorldY,
+                                               worldZ - m_sectionBaseWorldZ);
         }
         return m_biomeAccess ? m_biomeAccess->GetBiome(worldX, worldY, worldZ) : 0;
     }
@@ -1067,13 +1102,16 @@ namespace Render {
     }
 
     float Mesher::GetDirectionalShade(BlockFace face) {
+        // Values live in Game::DirectionalShade (BlockModel.hpp) so the chunk
+        // mesher and the item-model builder cannot drift apart — a dropped
+        // block has to be shaded identically to the one it came from.
         switch (face) {
-            case BlockFace::PositiveY: return 1.0f;  // UP
-            case BlockFace::NegativeY: return 0.5f;  // DOWN
-            case BlockFace::PositiveZ: return 0.8f;  // SOUTH
-            case BlockFace::NegativeZ: return 0.8f;  // NORTH
-            case BlockFace::PositiveX: return 0.6f;  // EAST
-            case BlockFace::NegativeX: return 0.6f;  // WEST
+            case BlockFace::PositiveY: return Game::DirectionalShade(Game::FaceDir::Up);
+            case BlockFace::NegativeY: return Game::DirectionalShade(Game::FaceDir::Down);
+            case BlockFace::PositiveZ: return Game::DirectionalShade(Game::FaceDir::South);
+            case BlockFace::NegativeZ: return Game::DirectionalShade(Game::FaceDir::North);
+            case BlockFace::PositiveX: return Game::DirectionalShade(Game::FaceDir::East);
+            case BlockFace::NegativeX: return Game::DirectionalShade(Game::FaceDir::West);
             default: return 1.0f;
         }
     }

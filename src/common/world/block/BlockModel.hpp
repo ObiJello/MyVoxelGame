@@ -118,6 +118,30 @@ namespace Game {
     glm::vec3 ApplyElementRotation(const glm::vec3& point, const ElementRotation& rot,
                                    float scale = 1.0f);
 
+    // MC's fixed per-face brightness multiplier — the "fake directional light"
+    // that makes a cube's top read brighter than its sides with no light source
+    // involved (ClientLevel.getShade / ModelBlockRenderer). Baked into vertex
+    // colour at mesh-build time on every path that draws a block model, so a
+    // block looks the same in the world, in your hand, and lying on the ground.
+    //
+    // Gated per element by `Element::shade` below: models that opt out (crossed
+    // planes like saplings and torches) would otherwise show their two quads at
+    // visibly different brightness.
+    //
+    // CANONICAL. Mesher::GetDirectionalShade delegates here — do not fork a
+    // second copy of these numbers, or terrain and items will disagree.
+    constexpr float DirectionalShade(FaceDir dir) {
+        switch (dir) {
+            case FaceDir::Up:    return 1.0f;   // +Y
+            case FaceDir::Down:  return 0.5f;   // -Y
+            case FaceDir::North:                // -Z
+            case FaceDir::South: return 0.8f;   // +Z
+            case FaceDir::West:                 // -X
+            case FaceDir::East:  return 0.6f;   // +X
+        }
+        return 1.0f;
+    }
+
     // One cuboid "element" of the model (Minecraft models can have multiple cuboids)
     struct Element {
         glm::vec3 from{0.0f};                           // Bottom-left-back corner in 0-16 model space

@@ -1,5 +1,6 @@
 // File: src/client/entity/Player.cpp
 #include "Player.hpp"
+#include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/core/Log.hpp"
@@ -34,6 +35,66 @@ namespace Game {
 
         Log::Info("ClientPlayer initialized at position (%.2f, %.2f, %.2f)",
                   physics.position.x, physics.position.y, physics.position.z);
+    }
+
+    void ClientPlayer::Tick() {
+        // MC Player.tick:257-266. These are the client's own copies of the
+        // attack cooldown — the attack indicator IS attackStrengthTicker, and
+        // the server keeps an identical one so the bar and the damage agree.
+        //
+        // They live in the 20 Hz tick, NOT in UpdatePhysics: that runs once per
+        // FRAME, so counting there filled the bar at frame rate (three times
+        // too fast at 60 fps) and the indicator read full while the server was
+        // still charging.
+        ++attackStrengthTicker;
+        ++itemSwapTicker;
+
+        // MC compares the ITEM (ItemStack.isSameItem), not the slot: moving
+        // between two hotbar slots holding the same sword keeps the charge,
+        // and a stack that changes under a stationary selection loses it.
+        //
+        // An item change resets BOTH tickers (Player.resetAttackStrengthTicker);
+        // an ATTACK resets only the attack one (onAttack →
+        // resetOnlyAttackStrengthTicker, done in the controller's attack path).
+        const uint32_t heldNow = static_cast<uint32_t>(inventory.GetSelectedItem());
+        if (heldNow != m_lastItemInMainHand) {
+            m_lastItemInMainHand = heldNow;
+            attackStrengthTicker = 0;
+            itemSwapTicker = 0;
+        }
+
+        // MC LivingEntity.baseTick counts the hurt flash down; tickDeath counts
+        // the death animation up and stops at 20 (where the camera roll's
+        // asymptote leaves it).
+        if (hurtTime > 0) --hurtTime;
+        if (health <= 0) {
+            if (deathTime < 20) ++deathTime;
+        } else {
+            deathTime = 0;
+        }
+    }
+
+    float ClientPlayer::GetCurrentItemAttackStrengthDelay() const {
+        float itemDamage = 0.0f, itemSpeed = 0.0f;
+        Game::GetItemAttackAttributes(
+            static_cast<uint32_t>(inventory.GetSelectedItem()), itemDamage, itemSpeed);
+        const float attackSpeed = Game::kPlayerBaseAttackSpeed + itemSpeed;
+        // A pathological modifier could zero this; a NaN delay would make every
+        // swing read as fully charged. Mirrors ServerPlayer's guard.
+        if (attackSpeed <= 0.0f) return 1.0e6f;
+        return 20.0f / attackSpeed;
+    }
+
+    float ClientPlayer::GetAttackStrengthScale(float adjust) const {
+        const float v = (static_cast<float>(attackStrengthTicker) + adjust)
+                      / GetCurrentItemAttackStrengthDelay();
+        return std::clamp(v, 0.0f, 1.0f);
+    }
+
+    float ClientPlayer::GetItemSwapScale(float adjust) const {
+        const float v = (static_cast<float>(itemSwapTicker) + adjust)
+                      / GetCurrentItemAttackStrengthDelay();
+        return std::clamp(v, 0.0f, 1.0f);
     }
 
     void ClientPlayer::UpdatePhysics(float deltaTime, IBlockAccess* blockAccess) {
@@ -92,11 +153,7 @@ namespace Game {
 
     void ClientPlayer::UpdateRaycast(const Render::Camera& camera) {
         // Calculate ray direction from camera
-        glm::vec3 front;
-        front.x = cos(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
-        front.y = sin(glm::radians(camera.pitch));
-        front.z = sin(glm::radians(camera.yaw)) * cos(glm::radians(camera.pitch));
-        front = glm::normalize(front);
+        const glm::vec3 front = camera.GetForward();
 
         // Cache the live look direction so consumers (e.g. portal-gun
         // projectile spawn) can use the camera-space forward without

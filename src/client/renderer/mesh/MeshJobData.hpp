@@ -4,6 +4,8 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/biome/Biomes.hpp"
+#include "common/world/chunk/PalettedContainer.hpp"
+#include "common/world/block/BlockStateIds.hpp"
 #include <array>
 #include <vector>
 #include <atomic>
@@ -13,117 +15,132 @@
 namespace Client {
 namespace Render {
 
-    // Snapshot of section data for thread-safe mesh building
-    // This is a COPY of the chunk data that workers can safely read
-    struct SectionSnapshot {
-        // Block data (16x16x16 = 4096 blocks)
-        std::array<Game::BlockID, 4096> blocks;
-        
-        // Light data (sky and block light, 4 bits each)
-        std::array<uint8_t, 2048> lightData;
-        
-        // Neighbor boundary planes for face culling (16x16 = 256 blocks per face).
-        // Only the single layer adjacent to this section is needed (mesher reads 1 block into neighbors).
-        // Index: 0=north(-z, stores z=15), 1=south(+z, stores z=0),
-        //        2=east(+x, stores x=0), 3=west(-x, stores x=15),
-        //        4=up(+y, stores y=0), 5=down(-y, stores y=15)
-        std::array<std::array<Game::BlockID, 256>, 6> neighbors;
-        
-        // Per-voxel block-state indices, in the same [y*256 + z*16 + x] layout
-        // as `blocks`. Left EMPTY when the source section carries no states,
-        // which is the case for essentially all terrain (ChunkSection::states
-        // is lazily allocated for the same reason) — an always-present array
-        // would add 4 KB to every snapshot in flight for nothing.
-        //
-        // No neighbour planes: unlike block ids, states are only read for the
-        // block being meshed. Face culling and AO care about the neighbour's
-        // opacity, which is a property of the block id alone.
-        std::vector<uint8_t> states;
+    // ── Shared per-section copy (MC SectionCopy) ────────────────────────
+    //
+    // One immutable copy of ONE section, shared by every mesh job that needs
+    // it. Direct port of net.minecraft.client.renderer.chunk.SectionCopy:
+    // taken on the main thread, handed to workers by shared_ptr, never mutated.
+    //
+    // Sharing is the whole point. A section is read by its own mesh job AND by
+    // the 26 jobs around it, so a private copy per job duplicates the same
+    // blocks 27 times. MC keeps one copy per section in a per-frame cache
+    // (RenderRegionCache) and hands out references; this does the same.
+    //
+    // MC sets `section = null` for a section that hasOnlyAir() and answers AIR
+    // for every read. `allAir` is that: most of a 384-block column is sky, and
+    // those sections cost a control block and nothing else.
+    struct SectionCopy {
+        bool allAir = true;
 
-        // Noise biomes covering this section PLUS the margin MC's biome blend
-        // reaches. ClientLevel.calculateBlockTint averages a
-        // (2*biomeBlendRadius+1)^2 square with the vanilla default radius of 2,
-        // so a tint at x needs biomes from x-2 to x+17 — quart cells -1 through
-        // 4, i.e. 6 per horizontal axis. Vertically only the section's own four
-        // quart layers are needed, because the blend samples at a fixed Y.
+        // MC SectionCopy keeps `levelChunkSection.getStates().copy()` — the
+        // section's own PalettedContainer, not an unpacked array. So does this
+        // now: a copy is the palette plus the packed words, roughly 2 KB for
+        // ordinary terrain against the 8 KB flat array it replaced, and nothing
+        // at all for a uniform section.
         //
-        // 6*4*6 = 144 entries (288 bytes), always present when the chunk has
-        // biome data. Copying it into the snapshot is what keeps mesh workers
-        // off the live chunk map.
-        static constexpr int BIOME_XZ = 6;
-        static constexpr int BIOME_Y  = 4;
-        std::array<uint16_t, BIOME_XZ * BIOME_Y * BIOME_XZ> biomes{};
+        // That matters more here than anywhere else: the compile queue is
+        // unbounded, so a pass holds one copy per distinct section it touched.
+        Game::PalettedContainer states;
+
+        // Biomes: 4x4x4 quart cells for this section.
+        //
+        // MC does NOT carry these — RenderSectionRegion.getBlockTint delegates
+        // to the live Level from the worker thread. We deliberately do not: our
+        // mesh workers must never touch the live chunk map, and MC gets away
+        // with it only because its ClientLevel chunk array is safe to read
+        // concurrently.
         bool hasBiomes = false;
+        Game::PalettedContainer biomes;
 
-        // `lx`/`lz` are section-local BLOCK coordinates and may run from -2 to
-        // 17; `ly` is 0..15. Out-of-grid asks clamp, which only happens if a
-        // caller reaches further than the blend radius.
-        uint16_t GetBiomeLocal(int lx, int ly, int lz) const {
+        Game::BlockID GetBlock(int lx, int ly, int lz) const {
+            if (allAir) return Game::BlockID::Air;
+            return Game::BlockStateIds::Unpack(
+                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).id;
+        }
+
+        uint8_t GetState(int lx, int ly, int lz) const {
+            if (allAir) return 0;
+            return Game::BlockStateIds::Unpack(
+                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).state;
+        }
+
+        // Flat state id without unpacking — the mesher's cache fill wants the
+        // block and the state together, so it pays one Unpack instead of two.
+        uint32_t GetStateId(size_t index) const {
+            return allAir ? Game::BlockStateIds::Pack(Game::BlockID::Air, 0) : states.Get(index);
+        }
+
+        uint16_t GetBiome(int qx, int qy, int qz) const {
             if (!hasBiomes) return Game::kFallbackBiomeId;
-            auto quart = [](int v) {
-                // Floor-divide by 4 then shift into the grid (which starts at
-                // quart cell -1). Arithmetic shift keeps negatives flooring.
-                const int q = (v >> 2) + 1;
-                return q < 0 ? 0 : (q >= BIOME_XZ ? BIOME_XZ - 1 : q);
-            };
-            const int qx = quart(lx);
-            const int qz = quart(lz);
-            int qy = ly >> 2;
-            if (qy < 0) qy = 0; else if (qy >= BIOME_Y) qy = BIOME_Y - 1;
-            return biomes[static_cast<size_t>((qy * BIOME_XZ + qz) * BIOME_XZ + qx)];
+            return static_cast<uint16_t>(
+                biomes.Get(static_cast<size_t>((qy * 4 + qz) * 4 + qx)));
+        }
+    };
+
+    using SectionCopyPtr = std::shared_ptr<const SectionCopy>;
+
+    // ── The 3x3x3 neighbourhood a section is meshed against ─────────────────
+    //
+    // Port of MC RenderSectionRegion (RADIUS 1, SIZE 3, 27 sections). Holds
+    // REFERENCES, so constructing one is 27 pointer copies.
+    //
+    // Carrying all 27 is also a correctness fix, not only a memory one: the
+    // previous snapshot carried the six face planes and synthesised edges and
+    // corners with a dominant-axis clamp, which is an approximation that shows
+    // up as wrong ambient occlusion along section borders. Every neighbour is
+    // now present, so those reads are exact.
+    struct RegionSnapshot {
+        static constexpr int RADIUS = 1;
+        static constexpr int SIZE   = 3;
+
+        // Section coordinates of the corner (centre - 1 on each axis).
+        int minSectionX = 0, minSectionY = 0, minSectionZ = 0;
+        std::array<SectionCopyPtr, SIZE * SIZE * SIZE> sections;
+
+        static int Index(int dx, int dy, int dz) {
+            return (dz * SIZE + dy) * SIZE + dx;   // dx,dy,dz in [0,2]
         }
 
-        // Metadata
-        bool isEmpty = true;
-        int sectionY = 0;
-
-        // Copy block at local coordinates (0-15)
-        void SetBlock(int x, int y, int z, Game::BlockID block) {
-            if (x >= 0 && x < 16 && y >= 0 && y < 16 && z >= 0 && z < 16) {
-                blocks[y * 256 + z * 16 + x] = block;
-                if (block != Game::BlockID::Air) {
-                    isEmpty = false;
-                }
+        // `lx/ly/lz` are LOCAL to the centre section and may run from -16 to 31;
+        // meshing only ever reaches -1..16.
+        const SectionCopy* SectionForLocal(int lx, int ly, int lz) const {
+            const int dx = (lx >> 4) + RADIUS;
+            const int dy = (ly >> 4) + RADIUS;
+            const int dz = (lz >> 4) + RADIUS;
+            if (dx < 0 || dx >= SIZE || dy < 0 || dy >= SIZE || dz < 0 || dz >= SIZE) {
+                return nullptr;
             }
+            return sections[Index(dx, dy, dz)].get();
         }
 
-        void SetBlockState(int x, int y, int z, uint8_t stateIndex) {
-            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return;
-            if (states.empty()) {
-                if (stateIndex == 0) return;   // still all-default; stay unallocated
-                states.assign(4096, 0);
-            }
-            states[y * 256 + z * 16 + x] = stateIndex;
+        Game::BlockID BlockAtLocal(int lx, int ly, int lz) const {
+            const SectionCopy* sec = SectionForLocal(lx, ly, lz);
+            if (!sec) return Game::BlockID::Air;
+            return sec->GetBlock(lx & 15, ly & 15, lz & 15);
         }
 
-        uint8_t GetBlockState(int x, int y, int z) const {
-            if (states.empty()) return 0;
-            if (x < 0 || x >= 16 || y < 0 || y >= 16 || z < 0 || z >= 16) return 0;
-            return states[y * 256 + z * 16 + x];
+        // Flat state id, for the cache fill that wants block and state together.
+        uint32_t StateIdAtLocal(int lx, int ly, int lz) const {
+            const SectionCopy* sec = SectionForLocal(lx, ly, lz);
+            if (!sec) return Game::BlockStateIds::Pack(Game::BlockID::Air, 0);
+            return sec->GetStateId(
+                static_cast<size_t>(Game::Math::LocalIndex(lx & 15, ly & 15, lz & 15)));
         }
-        
-        // Get block at local coordinates (0-15)
-        Game::BlockID GetBlock(int x, int y, int z) const {
-            if (x >= 0 && x < 16 && y >= 0 && y < 16 && z >= 0 && z < 16) {
-                return blocks[y * 256 + z * 16 + x];
-            }
-            return Game::BlockID::Air;
+
+        uint16_t BiomeAtLocal(int lx, int ly, int lz) const {
+            const SectionCopy* sec = SectionForLocal(lx, ly, lz);
+            if (!sec) return Game::kFallbackBiomeId;
+            // Block-local -> quart cell within the section.
+            return sec->GetBiome((lx & 15) >> 2, (ly & 15) >> 2, (lz & 15) >> 2);
         }
-        
-        // Get block from neighbor boundary plane.
-        // Each face stores a 16x16 plane (256 blocks) — the single layer adjacent to this section.
-        // Coordinates are remapped to 2D based on which axis the face is perpendicular to.
-        Game::BlockID GetNeighborBlock(int face, int x, int y, int z) const {
-            if (face < 0 || face >= 6) return Game::BlockID::Air;
-            int idx;
-            switch (face) {
-                case 0: case 1: idx = y * 16 + x; break;  // N/S: plane perpendicular to Z
-                case 2: case 3: idx = y * 16 + z; break;  // E/W: plane perpendicular to X
-                case 4: case 5: idx = z * 16 + x; break;  // U/D: plane perpendicular to Y
-                default: return Game::BlockID::Air;
-            }
-            if (idx < 0 || idx >= 256) return Game::BlockID::Air;
-            return neighbors[face][idx];
+
+        const SectionCopy* Centre() const {
+            return sections[Index(RADIUS, RADIUS, RADIUS)].get();
+        }
+
+        bool CentreIsEmpty() const {
+            const SectionCopy* c = Centre();
+            return !c || c->allAir;
         }
     };
 
@@ -142,8 +159,9 @@ namespace Render {
         // Section Y coordinate (-4 to 19 for world height -64 to 319)
         int sectionY;
         
-        // Snapshot of this section's data
-        SectionSnapshot sectionData;
+        // The 3x3x3 neighbourhood this section is meshed against. Shares its
+        // SectionCopy objects with every other job built in the same pass.
+        RegionSnapshot region;
         
         // Job type (full mesh or border-only for empty sections)
         MeshJobType jobType = MeshJobType::Full;

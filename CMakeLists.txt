@@ -486,6 +486,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/sky_vk.frag
             ${VK_SHADER_DIR}/clouds_vk.vert
             ${VK_SHADER_DIR}/clouds_vk.frag
+            ${VK_SHADER_DIR}/entity_vk.vert
+            ${VK_SHADER_DIR}/entity_vk.frag
         )
         set(VK_SPV_FILES)
         foreach(SHADER ${VK_SHADERS})
@@ -530,10 +532,13 @@ set(GAME_SOURCES
             src/platform/Time.hpp
             src/platform/GameDirectory.cpp
             src/platform/GameDirectory.hpp
+            src/platform/CrashHandler.cpp
+            src/platform/CrashHandler.hpp
 
             # Core systems
             src/common/core/Log.cpp
             src/common/core/Log.hpp
+            src/common/core/Mth.hpp
             src/common/core/JobSystem.cpp
             src/common/core/JobSystem.hpp
             src/common/core/ThreadAllocator.cpp
@@ -554,12 +559,29 @@ set(GAME_SOURCES
             src/client/entity/Player.hpp
             src/client/entity/RemotePlayerManager.cpp
             src/client/entity/RemotePlayerManager.hpp
+            src/client/entity/ItemEntityManager.cpp
+            src/client/entity/ItemEntityManager.hpp
+            src/client/entity/ClientMobManager.cpp
+            src/client/entity/ClientMobManager.hpp
 
             # Client rendering - Entity
             src/client/renderer/entity/PlayerRenderer.cpp
             src/client/renderer/entity/PlayerRenderer.hpp
+            src/client/renderer/entity/ItemEntityRenderer.cpp
+            src/client/renderer/entity/ItemEntityRenderer.hpp
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/entity/StickFigureGeometry.hpp
+            src/client/renderer/entity/MobRenderer.cpp
+            src/client/renderer/entity/MobRenderer.hpp
+            src/client/renderer/entity/model/ModelPart.cpp
+            src/client/renderer/entity/model/ModelPart.hpp
+            src/client/renderer/entity/model/EntityModels.cpp
+            src/client/renderer/entity/model/GeneratedEntityModels.cpp
+            src/client/renderer/entity/model/GeneratedAnimations.cpp
+            src/client/renderer/entity/model/KeyframeAnimation.cpp
+            src/client/renderer/entity/model/GeneratedSetupAnim.cpp
+            src/client/renderer/entity/model/SetupAnimRunner.cpp
+            src/client/renderer/entity/model/EntityModels.hpp
 
             # Client rendering - Shader
             src/client/renderer/shader/Shader.cpp
@@ -598,7 +620,8 @@ set(GAME_SOURCES
             src/client/renderer/mesh/Mesher.hpp
             src/client/renderer/mesh/SectionMesh.hpp
             src/client/renderer/mesh/MeshJobData.hpp
-            src/client/renderer/mesh/SnapshotBuilder.hpp
+            src/client/renderer/mesh/RenderRegionCache.hpp
+            src/client/renderer/mesh/RenderRegionCache.cpp
 
             # Client rendering - BlockEntity (BER)
             src/client/renderer/blockentity/BlockEntityRenderer.hpp
@@ -608,6 +631,9 @@ set(GAME_SOURCES
             src/client/renderer/blockentity/BlockEntityRenderers.cpp
             src/client/renderer/blockentity/ChestRenderer.hpp
             src/client/renderer/blockentity/ChestRenderer.cpp
+            src/client/renderer/blockentity/CampfireRenderer.cpp
+            src/client/renderer/blockentity/ShulkerBoxRenderer.cpp
+            src/client/renderer/blockentity/ShulkerBoxRenderer.hpp
 
             # Client rendering - Culling
             src/client/renderer/culling/VisibilitySet.hpp
@@ -644,6 +670,10 @@ set(GAME_SOURCES
             src/client/renderer/gui/CreativeModeInventoryScreen.hpp
             src/client/renderer/gui/CreativeModeInventoryScreen.cpp
             src/client/renderer/gui/CraftingScreen.hpp
+            src/client/renderer/gui/ContainerScreen.cpp
+            src/client/renderer/gui/ContainerScreen.hpp
+            src/client/renderer/gui/FurnaceScreen.cpp
+            src/client/renderer/gui/FurnaceScreen.hpp
             src/client/renderer/gui/CraftingScreen.cpp
 
             # Client rendering - Menu screens (title / options tree)
@@ -735,7 +765,11 @@ set(GAME_SOURCES
             src/common/world/block/BlockInteraction.hpp
             src/common/world/block/BlockRegistry.cpp
             src/common/world/block/BlockBehaviors.cpp
+            src/common/world/block/BlockGrowth.cpp
+            src/common/world/block/RedstoneWire.cpp
+            src/common/world/block/RedstoneWire.hpp
             src/common/world/block/BlockRegistry.hpp
+            src/common/world/block/BlockStateIds.hpp
             src/common/world/block/Blocks.hpp
             src/common/world/block/MiningSpeed.cpp
             src/common/world/block/MiningSpeed.hpp
@@ -745,12 +779,26 @@ set(GAME_SOURCES
             src/common/world/block/entity/BlockEntityType.hpp
             src/common/world/block/entity/BlockEntityTypes.hpp
             src/common/world/block/entity/BlockEntityTypes.cpp
+            src/common/world/block/entity/BaseContainerBlockEntity.hpp
             src/common/world/block/entity/ChestBlockEntity.hpp
+            src/common/world/block/entity/FurnaceBlockEntity.cpp
+            src/common/world/block/entity/CampfireBlockEntity.cpp
+            src/common/world/level/WorldDrops.cpp
+            src/common/world/level/WorldMobSpawn.cpp
+            src/common/world/block/GeneratedBlockShapes.cpp
+            src/common/world/block/entity/FurnaceBlockEntity.hpp
+            src/common/world/block/entity/DoubleChest.cpp
+            src/common/world/block/entity/DoubleChest.hpp
 
             # Common world - Chunk
             src/common/world/chunk/Chunk.cpp
             src/common/world/chunk/Chunk.hpp
             src/common/world/chunk/ChunkSection.hpp
+            src/common/world/chunk/PalettedContainer.hpp
+            src/common/world/chunk/BitStorage.hpp
+            src/common/world/chunk/IBlockAccess.cpp
+            src/common/world/chunk/Heightmap.cpp
+            src/common/world/chunk/Heightmap.hpp
             src/common/world/chunk/IBlockAccess.hpp
 
             # Common world - Level
@@ -777,10 +825,94 @@ set(GAME_SOURCES
             # Common entity
             src/common/entity/Inventory.cpp
             src/common/entity/Inventory.hpp
+            src/common/entity/ItemEntity.cpp
+            src/common/entity/ItemEntity.hpp
             src/common/entity/GeneratedItemList.cpp
             src/common/entity/GeneratedItemList.hpp
             src/common/entity/PlayerColors.cpp
             src/common/entity/PlayerColors.hpp
+
+            # Common entity - mob system (MC net.minecraft.world.entity port)
+            src/common/entity/EntityType.hpp
+            src/common/entity/MobCategory.hpp
+            src/common/entity/EntityLevel.hpp
+            src/common/entity/Attributes.cpp
+            src/common/entity/Attributes.hpp
+            src/common/entity/Entity.cpp
+            src/common/entity/Entity.hpp
+            src/common/entity/LivingEntity.cpp
+            src/common/entity/LivingEntity.hpp
+            src/common/entity/Mob.cpp
+            src/common/entity/Mob.hpp
+            src/common/entity/Monster.cpp
+            src/common/entity/Monster.hpp
+            src/common/entity/Animal.cpp
+            src/common/entity/GeneratedEntityTypes.cpp
+            src/common/entity/GeneratedMobDefs.cpp
+            src/common/entity/mobs/GenericMobs.cpp
+    src/common/entity/mobs/AnimatedMobs.cpp
+    src/common/entity/GeneratedItemAttributes.cpp
+    src/common/entity/ai/goals/LongJumpGoal.cpp
+    src/common/entity/ai/brain/Brain.cpp
+    src/common/entity/ai/brain/CoreBehaviors.cpp
+    src/common/entity/ai/brain/CommonBehaviors.cpp
+    src/common/entity/ai/navigation/AmphibiousPathNavigation.cpp
+    src/common/entity/ai/brain/FrogAi.cpp
+    src/common/entity/ai/brain/CamelAi.cpp
+    src/common/entity/ai/brain/TadpoleAi.cpp
+    src/common/entity/ai/brain/HoglinAi.cpp
+    src/common/entity/ai/brain/GoatAi.cpp
+    src/common/entity/ai/brain/GeneratedMemoryModules.cpp
+            src/common/entity/Animal.hpp
+            src/common/entity/mobs/Monsters.cpp
+            src/common/entity/mobs/Monsters.hpp
+            src/common/entity/mobs/Animals.cpp
+            src/common/entity/mobs/Animals.hpp
+
+            # Common entity - AI
+            src/common/entity/ai/Goal.cpp
+            src/common/entity/ai/Goal.hpp
+            src/common/entity/ai/Controls.cpp
+            src/common/entity/ai/Controls.hpp
+            src/common/entity/ai/Sensing.cpp
+            src/common/entity/ai/Sensing.hpp
+            src/common/entity/ai/TargetingConditions.cpp
+            src/common/entity/ai/TargetingConditions.hpp
+            src/common/entity/ai/RandomPos.cpp
+            src/common/entity/ai/RandomPos.hpp
+            src/common/entity/ai/navigation/PathNavigation.cpp
+            src/common/entity/ai/navigation/PathNavigation.hpp
+            src/common/entity/ai/goals/BasicGoals.cpp
+            src/common/entity/ai/goals/BasicGoals.hpp
+            src/common/entity/ai/goals/AttackGoals.cpp
+            src/common/entity/ai/goals/AttackGoals.hpp
+            src/common/entity/ai/goals/TargetGoals.cpp
+            src/common/entity/ai/goals/TargetGoals.hpp
+            src/common/entity/ai/goals/AnimalGoals.cpp
+            src/common/entity/ai/goals/AnimalGoals.hpp
+
+            # Common world - pathfinder (MC world.level.pathfinder port)
+            src/common/world/pathfinder/PathType.hpp
+            src/common/world/pathfinder/PathTypeTable.cpp
+            src/common/world/pathfinder/PathTypeTable.hpp
+            src/common/world/pathfinder/Node.cpp
+            src/common/world/pathfinder/Node.hpp
+            src/common/world/pathfinder/Path.cpp
+            src/common/world/pathfinder/Path.hpp
+            src/common/world/pathfinder/NodeEvaluator.cpp
+            src/common/world/pathfinder/NodeEvaluator.hpp
+            src/common/world/pathfinder/PathFinder.cpp
+            src/common/world/pathfinder/PathFinder.hpp
+
+            # Common world - mob loot
+            src/common/world/loot/GeneratedMobLoot.cpp
+            src/common/world/loot/GeneratedMobLoot.hpp
+
+            # Common world - natural spawning
+            src/common/world/spawn/NaturalSpawner.cpp
+            src/common/world/spawn/NaturalSpawner.hpp
+            src/common/world/spawn/GeneratedMobSpawns.cpp
+            src/common/world/spawn/GeneratedMobSpawns.hpp
 
             # Common network
             src/common/network/MessageQueue.hpp
@@ -794,9 +926,13 @@ set(GAME_SOURCES
             # Server
             src/server/IntegratedServer.cpp
             src/server/IntegratedServer.hpp
+            src/server/ServerTickRateManager.cpp
+            src/server/ServerTickRateManager.hpp
             src/server/commands/CommandDispatcher.hpp
             src/server/commands/CommandDispatcher.cpp
             src/server/commands/TeleportCommand.hpp
+            src/server/commands/EntitySelector.cpp
+            src/server/commands/SheepEatCommand.cpp
             src/server/commands/TeleportCommand.cpp
             src/server/commands/KickCommand.hpp
             src/server/commands/KickCommand.cpp
@@ -809,6 +945,8 @@ set(GAME_SOURCES
             src/server/commands/GameRuleCommand.hpp
             src/server/commands/GameRuleCommand.cpp
             src/server/commands/SeedCommand.cpp
+            src/server/commands/TickCommand.hpp
+            src/server/commands/TickCommand.cpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp
@@ -824,6 +962,16 @@ set(GAME_SOURCES
 
             src/server/player/ServerPlayer.cpp
             src/server/player/ServerPlayer.hpp
+            src/server/commands/SummonCommand.cpp
+            src/server/commands/SummonCommand.hpp
+            src/server/entity/MobManager.cpp
+            src/server/entity/MobManager.hpp
+            src/server/entity/ServerLevelBridge.cpp
+            src/server/entity/ServerLevelBridge.hpp
+            src/server/entity/ServerEntityTracker.cpp
+            src/server/entity/ServerEntityTracker.hpp
+            src/server/entity/ItemEntityManager.cpp
+            src/server/entity/ItemEntityManager.hpp
             src/server/level/PlayerSpawnFinder.cpp
             src/server/level/PlayerSpawnFinder.hpp
 
@@ -836,17 +984,33 @@ set(GAME_SOURCES
             src/common/inventory/AbstractCraftingMenu.cpp
             src/common/inventory/AbstractCraftingMenu.hpp
             src/common/inventory/SimpleContainer.hpp
+            src/common/inventory/ContainerData.hpp
+            src/common/inventory/CompoundContainer.hpp
             src/common/inventory/MenuType.hpp
             src/common/inventory/InventoryMenu.cpp
             src/common/inventory/InventoryMenu.hpp
             src/common/inventory/CraftingMenu.cpp
             src/common/inventory/CraftingMenu.hpp
+            src/common/inventory/ChestMenu.cpp
+            src/common/inventory/ChestMenu.hpp
+            src/common/inventory/FurnaceMenu.cpp
+            src/common/inventory/FurnaceMenu.hpp
+            src/common/inventory/UtilityMenus.cpp
+            src/common/inventory/UtilityMenus.hpp
+            src/common/inventory/SystemMenus.cpp
+            src/common/inventory/SystemMenus.hpp
 
             # Crafting recipes (generated table + matcher)
             src/common/world/crafting/GeneratedRecipeList.hpp
             src/common/world/crafting/GeneratedRecipeList.cpp
             src/common/world/crafting/RecipeManager.hpp
             src/common/world/crafting/RecipeManager.cpp
+
+            # Block loot tables (generated table + evaluator)
+            src/common/world/loot/GeneratedLootTables.hpp
+            src/common/world/loot/GeneratedLootTables.cpp
+            src/common/world/loot/LootTables.hpp
+            src/common/world/loot/LootTables.cpp
 
             # Server world - Cache
             src/server/world/cache/ChunkCache.cpp
@@ -898,8 +1062,8 @@ set(GAME_SOURCES
             # New session management system
             src/server/world/ticketing/ChunkTicketManager.cpp
             src/server/world/ticketing/ChunkTicketManager.hpp
-            src/server/world/watch/ChunkWatchIndex.cpp
-            src/server/world/watch/ChunkWatchIndex.hpp
+            src/server/world/watch/ChunkTrackingView.hpp
+            src/common/world/math/ChunkViewDistance.hpp
             src/server/world/status/ChunkStatusManager.cpp
             src/server/world/status/ChunkStatusManager.hpp
             src/server/world/tracking/SectionChangeAccumulator.cpp
@@ -939,6 +1103,7 @@ set(GAME_SOURCES
             src/common/entity/FoodDefs.cpp
             src/server/player/FoodData.cpp
             src/server/player/FoodData.hpp
+            src/server/player/PlayerExperience.hpp
             src/common/entity/ItemModelLoader.cpp
             src/common/entity/ItemModelLoader.hpp
             src/common/entity/ClientItemLoader.cpp
@@ -980,6 +1145,8 @@ set(GAME_SOURCES
             src/client/renderer/viewmodel/HeldItemRenderer.hpp
             src/client/renderer/viewmodel/HeldItemSpriteMesh.cpp
             src/client/renderer/viewmodel/HeldItemSpriteMesh.hpp
+            src/client/renderer/viewmodel/ItemMeshBuilder.cpp
+            src/client/renderer/viewmodel/ItemMeshBuilder.hpp
 )
 
 if(APPLE)

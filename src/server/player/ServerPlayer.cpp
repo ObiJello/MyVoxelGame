@@ -1,5 +1,6 @@
 // File: src/server/player/ServerPlayer.cpp
 #include "ServerPlayer.hpp"
+#include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/entity/ConsumableBehavior.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
@@ -44,7 +45,46 @@ namespace Server {
 
     // === LIFECYCLE ===
 
+    float ServerPlayer::getCurrentItemAttackStrengthDelay() const {
+        // MC: 1 / ATTACK_SPEED * 20. The player's base is 4.0 and the held
+        // weapon's modifier is ADDED to it, so a bare hand refills in 5 ticks
+        // and an axe in 20-25.
+        float itemDamage = 0.0f, itemSpeed = 0.0f;
+        Game::GetItemAttackAttributes(
+            m_inventory.GetSlot(Game::Inventory::HotbarToIndex(
+                m_inventory.GetSelectedSlot())).itemId,
+            itemDamage, itemSpeed);
+        const float attackSpeed = Game::kPlayerBaseAttackSpeed + itemSpeed;
+        // A pathological modifier could zero this; MC would divide by zero too,
+        // but a NaN delay would make every hit read as full strength.
+        if (attackSpeed <= 0.0f) return 1.0e6f;
+        return 20.0f / attackSpeed;
+    }
+
+    float ServerPlayer::getAttackStrengthScale(float adjust) const {
+        const float delay = getCurrentItemAttackStrengthDelay();
+        const float v = (static_cast<float>(m_attackStrengthTicker) + adjust) / delay;
+        return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    }
+
     void ServerPlayer::tick(Game::World* world, int currentTick) {
+        // MC Player.tick: the ticker counts up every tick and is reset by an
+        // attack or a change of held item.
+        ++m_attackStrengthTicker;
+
+        // MC Player.tick:259-266 — resetAttackStrengthTicker() when the
+        // main-hand item is no longer `isSameItem` as last tick. Without this
+        // the server keeps charging through a hotbar switch while the client
+        // (which does reset) shows an empty bar, so the two disagree about how
+        // much damage the next swing deals.
+        const uint32_t mainHand = static_cast<uint32_t>(
+            m_inventory.GetSlot(Game::Inventory::HotbarToIndex(
+                m_inventory.GetSelectedSlot())).itemId);
+        if (mainHand != m_lastItemInMainHand) {
+            m_lastItemInMainHand = mainHand;
+            resetAttackStrengthTicker();
+        }
+
         // TODO: Update invulnerability timer
         if (m_invulnerabilityTicks > 0) {
             m_invulnerabilityTicks--;
@@ -458,6 +498,12 @@ namespace Server {
         
         // Apply damage
         m_health = std::max(0.0f, m_health - amount);
+        // Bumped on every landed hit so the entity view can notice damage that
+        // did NOT come through it — fall, void, starvation — and still start
+        // the hurt flash and the client's camera tilt. MC gets that for free by
+        // routing every source through LivingEntity.hurtServer; here the two
+        // paths only meet at this line.
+        ++m_damageCounter;
         m_invulnerabilityTicks = 10; // 0.5 seconds
         
         Log::Info("ServerPlayer: Player %u took %.1f damage from %d (health: %.1f)",

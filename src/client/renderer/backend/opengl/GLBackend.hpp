@@ -27,10 +27,14 @@ namespace Render {
         void SetClearColor(float r, float g, float b, float a) override;
         void Clear(bool color, bool depth, bool stencil = false) override;
         void SetViewport(int x, int y, int width, int height) override;
+        void SetScissorRect(int x, int y, int w, int h) override;
+        void ClearScissorRect() override;
 
         // Buffers
         BufferHandle CreateBuffer(BufferUsage usage, size_t size,
                                  const void* data, BufferAccess access) override;
+        void UpdateBufferUnsynchronized(BufferHandle handle, size_t offset,
+                                        size_t size, const void* data) override;
         void UpdateBuffer(BufferHandle handle, size_t offset,
                          size_t size, const void* data) override;
         void DestroyBuffer(BufferHandle handle) override;
@@ -203,6 +207,10 @@ namespace Render {
 
         // Window reference
         GLFWwindow* m_window = nullptr;
+        // Tracked from SetViewport so SetScissorRect can flip a top-left rect
+        // into GL's bottom-left origin. glGet on every scissor call would be a
+        // driver round-trip; this costs a store per viewport change.
+        int m_viewportHeight = 0;
 
         // Currently bound handles
         ShaderHandle m_boundShader = INVALID_SHADER;

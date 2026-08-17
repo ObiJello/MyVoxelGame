@@ -1,6 +1,7 @@
 // File: src/common/entity/ClientItemLoader.cpp
 #include "ClientItemLoader.hpp"
 #include "../core/Log.hpp"
+#include "../world/biome/Biomes.hpp"   // grass/foliage tint sampling
 
 #include <nlohmann/json.hpp>
 #include <fstream>
@@ -66,6 +67,39 @@ namespace Game {
                     out.layerTints.reserve(tints->size());
                     for (const auto& t : *tints) {
                         if (!t.is_object()) { out.layerTints.push_back(0); continue; }
+
+                        // Climate-sampled tint sources. MC's `minecraft:grass`
+                        // and `minecraft:foliage` carry a fixed temperature /
+                        // downfall instead of a `default`, because an ITEM has
+                        // no biome to sample — bush ships
+                        // {"type":"minecraft:grass","temperature":0.5,
+                        // "downfall":1.0}.
+                        //
+                        // These MUST be handled: plant sprites are authored
+                        // greyscale and get all their colour from here, so
+                        // falling through to the `default` branch below (and
+                        // therefore to 0 = untinted) renders a bush as a grey
+                        // smear.
+                        auto ty = t.find("type");
+                        if (ty != t.end() && ty->is_string()) {
+                            std::string tt = ty->get<std::string>();
+                            if (tt.rfind("minecraft:", 0) == 0) tt.erase(0, 10);
+                            if (tt == "grass" || tt == "foliage") {
+                                const auto num = [&](const char* k, float dflt) {
+                                    auto f = t.find(k);
+                                    return (f != t.end() && f->is_number())
+                                         ? f->get<float>() : dflt;
+                                };
+                                const float temp = num("temperature", 0.5f);
+                                const float down = num("downfall", 1.0f);
+                                out.layerTints.push_back(
+                                    tt == "grass"
+                                        ? BiomeRegistry::GrassColorAt(temp, down)
+                                        : BiomeRegistry::FoliageColorAt(temp, down));
+                                continue;
+                            }
+                        }
+
                         auto def = t.find("default");
                         if (def != t.end() && def->is_number_integer()) {
                             // Java int → ARGB uint32 (negative ints store the

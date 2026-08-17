@@ -13,7 +13,6 @@ namespace Server {
 
     // Forward declarations
     class ChunkTicketManager;
-    class ChunkWatchIndex;
     class ChunkStatusManager;
     class SendScheduler;
     class ServerConnection;
@@ -56,7 +55,6 @@ namespace Server {
         void Initialize(
             const Config& config,
             ChunkTicketManager* ticketMgr,
-            ChunkWatchIndex* watchIndex,
             ChunkStatusManager* statusMgr,
             SendScheduler* scheduler
         );
@@ -211,7 +209,6 @@ namespace Server {
         
         // Dependencies
         ChunkTicketManager* m_ticketManager = nullptr;
-        ChunkWatchIndex* m_watchIndex = nullptr;
         ChunkStatusManager* m_statusManager = nullptr;
         SendScheduler* m_sendScheduler = nullptr;
         
@@ -248,16 +245,24 @@ namespace Server {
             int simulationDistance
         );
         
-        // Update watch index for a player
-        void UpdatePlayerWatchers(
-            uint32_t playerId,
-            const std::vector<Game::Math::ChunkPos>& toAdd,
-            const std::vector<Game::Math::ChunkPos>& toRemove
-        );
-        
-        // Get players watching a chunk
+    public:
+        // Run `fn` for every session whose tracking view contains `chunk`.
+        //
+        // This is the ONLY answer to "who is watching this chunk" — MC
+        // ChunkMap.onChunkReadyToSend does the same walk over its player list
+        // rather than maintaining a reverse index. `fn` runs OUTSIDE the
+        // session lock (the matches are snapshotted first), so a callback is
+        // free to call back into this manager.
+        void ForEachSessionWatching(Game::Math::ChunkPos chunk,
+                                    const std::function<void(PlayerSession&)>& fn) const;
+
+        // Ids of the players watching a chunk. Prefer ForEachSessionWatching
+        // where the sessions themselves are wanted — this exists for callers
+        // that only need the ids.
         std::vector<uint32_t> GetChunkWatchers(Game::Math::ChunkPos chunk) const;
-        
+
+    private:
+
         // Process individual session tick
         void ProcessSessionTick(std::shared_ptr<PlayerSession> session);
         
