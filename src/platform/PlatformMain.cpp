@@ -61,6 +61,7 @@
 #include "client/renderer/gui/ChatScreen.hpp"
 #include "client/renderer/gui/screens/Screen.hpp"
 #include "client/renderer/gui/screens/TitleScreen.hpp"
+#include "client/renderer/gui/screens/DisconnectedScreen.hpp"
 #include "client/renderer/gui/screens/PauseScreen.hpp"
 #include "client/renderer/gui/screens/DeathScreen.hpp"
 #include "client/renderer/gui/screens/PanoramaRenderer.hpp"
@@ -738,6 +739,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // session left this set to the in-world transparent mode).
         screens.SetInWorld(false);
         screens.Set(std::make_unique<Render::TitleScreen>(/*fadeIn=*/true));
+
+        // If the last session ended because the server dropped us, say so —
+        // on top of the title screen, which is the parent MC's
+        // createDisconnectScreen falls back to. No-op after a normal quit.
+        Render::ShowPendingDisconnectScreen();
 
         // Presence: browsing menus.
         if (Client::g_friendsClient) {
@@ -1879,6 +1885,12 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Use shared_ptr to ensure atomics remain valid for async callbacks
         auto connected = std::make_shared<std::atomic<bool>>(false);
         auto connectionComplete = std::make_shared<std::atomic<bool>>(false);
+        // Set from the network I/O thread when the server drops us mid-session;
+        // consumed by the frame loop below, which turns it into returnToTitle.
+        auto serverDropped = std::make_shared<std::atomic<bool>>(false);
+        // Why, for the DisconnectedScreen. Published under serverDropped's
+        // release store — see the callback.
+        auto dropReason = std::make_shared<std::string>();
 
         networkClient->SetOnConnected([connected, connectionComplete]() {
             Log::Info("✓ Connection established");
@@ -1891,9 +1903,26 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
             *connectionComplete = true;
         });
 
-        networkClient->SetOnDisconnected([window](const std::string& reason) {
-            Log::Info("Disconnected from server: %s", reason.c_str());
-            glfwSetWindowShouldClose(window, GLFW_TRUE);
+        // Losing the connection ends the SESSION, not the process.
+        //
+        // MC ClientCommonPacketListenerImpl.onDisconnect (:348) calls
+        //   this.minecraft.disconnect(this.createDisconnectScreen(details), ...)
+        // and createDisconnectScreen (:368) falls back to `new TitleScreen()`.
+        // Vanilla never closes the game when a server drops you.
+        //
+        // This used to call glfwSetWindowShouldClose(window, GLFW_TRUE), which
+        // both broke the frame loop AND made the outer session loop's
+        // `returnToTitle && !glfwWindowShouldClose(window)` test fail — so a
+        // kicked client quit to desktop. Signal instead: the flag is polled by
+        // the frame loop, which is also what keeps this off the GLFW API from
+        // the network I/O thread this callback runs on.
+        networkClient->SetOnDisconnected([serverDropped, dropReason](const std::string& reason) {
+            Log::Info("Disconnected from server: %s — returning to title", reason.c_str());
+            // Write the reason BEFORE publishing the flag; the frame loop reads
+            // it only after an acquire on that flag, so the release/acquire
+            // pair is what makes the plain string safe across the two threads.
+            *dropReason = reason;
+            serverDropped->store(true, std::memory_order_release);
         });
 
         // Determine connection target
@@ -2081,6 +2110,19 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         while (!glfwWindowShouldClose(window) && !returnToTitle) {
             frameStartTime = std::chrono::high_resolution_clock::now();
+
+            // Server dropped us (kick, host quit, connection lost). Same exit
+            // as "Save and Quit to Title": the teardown below runs and the
+            // outer session loop shows the title screen again.
+            if (serverDropped->load(std::memory_order_acquire)) {
+                Log::Info("Connection lost — ending session and returning to title");
+                // Queued rather than pushed: the title screen this belongs on
+                // top of does not exist until RunTitleScreenPhase rebuilds the
+                // stack, several hundred lines of teardown from here.
+                Render::SetPendingDisconnectReason(*dropReason);
+                returnToTitle = true;
+                break;
+            }
 
             // === PER-FRAME: Poll events and handle input (must be every frame for responsiveness) ===
             bool cursorEnabled;
@@ -4205,8 +4247,11 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         Log::Info("Shutting down session...");
 
         // Neutralize the disconnect callback FIRST: this is an intentional
-        // teardown, and the socket closing must not flag the window to close
-        // — that would turn "Save and Quit to Title" into an app exit.
+        // teardown, and the socket closing below must not be mistaken for the
+        // server dropping us. Harmless now that the callback only sets a flag
+        // the loop has already left, but it was load-bearing when that callback
+        // closed the window — which is what made "Save and Quit to Title" need
+        // this line, and what made an UNSOLICITED disconnect quit to desktop.
         networkClient->SetOnDisconnected([](const std::string&) {});
 
         // Stop accepting relay tunnels: the server they'd be adopted into is

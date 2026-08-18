@@ -691,6 +691,8 @@ set(GAME_SOURCES
             src/client/renderer/gui/screens/PauseScreen.cpp
             src/client/renderer/gui/screens/DeathScreen.hpp
             src/client/renderer/gui/screens/DeathScreen.cpp
+            src/client/renderer/gui/screens/DisconnectedScreen.cpp
+            src/client/renderer/gui/screens/DisconnectedScreen.hpp
             src/client/renderer/gui/screens/WorldSelectScreens.hpp
             src/client/renderer/gui/screens/WorldSelectScreens.cpp
             src/client/renderer/gui/screens/FriendsScreen.hpp
