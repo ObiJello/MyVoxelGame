@@ -2,6 +2,7 @@
 #include "DisconnectedScreen.hpp"
 
 #include "../GuiGraphics.hpp"
+#include "../FontRenderer.hpp"
 #include "Widgets.hpp"
 
 namespace Render {
@@ -10,11 +11,20 @@ namespace Render {
         constexpr uint32_t kWhite = 0xFFFFFFFFu;
         constexpr uint32_t kGrey  = 0xFFA0A0A0u;   // ChatFormatting.GRAY, for the reason
 
-        // MC font line height (9px glyphs + 1px spacing).
-        constexpr int kLineHeight = 10;
+        // MC Font.lineHeight — the spacing MultiLineTextWidget uses per line.
+        constexpr int kLineHeight = FontRenderer::LINE_HEIGHT;   // 9
 
         // MC: `.setMaxWidth(this.width - 50)` on the MultiLineTextWidget.
         constexpr int kReasonMargin = 50;
+
+        // LinearLayout cell padding from DisconnectedScreen.init():
+        //   defaultCellSetting().alignHorizontallyCenter().padding(10)  <- title, reason
+        //   defaultCellSetting().padding(2)                             <- button
+        // Padding is applied on every side of a cell, so a cell's contribution
+        // to the column height is content + 2*padding, and the visible gap
+        // between two cells is the sum of their facing paddings.
+        constexpr int kTextPadding   = 10;
+        constexpr int kButtonPadding = 2;
 
         // Set during teardown, drained by the title phase. Plain string, not
         // atomic: both ends run on the main thread — the network callback that
@@ -73,18 +83,19 @@ namespace Render {
     }
 
     void DisconnectedScreen::Init() {
-        // Wrapping needs font metrics, which live on GuiGraphics — not
-        // available here. Defer to the first Render(), keyed on the line list
-        // being empty. Init() clears it so a resize re-wraps.
+        // Wrapping needs font metrics, which live on GuiGraphics and are not
+        // reachable here. Both the wrap and the layout that depends on its line
+        // count are done on the first Render(); Init() just invalidates them so
+        // a resize redoes both.
         m_reasonLines.clear();
+        m_laidOut = false;
 
-        // MC lays the whole thing out with a centred LinearLayout. Ours is a
-        // fixed layout around the vertical centre: title, reason block, then
-        // the button below it.
-        const int x = m_width / 2 - WidgetDims::BUTTON_WIDTH / 2;
-        AddWidget(new Button(x, m_height / 2 + 40,
+        // MC labels this button gui.toTitle -> "Back to Title Screen" whenever
+        // the destination is the title screen (DisconnectedScreen.init's
+        // non-multiplayer branch). Ours always is.
+        m_backBtn = AddWidget(new Button(0, 0,
             WidgetDims::BUTTON_WIDTH, WidgetDims::BUTTON_HEIGHT,
-            "Back to Title", [this] {
+            "Back to Title Screen", [this] {
                 // MC sets the screen to `parent` (a TitleScreen). Ours is
                 // already underneath, so pop back to it.
                 if (m_manager) m_manager->Pop();
@@ -92,17 +103,34 @@ namespace Render {
     }
 
     void DisconnectedScreen::Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {
-        if (m_reasonLines.empty()) {
+        if (!m_laidOut) {
             m_reasonLines = WrapText(g, m_reason, m_width - kReasonMargin);
+
+            // MC arranges title / reason / button in a vertical LinearLayout and
+            // then FrameLayout.centerInRectangle's the WHOLE block in the screen
+            // — so the group is centred, not pinned to fixed offsets. Reproduce
+            // that: measure the column, then place from its top.
+            const int reasonHeight = static_cast<int>(m_reasonLines.size()) * kLineHeight;
+            const int titleCell  = kLineHeight   + kTextPadding   * 2;
+            const int reasonCell = reasonHeight  + kTextPadding   * 2;
+            const int buttonCell = WidgetDims::BUTTON_HEIGHT + kButtonPadding * 2;
+
+            const int top = (m_height - (titleCell + reasonCell + buttonCell)) / 2;
+            m_titleY  = top + kTextPadding;
+            m_reasonY = top + titleCell + kTextPadding;
+
+            if (m_backBtn) {
+                m_backBtn->SetPosition(m_width / 2 - WidgetDims::BUTTON_WIDTH / 2,
+                                       top + titleCell + reasonCell + kButtonPadding);
+            }
+            m_laidOut = true;
         }
 
         Screen::Render(g, mouseX, mouseY, partialTick);   // background + widgets
 
-        // Title, then the reason block centred above the button.
-        const int titleY = m_height / 2 - 40;
-        g.DrawCenteredString(m_title, m_width / 2, titleY, kWhite);
+        g.DrawCenteredString(m_title, m_width / 2, m_titleY, kWhite);
 
-        int y = titleY + kLineHeight * 2;
+        int y = m_reasonY;
         for (const auto& line : m_reasonLines) {
             g.DrawCenteredString(line, m_width / 2, y, kGrey);
             y += kLineHeight;

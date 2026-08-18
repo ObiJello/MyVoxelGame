@@ -35,7 +35,13 @@ namespace Render {
 
     private:
         std::string              m_reason;
-        std::vector<std::string> m_reasonLines;   // wrapped in Init()
+        std::vector<std::string> m_reasonLines;   // wrapped on first Render()
+        class Button*            m_backBtn = nullptr;
+        // Layout depends on the wrapped line count, which needs font metrics —
+        // so it happens on the first Render() rather than in Init().
+        bool m_laidOut = false;
+        int  m_titleY  = 0;
+        int  m_reasonY = 0;
     };
 
     // ── PlatformMain hooks ────────────────────────────────────────────────
