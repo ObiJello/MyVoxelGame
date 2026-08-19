@@ -44,6 +44,40 @@ namespace Server {
         MAGIC
     };
 
+    // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
+    // collapsed to what this port can actually distinguish.
+    //
+    // MC picks "death.attack.<msgId>" from the killing DamageSource, using the
+    // 2-argument form when there is a causing entity and the 1-argument form
+    // when there is not. The strings below are the en_us.json values for the
+    // msgIds our DamageSource enum maps onto, verbatim.
+    //
+    // ENTITY_ATTACK with no identifiable killer falls back to
+    // "death.attack.generic" rather than "death.attack.mob": the latter is
+    // "%1$s was slain by %2$s", and with nothing to put in %2$s MC would never
+    // reach it — it always has a causing entity for that source.
+    inline std::string BuildDeathMessage(const std::string& victim,
+                                         DamageSource source,
+                                         const std::string& attackerName) {
+        using DS = DamageSource;
+        switch (source) {
+            case DS::FALL:         return victim + " hit the ground too hard";
+            case DS::FIRE:         return victim + " burned to death";
+            case DS::DROWNING:     return victim + " drowned";
+            case DS::STARVATION:   return victim + " starved to death";
+            case DS::VOID_DAMAGE:  return victim + " fell out of the world";
+            case DS::EXPLOSION:    return victim + " blew up";
+            case DS::MAGIC:        return victim + " was killed by magic";
+            case DS::ENTITY_ATTACK:
+                if (!attackerName.empty()) {
+                    return victim + " was slain by " + attackerName;
+                }
+                return victim + " died";
+            case DS::GENERIC:
+            default:               return victim + " died";
+        }
+    }
+
     // Status effect placeholder for future implementation
     struct StatusEffect {
         int effectId;
@@ -232,6 +266,16 @@ namespace Server {
         
         // Apply damage to player
         void damage(float amount, DamageSource source);
+        // Overload carrying the killer's display name, for the death message.
+        // MC gets this from DamageSource.causingEntity via CombatTracker; we
+        // have no combat tracker, so the caller passes it at the one site that
+        // knows (PlayerEntityView::ActuallyHurt).
+        void damage(float amount, DamageSource source, const std::string& attackerName);
+
+        // What killed this player, for the death broadcast. MC reads the
+        // equivalent off the CombatTracker's last CombatEntry.
+        DamageSource       getLastDamageSource() const { return m_lastDamageSource; }
+        const std::string& getLastAttackerName() const { return m_lastAttackerName; }
         
         // Heal player
         void heal(float amount);
@@ -385,6 +429,8 @@ namespace Server {
         // === ATTRIBUTES & STATUS ===
         float m_health = 20.0f;
         bool  m_isDead = false;
+        DamageSource m_lastDamageSource = DamageSource::GENERIC;
+        std::string  m_lastAttackerName;   // empty = no identifiable killer
         uint32_t m_damageCounter = 0;
         // Hunger/saturation/exhaustion — MC FoodData port (FoodData.hpp).
         FoodData m_foodData;

@@ -307,7 +307,17 @@ namespace Game {
         // particular neighbour occlusion keeps working because cullfaces come
         // out as rotated world directions (MC: SimpleUnbakedGeometry rotates
         // them with Direction.rotate for exactly this reason).
-        static BlockModel RotateModel(const BlockModel& src, int xQuarterTurns, int yQuarterTurns);
+        //
+        // `uvLock` is the blockstate variant's `"uvlock"` field. MC applies a
+        // variant's rotation to the GEOMETRY always, and to the UVs only when
+        // uvlock is false — a uvlocked face keeps its texture aligned to the
+        // world, which is what stops a stair's plank grain or a sandstone top
+        // from spinning as the stair is turned. The mesher here derives UVs
+        // from fixed world-space axes, so world-aligned is what it does with
+        // no correction at all: uvLock=true means "skip the uvRotation solve
+        // below", and uvLock=false means "apply it".
+        static BlockModel RotateModel(const BlockModel& src, int xQuarterTurns,
+                                      int yQuarterTurns, bool uvLock = false);
 
         // Concatenate several resolved models into one.
         //

@@ -905,6 +905,30 @@ namespace Debug {
                 ImGui::TextColored(COL_RED, "Disconnected");
             }
 
+            // Transport: the thing that otherwise means digging through
+            // friends-service logs to answer "am I being relayed?".
+            switch (net.transport) {
+                case NetworkMetricsSnapshot::Transport::Singleplayer:
+                    ImGui::TextColored(COL_GRAY, "Transport: Singleplayer (loopback)");
+                    break;
+                case NetworkMetricsSnapshot::Transport::Direct:
+                    ImGui::TextColored(COL_GREEN, "Transport: DIRECT");
+                    break;
+                case NetworkMetricsSnapshot::Transport::Relay:
+                    ImGui::TextColored(COL_YELLOW, "Transport: RELAY (via friends service)");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "Traffic is being copied through the friends service\n"
+                            "instead of going straight to the host. Happens when\n"
+                            "the host's port is not reachable from here.");
+                    }
+                    break;
+            }
+            if (!net.peerAddress.empty()) {
+                ImGui::Text("Peer:     %s", net.peerAddress.c_str());
+            }
+            ImGui::Text("Compression: %s", net.compressionEnabled ? "on" : "off");
+
             char sentBuf[32], recvBuf[32];
             FormatBytes(net.bytesSent, sentBuf, sizeof(sentBuf));
             FormatBytes(net.bytesReceived, recvBuf, sizeof(recvBuf));

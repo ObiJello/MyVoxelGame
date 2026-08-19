@@ -161,6 +161,18 @@ namespace Client {
         void StartPingTimer();
         void FailConnection();
 
+        // Try the host address join_info handed us, then publish the result.
+        //
+        // The SERVICE cannot decide direct-vs-relay: when it shares a network
+        // with the host, its reachability test is a NAT hairpin against the
+        // host's own public IP, which many routers refuse for a UPnP-created
+        // mapping — so it reported "unreachable" for hosts that were perfectly
+        // reachable from the outside, and relayed everyone. The joiner is the
+        // only party who can answer "can I reach this host", so it asks
+        // directly. Falls back by re-requesting join_info with force_relay.
+        void ProbeDirectThenPublish(JoinInfoResult direct, int64_t friendId);
+        void PublishJoinResult(JoinInfoResult result);
+
         // ── io-thread-only state ───────────────────────────────────────
         net::io_context m_ioContext;
         using WorkGuard = net::executor_work_guard<net::io_context::executor_type>;
@@ -197,6 +209,9 @@ namespace Client {
         std::vector<JoinInfoResult> m_joinResults;
         std::string m_lastError;
         int m_pendingJoinRequestId = 0;   // correlation id of in-flight join_info
+        // Who we are joining, kept so a failed direct probe can re-ask with
+        // force_relay. 0 = the in-flight request is already the relay retry.
+        int64_t m_pendingJoinFriendId = 0;
 
         std::atomic<bool> m_connected{false};
         std::atomic<bool> m_running{false};

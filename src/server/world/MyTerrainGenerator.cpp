@@ -419,7 +419,7 @@ namespace Game {
             // First encounter on this thread — resolve via string lookup
             // (slow path, one hit per distinct state per worker thread).
             Game::BlockStateRegistry::Initialize();
-            Game::BlockState gameState = Game::BlockStateRegistry::CreateBlockState(
+            Game::NbtBlockState gameState = Game::BlockStateRegistry::CreateBlockState(
                 blockState->getIdentifier(), blockState->getProperties());
             it = tc.map.emplace(blockState,
                                 MappedBlock{ gameState.resolvedId, gameState.resolvedState }).first;
@@ -480,7 +480,7 @@ namespace Game {
         values.reserve(libPalette.size());
         for (auto* st : libPalette) {
             const MappedBlock mapped = MapBlockType(st);
-            values.push_back(Game::BlockStateIds::Pack(mapped.id, mapped.state));
+            values.push_back(Game::BlockStates::FromIndex(mapped.id, mapped.state).RawId());
         }
 
         // Unpack the library's indices: pure shift-and-mask over the packed
@@ -506,13 +506,13 @@ namespace Game {
         // `indices` already is.
 
         Game::PalettedContainer built(
-            Game::PaletteStrategy::ForBlockStates(Game::BlockStateIds::Bits()),
-            Game::BlockStateIds::Pack(BlockID::Air, 0));
+            Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
+            Game::BlockState{}.RawId());
         if (!built.BuildFrom(values, indices)) return false;
 
         int nonAir = 0;
         for (int i = 0; i < ChunkSection::TOTAL; ++i) {
-            if (Game::BlockStateIds::Unpack(values[indices[i]]).id != BlockID::Air) ++nonAir;
+            if (Game::BlockState::FromRawId(values[indices[i]]).Block() != BlockID::Air) ++nonAir;
         }
 
         outSection.AdoptStates(std::move(built));

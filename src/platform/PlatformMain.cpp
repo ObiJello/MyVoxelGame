@@ -239,18 +239,28 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
 
         const auto& hit = player.lastBlockHit;
         if (Render::BlockHighlight::IsValidHighlight(hit)) {
-            // Use the block's actual model-shape bounds so partial blocks (leaf
+            // Use the block's actual model shape so partial blocks (leaf
             // litter, slabs, fences, …) outline their real geometry instead of
             // the enclosing full cube.
             // World-aware so a paired chest outlines the half that is actually
             // there — otherwise the selection box stops a pixel short of the
             // seam that the raycast now accepts.
-            const auto shape = Client::g_clientBlockAccess
-                ? Game::BlockRegistry::GetBlockShapeAt(*Client::g_clientBlockAccess,
-                                                       hit->blockPos, hit->blockId,
-                                                       hit->stateIndex)
-                : Game::BlockRegistry::GetBlockShape(hit->blockId, hit->stateIndex);
-            Render::g_blockHighlight.Render(hit->blockPos, proj, view, shape.min, shape.max);
+            //
+            // One draw per box of the shape. MC outlines the whole VoxelShape
+            // (LevelRenderer.renderShape → shape.forAllEdges), so a stair gets
+            // the L-shaped profile rather than a cube around its empty half.
+            // Vanilla's merged edge walk drops the internal edges where two
+            // boxes meet and this does not, which shows as one extra line
+            // across the step; the alternative is merging voxel shapes here
+            // for a seam the player has to look for.
+            const auto shapes = Client::g_clientBlockAccess
+                ? Game::BlockRegistry::GetBlockShapeSetAt(*Client::g_clientBlockAccess,
+                                                          hit->blockPos, hit->state)
+                : Game::BlockRegistry::GetBlockShapeSet(hit->state);
+            for (const auto& shape : shapes) {
+                Render::g_blockHighlight.Render(hit->blockPos, proj, view,
+                                                shape.min, shape.max);
+            }
         }
     }
 
@@ -265,13 +275,18 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // Size the crack overlay to the block's actual shape so partial
         // blocks (leaf litter, slabs, …) don't get a full-cube crack
         // floating above / around their geometry.
+        // One crack box per box of the shape, so a stair cracks along its own
+        // L rather than inside a phantom cube. SetTarget only stores the
+        // extents — the mesh is a unit cube scaled at draw time — so retargeting
+        // between Render calls is free.
         const auto stateIdx = Game::Raycast::GetBlockStateAt(bp.x, bp.y, bp.z);
-        const auto shape = Client::g_clientBlockAccess
-            ? Game::BlockRegistry::GetBlockShapeAt(*Client::g_clientBlockAccess, bp,
-                                                   pc.GetBreakingBlockId(), stateIdx)
-            : Game::BlockRegistry::GetBlockShape(pc.GetBreakingBlockId(), stateIdx);
-        Render::g_blockBreakOverlay.SetTarget(bp, stage, shape.min, shape.max);
-        Render::g_blockBreakOverlay.Render(proj, view);
+        const auto shapes = Client::g_clientBlockAccess
+            ? Game::BlockRegistry::GetBlockShapeSetAt(*Client::g_clientBlockAccess, bp, stateIdx)
+            : Game::BlockRegistry::GetBlockShapeSet(stateIdx);
+        for (const auto& shape : shapes) {
+            Render::g_blockBreakOverlay.SetTarget(bp, stage, shape.min, shape.max);
+            Render::g_blockBreakOverlay.Render(proj, view);
+        }
     }
 
     void RenderCrosshair(GLFWwindow* window) {
@@ -1941,6 +1956,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         // relay can splice us to the host's outbound tunnel; the game
         // protocol then proceeds untouched. The ticket is service-generated
         // hex, so it needs no escaping here.
+        // Remembered for the debug panel: this is the one place that knows,
+        // without asking the friends service again, whether this session is
+        // being relayed.
+        const bool sessionUsedRelay = !titleAction.relayTicket.empty();
         if (!titleAction.relayTicket.empty()) {
             networkClient->SetConnectPreamble(
                 std::string("{\"op\":\"relay_attach\",\"role\":\"joiner\",\"ticket\":\"")
@@ -3856,6 +3875,27 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         netSnap.connectionUptimeSec = std::chrono::duration<float>(elapsed).count();
                     }
                 }
+                // Transport: relay is knowable from the session's own setup —
+                // a relayed join is exactly the one that carried a relay
+                // ticket, and the preamble is set from it at connect time.
+                // Singleplayer is the loopback case (which also skips
+                // compression, matching MC's isMemoryConnection).
+                if (!isRemoteClient) {
+                    netSnap.transport =
+                        Debug::NetworkMetricsSnapshot::Transport::Singleplayer;
+                } else if (sessionUsedRelay) {
+                    netSnap.transport =
+                        Debug::NetworkMetricsSnapshot::Transport::Relay;
+                } else {
+                    netSnap.transport =
+                        Debug::NetworkMetricsSnapshot::Transport::Direct;
+                }
+                netSnap.peerAddress = connectHost + ":" + std::to_string(serverPort);
+                if (networkClient) {
+                    if (auto conn = networkClient->GetConnection()) {
+                        netSnap.compressionEnabled = conn->CompressionEnabled();
+                    }
+                }
                 Debug::DebugSystem::SetNetworkSnapshot(netSnap);
 
                 // Chunk Pipeline snapshot
@@ -4006,7 +4046,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                     wi.targetZ = hit.blockPos.z;
                     wi.targetDistance = hit.distance;
                     wi.targetBlockId = static_cast<int>(hit.blockId);
-                    wi.targetStateIndex = hit.stateIndex;
+                    wi.targetStateIndex = hit.state.Index();
                     wi.biomeTarget = biomeName(biomeAt(hit.blockPos.x, hit.blockPos.y, hit.blockPos.z));
 
                     const Game::Block& b = Game::BlockRegistry::Get(hit.blockId);
@@ -4026,7 +4066,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                         wi.targetStateProps = "-";
                     } else {
                         wi.targetStateProps.clear();
-                        for (const auto& [k, v] : def.PropertiesOf(hit.stateIndex)) {
+                        for (const auto& [k, v] : def.PropertiesOf(hit.state.Index())) {
                             if (!wi.targetStateProps.empty()) wi.targetStateProps += ", ";
                             wi.targetStateProps += k + "=" + v;
                         }
@@ -4038,7 +4078,7 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
                                       ? kFaceNames[hit.hitFace] : "?";
 
                     const auto& shape =
-                        Game::BlockRegistry::GetBlockShape(hit.blockId, hit.stateIndex);
+                        Game::BlockRegistry::GetBlockShape(hit.state);
                     wi.targetShapeMin[0] = shape.min.x; wi.targetShapeMin[1] = shape.min.y;
                     wi.targetShapeMin[2] = shape.min.z;
                     wi.targetShapeMax[0] = shape.max.x; wi.targetShapeMax[1] = shape.max.y;

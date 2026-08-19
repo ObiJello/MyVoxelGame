@@ -381,7 +381,7 @@ namespace Game {
         // default state.
         struct MappedBlock {
             BlockID id    = BlockID::Air;
-            uint8_t state = 0;
+            BlockStateIndex state = 0;
         };
 
         MappedBlock MapBlockType(minecraft::world::BlockState* blockState) const;

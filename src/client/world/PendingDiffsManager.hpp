@@ -41,7 +41,7 @@ namespace Client {
         struct BlockChange {
             BlockPos pos;
             Game::BlockID blockId;
-            uint8_t blockState = 0; // Block-state index (MC BlockState.getId())
+            Game::BlockStateIndex blockState = 0; // Block-state index (MC BlockState.getId())
             uint32_t generation;    // Generation when change was received
             std::chrono::steady_clock::time_point timestamp;
             bool playSound = false;

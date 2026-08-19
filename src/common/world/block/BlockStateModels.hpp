@@ -36,7 +36,7 @@ namespace Game {
         // Model name for one state of one block. Falls back to the block's
         // plain `modelName` when the block has no blockstate JSON, no states,
         // or the state didn't match any variant.
-        static const std::string& ModelNameFor(BlockID id, uint8_t stateIndex);
+        static const std::string& ModelNameFor(BlockID id, BlockStateIndex stateIndex);
 
         static void Clear();
 

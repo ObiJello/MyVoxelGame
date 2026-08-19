@@ -6,7 +6,7 @@ namespace Client {
 
     void BlockStatePrediction::Retain(const glm::ivec3& pos,
                                       Game::BlockID knownServerState,
-                                      uint8_t knownServerStateIndex,
+                                      Game::BlockStateIndex knownServerStateIndex,
                                       uint32_t sequence) {
         const int64_t key = PackPos(pos);
         auto it = m_records.find(key);
@@ -23,7 +23,7 @@ namespace Client {
     }
 
     bool BlockStatePrediction::RecordServerState(const glm::ivec3& pos, Game::BlockID state,
-                                                 uint8_t stateIndex) {
+                                                 Game::BlockStateIndex stateIndex) {
         auto it = m_records.find(PackPos(pos));
         if (it == m_records.end()) return false;
         it->second.serverState = state;
@@ -42,7 +42,7 @@ namespace Client {
 
             const glm::ivec3 pos = UnpackPos(it->first);
             const Game::BlockID serverState = it->second.serverState;
-            const uint8_t serverStateIndex  = it->second.serverStateIndex;
+            const Game::BlockStateIndex serverStateIndex  = it->second.serverStateIndex;
             it = m_records.erase(it);
 
             // MC ClientLevel.syncBlockState: only touch the world when the
@@ -51,7 +51,7 @@ namespace Client {
             // The comparison includes the state index, so predicting the right
             // block with the wrong facing still counts as a disagreement.
             if (!m_read || !m_apply) continue;
-            if (m_read(pos) == std::pair<Game::BlockID, uint8_t>{serverState, serverStateIndex}) continue;
+            if (m_read(pos) == std::pair<Game::BlockID, Game::BlockStateIndex>{serverState, serverStateIndex}) continue;
 
             Log::Debug("[Prediction] Rollback at (%d,%d,%d) -> block %u state %u",
                        pos.x, pos.y, pos.z, static_cast<unsigned>(serverState),

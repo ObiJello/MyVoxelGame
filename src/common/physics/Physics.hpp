@@ -4,6 +4,8 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 #include <cstdint>
+#include "common/world/block/Blocks.hpp"
+#include "common/world/block/BlockState.hpp"
 #include <functional>
 #include <vector>
 
@@ -183,7 +185,7 @@ namespace Game {
         // a stair or a segmented ground-cover block occupies a different part
         // of its cell per state. Block-only accessors report 0 (all default),
         // which is the correct answer for them.
-        uint8_t GetBlockState(int x, int y, int z) const;
+        BlockState GetBlockState(int x, int y, int z) const;
         bool IsBlockSolid(int x, int y, int z) const;
         bool IsChunkLoaded(int chunkX, int chunkZ) const;
     };

@@ -148,7 +148,17 @@ namespace Game {
                 for (uint16_t i = 0; i + 1 < cond.argCount; i += 2) {
                     const std::string_view prop  = Arg(cond.argBegin + i);
                     const std::string_view value = Arg(cond.argBegin + i + 1);
-                    if (def.ValueOf(ctx.blockState, prop) != value) return false;
+                    // `type=double` is the one that matters: vanilla's slab
+                    // table multiplies the drop by two under exactly that
+                    // condition, so a double slab mined back must return the
+                    // two slabs that went into it.
+                    //
+                    // This used to need an ImpliedPropertyValue fallback,
+                    // because the half was a BlockID rather than a state and so
+                    // was absent from the state definition. It is a real
+                    // property now and the plain lookup finds it.
+                    if (def.ValueOf(ctx.blockState, prop) == value) continue;
+                    return false;
                 }
                 return true;
             }
@@ -163,9 +173,11 @@ namespace Game {
                                                         ctx.pos.y + cond.i0,
                                                         ctx.pos.z);
                 if (got == want) return true;
-                // The wanted state may be a promoted variant BlockID of the
-                // same vanilla block (tall_grass{half:upper} is TallGrassTop
-                // here), so compare registry slugs as well.
+                // Both halves of a double plant are ONE BlockID now, so the
+                // `got == want` test above already covers what this slug
+                // comparison was added for (tall_grass{half:upper} used to be a
+                // separate TallGrassTop id). Kept because loot tables can still
+                // name a block this build maps onto a shared slug.
                 return BlockRegistry::Get(got).registrySlug ==
                        BlockRegistry::Get(want).registrySlug;
             }

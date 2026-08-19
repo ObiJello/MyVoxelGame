@@ -5,6 +5,7 @@
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world//block/Blocks.hpp"
+#include "common/world/block/BlockState.hpp"
 #include <vector>
 
 #include "glm/vec3.hpp"
@@ -41,11 +42,12 @@ namespace Game {
         // Get block at world coordinates
         virtual BlockID GetBlock(int worldX, int worldY, int worldZ) const = 0;
 
-        // State index within the block's own state list (MC BlockState.getId());
-        // 0 is always the block's default state. Defaulted rather than pure so
-        // providers that only carry block ids stay valid — "no state tracked"
-        // and "everything default" are the same answer.
-        virtual uint8_t GetBlockState(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return 0; }
+        // State index within the block's own state list (MC BlockState.getId()).
+        // Pure virtual for the same reason as IBlockAccess::GetBlockState — see
+        // the long note there. In short: "0 means default" is about to stop
+        // being true, and a provider that inherits a `return 0` would silently
+        // describe a world made entirely of air.
+        virtual BlockState GetBlockState(int worldX, int worldY, int worldZ) const = 0;
 
         // Biome id, quantised to MC's 4x4x4 noise-biome grid by the chunk.
         // Defaulted for the same reason as GetBlockState: a provider that
@@ -86,6 +88,15 @@ namespace Game {
 
         // Check if block is fluid (water, lava)
         virtual bool IsBlockFluid(int worldX, int worldY, int worldZ) const = 0;
+
+        // MC `level.getFluidState(pos).is(FluidTags.WATER)`. Mirrors
+        // IBlockAccess::ContainsWater — a waterlogged fence, a kelp stalk and
+        // a coral fan hold water while being something else, so this is not
+        // the same question as `GetBlock(...) == BlockID::Water`.
+        //
+        // Out-of-line (INeighborProvider.cpp) so this header does not have to
+        // pull in BlockRegistry; every server subsystem includes it.
+        virtual bool ContainsWater(int worldX, int worldY, int worldZ) const;
 
         // Check if block is transparent (doesn't block light)
         virtual bool IsBlockTransparent(int worldX, int worldY, int worldZ) const {

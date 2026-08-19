@@ -144,9 +144,8 @@ void main() {
         // MC ShulkerBoxBlock's default facing is UP (registerDefaultState),
         // which is also what ShulkerBoxRenderer falls back to
         // (getValueOrElse(FACING, Direction.UP)).
-        Game::Direction FacingOf(Game::BlockID id, uint8_t stateIndex) {
-            const auto& def = Game::BlockRegistry::GetStateDefinition(id);
-            const std::string_view f = def.ValueOf(stateIndex, "facing");
+        Game::Direction FacingOf(Game::BlockState state) {
+            const std::string_view f = state.GetValueByName("facing");
             if (f == "down")  return Game::Direction::Down;
             if (f == "up")    return Game::Direction::Up;
             if (f == "north") return Game::Direction::North;
@@ -316,11 +315,11 @@ void main() {
         if (tex == INVALID_TEXTURE) return;
 
         const glm::ivec3 p = be.GetWorldPos();
-        uint8_t stateIndex = 0;
+        Game::BlockState state;
         if (Client::g_clientBlockAccess) {
-            stateIndex = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
+            state = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
         }
-        const Game::Direction facing = FacingOf(be.GetBlockId(), stateIndex);
+        const Game::Direction facing = FacingOf(state);
 
         // Lid open amount. MC reads ShulkerBoxBlockEntity.getProgress(partialTick),
         // driven by the container-opener count. This engine's shulker box uses

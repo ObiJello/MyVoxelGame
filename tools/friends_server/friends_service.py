@@ -85,8 +85,9 @@ PBKDF2_ITERATIONS = 200_000
 PREFERRED_KDF = "scrypt" if hasattr(hashlib, "scrypt") else "pbkdf2"
 
 # ── Direct-vs-relay tuning ────────────────────────────────────────────────
-PROBE_TIMEOUT_SECONDS = 3.0     # TCP connect test against a host's game port
-PROBE_CACHE_SECONDS = 120.0     # re-probe if the cached verdict is older
+# The service no longer probes host reachability — it cannot answer that
+# question when it shares a network with the host (NAT hairpin). The JOINER
+# probes instead, with its own timeout, and asks for a relay ticket on failure.
 RELAY_TICKET_TTL_SECONDS = 30   # unpaired relay tickets expire after this
 RELAY_BUFFER = 64 * 1024
 
@@ -301,9 +302,6 @@ class Presence:
     def touch(self, account_id: int, conn):
         entry = self.online.setdefault(account_id, {
             "state": "menu", "world": "", "host": "", "port": 0,
-            # Direct-reachability: None = not probed yet, True/False = result.
-            # False means joiners get relayed instead.
-            "direct_ok": None, "probed_at": 0.0,
             "conns": set()})
         entry["conns"].add(conn)
         task = self.offline_tasks.pop(account_id, None)
@@ -316,11 +314,6 @@ class Presence:
         entry = self.online.get(account_id)
         if entry is None:
             return
-        # Any change to where/whether we're hosting invalidates the probe.
-        if (entry["state"] != state or entry["host"] != host
-                or entry["port"] != port):
-            entry["direct_ok"] = None
-            entry["probed_at"] = 0.0
         entry.update(state=state, world=world, host=host, port=port)
 
     def drop_conn(self, account_id: int, conn) -> bool:
@@ -381,25 +374,6 @@ def is_public_ip(ip: str) -> bool:
     if a == 100 and 64 <= b <= 127:   # CGNAT
         return False
     return True
-
-
-async def probe_reachable(host: str, port: int) -> bool:
-    """Can we open a TCP connection to the host's game port from out here?
-    This is the ground truth for 'their UPnP mapping actually works' — the
-    host claiming success isn't enough (double-NAT, ISP filtering)."""
-    if not host or not port:
-        return False
-    try:
-        fut = asyncio.open_connection(host, port)
-        reader, writer = await asyncio.wait_for(fut, PROBE_TIMEOUT_SECONDS)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
-        return True
-    except Exception:  # noqa: BLE001 — any failure means "not reachable"
-        return False
 
 
 class Relay:
@@ -735,45 +709,35 @@ class Service:
                 host = reported
 
         self.presence.update(me["id"], state, world, host, port)
-        # Verify reachability out-of-band; joiners fall back to the relay
-        # until (and unless) the probe succeeds.
-        if state == "hosting":
-            asyncio.get_running_loop().create_task(
-                self.refresh_direct(me["id"]))
         self.broadcast_change(me["id"])
         return {"ok": True}
 
-    async def refresh_direct(self, account_id: int):
-        """Probe the host's advertised address and cache the verdict."""
-        entry = self.presence.entry(account_id)
-        if entry is None or entry["state"] != "hosting":
-            return
-        host, port = entry["host"], entry["port"]
-        ok = await probe_reachable(host, port) if host else False
-        entry = self.presence.entry(account_id)   # may have changed meanwhile
-        if entry is None or entry["state"] != "hosting":
-            return
-        if entry["host"] != host or entry["port"] != port:
-            return
-        entry["direct_ok"] = ok
-        entry["probed_at"] = time.time()
-        log.info("probe: account %d at %s:%s -> %s", account_id, host or "?",
-                 port, "DIRECT" if ok else "relay")
+    async def resolve_join(self, joiner_id: int, host_id: int,
+                           force_relay: bool = False) -> dict:
+        """Hand out the host address; the JOINER decides if it works.
 
-    async def resolve_join(self, joiner_id: int, host_id: int) -> dict:
-        """Pick direct or relay for this join, refreshing a stale probe."""
+        This used to TCP-probe the host from here and only offer a direct
+        address when that succeeded. That test is invalid whenever the service
+        shares a network with the host — it dials the host's own public IP from
+        inside that network, which is a NAT hairpin, and plenty of routers do
+        not hairpin a UPnP-created mapping. Observed in practice: a live
+        mapping, a reachable port, and three straight probe failures, so every
+        joiner got relayed — including one on a completely different network
+        who could very likely have connected directly.
+
+        Only the joiner can answer "can I reach this host", so the joiner does:
+        it tries the address, and comes back with force_relay=True if it cannot.
+        The relay stays the fallback, which is what it was always meant to be.
+        """
         entry = self.presence.entry(host_id)
         if entry is None or entry["state"] != "hosting":
             return {"ok": False, "error": "not_hosting"}
-        stale = (entry["direct_ok"] is None or
-                 time.time() - entry["probed_at"] > PROBE_CACHE_SECONDS)
-        if stale:
-            await self.refresh_direct(host_id)
-            entry = self.presence.entry(host_id)
-            if entry is None or entry["state"] != "hosting":
-                return {"ok": False, "error": "not_hosting"}
 
-        if entry["direct_ok"]:
+        # A usable address means one we could plausibly hand to an outsider.
+        # is_public_ip already rejects the cases that are hopeless from the
+        # internet (private, CGNAT, loopback) — those go straight to relay
+        # without wasting the joiner's connect timeout.
+        if not force_relay and entry["host"]:
             return {"ok": True, "mode": "direct", "host": entry["host"],
                     "port": entry["port"], "world": entry["world"]}
 
@@ -812,7 +776,10 @@ class Service:
         other = int(body.get("friend", 0))
         if not self.db.are_friends(me["id"], other):
             return {"ok": False, "error": "not_friends"}
-        return await self.resolve_join(me["id"], other)
+        # force_relay: the joiner already tried the direct address and could
+        # not reach it.
+        return await self.resolve_join(me["id"], other,
+                                       bool(body.get("force_relay", False)))
 
     def op_ping(self, body, peer_ip, conn):
         return {"ok": True}

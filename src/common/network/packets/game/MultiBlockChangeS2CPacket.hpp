@@ -22,7 +22,7 @@ namespace Network {
             Game::BlockID blockId;
             // Block-state index within blockId's own state list (MC
             // BlockState.getId()); 0 = the block's default state.
-            uint8_t       blockState = 0;
+            Game::BlockStateIndex       blockState = 0;
         };
 
         std::vector<BlockChange> changes;
@@ -41,7 +41,7 @@ namespace Network {
                 buffer.WriteByte(change.localY);
                 buffer.WriteByte(change.localZ);
                 buffer.WriteShort(static_cast<uint16_t>(change.blockId));
-                buffer.WriteByte(change.blockState);
+                buffer.WriteShort(change.blockState);
             }
             buffer.WriteInt(packet.timestamp);
             return buffer.GetData();
@@ -60,7 +60,7 @@ namespace Network {
                 change.localY = reader.ReadByte();
                 change.localZ = reader.ReadByte();
                 change.blockId = static_cast<Game::BlockID>(reader.ReadShort());
-                change.blockState = reader.ReadByte();
+                change.blockState = reader.ReadShort();
                 packet.changes.push_back(change);
             }
             packet.timestamp = reader.ReadInt();

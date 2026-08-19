@@ -99,7 +99,7 @@ namespace Game {
             return static_cast<double>(below.y);
         }
         const BlockRegistry::BlockShape& shape =
-            BlockRegistry::GetBlockShape(id, blocks.GetBlockState(below.x, below.y, below.z));
+            BlockRegistry::GetBlockShape(blocks.GetBlockState(below.x, below.y, below.z));
         return static_cast<double>(below.y) + static_cast<double>(shape.max.y);
     }
 

@@ -40,7 +40,7 @@ namespace Game {
 
     private:
         static void SerializeSection(const ChunkSection* section, std::vector<uint8_t>& buffer);
-        static bool DeserializeSection(const uint8_t*& data, size_t& remaining, ChunkSection& section);
+        static bool DeserializeSection(const uint8_t*& data, size_t& remaining, ChunkSection& section, uint32_t version);
     };
 
     // Save queue entry with priority

@@ -44,8 +44,21 @@ namespace Game {
             // Fluids are included even though you can walk into them — that is
             // the point of this map for spawning: it puts the surface at the
             // water's top, so nothing tries to spawn on the seabed.
+            //
+            // `!fluidState.isEmpty()` also catches the blocks that hold water
+            // without being water — kelp, seagrass and bubble columns, whose
+            // getFluidState is unconditionally WATER. None of them has
+            // collision, so without this a kelp forest puts the surface back
+            // down on the seabed and mobs try to spawn under the water.
+            //
+            // The per-state `waterlogged` blocks cannot be expressed here (this
+            // table is keyed on BlockID alone) and do not need to be: every
+            // waterloggable block that could change the answer — stairs, slabs,
+            // fences, walls, trapdoors — already blocks motion, so the fluid
+            // clause adds nothing for them either way.
             const bool isFluid = slug == "water" || slug == "flowing_water" ||
-                                 slug == "lava"  || slug == "flowing_lava";
+                                 slug == "lava"  || slug == "flowing_lava" ||
+                                 BlockRegistry::IsAlwaysWaterlogged(id);
             const bool isLeaves = EndsWith(slug, "_leaves");
 
             if ((BlockRegistry::HasCollision(id) || isFluid) && !isLeaves) {

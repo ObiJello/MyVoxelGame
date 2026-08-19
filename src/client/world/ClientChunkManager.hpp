@@ -164,7 +164,7 @@ namespace Client {
         // packet for this interaction — that's what the server's
         // BlockChangedAckS2C refers to.
         void PredictBlockChange(const glm::ivec3& pos, Game::BlockID newBlock, uint32_t sequence,
-                                uint8_t stateIndex = 0);
+                                Game::BlockStateIndex stateIndex = 0);
 
         // BlockChangedAckS2C arrived: retire predictions up to `sequence`,
         // snapping back anywhere the server disagreed with us.
@@ -174,7 +174,7 @@ namespace Client {
         Game::BlockID GetBlockAt(const glm::ivec3& pos) const;
 
         // Block + block-state index together (0 when the chunk isn't loaded).
-        std::pair<Game::BlockID, uint8_t> GetBlockAndStateAt(const glm::ivec3& pos) const;
+        std::pair<Game::BlockID, Game::BlockStateIndex> GetBlockAndStateAt(const glm::ivec3& pos) const;
 
         // Write a block into the client's chunk store and mark the affected
         // sections dirty. This is the shared body behind ProcessBlockChange,
@@ -182,7 +182,7 @@ namespace Client {
         // fromPlayer marks the touched sections as MC's isDirtyFromPlayer, which
         // the "Semi Blocking"/"Fully Blocking" chunk-builder modes compile on the
         // main thread so the edit shows up the same frame.
-        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, uint8_t stateIndex = 0,
+        void SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId, Game::BlockStateIndex stateIndex = 0,
                            bool fromPlayer = false);
         
 

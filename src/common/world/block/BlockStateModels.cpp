@@ -57,10 +57,23 @@ namespace Game {
         struct VariantEntry {
             std::vector<std::pair<std::string, std::string>> constraints;
             std::string model;
-            int xTurns = 0;
-            int yTurns = 0;
-            int order  = 0;   // position in the JSON, for deterministic tie-breaks
+            int  xTurns = 0;
+            int  yTurns = 0;
+            bool uvLock = false;
+            int  order  = 0;  // position in the JSON, for deterministic tie-breaks
         };
+
+        // The name a rotated model is registered under. uvlock is part of the
+        // key because it changes the BAKED result: the same model at the same
+        // rotation is a different quad set with the texture locked to the world
+        // than with it turned along. Stairs are where that first bites — nearly
+        // every rotated stair variant in vanilla sets uvlock, while the fence
+        // and pillar rotations sharing this baker do not.
+        std::string RotatedModelName(const std::string& base, int xt, int yt, bool uvLock) {
+            std::string n = base + "__x" + std::to_string(xt) + "_y" + std::to_string(yt);
+            if (uvLock) n += "_uv";
+            return n;
+        }
 
         void ReadVariantValue(const json& value, VariantEntry& out) {
             // A variant value may be a single object or a weighted array; MC
@@ -71,6 +84,7 @@ namespace Game {
             if (v.contains("model")) out.model = BaseModelName(v["model"].get<std::string>());
             if (v.contains("x")) out.xTurns = v["x"].get<int>() / 90;
             if (v.contains("y")) out.yTurns = v["y"].get<int>() / 90;
+            if (v.contains("uvlock")) out.uvLock = v["uvlock"].get<bool>();
         }
 
         // ── multipart ────────────────────────────────────────────────────────
@@ -174,47 +188,9 @@ namespace Game {
             for (const Condition& sub : c.nested) CollectConditionProps(sub, out);
         }
 
-        // ── BlockIDs that stand in for one property value ────────────────────
-        //
-        // This engine spends a whole BlockID per `segment_amount` / `flower_amount`
-        // value, so BlockID::LeafLitter3's model name is "leaf_litter_3" and
-        // nothing links it back to `blockstates/leaf_litter.json`. This table is
-        // that link: it names the blockstate file to read and the property value
-        // the BlockID already stands for, which is then folded into the property
-        // map before the multipart predicates are evaluated.
-        struct SegmentedBlock {
-            const char* modelName;        // BlockRegistry model name for this BlockID
-            const char* blockstateFile;   // stem of the blockstates/*.json to read
-            const char* property;         // property this BlockID pins down
-            const char* value;
-        };
-
-        // The property NAME differs between the two block classes and is not
-        // guessable from the Java: LeafLitterBlock uses `segment_amount`, while
-        // FlowerBedBlock (wildflowers AND pink_petals) uses `flower_amount`.
-        // Each row's name is taken from the `when` keys of its own blockstate
-        // file — the JSON is what these predicates are matched against, so it
-        // is the only authority that matters here.
-        constexpr SegmentedBlock kSegmentedBlocks[] = {
-            { "leaf_litter_1", "leaf_litter", "segment_amount", "1" },
-            { "leaf_litter_2", "leaf_litter", "segment_amount", "2" },
-            { "leaf_litter_3", "leaf_litter", "segment_amount", "3" },
-            { "leaf_litter_4", "leaf_litter", "segment_amount", "4" },
-
-            { "wildflowers_1", "wildflowers", "flower_amount", "1" },
-            { "wildflowers_2", "wildflowers", "flower_amount", "2" },
-            { "wildflowers_3", "wildflowers", "flower_amount", "3" },
-            { "wildflowers_4", "wildflowers", "flower_amount", "4" },
-
-            { "pink_petals_1", "pink_petals", "flower_amount", "1" },
-            { "pink_petals_2", "pink_petals", "flower_amount", "2" },
-            { "pink_petals_3", "pink_petals", "flower_amount", "3" },
-            { "pink_petals_4", "pink_petals", "flower_amount", "4" },
-        };
-
     } // namespace
 
-    const std::string& BlockStateModels::ModelNameFor(BlockID id, uint8_t stateIndex) {
+    const std::string& BlockStateModels::ModelNameFor(BlockID id, BlockStateIndex stateIndex) {
         const size_t idx = static_cast<size_t>(id);
         if (idx >= BlockRegistry::Size) return kEmpty;
         const auto& states = s_stateModels[idx];
@@ -256,10 +232,19 @@ namespace Game {
         for (const auto& [modelName, id] : nameToBlock) {
             fileTargets[modelName].push_back({ id, {} });
         }
-        for (const SegmentedBlock& sb : kSegmentedBlocks) {
-            auto it = nameToBlock.find(sb.modelName);
-            if (it == nameToBlock.end()) continue;
-            fileTargets[sb.blockstateFile].push_back({ it->second, { { sb.property, sb.value } } });
+        // The segmented families (leaf_litter, wildflowers, pink_petals) are the
+        // one case where the modelName-keyed pass above cannot find the file:
+        // their model is the per-count "leaf_litter_1" while their blockstate
+        // JSON is "leaf_litter". Add them under their registry slug.
+        //
+        // This used to be a kSegmentedBlocks table pinning an IMPLIED
+        // `segment_amount`/`flower_amount` for each of four BlockIDs. The count
+        // is a real property now, so pinning it would force every state onto the
+        // 1-segment model; the state itself selects the variant instead.
+        for (const char* slug : { "leaf_litter", "wildflowers", "pink_petals" }) {
+            const BlockID id = BlockStates::FromSlug(slug).Block();
+            if (id == BlockID::Air) continue;
+            fileTargets[slug].push_back({ id, {} });
         }
 
         size_t filesRead = 0, blocksMatched = 0, rotatedModels = 0;
@@ -355,7 +340,7 @@ namespace Game {
                 blocksMatched++;
 
                 for (uint16_t state = 0; state < stateCount; ++state) {
-                    auto props = def.PropertiesOf(static_cast<uint8_t>(state));
+                    auto props = def.PropertiesOf(state);
                     // Fold in what this BlockID already stands for, so a predicate
                     // like `segment_amount=2|3` can be judged even though the state
                     // itself only carries `facing`.
@@ -373,12 +358,13 @@ namespace Game {
                             const int yt = ((me.apply.yTurns % 4) + 4) % 4;
                             std::string partName = me.apply.model;
                             if (xt != 0 || yt != 0) {
-                                partName += "__x" + std::to_string(xt) + "_y" + std::to_string(yt);
+                                partName = RotatedModelName(partName, xt, yt, me.apply.uvLock);
                                 if (!BlockModelRegistry::HasModel(partName)) {
                                     BlockModelRegistry::RegisterModel(
                                         partName,
                                         BlockModelRegistry::RotateModel(
-                                            BlockModelRegistry::GetModel(me.apply.model), xt, yt));
+                                            BlockModelRegistry::GetModel(me.apply.model),
+                                            xt, yt, me.apply.uvLock));
                                     rotatedModels++;
                                 }
                             }
@@ -439,15 +425,16 @@ namespace Game {
 
                     // Synthesise the rotated model once and register it under a
                     // derived name, the way MC bakes one quad set per state.
+                    const int xt = ((best->xTurns % 4) + 4) % 4;
+                    const int yt = ((best->yTurns % 4) + 4) % 4;
                     const std::string rotatedName =
-                        best->model + "__x" + std::to_string(((best->xTurns % 4) + 4) % 4) +
-                                      "_y" + std::to_string(((best->yTurns % 4) + 4) % 4);
+                        RotatedModelName(best->model, xt, yt, best->uvLock);
                     if (!BlockModelRegistry::HasModel(rotatedName)) {
                         BlockModelRegistry::RegisterModel(
                             rotatedName,
                             BlockModelRegistry::RotateModel(
                                 BlockModelRegistry::GetModel(best->model),
-                                best->xTurns, best->yTurns));
+                                best->xTurns, best->yTurns, best->uvLock));
                         rotatedModels++;
                     }
                     slot[state] = rotatedName;
@@ -492,8 +479,10 @@ namespace Game {
             slot.assign(stateCount, std::string{});
             fallbackBlocks++;
 
+            const BlockID blockId = static_cast<BlockID>(i);
             for (uint16_t state = 0; state < stateCount; ++state) {
-                const std::string_view facing = def.ValueOf(static_cast<uint8_t>(state), "facing");
+                const std::string_view facing =
+                    BlockStates::FromIndex(blockId, state).GetValueByName("facing");
                 int yTurns = 0;
                 if      (facing == "north") yTurns = 0;
                 else if (facing == "east")  yTurns = 1;
@@ -503,12 +492,15 @@ namespace Game {
 
                 if (yTurns == 0) { slot[state] = base; continue; }
 
-                const std::string rotatedName = base + "__x0_y" + std::to_string(yTurns);
+                // No uvlock: this fallback exists for blocks with no variant
+                // table to read one from, and MC's own multipart entries for
+                // them (leaf_litter, wildflowers, pink_petals) do not set it.
+                const std::string rotatedName = RotatedModelName(base, 0, yTurns, false);
                 if (!BlockModelRegistry::HasModel(rotatedName)) {
                     BlockModelRegistry::RegisterModel(
                         rotatedName,
                         BlockModelRegistry::RotateModel(
-                            BlockModelRegistry::GetModel(base), 0, yTurns));
+                            BlockModelRegistry::GetModel(base), 0, yTurns, false));
                     rotatedModels++;
                 }
                 slot[state] = rotatedName;

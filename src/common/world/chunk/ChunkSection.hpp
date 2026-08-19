@@ -7,7 +7,8 @@
 #include "PalettedContainer.hpp"
 #include "../math/WorldMath.hpp"
 #include "../block/Blocks.hpp"
-#include "../block/BlockStateIds.hpp"
+#include "../block/BlockState.hpp"
+#include "common/world/block/BlockState.hpp"
 #include "../biome/Biomes.hpp"
 
 namespace Game {
@@ -60,8 +61,8 @@ namespace Game {
         // chunk stops being a re-encode pass over 4096 voxels.
     private:
         PalettedContainer m_states{
-            PaletteStrategy::ForBlockStates(BlockStateIds::Bits()),
-            BlockStateIds::Pack(BlockID::Air, 0)
+            PaletteStrategy::ForBlockStates(kBlockStateBits),
+            BlockState{}.RawId()                 // air's default = global id 0
         };
 
         PalettedContainer m_biomes{ PaletteStrategy::ForBiomes(16), kFallbackBiomeId };
@@ -130,19 +131,40 @@ namespace Game {
             RecountRandomTicking();
         }
 
-        // State index at local (x,y,z). Returns 0 (the block's default state)
-        // when nothing non-default has been written here.
-        inline uint8_t GetState(int x, int y, int z) const {
-            return BlockStateIds::Unpack(
-                       m_states.Get(static_cast<size_t>(Math::LocalIndex(x, y, z)))).state;
+        // The full state at local (x,y,z) — MC's LevelChunkSection.getBlockState.
+        // ONE container read: the flat id IS what is stored, so unlike the
+        // (block, index) pair this needs no unpack and no second lookup.
+        inline BlockState StateAt(int x, int y, int z) const {
+            return BlockState::FromRawId(
+                m_states.Get(static_cast<size_t>(Math::LocalIndex(x, y, z))));
         }
 
-        inline void SetState(int x, int y, int z, uint8_t stateIndex) {
+        inline void SetStateAt(int x, int y, int z, BlockState state) {
             const size_t i = static_cast<size_t>(Math::LocalIndex(x, y, z));
-            const BlockStateRef cur = BlockStateIds::Unpack(m_states.Get(i));
-            if (cur.state == stateIndex) return;
-            m_states.Set(i, BlockStateIds::Pack(cur.id, stateIndex));
-            if (stateIndex != 0) m_hasStates = true;
+            const uint32_t previous = m_states.GetAndSet(i, state.RawId());
+            const uint16_t prevRaw =
+                static_cast<uint16_t>(BlockState::FromRawId(previous).Block());
+            const uint16_t rawID = static_cast<uint16_t>(state.Block());
+            if (prevRaw != rawID) {
+                if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
+                if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
+            }
+            if (state != BlockStates::Default(state.Block())) m_hasStates = true;
+        }
+
+        // State index at local (x,y,z). Returns 0 (the block's default state)
+        // when nothing non-default has been written here.
+        inline BlockStateIndex GetState(int x, int y, int z) const {
+            return StateAt(x, y, z).Index();
+        }
+
+        inline void SetState(int x, int y, int z, BlockStateIndex stateIndex) {
+            const size_t i = static_cast<size_t>(Math::LocalIndex(x, y, z));
+            const BlockState cur = BlockState::FromRawId(m_states.Get(i));
+            if (cur.Index() == stateIndex) return;
+            const BlockState next = BlockStates::FromIndex(cur.Block(), stateIndex);
+            m_states.Set(i, next.RawId());
+            if (next != BlockStates::Default(cur.Block())) m_hasStates = true;
         }
 
         // True when this section carries any per-voxel state at all. Lets the
@@ -158,38 +180,44 @@ namespace Game {
         // encoder, the mesh copy and the conversion all branch on.
         inline bool IsAllAir() const {
             return m_states.IsSingleValue() &&
-                   m_states.SingleValue() == BlockStateIds::Pack(BlockID::Air, 0);
+                   m_states.SingleValue() == BlockState{}.RawId();
         }
 
         // Retrieve the BlockID at local (x,y,z) in [0..15].
         // Returns a raw uint16_t; static_cast<BlockID>(...) when needed.
         inline uint16_t Get(int x, int y, int z) const {
-            return static_cast<uint16_t>(
-                BlockStateIds::Unpack(
-                    m_states.Get(static_cast<size_t>(Math::LocalIndex(x, y, z)))).id);
+            return static_cast<uint16_t>(StateAt(x, y, z).Block());
         }
 
         inline BlockID GetBlockID(int x, int y, int z) const {
             return static_cast<BlockID>(Get(x, y, z));
         }
 
-        // Set the block at local (x,y,z), PRESERVING the existing state index —
-        // which is what the old split blocks[]/states[] arrays did, since a
-        // write to one never touched the other. Pack clamps the index against
-        // the new block's state count, so a block with fewer states cannot
-        // inherit an index it does not have.
+        // Set the block at local (x,y,z) in its DEFAULT state — MC's
+        // `setBlockState(pos, block.defaultBlockState())`.
+        //
+        // This used to PRESERVE the outgoing block's state index, mirroring the
+        // old split blocks[]/states[] arrays where writing one never touched
+        // the other. That is meaningless now: an index means something only
+        // relative to the block that owns it, so carrying a slab's `type=top`
+        // into a door hands the door a completely unrelated property tuple —
+        // and with defaults no longer at index 0 it cannot even be read as
+        // "unset". Replacing a block replaces its state.
         inline void Set(int x, int y, int z, uint16_t rawID) {
             const size_t i = static_cast<size_t>(Math::LocalIndex(x, y, z));
-            const BlockStateRef cur = BlockStateIds::Unpack(m_states.Get(i));
-            if (static_cast<uint16_t>(cur.id) == rawID) return;
+            const BlockState cur = BlockState::FromRawId(m_states.Get(i));
+            if (static_cast<uint16_t>(cur.Block()) == rawID) return;
 
-            const uint32_t previous =
-                m_states.GetAndSet(i, BlockStateIds::Pack(static_cast<BlockID>(rawID), cur.state));
+            const BlockID newId = static_cast<BlockID>(rawID);
+            const BlockState newState = BlockStates::Default(newId);
+            if (newState.Index() != 0) m_hasStates = true;   // 0 is only the default for a stateless block
+            const uint32_t previous = m_states.GetAndSet(i, newState.RawId());
 
             // Keep the random-tick census current — MC does exactly this in
             // LevelChunkSection.setBlockState, which likewise reads the old
             // value back from the container to adjust its counts.
-            const uint16_t prevRaw = static_cast<uint16_t>(BlockStateIds::Unpack(previous).id);
+            const uint16_t prevRaw =
+                static_cast<uint16_t>(BlockState::FromRawId(previous).Block());
             if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
             if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
         }
@@ -201,16 +229,23 @@ namespace Game {
         // Set block and state together — MC's actual shape
         // (setBlockState takes one BlockState), and one container write instead
         // of two.
-        inline void SetBlockState(int x, int y, int z, BlockID id, uint8_t stateIndex) {
+        inline void SetBlockState(int x, int y, int z, BlockID id, BlockStateIndex stateIndex) {
             const size_t i = static_cast<size_t>(Math::LocalIndex(x, y, z));
-            const uint32_t previous = m_states.GetAndSet(i, BlockStateIds::Pack(id, stateIndex));
-            const uint16_t prevRaw = static_cast<uint16_t>(BlockStateIds::Unpack(previous).id);
+            const uint32_t previous =
+                m_states.GetAndSet(i, BlockStates::FromIndex(id, stateIndex).RawId());
+            const uint16_t prevRaw =
+                static_cast<uint16_t>(BlockState::FromRawId(previous).Block());
             const uint16_t rawID   = static_cast<uint16_t>(id);
             if (prevRaw != rawID) {
                 if (BlockRandomlyTicks(prevRaw)) --randomTickingCount;
                 if (BlockRandomlyTicks(rawID))   ++randomTickingCount;
             }
-            if (stateIndex != 0) m_hasStates = true;
+            // "Something here is not at its block's default state." Compared
+            // against the block's own default rather than against 0, which is
+            // no longer the same question — most blocks default elsewhere, and
+            // testing `!= 0` would leave this permanently true and the encoder
+            // fast path it gates permanently off.
+            if (stateIndex != DefaultStateIndexOf(id)) m_hasStates = true;
         }
 
         // ── Random ticking (MC LevelChunkSection.isRandomlyTicking) ─────────
@@ -239,11 +274,11 @@ namespace Game {
             // already knows how many of each there are (MC recalcBlockCounts
             // uses its container's count() the same way).
             m_states.ForEachValue([&](uint32_t stateId, int count) {
-                const BlockStateRef ref = BlockStateIds::Unpack(stateId);
-                if (BlockRandomlyTicks(static_cast<uint16_t>(ref.id))) {
+                const BlockState st = BlockState::FromRawId(stateId);
+                if (BlockRandomlyTicks(static_cast<uint16_t>(st.Block()))) {
                     n += static_cast<uint32_t>(count);
                 }
-                if (ref.state != 0) anyState = true;
+                if (st != BlockStates::Default(st.Block())) anyState = true;
             });
             randomTickingCount = static_cast<uint16_t>(n > 0xFFFFu ? 0xFFFFu : n);
             m_hasStates = anyState;

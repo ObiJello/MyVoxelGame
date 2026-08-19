@@ -32,7 +32,7 @@ namespace Network {
         // than read from the world. The state needs the same treatment, and
         // without it every loot condition on a state reads the DEFAULT: a fully
         // grown wheat evaluated as age=0 and dropped seeds instead of wheat.
-        uint8_t         blockState = 0;
+        Game::BlockStateIndex         blockState = 0;
 
         BlockActionC2SPacket() = default;
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act)
@@ -55,7 +55,7 @@ namespace Network {
             buffer.WriteFloat(packet.hitPosition.y);
             buffer.WriteFloat(packet.hitPosition.z);
             buffer.WriteVarInt(packet.sequenceNumber);
-            buffer.WriteByte(packet.blockState);
+            buffer.WriteShort(packet.blockState);
             return buffer.GetData();
         }
 
@@ -76,7 +76,7 @@ namespace Network {
             // absent from a pre-state sender, which means "default state" — the
             // correct reading for a block that carries no properties.
             if (reader.Remaining() >= 1) {
-                packet.blockState = reader.ReadByte();
+                packet.blockState = reader.ReadShort();
             }
             return packet;
         }

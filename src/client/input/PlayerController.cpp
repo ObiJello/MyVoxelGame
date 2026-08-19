@@ -26,6 +26,7 @@
 #include <glm/glm.hpp>
 #include <cmath>
 #include <thread>
+#include <optional>
 
 namespace Game {
 
@@ -50,7 +51,7 @@ namespace Game {
 
     uint32_t ClientPlayerController::SendDigPacket(Network::BlockActionType action,
                                                    const glm::ivec3& pos, BlockID blockId,
-                                                   uint8_t blockState) {
+                                                   BlockState blockState) {
         if (!networkClient || !networkClient->IsConnected()) return 0;
         Network::BlockActionC2SPacket packet;
         packet.worldX = pos.x;
@@ -58,7 +59,8 @@ namespace Game {
         packet.worldZ = pos.z;
         packet.action = action;
         packet.blockId = blockId;
-        packet.blockState = blockState;
+        // The wire still carries the within-block index next to the id.
+        packet.blockState = blockState.Index();
         packet.face = 0;
         packet.sequenceNumber = ++interactSeq;
         auto data = Network::Serialization::Serialize(packet);
@@ -104,23 +106,24 @@ namespace Game {
         return BlockID::Air;
     }
 
-    uint8_t ClientPlayerController::ReadBlockState(const glm::ivec3& pos) const {
+    BlockState ClientPlayerController::ReadBlockState(const glm::ivec3& pos) const {
         try {
             if (blockAccess) return blockAccess->GetBlockState(pos.x, pos.y, pos.z);
             if (world)       return world->GetBlockState(pos.x, pos.y, pos.z);
         } catch (...) {}
-        return 0;
+        return BlockState{};
     }
 
     void ClientPlayerController::PredictBlock(const glm::ivec3& pos,
                                               BlockID newBlock,
                                               uint32_t sequence,
-                                              uint8_t stateIndex) {
+                                              BlockState state) {
         // The client's chunk cache is what the renderer meshes from AND what
         // ClientBlockAccess reads for raycast/physics, so a single write here
         // makes the change visible, targetable and solid on the same frame.
         if (Client::g_clientChunkManager) {
-            Client::g_clientChunkManager->PredictBlockChange(pos, newBlock, sequence, stateIndex);
+            Client::g_clientChunkManager->PredictBlockChange(pos, newBlock, sequence,
+                                                             state.Index());
         }
     }
     
@@ -346,7 +349,7 @@ namespace Game {
     bool ClientPlayerController::ComputePredictedPlacement(const RaycastHit& hit,
                                                            glm::ivec3& outPos,
                                                            BlockID& outBlock,
-                                                           uint8_t& outState) const {
+                                                           BlockState& outState) const {
         if (!player) return false;
 
         // --- Only plain block items are predictable ---------------------
@@ -375,17 +378,26 @@ namespace Game {
         // replaceable, resolve the position from that, then re-ask at the
         // resolved cell. Clicking the grass under a leaf litter clump lands on
         // the litter's own cell, which is what lets the growth below see it.
-        const uint8_t clickedState = ReadBlockState(hit.blockPos);
+        const BlockState clickedState = ReadBlockState(hit.blockPos);
+        // Same click data the server builds, so the slab merge predicts
+        // identically instead of flashing a slab into the neighbouring cell.
+        Game::PlacementClick click;
+        click.clickedFace = static_cast<Game::Direction>(OurFaceToMcFace(hit.hitFace));
+        click.hitY        = hit.cursorPos.y;
+        click.replacingClickedOnBlock = true;
+
         const bool replaceClicked =
-            Game::CanBeReplacedByPlacement(clickedId, clickedState, toPlace,
-                                           player->physics.isSneaking);
+            Game::CanBeReplacedByPlacement(clickedState, toPlace,
+                                           player->physics.isSneaking, click);
 
         const glm::ivec3 target = replaceClicked ? hit.blockPos : hit.adjacentPos;
         const BlockID targetId    = ReadBlock(target);
-        const uint8_t targetState = ReadBlockState(target);
+        const BlockState targetState = ReadBlockState(target);
+        Game::PlacementClick resolvedClick = click;
+        resolvedClick.replacingClickedOnBlock = false;
         if (!replaceClicked &&
-            !Game::CanBeReplacedByPlacement(targetId, targetState, toPlace,
-                                            player->physics.isSneaking)) {
+            !Game::CanBeReplacedByPlacement(targetState, toPlace,
+                                            player->physics.isSneaking, resolvedClick)) {
             return false;
         }
 
@@ -394,32 +406,43 @@ namespace Game {
         // segment count and KEEPS the facing it already has. Predicting the
         // grow avoids a round trip in which the clump visibly stays put and
         // then jumps a segment.
+        // Growing raises the `segment_amount`/`flower_amount` state; the
+        // BlockID never changes, so `resolved` stays put and the new state is
+        // carried to outState below.
         BlockID resolved = toPlace;
         bool grewInPlace = false;
-        {
-            const BlockID base = Game::SegmentedFamilyBase(targetId);
-            if (base != BlockID::Air && base == Game::SegmentedFamilyBase(toPlace)) {
-                const BlockID grown = Game::SegmentedGrowth(targetId);
-                if (grown != BlockID::Air) {
-                    resolved     = grown;
-                    grewInPlace  = true;
-                }
+        BlockState grownState;
+        if (Game::IsSegmentedBlock(targetId) && targetId == toPlace) {
+            const BlockState grown = Game::SegmentGrownState(targetState);
+            if (grown != targetState) {
+                grownState  = grown;
+                grewInPlace = true;
             }
         }
 
         // --- Slab half (server: SlabBlock.getStateForPlacement mirror) ---
         // Same inputs (clicked face + cursor Y), so the same answer — without
         // this a slab would predict as bottom and visibly flip on the ack.
-        if (!grewInPlace) {
-            const BlockID topVariant = Game::BlockRegistry::SlabTopVariant(toPlace);
-            if (topVariant != BlockID::Air) {
+        // The half is a `type` state, so unlike the segmented clumps this
+        // cannot resolve to a different BlockID — it is applied to the state
+        // once ComputePlacementState has run, below.
+        std::optional<Game::BlockRegistry::SlabType> slabHalf;
+        if (!grewInPlace && Game::BlockRegistry::IsSlabBlock(toPlace)) {
+            using SlabType = Game::BlockRegistry::SlabType;
+            // The merge comes first, exactly as on the server: a slab already
+            // in the resolved cell turns the placement into a double instead of
+            // a second half. `targetId == toPlace` is MC's `state.is(this)`.
+            if (targetId == toPlace &&
+                Game::BlockRegistry::SlabTypeOf(targetState) != SlabType::Double) {
+                slabHalf = SlabType::Double;
+            } else {
                 bool placeAsTop;
                 switch (hit.hitFace) {
                     case 3:  placeAsTop = true;  break;               // -Y (bottom face)
                     case 2:  placeAsTop = false; break;               // +Y (top face)
                     default: placeAsTop = (hit.cursorPos.y > 0.5f); break;  // sides
                 }
-                if (placeAsTop) resolved = topVariant;
+                slabHalf = placeAsTop ? SlabType::Top : SlabType::Bottom;
             }
         }
 
@@ -474,17 +497,28 @@ namespace Game {
         // Growing a clump keeps the facing it already has (MC's
         // `state.setValue(segment, n + 1)`); everything else derives its
         // orientation from how the player is standing.
-        outState = grewInPlace ? targetState : Game::ComputePlacementState(resolved, ctx);
+        outState = grewInPlace ? grownState : Game::ComputePlacementState(resolved, ctx);
+        // Applied after ComputePlacementState so it composes with, rather than
+        // overwrites, the waterlogged bit that placing into a fluid sets.
+        if (slabHalf) {
+            using SlabType = Game::BlockRegistry::SlabType;
+            outState = Game::BlockRegistry::SlabStateWithType(outState, *slabHalf);
+            // MC clears WATERLOGGED when merging to a double. The server does
+            // the same; predicting otherwise would flip the block on the ack.
+            if (*slabHalf == SlabType::Double) {
+                outState = Game::BlockRegistry::WithWaterlogged(outState, false);
+            }
+        }
         // Neighbour-derived orientation (redstone dust). Uses the SAME function
         // the server calls, against the client's own block access, so the wire
         // predicts with the exact connections the server is about to send.
         if (!grewInPlace && blockAccess) {
-            outState = Game::ComputeWorldPlacementState(*blockAccess, target, resolved, outState);
+            outState = Game::ComputeWorldPlacementState(*blockAccess, target, outState);
             // State-aware survival, mirroring the server's second gate: a
             // button's support depends on the face it ends up attached to, so
             // this can only be asked once the state is known. Predicting a
             // placement the server will refuse would flash a floating button.
-            if (!Game::CanSurviveAt(*blockAccess, target, resolved, outState)) return false;
+            if (!Game::CanSurviveAt(*blockAccess, target, outState)) return false;
         }
         return true;
     }
@@ -882,7 +916,7 @@ namespace Game {
         // predictor would refuse it.
         glm::ivec3 predictPos{};
         BlockID    predictBlock = BlockID::Air;
-        uint8_t predictState = 0;
+        Game::BlockState predictState;
         const bool predictable = ComputePredictedPlacement(*currentHit, predictPos, predictBlock,
                                                            predictState);
         const uint32_t sequence = SendUseItemOn(*currentHit, 0);
@@ -940,9 +974,9 @@ namespace Game {
         // from the click). Without this, pick-block on a top slab would put
         // a "top" item in the inventory which renders weird in the HUD and
         // bypasses the normal SlabBlock.getStateForPlacement decision.
-        if (Game::BlockRegistry::IsSlabTop(picked)) {
-            picked = Game::BlockRegistry::SlabBottomVariant(picked);
-        }
+        // Slabs need no normalisation any more: all three halves ARE one
+        // BlockID, so pick-block yields the right item without asking which
+        // half it landed on.
 
         const int slot = player->inventory.GetSelectedSlot();
         const int unifiedSlot = Game::Inventory::HotbarToIndex(slot);
@@ -1316,7 +1350,7 @@ namespace Game {
                     // stops being true the moment we write the prediction.
                     glm::ivec3 predictPos{};
                     BlockID    predictBlock = BlockID::Air;
-                    uint8_t    predictState = 0;
+                    Game::BlockState predictState;
                     const bool predictable =
                         ComputePredictedPlacement(*currentHit, predictPos, predictBlock,
                                                   predictState);
@@ -1501,10 +1535,20 @@ namespace Game {
             return;
         }
 
+        // MC Level.destroyBlock:266 — the cell becomes the FLUID that was in
+        // it, not air. Breaking a waterlogged fence or a kelp stalk under an
+        // ocean has to leave water behind, or the prediction punches a dry
+        // hole that the server's echo then has to un-punch a tick later.
+        // Mirrors the identical rule in PlayerSession's break handler.
+        const BlockID replacement =
+            Game::BlockRegistry::ContainsWater(digState.destroyingBlockState)
+                ? BlockID::Water
+                : BlockID::Air;
+
         // Predict the break into the client's own chunk data. This is what
         // makes breaking feel instant on a remote server; on the integrated
         // host it lands a tick earlier than the echo would.
-        PredictBlock(pos, BlockID::Air, sequence);
+        PredictBlock(pos, replacement, sequence);
 
         // Integrated host only: also clear the shared server World so the
         // host's raycast/physics (which read the server World, not the client
@@ -1514,7 +1558,7 @@ namespace Game {
         bool breakingSuccessful = true;
         if (world) {
             try {
-                breakingSuccessful = world->SetBlock(pos.x, pos.y, pos.z, BlockID::Air);
+                breakingSuccessful = world->SetBlock(pos.x, pos.y, pos.z, replacement);
             } catch (const std::exception& e) {
                 Log::Error("Exception during block breaking: %s", e.what());
                 breakingSuccessful = false;

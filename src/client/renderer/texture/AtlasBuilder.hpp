@@ -22,6 +22,13 @@ struct TextureAnimation {
     int frametime = 1;        // Ticks per frame (20 ticks = 1 second)
     bool interpolate = false; // Whether to interpolate between frames
     std::vector<int> frames;  // Custom frame sequence (empty = use all frames in order)
+
+    // The .mcmeta's optional `width` / `height`, 0 when absent. MC's
+    // AnimationMetadataSection.calculateFrameSize only falls back to a
+    // min(spriteWidth, spriteHeight) SQUARE when neither is given; a lone
+    // `width` keeps the full sprite height and vice versa.
+    int declaredFrameWidth = 0;
+    int declaredFrameHeight = 0;
 };
 
 namespace Render {

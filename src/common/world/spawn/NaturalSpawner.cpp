@@ -25,7 +25,7 @@ namespace Game {
             if (!BlockRegistry::HasCollision(id)) return false;
 
             const auto& shape =
-                BlockRegistry::GetBlockShape(id, blocks.GetBlockState(x, y, z));
+                BlockRegistry::GetBlockShape(blocks.GetBlockState(x, y, z));
             return shape.min.x <= 0.0f && shape.min.y <= 0.0f && shape.min.z <= 0.0f &&
                    shape.max.x >= 1.0f && shape.max.y >= 1.0f && shape.max.z >= 1.0f;
         }
@@ -39,7 +39,7 @@ namespace Game {
             if (!BlockRegistry::HasCollision(id)) return false;
 
             const auto& shape =
-                BlockRegistry::GetBlockShape(id, blocks.GetBlockState(x, y, z));
+                BlockRegistry::GetBlockShape(blocks.GetBlockState(x, y, z));
             return shape.min.x <= 0.0f && shape.max.x >= 1.0f &&
                    shape.min.z <= 0.0f && shape.max.z >= 1.0f;
         }

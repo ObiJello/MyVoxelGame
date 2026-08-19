@@ -15,8 +15,8 @@ namespace Game {
         // replaced block — treat it as unlit so we wind down rather than cook.
         bool IsLitAt(World& world, const glm::ivec3& pos, BlockID id) {
             const auto& def = BlockRegistry::GetStateDefinition(id);
-            const uint8_t state = world.GetBlockState(pos.x, pos.y, pos.z);
-            return def.ValueOf(state, "lit") == "true";
+            const BlockState state = world.GetBlockState(pos.x, pos.y, pos.z);
+            return state.GetValueByName("lit") == "true";
         }
     }
 

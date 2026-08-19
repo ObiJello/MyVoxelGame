@@ -399,6 +399,11 @@ namespace Server {
         void HandleInteract(uint32_t connectionId, int32_t entityId, bool attack,
                             bool sprinting);
 
+        // MC PlayerList.broadcastSystemMessage(component, false): a server
+        // message with no sender, delivered to every connected client. Used for
+        // the join/leave notices, which vanilla renders in yellow.
+        void BroadcastSystemMessage(const std::string& text, uint32_t color);
+
         // MC's post-hit visuals: entity event 4 for the swing, plus the crit
         // particle burst. Broadcast so every watcher sees them, not just the
         // attacker.

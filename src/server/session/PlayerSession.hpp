@@ -39,7 +39,7 @@ namespace Server {
         int sectionIndex;
         // localIndex -> block + state index (they must not get separated:
         // re-orienting a block is a real change watchers need to receive).
-        std::unordered_map<uint32_t, Game::BlockStateRef> changes;
+        std::unordered_map<uint32_t, Game::BlockState> changes;
         std::chrono::steady_clock::time_point lastUpdate;
         
         uint32_t MakeIndex(uint8_t x, uint8_t y, uint8_t z) const {
@@ -47,8 +47,8 @@ namespace Server {
         }
         
         void AddChange(uint8_t x, uint8_t y, uint8_t z, Game::BlockID blockId,
-                       uint8_t stateIndex = 0) {
-            changes[MakeIndex(x, y, z)] = Game::BlockStateRef{blockId, stateIndex};
+                       Game::BlockStateIndex stateIndex = 0) {
+            changes[MakeIndex(x, y, z)] = Game::BlockStates::FromIndex(blockId, stateIndex);
             lastUpdate = std::chrono::steady_clock::now();
         }
     };
@@ -276,7 +276,7 @@ namespace Server {
         // block is at its DEFAULT state, so any oriented block the client
         // already had right — a furnace, a log, a leaf litter clump — visibly
         // snaps to north/y-axis the moment anything resyncs it.
-        void SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block, uint8_t stateIndex);
+        void SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block, Game::BlockStateIndex stateIndex);
         void SendSingleBlockChange(const Network::BlockChangeS2CPacket& packet);
         void SendSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet);
         void SendInventoryUpdate(int slot); // TODO: Implement with inventory system
@@ -538,7 +538,7 @@ namespace Server {
         // Diff coalescing
         void CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                 uint8_t localX, uint8_t localY, uint8_t localZ,
-                                Game::BlockID blockId, uint8_t stateIndex = 0);
+                                Game::BlockID blockId, Game::BlockStateIndex stateIndex = 0);
         
         // Packet size estimation
         size_t EstimatePacketSize(const Network::ChunkDataS2CPacket& packet) const;

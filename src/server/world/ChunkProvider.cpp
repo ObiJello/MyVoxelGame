@@ -274,9 +274,9 @@ namespace Game {
         return chunk->GetBlock(localX, localY, localZ);
     }
 
-    uint8_t ChunkProvider::GetBlockState(int worldX, int worldY, int worldZ) const {
+    BlockState ChunkProvider::GetBlockState(int worldX, int worldY, int worldZ) const {
         if (!ValidateWorldPosition(worldX, worldY, worldZ)) {
-            return 0;
+            return BlockState{};
         }
 
         Math::ChunkPos chunkPos;
@@ -285,10 +285,10 @@ namespace Game {
 
         auto chunk = m_chunkCache ? m_chunkCache->Get(chunkPos) : nullptr;
         if (!chunk) {
-            return 0;
+            return BlockState{};
         }
 
-        return chunk->GetBlockState(localX, localY, localZ);
+        return chunk->StateAt(localX, localY, localZ);
     }
 
     uint16_t ChunkProvider::GetBiome(int worldX, int worldY, int worldZ) const {
@@ -314,7 +314,7 @@ namespace Game {
         SetBlock(worldX, worldY, worldZ, block, 0);
     }
 
-    void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block, uint8_t stateIndex) {
+    void ChunkProvider::SetBlock(int worldX, int worldY, int worldZ, BlockID block, BlockStateIndex stateIndex) {
         if (!ValidateWorldPosition(worldX, worldY, worldZ) || !IsValidBlockID(block)) {
             return;
         }
@@ -359,6 +359,9 @@ namespace Game {
     }
 
     bool ChunkProvider::IsBlockFluid(int worldX, int worldY, int worldZ) const {
+        // MC `!state.getFluidState().isEmpty()` — see ClientBlockAccess for why
+        // this cannot be a block-id test once waterlogging exists.
+        if (ContainsWater(worldX, worldY, worldZ)) return true;
         BlockID block = GetBlock(worldX, worldY, worldZ);
         bool isSolid, isFluid, isTransparent;
         GetBlockProperties(block, isSolid, isFluid, isTransparent);

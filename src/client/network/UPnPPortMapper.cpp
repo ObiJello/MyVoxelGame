@@ -14,6 +14,14 @@ namespace Client {
 
         constexpr const char* kSsdpAddress = "239.255.255.250";
         constexpr uint16_t kSsdpPort = 1900;
+
+        // SSDP discovery budget. MX in the M-SEARCH is 2 s, and responders
+        // wait a random 0..MX before replying, so the window has to clear MX
+        // with room for scheduling delay on a loaded machine. Attempts are
+        // cheap (a couple of UDP datagrams) and only cost time when there is
+        // genuinely no gateway.
+        constexpr int kDiscoveryAttempts      = 3;
+        constexpr int kDiscoveryWindowSeconds = 5;
         constexpr const char* kDescription = "ObeyCraft";
 
         // Service types to look for, most preferred first.
@@ -129,6 +137,29 @@ namespace Client {
     // ── SSDP discovery ──────────────────────────────────────────────────────
 
     bool UPnPPortMapper::Discover() {
+        // Retried, because a single miss used to cost the whole session:
+        // Map() calls this once and falls back to relaying forever if it
+        // returns false, with no later re-attempt.
+        //
+        // Misses are real and intermittent here. Measured against the router
+        // this was diagnosed on, SSDP replies arrived anywhere from 0.12 s to
+        // 2.14 s after the M-SEARCH — the responder waits a RANDOM delay of
+        // 0..MX seconds before answering, by design, so it can legitimately
+        // land near (or a little past) MX. A single 3 s window left almost no
+        // margin, and this runs on a detached thread during world load, when
+        // every core is busy generating chunks and the io thread may not be
+        // scheduled promptly.
+        for (int attempt = 1; attempt <= kDiscoveryAttempts; ++attempt) {
+            if (DiscoverOnce()) return true;
+            if (attempt < kDiscoveryAttempts) {
+                Log::Info("[UPnP] no gateway replied (attempt %d/%d) — retrying",
+                          attempt, kDiscoveryAttempts);
+            }
+        }
+        return false;
+    }
+
+    bool UPnPPortMapper::DiscoverOnce() {
         std::vector<std::string> locations;
         try {
             net::io_context io;
@@ -157,7 +188,13 @@ namespace Client {
             std::function<void()> receiveMore = [&]() {
                 socket.async_receive_from(net::buffer(*buffer), *sender,
                     [&](const error_code& ec, std::size_t n) {
-                        if (ec || n == 0) return;
+                        // Only a cancelled/closed socket ends the chain. A
+                        // transient per-datagram error must NOT — `ssdp:all`
+                        // makes every UPnP device on the LAN answer at once,
+                        // and giving up on the first odd one would discard the
+                        // gateway's reply that may still be in flight.
+                        if (ec == net::error::operation_aborted) return;
+                        if (ec || n == 0) { receiveMore(); return; }
                         std::string response(buffer->data(), n);
                         // LOCATION header (case varies by vendor).
                         std::string lower = ToLower(response);
@@ -179,7 +216,9 @@ namespace Client {
                     });
             };
             receiveMore();
-            io.run_for(std::chrono::seconds(3));
+            // Comfortably past MX (2 s) plus scheduling slack, rather than
+            // the 1 s of margin the old 3 s budget allowed.
+            io.run_for(std::chrono::seconds(kDiscoveryWindowSeconds));
         } catch (const std::exception& e) {
             Log::Info("[UPnP] discovery unavailable: %s", e.what());
             return false;

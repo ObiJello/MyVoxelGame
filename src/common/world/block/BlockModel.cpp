@@ -276,50 +276,26 @@ namespace Game {
         // Clear parent reference to avoid confusion
         result.parent = "";
 
-        // **FIX**: Expand template_single_face child models into full cubes.
-        // MC uses blockstate multipart to rotate a single face to all 6 directions.
-        // Since this game has no blockstate system, we expand child models that
-        // inherit from template_single_face into full cubes at resolution time.
-        // Only apply to children (not template_single_face itself) by checking
-        // the parent reference in the JSON.
-        if (j.contains("parent")) {
-            std::string parentCanon = CanonicalizeModelName(j["parent"].get<std::string>());
-            if (parentCanon == "template_single_face" && result.elements.size() == 1) {
-                const auto& elem = result.elements[0];
-                if (elem.faces.size() == 1 && elem.faces.count(FaceDir::North)) {
-
-                    std::string texRef = elem.faces.at(FaceDir::North).textureRef;
-
-                    // For mushroom stems, MC shows mushroom_block_inside on top/bottom
-                    std::string resolvedTex = result.ResolveTexture(texRef);
-                    bool isStem = (resolvedTex.find("mushroom_stem") != std::string::npos);
-
-                    std::string topBottomRef = texRef;
-                    if (isStem) {
-                        result.textures["_inside"] = "block/mushroom_block_inside";
-                        topBottomRef = "#_inside";
-                    }
-
-                    Element fullCube;
-                    fullCube.from = glm::vec3(0, 0, 0);
-                    fullCube.to = glm::vec3(16, 16, 16);
-                    glm::vec4 defaultUV(0, 0, 16, 16);
-
-                    fullCube.faces[FaceDir::North] = FaceDef(defaultUV, texRef, -1, "north");
-                    fullCube.faces[FaceDir::South] = FaceDef(defaultUV, texRef, -1, "south");
-                    fullCube.faces[FaceDir::East]  = FaceDef(defaultUV, texRef, -1, "east");
-                    fullCube.faces[FaceDir::West]  = FaceDef(defaultUV, texRef, -1, "west");
-                    fullCube.faces[FaceDir::Up]    = FaceDef(defaultUV, topBottomRef, -1, "up");
-                    fullCube.faces[FaceDir::Down]  = FaceDef(defaultUV, topBottomRef, -1, "down");
-
-                    result.elements.clear();
-                    result.elements.push_back(fullCube);
-
-                    Log::Debug("Expanded template_single_face child '%s' to full cube%s",
-                              name.c_str(), isStem ? " (stem: inside top/bottom)" : "");
-                }
-            }
-        }
+        // template_single_face children are left EXACTLY as authored: one
+        // zero-thickness quad on the north face, carrying `cullface: north`.
+        //
+        // There used to be an expansion here that turned each of them into a
+        // full 16^3 cube textured on all six sides, because "this game has no
+        // blockstate system". It has one now, and the expansion is what made
+        // every huge mushroom render as the sporey `mushroom_block_inside`:
+        // the blockstate file is multipart, so a cap block with a mixed state
+        // (say north/east/up true, south/west/down false) merges SIX parts —
+        // and once each part is a full cube they are six coincident cubes,
+        // three red and three sporey, with whichever draws last winning. A
+        // placed block hid the bug perfectly, because its default state is all
+        // six faces true, i.e. six IDENTICAL red cubes.
+        //
+        // Multipart already rotates the single quad onto all six directions
+        // (`y: 90/180/270`, `x: 90/270`) and RotateModel rewrites the cullface
+        // with it, which is exactly what vanilla does. The stem's
+        // "inside texture on top and bottom" is likewise already expressed as
+        // `up=false`/`down=false` -> mushroom_block_inside; it does not need a
+        // special case here either.
 
         //Log::Debug("Resolved model '%s': %zu elements, %zu textures", name.c_str(), result.elements.size(), result.textures.size());
 
@@ -667,7 +643,7 @@ namespace Game {
     } // namespace
 
     BlockModel BlockModelRegistry::RotateModel(const BlockModel& src, int xQuarterTurns,
-                                               int yQuarterTurns) {
+                                               int yQuarterTurns, bool uvLock) {
         const int xt = ((xQuarterTurns % 4) + 4) % 4;
         const int yt = ((yQuarterTurns % 4) + 4) % 4;
         if (xt == 0 && yt == 0) return src;
@@ -696,14 +672,20 @@ namespace Game {
                 const IVec3 n  = ApplyRot(NormalOf(dir), xt, yt);
                 const FaceDir dstDir = FaceFromNormal(n);
 
-                IVec3 su, sv;
-                FaceUvAxes(dir, su, sv);
-                // Carry the source face's existing uvRotation through, then add
-                // whatever the geometric rotation demands.
-                for (int s = 0; s < (((face.uvRotation / 90) % 4 + 4) % 4); ++s) UvShiftOnce(su, sv);
-
                 FaceDef f = face;
-                f.uvRotation = SolveUvShift(dstDir, ApplyRot(su, xt, yt), ApplyRot(sv, xt, yt));
+                if (!uvLock) {
+                    IVec3 su, sv;
+                    FaceUvAxes(dir, su, sv);
+                    // Carry the source face's existing uvRotation through, then
+                    // add whatever the geometric rotation demands.
+                    for (int s = 0; s < (((face.uvRotation / 90) % 4 + 4) % 4); ++s) {
+                        UvShiftOnce(su, sv);
+                    }
+                    f.uvRotation = SolveUvShift(dstDir, ApplyRot(su, xt, yt), ApplyRot(sv, xt, yt));
+                }
+                // uvLock: leave f.uvRotation as the source face authored it.
+                // The mesher's UVs already run along fixed world axes, so no
+                // correction IS the world-locked texture MC's uvlock asks for.
 
                 // Cullface is a world direction and must rotate with the face,
                 // or a rotated block stops culling against its neighbours (or

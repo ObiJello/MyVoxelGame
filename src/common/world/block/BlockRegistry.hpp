@@ -2,11 +2,13 @@
 #pragma once
 
 #include "Blocks.hpp"
-#include "BlockStateIds.hpp"
+#include "BlockState.hpp"
+#include "common/world/block/BlockState.hpp"
 #include "BlockModel.hpp"
 #include "Direction.hpp"
 #include "../../entity/MiningTier.hpp"
 #include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -70,7 +72,7 @@ namespace Game {
     // the block: a fully grown crop stops ticking (`!isMaxAge(state)`), which
     // is what keeps a harvested field from costing anything once it matures.
     // A block whose fn is null never random-ticks.
-    using BlockIsRandomlyTickingFn = bool (*)(uint8_t stateIndex);
+    using BlockIsRandomlyTickingFn = bool (*)(BlockState state);
 
     // One random tick. Mirrors `BlockBehaviour.randomTick(state, serverLevel,
     // pos, random)`. `id` is passed explicitly because one function backs
@@ -82,8 +84,7 @@ namespace Game {
     // server-only, so the growth helpers can be shared verbatim with the bone
     // meal path below — which DOES run on both sides.
     using BlockRandomTickFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
-                                       BlockID id, uint8_t stateIndex,
-                                       JavaRandom& random);
+                                       BlockState state, JavaRandom& random);
 
     // MC BonemealableBlock. `isValidBonemealTarget` is the "would bone meal do
     // anything here" test (crops: not yet max age); `performBonemeal` applies
@@ -93,10 +94,9 @@ namespace Game {
     // bonemealable.
     using BlockIsValidBonemealTargetFn = bool (*)(const IBlockAccess& level,
                                                   const glm::ivec3& pos,
-                                                  uint8_t stateIndex);
+                                                  BlockState state);
     using BlockPerformBonemealFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
-                                            BlockID id, uint8_t stateIndex,
-                                            JavaRandom& random);
+                                            BlockState state, JavaRandom& random);
 
     // A neighbour of this block changed. Narrowed port of MC's
     // `BlockBehaviour.updateShape(state, …, direction, neighbourPos,
@@ -111,10 +111,12 @@ namespace Game {
     // World::NotifyNeighborBlocks could not express: that rule can only
     // DESTROY, and attached stems need to turn back into a growable stem when
     // their fruit is picked.
+    // outBlock/outState collapsed into one BlockState: the block IS part of
+    // the state, so "become air" is just returning air's state.
     using BlockNeighborChangedFn = bool (*)(const IBlockAccess& level, const glm::ivec3& pos,
-                                            BlockID id, uint8_t stateIndex,
+                                            BlockState state,
                                             Direction toNeighbour, BlockID neighbourId,
-                                            BlockID& outBlock, uint8_t& outState);
+                                            BlockState& outState);
 
     struct Block {
         std::string name;
@@ -216,7 +218,7 @@ namespace Game {
         // state to a different (possibly rotated) model. MC's equivalent is
         // BlockModelShaper.getBlockModel(BlockState). Falls back to the plain
         // model when the block has no blockstate file or no states.
-        static const BlockModel& GetBlockModel(BlockID id, uint8_t stateIndex);
+        static const BlockModel& GetBlockModel(BlockState state);
 
         // Combined outline / selection shape for a block, in [0,1] block-local
         // coordinates. Computed once per BlockID by unioning the AABB of every
@@ -227,6 +229,86 @@ namespace Game {
         // produce NaN edges. Returns (0,0,0)-(1,1,1) for full cubes and for
         // blocks whose model couldn't be resolved.
         struct BlockShape { glm::vec3 min{0.0f}; glm::vec3 max{1.0f}; };
+
+        // ── MC VoxelShape, reduced to the box list this engine needs ────────
+        //
+        // BlockShape above is MC's `getShape().bounds()` — one AABB. That is
+        // the whole shape for every block whose VoxelShape is a single box,
+        // which until stairs was all of them.
+        //
+        // Stairs are the first family whose real shape is a UNION. MC builds
+        // them as nested `Shapes.or` calls (StairBlock.java:216-222):
+        //   SHAPE_OUTER    = column(16,0,8) or box(0,8,0, 8,16,8)
+        //   SHAPE_STRAIGHT = SHAPE_OUTER or rotate(SHAPE_OUTER, Y_90)
+        //   SHAPE_INNER    = SHAPE_STRAIGHT or rotate(SHAPE_STRAIGHT, Y_90)
+        // so a stair is two or three boxes and its BOUNDS are the full cell.
+        // Collapsing that to the bounds is what made a stair a solid cube the
+        // player had to jump onto, and what made it cull its neighbours' faces.
+        //
+        // Five is the maximum any shape here needs — a fence or a glass pane
+        // is a centre post plus one arm per connected side
+        // (CrossCollisionBlock.makeShapes). Stairs need three. Kept a fixed
+        // array rather than a vector so the physics sweep, which asks per
+        // voxel, allocates nothing.
+        static constexpr size_t kMaxShapeBoxes = 5;
+        struct BlockShapeSet {
+            BlockShape boxes[kMaxShapeBoxes];
+            uint8_t    count = 0;
+
+            const BlockShape* begin() const { return boxes; }
+            const BlockShape* end()   const { return boxes + count; }
+
+            // True when this is a single box filling the whole cell — MC's
+            // `Block.isShapeFullBlock(getOcclusionShape())`, which is what
+            // decides whether the block hides its neighbours' faces.
+            bool IsFullCube() const {
+                if (count != 1) return false;
+                const BlockShape& b = boxes[0];
+                return b.min.x <= 0.0001f && b.max.x >= 0.9999f &&
+                       b.min.y <= 0.0001f && b.max.y >= 0.9999f &&
+                       b.min.z <= 0.0001f && b.max.z >= 0.9999f;
+            }
+
+            // MC Block.isFaceSturdy(shape, UP): some single box in the union
+            // must reach the cell top AND cover the whole square. True for a
+            // full cube, a top slab and a top-half stair; false for a bottom
+            // slab and a bottom-half stair, which is exactly vanilla.
+            bool IsFaceSturdyUp() const {
+                for (const BlockShape& b : *this) {
+                    if (b.max.y >= 0.9999f &&
+                        b.min.x <= 0.0001f && b.max.x >= 0.9999f &&
+                        b.min.z <= 0.0001f && b.max.z >= 0.9999f) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+
+        // The state's full shape. Every block that is not a stair returns a
+        // one-box set holding exactly what GetBlockShape returns, so a caller
+        // that switches to this API changes no behaviour anywhere else.
+        //
+        // Returned by value: a stair's set is memoised per flat state id (its
+        // three property reads are string-keyed and far too slow per voxel),
+        // and every other block's is a 24-byte copy of its already-cached
+        // single shape.
+        static BlockShapeSet GetBlockShapeSet(BlockState state);
+
+        // GetBlockShapeSet + the neighbour-dependent extension GetBlockShapeAt
+        // applies. Use this wherever the single-shape code used GetBlockShapeAt.
+        static BlockShapeSet GetBlockShapeSetAt(const IBlockAccess& world,
+                                                const glm::ivec3& pos, BlockState state);
+
+        // MC BlockBehaviour.getCollisionShape, which defaults to getShape and
+        // is overridden by exactly one family here: CrossCollisionBlock hands
+        // its constructor a separate `collisionHeight`, and FenceBlock passes
+        // 24 — a fence is 1.5 blocks tall to walk into even though it is drawn
+        // one block tall, which is what makes fences unjumpable.
+        //
+        // Physics uses this; the raycast, the selection outline and everything
+        // that asks "what does this block look like" use GetBlockShapeSet.
+        static BlockShapeSet GetBlockCollisionShapeSet(BlockState state);
 
         // Shape for a specific block STATE. Rotation lives in the model, so a
         // block whose blockstate maps facing to a y-rotated model has a
@@ -239,7 +321,7 @@ namespace Game {
         // Querying the state-0 overload for a rotated block gives the shape of
         // the block as authored (north-facing), which is why the outline and
         // the raycast used to sit in the wrong corner.
-        static const BlockShape& GetBlockShape(BlockID id, uint8_t stateIndex);
+        static const BlockShape& GetBlockShape(BlockState state);
 
         // World-aware shape. Identical to GetBlockShape except for blocks whose
         // real extent depends on a NEIGHBOUR — today just a paired chest, which
@@ -248,8 +330,8 @@ namespace Game {
         // property (ChestBlock.TYPE) and keep it in the static table; we derive
         // the pairing from the world, so this needs the world and returns by
         // value rather than caching.
-        static BlockShape GetBlockShapeAt(const IBlockAccess& world, const glm::ivec3& pos,
-                                          BlockID id, uint8_t stateIndex);
+        static BlockShape GetBlockShapeAt(const IBlockAccess& world,
+                                          const glm::ivec3& pos, BlockState state);
 
         // Default-state shape. Correct for the ~99% of blocks that have no
         // state properties at all; prefer the two-argument form anywhere a
@@ -277,14 +359,42 @@ namespace Game {
         // physics / world helpers don't have to fetch the whole Block.
         static bool HasCollision(BlockID id);
 
-        // Slab orientation helpers. MC stores slab `type` (BOTTOM/TOP/DOUBLE)
-        // as a blockstate; we promote each top-half variant to its own
-        // BlockID. SlabTopVariant(bottom) returns the matching `*SlabTop`
-        // BlockID, SlabBottomVariant(top) returns the canonical bottom form
-        // (the one items resolve to). Both return BlockID::Air for non-slabs.
-        static BlockID SlabTopVariant(BlockID bottom);
-        static BlockID SlabBottomVariant(BlockID top);
-        static bool    IsSlabTop(BlockID id);
+        // ── Slabs (MC SlabBlock.TYPE) ───────────────────────────────────
+        //
+        // A slab's half is the `type` blockstate, exactly as in vanilla. It
+        // used to be three separate BlockIDs (*Slab / *SlabTop / *SlabDouble);
+        // those are gone, so there is one BlockID per slab and the half lives
+        // in the state where MC keeps it.
+        //
+        // Read it with SlabTypeOf and write it with SlabStateWithType; never
+        // infer the half from the BlockID, which no longer carries it.
+        enum class SlabType : uint8_t { NotSlab, Bottom, Top, Double };
+
+        static bool     IsSlabBlock(BlockID id);
+        static SlabType SlabTypeOf(BlockState state);
+        // Returns `stateIndex` unchanged for a non-slab, or when `type` is
+        // already what was asked for.
+        static BlockState SlabStateWithType(BlockState state, SlabType type);
+
+        // Kept as the slab family's answer to SegmentedFamilyBase — "are these
+        // two the same block in MC terms", which is what
+        // SlabBlock.getStateForPlacement's `replacedState.is(this)` asks. Now
+        // that the three halves share one BlockID this is just identity for a
+        // slab, and Air for anything else.
+        static BlockID SlabFamilyBase(BlockID id);
+
+        // ── Implied properties ──────────────────────────────────────────────
+        //
+        // A property whose value this engine spends a BlockID on instead of a
+        // state index. `oak_slab{type=top}` is its own BlockID here, so the
+        // state definition has no `type` at all — but anything reading MC data
+        // files (loot conditions, blockstate predicates) still asks for one.
+        //
+        // Returns the value this BlockID stands for, or an empty view when the
+        // block implies nothing about that property. BlockStateModels keeps its
+        // own copy of the same idea for segmented ground cover; this is the
+        // runtime lookup the data-driven paths need.
+        static std::string_view ImpliedPropertyValue(BlockID id, std::string_view propName);
 
         // ── Block states ────────────────────────────────────────────────────
         // Port of MC's StateDefinition (createBlockStateDefinition). Each block
@@ -292,43 +402,77 @@ namespace Game {
         // their values is the block's state list, and a voxel stores an index
         // into it (MC's BlockState.getId()).
         //
-        // INVARIANT: every property lists its DEFAULT value FIRST, so state
-        // index 0 is always the block's default state (MC defaultBlockState()).
-        // The whole storage layer leans on this — ChunkSection keeps no state
-        // plane at all until something writes a non-zero index, which is only
-        // sound because zero means "default" for every block.
+        // The index is mixed-radix over the properties in MC's SORTED-BY-NAME
+        // order, with the LAST property varying fastest — MC's StateDefinition
+        // keeps an ImmutableSortedMap and enumerates the cartesian product by
+        // flat-mapping over it, so the alphabetically-last property is the
+        // ones digit.
         //
-        // The index is mixed-radix with the FIRST property most significant.
+        // STATE INDEX 0 IS NOT THE DEFAULT. It used to be, by construction:
+        // every property listed its default value first. MC does the opposite —
+        // `StateDefinition.any()` takes the FIRST value of every property and
+        // BooleanProperty lists `true` before `false`, so `any()` is usually a
+        // nonsense state (waterlogged, powered and lit all true) and each block
+        // calls registerDefaultState to move off it. 627 of this engine's
+        // blocks now default somewhere other than 0; oak_stairs defaults to
+        // index 11 of 80. Use `defaultIndex`, or BlockStates::Default().
         struct BlockStateDefinition {
             struct Property {
+                PropertyId               id;      // identity: (name, value-set)
                 std::string              name;    // e.g. "facing"
-                std::vector<std::string> values;  // default first, e.g. north,east,south,west
+                std::vector<std::string> values;  // MC getPossibleValues() order
             };
             std::vector<Property> properties;      // empty => the block has exactly one state
+            BlockID  owner        = BlockID::Air;
+            uint16_t defaultIndex = 0;             // MC registerDefaultState
 
             using PropertyMap = std::unordered_map<std::string, std::string>;
 
-            uint16_t StateCount() const {
-                uint16_t n = 1;
-                for (const auto& p : properties) n = static_cast<uint16_t>(n * p.values.size());
-                return n;
-            }
+            uint16_t StateCount() const;
 
-            // Properties not present in `props`, or carrying an unrecognised
-            // value, fall back to that property's default (index 0) — which is
-            // what a caller who doesn't model a property means, and what an
-            // older save that predates it should decode as.
-            uint8_t IndexOf(const PropertyMap& props) const;
-            PropertyMap PropertiesOf(uint8_t stateIndex) const;
+            // Properties absent from `props`, or carrying an unrecognised
+            // value, keep the value the BLOCK'S DEFAULT STATE has for them —
+            // MC's `defaultBlockState()` then `setValue` for each property it
+            // was actually given (NbtUtils.readBlockState). Falling back to
+            // value index 0 instead, as this used to, now means "true" for
+            // every boolean and a different block entirely for most others.
+            uint16_t IndexOf(const PropertyMap& props) const;
+            PropertyMap PropertiesOf(uint16_t stateIndex) const;
 
             // Value of one property in a given state, or empty if this block
             // doesn't declare that property.
-            std::string_view ValueOf(uint8_t stateIndex, std::string_view propName) const;
+            std::string_view ValueOf(uint16_t stateIndex, std::string_view propName) const;
 
             // Build a state index from a single property, leaving every other
-            // property at its default. The common case for placement rules.
-            uint8_t IndexOfSingle(std::string_view propName, std::string_view value) const;
+            // property at ITS DEFAULT. The common case for placement rules.
+            uint16_t IndexOfSingle(std::string_view propName, std::string_view value) const;
         };
+
+        // ── Waterlogging (MC SimpleWaterloggedBlock / BlockState.getFluidState)
+        //
+        // Two mechanisms, both from the generated tables in
+        // GeneratedWaterlogged.hpp — see tools/gen_waterlogged.py for how the
+        // lists are derived from MC's class hierarchy rather than guessed at
+        // from block names.
+
+        // Declares the `waterlogged` property, i.e. MC's class chain reaches
+        // SimpleWaterloggedBlock. 386 blocks: stairs, slabs, fences, walls,
+        // trapdoors, signs, leaves, ladders, chests, candles, rails, coral…
+        static bool IsWaterloggable(BlockID id);
+
+        // No property, `getFluidState` returns WATER unconditionally: kelp,
+        // kelp_plant, seagrass, tall_seagrass, bubble_column.
+        static bool IsAlwaysWaterlogged(BlockID id);
+
+        // MC `BlockState.getFluidState().is(WATER)` for one (block, state).
+        // True for the water block itself, for an always-water block, and for
+        // a waterloggable block whose flag is set. This is THE question the
+        // mesher, the entity fluid test and the bucket all ask.
+        static bool ContainsWater(BlockState state);
+
+        // `state.setValue(WATERLOGGED, on)` — every other property untouched.
+        // Returns `stateIndex` unchanged for a block with no such property.
+        static BlockState WithWaterlogged(BlockState state, bool on);
 
         static const BlockStateDefinition& GetStateDefinition(BlockID id);
         // Populates the per-BlockID state table. Called from Init() after every
@@ -343,9 +487,17 @@ namespace Game {
     private:
         BlockRegistry() = delete;
 
-        // Helper to register a block with model-based rendering
+        // Helper to register a block with model-based rendering.
+        //
+        // `opaqueOverride` decouples occlusion from the render layer for the
+        // one case where MC's two answers disagree: lava draws in the SOLID
+        // layer (ItemBlockRenderTypes.LAYER_BY_FLUID lists only water) yet
+        // occludes nothing, because LiquidBlock's occlusion shape is empty.
+        // Everything else keeps the "opaque layer == occludes" default, which
+        // is what face culling, AO and the fluid face tests all read.
         static void RegisterModelBlock(BlockID id, const std::string& name, RenderLayer layer,
-                                     const std::string& modelName);
+                                     const std::string& modelName,
+                                     std::optional<bool> opaqueOverride = std::nullopt);
 
         // Helper to register a block with legacy texture indices
         static void RegisterLegacyBlock(BlockID id, const std::string& name, bool opaque,

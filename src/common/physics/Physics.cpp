@@ -19,8 +19,8 @@ namespace Game {
         return blockAccess->GetBlock(x, y, z);
     }
 
-    uint8_t PhysicsContext::GetBlockState(int x, int y, int z) const {
-        return blockAccess ? blockAccess->GetBlockState(x, y, z) : 0;
+    BlockState PhysicsContext::GetBlockState(int x, int y, int z) const {
+        return blockAccess ? blockAccess->GetBlockState(x, y, z) : BlockState{};
     }
 
     namespace { PortalPassthroughFn g_portalPassthrough = nullptr; }
@@ -602,7 +602,11 @@ namespace Game {
         // Check blocks that the box could be colliding with
         int minX = static_cast<int>(std::floor(box.min.x));
         int maxX = static_cast<int>(std::floor(box.max.x));
-        int minY = static_cast<int>(std::floor(box.min.y));
+        // One cell lower than the box needs, because a collision shape may
+        // reach out of its own cell upward — a fence is 24 pixels tall. Same
+        // reason MC's BlockCollisions walks a cursor one cell wider than the
+        // query box; see the note in MoveEntity.
+        int minY = static_cast<int>(std::floor(box.min.y)) - 1;
         int maxY = static_cast<int>(std::floor(box.max.y));
         int minZ = static_cast<int>(std::floor(box.min.z));
         int maxZ = static_cast<int>(std::floor(box.max.z));
@@ -636,13 +640,16 @@ namespace Game {
                     // real shape so the player can stand on a slab without
                     // floating at full-cube height, walk past a fence post
                     // through the gaps, etc.
-                    const auto& shape =
-                        BlockRegistry::GetBlockShape(bid, context.GetBlockState(x, y, z));
-                    AABB blockAABB;
-                    blockAABB.min = glm::vec3(x, y, z) + shape.min;
-                    blockAABB.max = glm::vec3(x, y, z) + shape.max;
+                    // …and for a stair, all two or three boxes of its union,
+                    // so the open half of the cell really is open.
+                    const auto shapes =
+                        BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(x, y, z));
+                    for (const auto& shape : shapes) {
+                        AABB blockAABB;
+                        blockAABB.min = glm::vec3(x, y, z) + shape.min;
+                        blockAABB.max = glm::vec3(x, y, z) + shape.max;
+                        if (!box.Intersects(blockAABB)) continue;
 
-                    if (box.Intersects(blockAABB)) {
                         // Portal-passthrough exception. The block is
                         // solid AND the moving AABB overlaps it, but
                         // the portal hook may say "this entity at
@@ -692,28 +699,43 @@ namespace Game {
                 );
 
                 int blockX = static_cast<int>(std::floor(cornerPosition.x));
-                int blockY = static_cast<int>(std::floor(cornerPosition.y));
                 int blockZ = static_cast<int>(std::floor(cornerPosition.z));
 
-                // Registry collision only — same rule as CheckCollision, and
-                // for the same host/joiner-parity reason. noCollision blocks
-                // don't provide support: you fall through a flower / leaf-
-                // litter pile the same way you walk through it, and air and
-                // the fluids hold nothing up.
-                const BlockID bid = context.GetBlock(blockX, blockY, blockZ);
-                if (!BlockRegistry::HasCollision(bid)) continue;
+                // The cell the point is in, and the one below it. A fence's
+                // collision shape is 24 pixels tall and so holds the player up
+                // from a cell they are not standing in — without the second
+                // probe, standing on a fence reads as standing on air.
+                int blockY = static_cast<int>(std::floor(cornerPosition.y));
+                bool inside = false;
+                BlockID bid = BlockID::Air;
+                for (int dy = 0; dy >= -1 && !inside; --dy) {
+                    const int by = blockY + dy;
+                    // Registry collision only — same rule as CheckCollision,
+                    // and for the same host/joiner-parity reason. noCollision
+                    // blocks don't provide support: you fall through a flower /
+                    // leaf-litter pile the same way you walk through it, and
+                    // air and the fluids hold nothing up.
+                    bid = context.GetBlock(blockX, by, blockZ);
+                    if (!BlockRegistry::HasCollision(bid)) continue;
 
-                // The check point is 0.1 below the foot — confirm it actually
-                // lies inside the block's collision shape (its top surface may
-                // be lower than the cube top for slabs / leaf litter / etc.).
-                const auto& shape = BlockRegistry::GetBlockShape(
-                    bid, context.GetBlockState(blockX, blockY, blockZ));
-                const float lx = cornerPosition.x - blockX;
-                const float ly = cornerPosition.y - blockY;
-                const float lz = cornerPosition.z - blockZ;
-                if (lx < shape.min.x || lx > shape.max.x) continue;
-                if (ly < shape.min.y || ly > shape.max.y) continue;
-                if (lz < shape.min.z || lz > shape.max.z) continue;
+                    // The check point is 0.1 below the foot — confirm it
+                    // actually lies inside the block's collision shape (its top
+                    // surface may be lower than the cube top for slabs / leaf
+                    // litter / etc., and higher than it for a fence).
+                    const auto shapes = BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(blockX, by, blockZ));
+                    const float lx = cornerPosition.x - blockX;
+                    const float ly = cornerPosition.y - by;
+                    const float lz = cornerPosition.z - blockZ;
+                    for (const auto& shape : shapes) {
+                        if (lx < shape.min.x || lx > shape.max.x) continue;
+                        if (ly < shape.min.y || ly > shape.max.y) continue;
+                        if (lz < shape.min.z || lz > shape.max.z) continue;
+                        inside = true;
+                        blockY = by;
+                        break;
+                    }
+                }
+                if (!inside) continue;
 
                 // Portal-passthrough at this corner — degenerate AABB
                 // collapsed to the corner point. If the corner falls
@@ -889,15 +911,13 @@ namespace Game {
                     const BlockID bid = context.GetBlock(x, y, z);
                     if (!BlockRegistry::HasCollision(bid)) continue;
 
-                    const auto& shape =
-                        BlockRegistry::GetBlockShape(bid, context.GetBlockState(x, y, z));
-
-                    // Built in DOUBLES from the integer block coordinate, so
-                    // a collider face is exact at any distance from the origin.
-                    // As floats, `1000000 + 0.5` is not even representable.
-                    AABBd blockAABB;
-                    blockAABB.min = glm::dvec3(x, y, z) + glm::dvec3(shape.min);
-                    blockAABB.max = glm::dvec3(x, y, z) + glm::dvec3(shape.max);
+                    // The box UNION, not its bounds. MC's getCollisionShape is
+                    // a VoxelShape and its collision walks every box in it;
+                    // a stair contributes two or three, which is what lets the
+                    // step-up search below find a half-block rise instead of a
+                    // full-cube wall.
+                    const auto shapes =
+                        BlockRegistry::GetBlockCollisionShapeSet(context.GetBlockState(x, y, z));
 
                     // Portal passthrough is deliberately NOT consulted here.
                     // The hook's answer depends on the moving entity's own box
@@ -907,7 +927,16 @@ namespace Game {
                     // about. Mobs therefore treat portal frames as solid, which
                     // is the intended behaviour: nothing but the player travels
                     // through a portal.
-                    out.push_back(blockAABB);
+                    for (const auto& shape : shapes) {
+                        // Built in DOUBLES from the integer block coordinate,
+                        // so a collider face is exact at any distance from the
+                        // origin. As floats, `1000000 + 0.5` is not even
+                        // representable.
+                        AABBd blockAABB;
+                        blockAABB.min = glm::dvec3(x, y, z) + glm::dvec3(shape.min);
+                        blockAABB.max = glm::dvec3(x, y, z) + glm::dvec3(shape.max);
+                        out.push_back(blockAABB);
+                    }
                 }
             }
         }
@@ -994,6 +1023,16 @@ namespace Game {
         region.max.y += std::max(1.0, static_cast<double>(maxUpStep));
         region.min -= glm::dvec3(1.0e-3);
         region.max += glm::dvec3(1.0e-3);
+        // A collision shape may reach OUT of its own cell: a fence's is 24
+        // pixels tall (CrossCollisionBlock's `collisionHeight`), which is what
+        // makes it unjumpable. A cell-bounded gather would miss the fence the
+        // player is standing on top of and drop them through it.
+        //
+        // MC solves this by iterating one cell further in every direction
+        // (BlockCollisions' Cursor3D is built on the box expanded by 1). Only
+        // -Y is needed here, because up is the only axis anything overhangs;
+        // widening all six would triple the cells scanned on every move.
+        region.min.y -= 1.0;
 
         std::vector<AABBd> colliders;
         CollectBlockColliders(region, context, colliders);

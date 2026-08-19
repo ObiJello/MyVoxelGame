@@ -23,7 +23,15 @@ namespace Render {
 
         // Visual settings
         glm::vec4 waterTint{0.3f, 0.5f, 1.0f, 0.8f};  // Blue-ish water
-        glm::vec4 lavaTint{1.0f, 0.4f, 0.1f, 1.0f};   // Orange-red lava
+
+        // WHITE, and it has to stay white. MC LiquidBlockRenderer.java:74 is
+        // `int col = isLava ? 16777215 : BiomeColors.getAverageWaterColor(...)`
+        // — 0xFFFFFF. The vertex colour on a fluid exists for water's biome
+        // resolver; lava_still/lava_flow already carry their own colour and the
+        // fragment shader multiplies the two. An orange tint on an orange
+        // sprite crushes green to 40% and blue to 10%, which flattens every
+        // yellow highlight and leaves a uniform red slab.
+        glm::vec4 lavaTint{1.0f, 1.0f, 1.0f, 1.0f};
 
         bool enableFluidTransparency = true;
         float fluidAlpha = 0.8f;
@@ -69,9 +77,19 @@ namespace Render {
     private:
         FluidMeshConfig m_config;
 
-        // Core fluid meshing functions
-        void AddFluidFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
-                         float height, const glm::vec4& tint, SectionMesh& mesh);
+        // MC ItemBlockRenderTypes.LAYER_BY_FLUID registers WATER (and
+        // FLOWING_WATER) as TRANSLUCENT and nothing else; getRenderLayer's
+        // fallback is SOLID, so lava is a solid-layer block. Lava's sprite has
+        // no alpha anywhere, so blending it only bought it a per-frame depth
+        // sort against glass and water and an arbitrary order relative to both.
+        static bool IsTranslucentFluid(Game::BlockID fluidType);
+
+        // Appends one already-wound, already-shaded quad to whichever layer
+        // IsTranslucentFluid puts this fluid in. Vertices are never shared
+        // between quads — the translucent sorter keys off "quad k occupies
+        // vertices 4k..4k+3" (see TranslucentSort.hpp).
+        bool EmitFluidQuad(Game::BlockID fluidType, const std::vector<Vertex>& verts,
+                           SectionMesh& mesh) const;
 
         // `backwardUpFace` emits a second, reverse-wound copy of the surface so
         // it stays visible from underneath once the translucent pass
@@ -90,15 +108,40 @@ namespace Render {
                                         int worldX, int worldY, int worldZ,
                                         Game::BlockID fluidType) const;
 
+        // One horizontal side. MC emits it TWICE — forward, then the same four
+        // vertices reversed — for every sprite but the water overlay
+        // (LiquidBlockRenderer.java:264-269), so a fluid wall stays visible
+        // from inside the fluid with back-face culling on.
         void CreateFluidSideFace(Game::BlockID fluidType, glm::vec3 blockPos, BlockFace face,
-                               float height, const glm::vec4& tint, SectionMesh& mesh);
+                                 float height, float bottomOffset,
+                                 const glm::vec4& tint, SectionMesh& mesh);
+
+        // The underside of the fluid volume, still sprite, full UV rect.
+        void CreateFluidBottomFace(Game::BlockID fluidType, glm::vec3 blockPos,
+                                   float bottomOffset, const glm::vec4& tint, SectionMesh& mesh);
 
         // Flow detection and surface calculation
         FlowDirection DetectFlowDirection(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ);
         float CalculateFluidHeight(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ, Game::BlockID fluidType);
-        bool IsFluidFaceExposed(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ, BlockFace face);
 
-        // Helper functions
+        // MC LiquidBlockRenderer.shouldRenderFace plus the caller's
+        // isFaceOccludedByNeighbor check, collapsed: draw the face unless the
+        // neighbour is the same fluid or fully occludes it.
+        bool ShouldRenderFluidFace(const Game::IBlockAccess& blocks,
+                                   int worldX, int worldY, int worldZ,
+                                   BlockFace face, Game::BlockID fluidType,
+                                   float faceHeight) const;
+
+        // MC `level.getBlockState(pos).getFluidState()`, reduced to the fluid's
+        // own block id (Air = Fluids.EMPTY). This — not GetBlock — is what
+        // every fluid decision in this class keys on, because a waterlogged
+        // block, a kelp stalk and a coral fan all hold water while being
+        // something else.
+        Game::BlockID FluidAt(const Game::IBlockAccess& blocks,
+                              int worldX, int worldY, int worldZ) const;
+
+        // Helper functions. `IsFluid`/`IsSameFluid` take FLUID ids as returned
+        // by FluidAt, never raw block ids from GetBlock.
         bool IsFluid(Game::BlockID blockId) const;
         bool IsSameFluid(Game::BlockID a, Game::BlockID b) const;
 

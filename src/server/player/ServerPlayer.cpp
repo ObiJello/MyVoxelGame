@@ -469,6 +469,11 @@ namespace Server {
 
     // === DAMAGE & EFFECTS ===
 
+    void ServerPlayer::damage(float amount, DamageSource source, const std::string& attackerName) {
+        m_lastAttackerName = attackerName;
+        damage(amount, source);
+    }
+
     void ServerPlayer::damage(float amount, DamageSource source) {
         // Already dead — nothing left to kill (the death screen is up and
         // the body is frozen until PERFORM_RESPAWN).
@@ -519,6 +524,7 @@ namespace Server {
             // MC), which opens the DeathScreen; PERFORM_RESPAWN revives via
             // respawn().
             m_isDead = true;
+            m_lastDamageSource = source;
             m_isBreaking = false;
             stopUsingItem();
             Log::Info("ServerPlayer: Player %u died (source %d)",

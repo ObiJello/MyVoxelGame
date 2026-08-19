@@ -248,9 +248,19 @@ namespace Client {
 
         const int corrId = msg.value("id", 0);
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (corrId != 0 && corrId == m_pendingJoinRequestId) {
-                m_pendingJoinRequestId = 0;
+            bool isJoinReply = false;
+            int64_t friendId = 0;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (corrId != 0 && corrId == m_pendingJoinRequestId) {
+                    isJoinReply = true;
+                    m_pendingJoinRequestId = 0;
+                    friendId = m_pendingJoinFriendId;
+                    m_pendingJoinFriendId = 0;
+                }
+            }
+
+            if (isJoinReply) {
                 JoinInfoResult result;
                 result.ok = msg.value("ok", false);
                 if (result.ok) {
@@ -269,7 +279,16 @@ namespace Client {
                 } else {
                     result.error = msg.value("error", "network");
                 }
-                m_joinResults.push_back(std::move(result));
+
+                // A direct address is a CANDIDATE, not a verdict — the service
+                // hands out whatever it has and we find out whether it works.
+                // friendId != 0 means this was the first ask, so the relay
+                // retry is still available if the probe fails.
+                if (result.ok && !result.relay && friendId != 0 && !result.host.empty()) {
+                    ProbeDirectThenPublish(std::move(result), friendId);
+                } else {
+                    PublishJoinResult(std::move(result));
+                }
                 return;
             }
         }
@@ -439,11 +458,83 @@ namespace Client {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_pendingJoinRequestId = corrId;
+                // Remembered so a failed direct probe can re-ask for a relay.
+                m_pendingJoinFriendId = friendId;
             }
             nlohmann::json req{{"op", "join_info"}, {"friend", friendId},
                                {"id", corrId}};
             SendJson(req.dump());
         });
+    }
+
+    void FriendsClient::PublishJoinResult(JoinInfoResult result) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_joinResults.push_back(std::move(result));
+    }
+
+    void FriendsClient::ProbeDirectThenPublish(JoinInfoResult direct, int64_t friendId) {
+        // One TCP connect against the host's game port. This is the test the
+        // SERVICE used to run and could not run correctly — see the header.
+        //
+        // Budget is deliberately short: a dead address must not stall the join
+        // behind a full OS connect timeout (~75 s on some stacks) when the
+        // relay is sitting right there. A reachable host on any normal
+        // connection answers well inside this.
+        constexpr int kProbeTimeoutSeconds = 3;
+
+        auto socket   = std::make_shared<net::ip::tcp::socket>(m_ioContext);
+        auto timer    = std::make_shared<net::steady_timer>(m_ioContext);
+        auto resolver = std::make_shared<net::ip::tcp::resolver>(m_ioContext);
+        // Guards against the timeout and the connect both firing.
+        auto settled  = std::make_shared<bool>(false);
+
+        auto finish = [this, socket, timer, settled](bool reachable,
+                                                     JoinInfoResult direct,
+                                                     int64_t friendId) {
+            if (*settled) return;
+            *settled = true;
+            timer->cancel();
+            error_code ignored;
+            socket->close(ignored);
+
+            if (reachable) {
+                Log::Info("[Friends] direct probe to %s:%u succeeded — joining directly",
+                          direct.host.c_str(), static_cast<unsigned>(direct.port));
+                PublishJoinResult(std::move(direct));
+                return;
+            }
+
+            Log::Info("[Friends] direct probe to %s:%u failed — asking for a relay",
+                      direct.host.c_str(), static_cast<unsigned>(direct.port));
+            // Re-ask with force_relay. friendId is NOT stored this time, so the
+            // reply is published as-is and cannot loop.
+            const int corrId = m_nextRequestId++;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_pendingJoinRequestId = corrId;
+                m_pendingJoinFriendId = 0;
+            }
+            nlohmann::json req{{"op", "join_info"}, {"friend", friendId},
+                               {"id", corrId}, {"force_relay", true}};
+            SendJson(req.dump());
+        };
+
+        timer->expires_after(std::chrono::seconds(kProbeTimeoutSeconds));
+        timer->async_wait([finish, direct, friendId](const error_code& ec) {
+            if (ec) return;   // cancelled because the connect already settled
+            finish(false, direct, friendId);
+        });
+
+        resolver->async_resolve(direct.host, std::to_string(direct.port),
+            [this, socket, resolver, finish, direct, friendId](
+                    const error_code& ec, net::ip::tcp::resolver::results_type results) {
+                if (ec) { finish(false, direct, friendId); return; }
+                net::async_connect(*socket, results,
+                    [finish, direct, friendId](const error_code& ec2,
+                                               const net::ip::tcp::endpoint&) {
+                        finish(!ec2, direct, friendId);
+                    });
+            });
     }
 
     bool FriendsClient::PollJoinResult(JoinInfoResult& out) {

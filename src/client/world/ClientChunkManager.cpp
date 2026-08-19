@@ -53,7 +53,7 @@ namespace Client {
         // equivalent handler and calls straight into its own setBlock).
         m_prediction.Clear();
         m_prediction.SetHooks(
-            [this](const glm::ivec3& pos, Game::BlockID state, uint8_t stateIndex) {
+            [this](const glm::ivec3& pos, Game::BlockID state, Game::BlockStateIndex stateIndex) {
                 SetBlockLocal(pos, state, stateIndex);
             },
             [this](const glm::ivec3& pos) { return GetBlockAndStateAt(pos); });
@@ -603,7 +603,7 @@ namespace Client {
     }
 
     void ClientChunkManager::SetBlockLocal(const glm::ivec3& pos, Game::BlockID blockId,
-                                           uint8_t stateIndex, bool fromPlayer) {
+                                           Game::BlockStateIndex stateIndex, bool fromPlayer) {
         ASSERT_MAIN_THREAD();
         Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
 
@@ -641,7 +641,7 @@ namespace Client {
         return chunk->chunkData->GetBlock(pos.x & 0xF, pos.y, pos.z & 0xF);
     }
 
-    std::pair<Game::BlockID, uint8_t> ClientChunkManager::GetBlockAndStateAt(const glm::ivec3& pos) const {
+    std::pair<Game::BlockID, Game::BlockStateIndex> ClientChunkManager::GetBlockAndStateAt(const glm::ivec3& pos) const {
         const ClientChunk* chunk = GetChunk({pos.x >> 4, pos.z >> 4});
         if (!chunk || !chunk->chunkData) return {Game::BlockID::Air, 0};
         const int lx = pos.x & 0xF, lz = pos.z & 0xF;
@@ -652,7 +652,7 @@ namespace Client {
     void ClientChunkManager::PredictBlockChange(const glm::ivec3& pos,
                                                 Game::BlockID newBlock,
                                                 uint32_t sequence,
-                                                uint8_t stateIndex) {
+                                                Game::BlockStateIndex stateIndex) {
         ASSERT_MAIN_THREAD();
         // Only predict into loaded chunks. Predicting into a chunk we don't
         // have would leave a record whose rollback target is a fabricated Air.
@@ -730,8 +730,8 @@ namespace Client {
                         // palette and words straight to the container. No
                         // per-voxel unpacking — the words ARE the storage.
                         Game::PalettedContainer states(
-                            Game::PaletteStrategy::ForBlockStates(Game::BlockStateIds::Bits()),
-                            Game::BlockStateIds::Pack(Game::BlockID::Air, 0));
+                            Game::PaletteStrategy::ForBlockStates(Game::kBlockStateBits),
+                            Game::BlockState{}.RawId());
                         Game::PalettedContainer biomes = Game::ChunkSection::MakeBiomeContainer();
 
                         auto stateWords  = sectionData.states.words;

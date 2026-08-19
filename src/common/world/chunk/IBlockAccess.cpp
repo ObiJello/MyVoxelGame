@@ -34,6 +34,15 @@ namespace Game {
         constexpr int kMaxBuildY = 319;
     } // namespace
 
+    bool IBlockAccess::ContainsWater(int worldX, int worldY, int worldZ) const {
+        const BlockID id = GetBlock(worldX, worldY, worldZ);
+        // Air is most of the world and can never hold water; skipping the
+        // state read for it keeps this cheap enough for the mesher, which asks
+        // about every voxel and all six of its neighbours.
+        if (id == BlockID::Air) return false;
+        return BlockRegistry::ContainsWater(GetBlockState(worldX, worldY, worldZ));
+    }
+
     int IBlockAccess::GetRawBrightness(int worldX, int worldY, int worldZ) const {
         // Anything above the build limit is sky by definition.
         for (int y = worldY + 1; y <= kMaxBuildY; ++y) {

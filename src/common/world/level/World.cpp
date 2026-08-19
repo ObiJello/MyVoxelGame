@@ -135,9 +135,9 @@ namespace Game {
         return m_chunkProvider->GetBlock(worldX, worldY, worldZ);
     }
 
-    uint8_t World::GetBlockState(int worldX, int worldY, int worldZ) const {
+    BlockState World::GetBlockState(int worldX, int worldY, int worldZ) const {
         if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunkProvider) {
-            return 0;
+            return BlockState{};      // air's default — nothing is there to read
         }
         return m_chunkProvider->GetBlockState(worldX, worldY, worldZ);
     }
@@ -217,17 +217,25 @@ namespace Game {
     }
 
     // World modification
+    // The two short forms mean "this block, in its DEFAULT state" — MC's
+    // `setBlockAndUpdate(pos, block.defaultBlockState())`. They used to forward
+    // a literal 0, which was the same thing only while index 0 was the default.
+    // It is not: state 0 is `StateDefinition.any()`, the first value of every
+    // property, and BooleanProperty lists `true` first — so a plain
+    // `SetBlock(pos, OakDoor)` would have placed an open, powered, upper half.
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId) {
         // Default to all updates for backwards compatibility
-        return SetBlock(worldX, worldY, worldZ, blockId, UpdateFlags::All, 0);
+        return SetBlock(worldX, worldY, worldZ, blockId, UpdateFlags::All,
+                        DefaultStateIndexOf(blockId));
     }
 
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags) {
-        return SetBlock(worldX, worldY, worldZ, blockId, updateFlags, 0);
+        return SetBlock(worldX, worldY, worldZ, blockId, updateFlags,
+                        DefaultStateIndexOf(blockId));
     }
 
     bool World::SetBlock(int worldX, int worldY, int worldZ, BlockID blockId, uint32_t updateFlags,
-                         uint8_t stateIndex) {
+                         BlockStateIndex stateIndex) {
         if (!IsValidPosition(worldX, worldY, worldZ)) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d)",
                         worldX, worldY, worldZ);
@@ -241,11 +249,11 @@ namespace Game {
 
         // Get the old block for comparison
         BlockID oldBlockId = GetBlock(worldX, worldY, worldZ);
-        const uint8_t oldState = GetBlockState(worldX, worldY, worldZ);
+        const BlockState oldState = GetBlockState(worldX, worldY, worldZ);
 
         // No change needed. The state comparison matters: re-orienting a block
         // in place (same id, new facing) must not be swallowed here.
-        if (oldBlockId == blockId && oldState == stateIndex) {
+        if (oldBlockId == blockId && oldState.Index() == stateIndex) {
             return true;
         }
 
@@ -363,7 +371,7 @@ namespace Game {
                     // Block and state travel together — a re-orientation is a
                     // real change that watchers must be told about.
                     accumulator->accumulate(sp, localX, localY, localZ,
-                                            Game::BlockStateRef{blockId, stateIndex});
+                                            Game::BlockStates::FromIndex(blockId, stateIndex));
                 }
             }
         }
@@ -449,14 +457,14 @@ namespace Game {
         auto destroyWithDrops = [&](const glm::ivec3& p, BlockID id) {
             // Roll the loot BEFORE clearing: the tables key on the block that
             // is still there, and on its state.
-            const uint8_t state = GetBlockState(p.x, p.y, p.z);
+            const BlockState state = GetBlockState(p.x, p.y, p.z);
             JavaRandom rng(static_cast<uint64_t>(
                 (static_cast<int64_t>(p.x) * 3129871) ^
                 (static_cast<int64_t>(p.z) * 116129781) ^
                  static_cast<int64_t>(p.y)));
             LootContext ctx;
             ctx.block      = id;
-            ctx.blockState = state;
+            ctx.blockState = state.Index();
             ctx.world      = this;
             ctx.pos        = p;
             ctx.rng        = &rng;
@@ -484,18 +492,18 @@ namespace Game {
             // the two are alternatives: a block that transformed has already
             // answered for this change.
             if (neighbourDef.neighborChanged) {
-                BlockID outBlock = BlockID::Air;
-                uint8_t outState = 0;
-                if (neighbourDef.neighborChanged(*this, n, id,
+                BlockState outState;
+                if (neighbourDef.neighborChanged(*this, n,
                                                  GetBlockState(n.x, n.y, n.z),
                                                  kFromNeighbour[oi], originId,
-                                                 outBlock, outState)) {
+                                                 outState)) {
+                    const BlockID outBlock = outState.Block();
                     // AIR from updateShape means "I cannot exist any more" —
                     // MC's RedStoneWireBlock and the face-attached family both
                     // return it when their support goes, and MC destroys with
                     // drops rather than erasing.
                     if (outBlock == BlockID::Air) destroyWithDrops(n, id);
-                    else SetBlock(n.x, n.y, n.z, outBlock, UpdateFlags::All, outState);
+                    else SetBlock(n.x, n.y, n.z, outState, UpdateFlags::All);
                     continue;
                 }
             }
@@ -782,7 +790,7 @@ namespace Game {
                     const Block& def = BlockRegistry::Get(id);
                     if (!def.randomTick) continue;
 
-                    const uint8_t state = section->GetState(lx, ly, lz);
+                    const BlockState state = section->StateAt(lx, ly, lz);
                     if (def.isRandomlyTicking && !def.isRandomlyTicking(state)) continue;
 
                     // The callback may SetBlock anywhere — including into this
@@ -791,7 +799,7 @@ namespace Game {
                     // in this iteration, and the next iteration re-fetches
                     // nothing... which is exactly why the loop re-reads
                     // `section` below rather than caching a block pointer.
-                    def.randomTick(*this, pos, id, state, m_tickRandom);
+                    def.randomTick(*this, pos, state, m_tickRandom);
 
                     // Re-fetch: a growth callback that turned farmland to dirt
                     // (or a cane that grew into the section above) can have

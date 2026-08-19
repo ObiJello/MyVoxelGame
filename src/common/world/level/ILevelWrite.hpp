@@ -41,7 +41,17 @@ namespace Game {
         // so common code can reach it through the interface.
         virtual bool SetBlock(int worldX, int worldY, int worldZ,
                               BlockID blockId, uint32_t updateFlags,
-                              uint8_t stateIndex) = 0;
+                              BlockStateIndex stateIndex) = 0;
+
+        // MC's `Level.setBlock(pos, state, flags)` — the form callers should
+        // use. Non-virtual on purpose: it forwards to the pair overload above,
+        // which is what implementors override and what the storage layer still
+        // speaks. Argument order follows vanilla (state, then flags), NOT the
+        // pair form's (flags, then index).
+        bool SetBlock(int worldX, int worldY, int worldZ,
+                      BlockState state, uint32_t updateFlags) {
+            return SetBlock(worldX, worldY, worldZ, state.Block(), updateFlags, state.Index());
+        }
 
         // MC Level.isClientSide. Item behaviours run on both sides (see the
         // note above), and most of them WANT that — a tilled block should

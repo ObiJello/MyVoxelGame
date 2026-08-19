@@ -14,6 +14,10 @@
 #include "BlockInteraction.hpp"
 #include "BlockPlacement.hpp"
 #include "RedstoneWire.hpp"
+#include "Stairs.hpp"
+#include "CrossCollision.hpp"
+#include "Walls.hpp"
+#include "FenceGate.hpp"
 #include "common/world/level/World.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/entity/Item.hpp"
@@ -57,13 +61,12 @@ namespace Game {
         UseResult RedstoneWireUse(ILevelWrite* world, const glm::ivec3& pos,
                                   IUsePlayer* player, const BlockHitResult& /*hit*/) {
             if (!world || !player) return UseResult::Pass;
-            const uint8_t state = world->GetBlockState(pos.x, pos.y, pos.z);
-            uint8_t next = 0;
+            const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
+            BlockState next;
             if (!RedstoneToggleShape(*world, pos, state, next)) return UseResult::Pass;
             // MC uses flag 3 (UPDATE_NEIGHBORS | UPDATE_CLIENTS) here, then
             // calls updatesOnShapeChange to poke the wires around it.
-            world->SetBlock(pos.x, pos.y, pos.z, BlockID::RedstoneWire,
-                            World::UpdateFlags::All, next);
+            world->SetBlock(pos.x, pos.y, pos.z, next, World::UpdateFlags::All);
             return UseResult::Success;
         }
 
@@ -78,22 +81,21 @@ namespace Game {
         // mining the block behind a wall button drops it, mining the one beside
         // it does nothing.
         bool FaceAttachedNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
-                                         BlockID id, uint8_t stateIndex,
+                                         BlockState state,
                                          Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockID& outBlock, uint8_t& outState) {
-            (void)outState;
-            if (CanSurviveAt(level, pos, id, stateIndex)) return false;
+                                         BlockState& outState) {
+            const BlockID id = state.Block();
+            if (CanSurviveAt(level, pos, state)) return false;
             // Only the attachment side matters. CanSurviveAt already answered
             // false, so the support is gone whichever neighbour reported it;
             // checking the direction just avoids re-destroying on every one of
             // the six updates a single change fans out to.
-            const auto& def = BlockRegistry::GetStateDefinition(id);
-            const std::string_view face = def.ValueOf(stateIndex, "face");
+            const std::string_view face = state.GetValueByName("face");
             Direction connected = Direction::North;
             if (face == "floor")        connected = Direction::Up;
             else if (face == "ceiling") connected = Direction::Down;
             else {
-                const std::string_view f = def.ValueOf(stateIndex, "facing");
+                const std::string_view f = state.GetValueByName("facing");
                 if      (f == "east")  connected = Direction::East;
                 else if (f == "south") connected = Direction::South;
                 else if (f == "west")  connected = Direction::West;
@@ -101,7 +103,8 @@ namespace Game {
             }
             if (Opposite(connected) != toNeighbour) return false;
 
-            outBlock = BlockID::Air;   // World turns this into a destroy-with-drops
+            // Air's state — World turns this into a destroy-with-drops.
+            outState = BlockState{};
             return true;
         }
 
@@ -109,19 +112,103 @@ namespace Game {
         // this wire's connections. Wired through the generic neighborChanged
         // hook, which is what makes two wires laid side by side join up.
         bool RedstoneWireNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
-                                         BlockID /*id*/, uint8_t stateIndex,
+                                         BlockState state,
                                          Direction toNeighbour, BlockID /*neighbourId*/,
-                                         BlockID& outBlock, uint8_t& outState) {
+                                         BlockState& outState) {
             // DOWN is the support case: MC returns AIR when the block below can
             // no longer hold dust. The engine's support-collapse rule already
             // handles that (redstone has a modelled canSurvive), so leave it.
             if (toNeighbour == Direction::Down) return false;
 
-            const uint8_t next = RedstoneUpdateShape(level, pos, stateIndex, toNeighbour);
-            if (next == stateIndex) return false;
-            outBlock = BlockID::RedstoneWire;
+            const BlockState next = RedstoneUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
             outState = next;
             return true;
+        }
+
+        // MC StairBlock.updateShape — re-derive SHAPE when a horizontal
+        // neighbour changes. This is what makes two stairs meeting at a right
+        // angle grow into a corner, and what un-corners them again when one is
+        // mined. Vertical changes are ignored, exactly as vanilla's
+        // `directionToNeighbour.getAxis().isHorizontal()` gate does.
+        bool StairNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                  BlockState state,
+                                  Direction toNeighbour, BlockID /*neighbourId*/,
+                                         BlockState& outState) {
+            const BlockState next = StairsUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC FenceBlock / IronBarsBlock.updateShape — re-resolve the ONE side
+        // the change came from, which is what joins a fence line together as
+        // it is built and opens it again when a post is mined.
+        bool CrossCollisionNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                           BlockState state,
+                                           Direction toNeighbour, BlockID /*neighbourId*/,
+                                         BlockState& outState) {
+            const BlockState next = CrossUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC WallBlock.updateShape. A wall reacts to the block ABOVE as well as
+        // beside it — that is what turns its arms tall and drops its post when
+        // something is set on top of it.
+        bool WallNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                 BlockState state,
+                                 Direction toNeighbour, BlockID /*neighbourId*/,
+                                         BlockState& outState) {
+            const BlockState next = WallUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC FenceGateBlock.updateShape — only IN_WALL can change, and only
+        // when the change is along the gate's hinge axis.
+        bool FenceGateNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                      BlockState state,
+                                      Direction toNeighbour, BlockID /*neighbourId*/,
+                                         BlockState& outState) {
+            const BlockState next = FenceGateUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC FenceGateBlock.useWithoutItem — the swing.
+        //
+        //   if (OPEN)  -> OPEN = false
+        //   else       -> if (FACING == player.getDirection().getOpposite())
+        //                     FACING = player.getDirection();
+        //                 OPEN = true
+        //
+        // The re-aim is what makes a gate always swing away from whoever opened
+        // it rather than through them.
+        //
+        // Runs on both sides: the client predicts the swing so the gate moves
+        // on the same frame, and the server's authoritative state follows.
+        UseResult FenceGateUse(ILevelWrite* world, const glm::ivec3& pos,
+                               IUsePlayer* player, const BlockHitResult& /*hit*/) {
+            if (!world || !player) return UseResult::Pass;
+            const BlockID id = world->GetBlock(pos.x, pos.y, pos.z);
+            if (!IsFenceGateBlock(id)) return UseResult::Pass;
+
+            const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
+            const Direction facing = FromYRot(player->getYaw());
+            const BlockState next = FenceGateToggle(state, facing);
+            if (next == state) return UseResult::Pass;
+
+            // MC uses flag 10 (UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE) — no
+            // neighbour notification, because opening a gate changes nothing
+            // any neighbour cares about. UpdateFlags::All is what every other
+            // handler here passes and the extra notify is harmless; the fences
+            // beside it re-resolve to the same connection either way.
+            world->SetBlock(pos.x, pos.y, pos.z, next, World::UpdateFlags::All);
+            return UseResult::Success;
         }
 
         // Every container block does the same thing on a right-click: ask for
@@ -227,6 +314,45 @@ namespace Game {
         if (Block* wire = forSlug("redstone_wire")) {
             wire->useWithoutItem  = &RedstoneWireUse;
             wire->neighborChanged = &RedstoneWireNeighborChanged;
+        }
+
+        // ── Stairs ────────────────────────────────────────────────────────
+        // Corner formation. Matched by IsStairs (the "_stairs" model-name
+        // test the rest of the stair code shares) rather than a 58-entry slug
+        // list, so a new stair from an MC version bump is picked up with the
+        // block definition alone.
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (IsStairs(static_cast<BlockID>(i))) {
+                blocks[i].neighborChanged = &StairNeighborChanged;
+            }
+        }
+
+        // ── Fences, glass panes, iron bars ────────────────────────────────
+        // Connection tracking. Same matching argument as the stairs above —
+        // IsCrossCollisionBlock is the one definition of the family, shared
+        // with the state declaration and the shape builder.
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (IsCrossCollisionBlock(static_cast<BlockID>(i))) {
+                blocks[i].neighborChanged = &CrossCollisionNeighborChanged;
+            }
+        }
+
+        // ── Walls ─────────────────────────────────────────────────────────
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (IsWallBlock(static_cast<BlockID>(i))) {
+                blocks[i].neighborChanged = &WallNeighborChanged;
+            }
+        }
+
+        // ── Fence gates ───────────────────────────────────────────────────
+        // The swing, plus the IN_WALL tracking. `useWithoutItem` rather than
+        // `useItemOn`, matching MC — which is what lets you open a gate while
+        // holding a block instead of placing the block.
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            if (IsFenceGateBlock(static_cast<BlockID>(i))) {
+                blocks[i].useWithoutItem  = &FenceGateUse;
+                blocks[i].neighborChanged = &FenceGateNeighborChanged;
+            }
         }
 
         // ── Buttons and levers ────────────────────────────────────────────

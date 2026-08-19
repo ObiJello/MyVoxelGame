@@ -108,7 +108,23 @@ namespace Server {
         // gamemode and death handling; the invulnerability window has already
         // been applied by LivingEntity::Hurt, so a mob cannot bypass it by
         // going through this path.
-        m_player->damage(amount, DamageSource::ENTITY_ATTACK);
+        // Name the killer for the death broadcast. MC pulls this from
+        // DamageSource.causingEntity in CombatTracker; we have no combat
+        // tracker, so it rides along with the damage call. The slug is
+        // title-cased ("zombie" -> "Zombie") to stand in for MC's translated
+        // entity name.
+        std::string attackerName;
+        if (attacker) {
+            const std::string_view slug = attacker->TypeInfo().slug;
+            attackerName.assign(slug.begin(), slug.end());
+            bool upper = true;
+            for (char& c : attackerName) {
+                if (c == '_') { c = ' '; upper = true; continue; }
+                c = upper ? static_cast<char>(::toupper((unsigned char)c)) : c;
+                upper = false;
+            }
+        }
+        m_player->damage(amount, DamageSource::ENTITY_ATTACK, attackerName);
         m_health = m_player->getHealth();
     }
 

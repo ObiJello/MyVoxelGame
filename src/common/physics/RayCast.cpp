@@ -29,10 +29,10 @@ namespace Game {
         return BlockID::Air;
     }
 
-    uint8_t Raycast::GetBlockStateAt(int worldX, int worldY, int worldZ) {
+    BlockState Raycast::GetBlockStateAt(int worldX, int worldY, int worldZ) {
         return g_raycastBlockAccess
                    ? g_raycastBlockAccess->GetBlockState(worldX, worldY, worldZ)
-                   : 0;
+                   : BlockState{};
     }
 
     std::optional<RaycastHit> Raycast::CastRay(
@@ -133,119 +133,145 @@ namespace Game {
                 // target box sit in the wrong corner — you aim at the visible
                 // clump and hit nothing, then hit it from a corner where
                 // nothing is drawn.
-                const uint8_t stateIndex =
+                const BlockState state =
                     GetBlockStateAt(currentBlock.x, currentBlock.y, currentBlock.z);
+                // Every box of the shape, not just its bounds. MC's clip walks
+                // the whole VoxelShape, which is what stops a stair from being
+                // targetable through the empty half of its cell — aim above the
+                // low step and the crosshair goes past it, exactly as vanilla.
+                //
                 // World-aware: a paired chest's half reaches the cell edge
                 // toward its partner, so the seam is clickable instead of a
                 // 2px dead strip between the two hitboxes.
-                const auto shape = g_raycastBlockAccess
-                    ? BlockRegistry::GetBlockShapeAt(*g_raycastBlockAccess, currentBlock,
-                                                     blockId, stateIndex)
-                    : BlockRegistry::GetBlockShape(blockId, stateIndex);
-                const glm::vec3 boxMin = glm::vec3(currentBlock) + shape.min;
-                const glm::vec3 boxMax = glm::vec3(currentBlock) + shape.max;
+                const auto shapes = g_raycastBlockAccess
+                    ? BlockRegistry::GetBlockShapeSetAt(*g_raycastBlockAccess, currentBlock, state)
+                    : BlockRegistry::GetBlockShapeSet(state);
 
-                // Slab-test ray vs AABB. Returns tEnter / tExit relative to the
-                // unit-`dir` ray. We use the post-step `totalDistance` as the
-                // lower bound on tEnter so we never re-hit something the DDA
-                // already crossed.
-                float tNear = -std::numeric_limits<float>::infinity();
-                float tFar  =  std::numeric_limits<float>::infinity();
+                // The winning box: the one the ray enters FIRST. Boxes of one
+                // shape can overlap in t (a stair's slab and its step share a
+                // face), so "first hit wins" is the only ordering that gives
+                // the same face MC would report.
+                float bestHit  = std::numeric_limits<float>::infinity();
                 int   nearAxis = -1;
                 int   nearSign = 0;
-                bool  hitBox   = true;
-                for (int axis = 0; axis < 3; ++axis) {
-                    const float d = dir[axis];
-                    const float o = origin[axis];
-                    if (std::abs(d) < epsilon) {
-                        // Ray parallel to this slab — must already be inside it.
-                        if (o < boxMin[axis] || o > boxMax[axis]) { hitBox = false; break; }
-                        continue;
-                    }
-                    const float invD = 1.0f / d;
-                    float t1 = (boxMin[axis] - o) * invD;
-                    float t2 = (boxMax[axis] - o) * invD;
-                    int   sign = -1; // hit the -axis face (entering through min)
-                    if (t1 > t2) { std::swap(t1, t2); sign = +1; }
-                    if (t1 > tNear) { tNear = t1; nearAxis = axis; nearSign = sign; }
-                    if (t2 < tFar)  { tFar  = t2; }
-                    if (tNear > tFar) { hitBox = false; break; }
-                }
+                bool  insideShape = false;
+                bool  anyHit   = false;
 
-                // Also accept "started inside the shape" as a hit at t=0 (matches
-                // MC's `if (clipcontext.block().get(start) ...` behaviour on the
-                // origin voxel).
-                const bool insideShape =
-                    (totalDistance == 0.0f &&
-                     origin.x >= boxMin.x && origin.x <= boxMax.x &&
-                     origin.y >= boxMin.y && origin.y <= boxMax.y &&
-                     origin.z >= boxMin.z && origin.z <= boxMax.z);
+                for (const auto& shape : shapes) {
+                    const glm::vec3 boxMin = glm::vec3(currentBlock) + shape.min;
+                    const glm::vec3 boxMax = glm::vec3(currentBlock) + shape.max;
 
-                if (hitBox && tFar >= 0.0f && tNear <= maxDistance) {
-                    // tHit is the entry distance (or 0 if the ray starts inside).
-                    const float tHit = insideShape ? 0.0f : std::max(tNear, 0.0f);
-                    if (tHit <= maxDistance) {
-                        RaycastHit hit;
-                        hit.blockPos = currentBlock;
-                        hit.adjacentPos = previousBlock;
-                        hit.blockId = blockId;
-                        hit.stateIndex = stateIndex;
-                        hit.distance = tHit;
-                        hit.hitPoint = origin + dir * tHit;
-                        hit.cursorPos = hit.hitPoint - glm::vec3(currentBlock);
-                        hit.cursorPos = glm::clamp(hit.cursorPos, glm::vec3(0.0f), glm::vec3(0.999f));
-                        hit.insideBlock = insideShape;
-
-                        // Face from the slab axis we entered through.
-                        if (insideShape || nearAxis < 0) {
-                            // Fallback to the last DDA step axis so adjacent-placement
-                            // (which uses `normal` to pick a neighbour) still works.
-                            if (lastStepAxis == 0) {
-                                hit.hitFace = (step.x > 0) ? 1 : 0;
-                                hit.normal  = glm::vec3(-step.x, 0, 0);
-                            } else if (lastStepAxis == 1) {
-                                hit.hitFace = (step.y > 0) ? 3 : 2;
-                                hit.normal  = glm::vec3(0, -step.y, 0);
-                            } else if (lastStepAxis == 2) {
-                                hit.hitFace = (step.z > 0) ? 5 : 4;
-                                hit.normal  = glm::vec3(0, 0, -step.z);
-                            } else {
-                                hit.hitFace = 0;
-                                hit.normal  = glm::vec3(0, 1, 0);
-                            }
-                        } else {
-                            // nearSign is -1 if we entered through the min face
-                            // (i.e. the normal points along -axis from the box's
-                            // POV → +axis pointing outward). nearSign = +1 means
-                            // entered through max face (normal points along +axis).
-                            glm::vec3 n(0.0f);
-                            n[nearAxis] = (nearSign < 0) ? -1.0f : 1.0f;
-                            hit.normal  = n;
-                            // hitFace encoding (matches SendUseItemOn's switch
-                            // in PlayerController.cpp, which the server uses to
-                            // pick the placement direction):
-                            //   0 = +X face, 1 = -X face
-                            //   2 = +Y face, 3 = -Y face
-                            //   4 = +Z face, 5 = -Z face
-                            // nearSign < 0 means we entered through the MIN
-                            // face (= -axis face), so that maps to the odd
-                            // numbers; +axis face maps to the even numbers.
-                            // Inverting this puts placement on the opposite
-                            // side of the targeted block.
-                            if      (nearAxis == 0) hit.hitFace = (nearSign < 0) ? 1 : 0;
-                            else if (nearAxis == 1) hit.hitFace = (nearSign < 0) ? 3 : 2;
-                            else                    hit.hitFace = (nearSign < 0) ? 5 : 4;
-                            // adjacentPos for partial shapes: the cell on the
-                            // OTHER side of the hit face (so right-click places
-                            // against the visible surface, not the full-cube
-                            // neighbour the DDA happened to come from).
-                            glm::ivec3 adj = currentBlock;
-                            adj[nearAxis] += (nearSign < 0) ? -1 : 1;
-                            hit.adjacentPos = adj;
+                    // Slab-test ray vs AABB. Returns tEnter / tExit relative to the
+                    // unit-`dir` ray. We use the post-step `totalDistance` as the
+                    // lower bound on tEnter so we never re-hit something the DDA
+                    // already crossed.
+                    float tNear = -std::numeric_limits<float>::infinity();
+                    float tFar  =  std::numeric_limits<float>::infinity();
+                    int   boxAxis = -1;
+                    int   boxSign = 0;
+                    bool  hitBox   = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float d = dir[axis];
+                        const float o = origin[axis];
+                        if (std::abs(d) < epsilon) {
+                            // Ray parallel to this slab — must already be inside it.
+                            if (o < boxMin[axis] || o > boxMax[axis]) { hitBox = false; break; }
+                            continue;
                         }
-
-                        return hit;
+                        const float invD = 1.0f / d;
+                        float t1 = (boxMin[axis] - o) * invD;
+                        float t2 = (boxMax[axis] - o) * invD;
+                        int   sign = -1; // hit the -axis face (entering through min)
+                        if (t1 > t2) { std::swap(t1, t2); sign = +1; }
+                        if (t1 > tNear) { tNear = t1; boxAxis = axis; boxSign = sign; }
+                        if (t2 < tFar)  { tFar  = t2; }
+                        if (tNear > tFar) { hitBox = false; break; }
                     }
+
+                    // Also accept "started inside the shape" as a hit at t=0 (matches
+                    // MC's `if (clipcontext.block().get(start) ...` behaviour on the
+                    // origin voxel).
+                    const bool insideBox =
+                        (totalDistance == 0.0f &&
+                         origin.x >= boxMin.x && origin.x <= boxMax.x &&
+                         origin.y >= boxMin.y && origin.y <= boxMax.y &&
+                         origin.z >= boxMin.z && origin.z <= boxMax.z);
+
+                    if (hitBox && tFar >= 0.0f && tNear <= maxDistance) {
+                        const float t = insideBox ? 0.0f : std::max(tNear, 0.0f);
+                        if (t <= maxDistance && t < bestHit) {
+                            bestHit     = t;
+                            nearAxis    = boxAxis;
+                            nearSign    = boxSign;
+                            insideShape = insideBox;
+                            anyHit      = true;
+                        }
+                    }
+                }   // shape boxes
+
+                if (anyHit) {
+                    // tHit is the entry distance (or 0 if the ray starts inside).
+                    const float tHit = bestHit;
+                    RaycastHit hit;
+                    hit.blockPos = currentBlock;
+                    hit.adjacentPos = previousBlock;
+                    hit.blockId = blockId;
+                    hit.state = state;
+                    hit.distance = tHit;
+                    hit.hitPoint = origin + dir * tHit;
+                    hit.cursorPos = hit.hitPoint - glm::vec3(currentBlock);
+                    hit.cursorPos = glm::clamp(hit.cursorPos, glm::vec3(0.0f), glm::vec3(0.999f));
+                    hit.insideBlock = insideShape;
+
+                    // Face from the slab axis we entered through.
+                    if (insideShape || nearAxis < 0) {
+                        // Fallback to the last DDA step axis so adjacent-placement
+                        // (which uses `normal` to pick a neighbour) still works.
+                        if (lastStepAxis == 0) {
+                            hit.hitFace = (step.x > 0) ? 1 : 0;
+                            hit.normal  = glm::vec3(-step.x, 0, 0);
+                        } else if (lastStepAxis == 1) {
+                            hit.hitFace = (step.y > 0) ? 3 : 2;
+                            hit.normal  = glm::vec3(0, -step.y, 0);
+                        } else if (lastStepAxis == 2) {
+                            hit.hitFace = (step.z > 0) ? 5 : 4;
+                            hit.normal  = glm::vec3(0, 0, -step.z);
+                        } else {
+                            hit.hitFace = 0;
+                            hit.normal  = glm::vec3(0, 1, 0);
+                        }
+                    } else {
+                        // nearSign is -1 if we entered through the min face
+                        // (i.e. the normal points along -axis from the box's
+                        // POV → +axis pointing outward). nearSign = +1 means
+                        // entered through max face (normal points along +axis).
+                        glm::vec3 n(0.0f);
+                        n[nearAxis] = (nearSign < 0) ? -1.0f : 1.0f;
+                        hit.normal  = n;
+                        // hitFace encoding (matches SendUseItemOn's switch
+                        // in PlayerController.cpp, which the server uses to
+                        // pick the placement direction):
+                        //   0 = +X face, 1 = -X face
+                        //   2 = +Y face, 3 = -Y face
+                        //   4 = +Z face, 5 = -Z face
+                        // nearSign < 0 means we entered through the MIN
+                        // face (= -axis face), so that maps to the odd
+                        // numbers; +axis face maps to the even numbers.
+                        // Inverting this puts placement on the opposite
+                        // side of the targeted block.
+                        if      (nearAxis == 0) hit.hitFace = (nearSign < 0) ? 1 : 0;
+                        else if (nearAxis == 1) hit.hitFace = (nearSign < 0) ? 3 : 2;
+                        else                    hit.hitFace = (nearSign < 0) ? 5 : 4;
+                        // adjacentPos for partial shapes: the cell on the
+                        // OTHER side of the hit face (so right-click places
+                        // against the visible surface, not the full-cube
+                        // neighbour the DDA happened to come from).
+                        glm::ivec3 adj = currentBlock;
+                        adj[nearAxis] += (nearSign < 0) ? -1 : 1;
+                        hit.adjacentPos = adj;
+                    }
+
+                    return hit;
                 }
 
                 // Ray didn't actually intersect the block's shape inside this

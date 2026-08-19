@@ -27,7 +27,7 @@ namespace Client {
 
         // ILevelWrite
         Game::BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
-        uint8_t GetBlockState(int worldX, int worldY, int worldZ) const override;
+        Game::BlockState GetBlockState(int worldX, int worldY, int worldZ) const override;
         uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         bool SetBlock(int worldX, int worldY, int worldZ,
                       Game::BlockID blockId, uint32_t updateFlags) override;
@@ -36,7 +36,8 @@ namespace Client {
         // the server's block change lands.
         bool SetBlock(int worldX, int worldY, int worldZ,
                       Game::BlockID blockId, uint32_t updateFlags,
-                      uint8_t stateIndex) override;
+                      Game::BlockStateIndex stateIndex) override;
+        using Game::ILevelWrite::SetBlock;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
         bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
         bool IsBlockSolid(int worldX, int worldY, int worldZ) const override;

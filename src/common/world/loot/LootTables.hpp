@@ -32,7 +32,7 @@ namespace Game {
     // nothing can supply yet (explosion radius, killer entity, block entity).
     struct LootContext {
         BlockID          block      = BlockID::Air;
-        uint8_t          blockState = 0;
+        BlockStateIndex          blockState = 0;
         const ItemStack* tool       = nullptr;   // held stack; null/empty = bare hand
         const World*     world      = nullptr;   // for location_check; optional
         glm::ivec3       pos{0, 0, 0};

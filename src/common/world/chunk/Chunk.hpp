@@ -122,12 +122,17 @@ namespace Game {
         // several hundred existing call sites that don't care about state stay
         // untouched.
 
-        uint8_t GetBlockState(int localX, int worldY, int localZ) const;
+        BlockStateIndex GetBlockState(int localX, int worldY, int localZ) const;
+
+        // The full state — MC's ChunkAccess.getBlockState. One container read
+        // rather than GetBlock + GetBlockState, which read the same word twice
+        // and then had to be recombined.
+        BlockState StateAt(int localX, int worldY, int localZ) const;
 
         // Set block and state together. Unlike SetBlock(...) this proceeds even
         // when the BlockID is unchanged, so a pure re-orientation still applies
         // and still dirties the section.
-        void SetBlock(int localX, int worldY, int localZ, BlockID blockId, uint8_t stateIndex);
+        void SetBlock(int localX, int worldY, int localZ, BlockID blockId, BlockStateIndex stateIndex);
 
         // === SECTION MANAGEMENT ===
 

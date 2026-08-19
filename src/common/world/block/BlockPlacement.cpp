@@ -3,6 +3,10 @@
 #include <algorithm>
 #include "BlockRegistry.hpp"
 #include "RedstoneWire.hpp"
+#include "Stairs.hpp"
+#include "CrossCollision.hpp"
+#include "Walls.hpp"
+#include "FenceGate.hpp"
 #include "../../core/Log.hpp"
 
 #include <array>
@@ -72,7 +76,14 @@ namespace Game {
             // ── Facing points AWAY from the player (raw horizontal direction) —
             //    MC StairBlock / DoorBlock / FenceGateBlock / BedBlock /
             //    CampfireBlock / DecoratedPotBlock.
+            //
+            //    Stairs are listed here because FACING really is this rule, but
+            //    they also carry HALF and SHAPE, so ComputePlacementState
+            //    intercepts them before the switch — see the stairs branch
+            //    there. The classification stays because it is the truth about
+            //    FACING and keeps this table a description of MC's categories.
             if (Has(n, "_stairs") || Is(n, "campfire") || Is(n, "soul_campfire") ||
+                Has(n, "_fence_gate") ||
                 Is(n, "decorated_pot") || Is(n, "calibrated_sculk_sensor") ||
                 Is(n, "grindstone")) {
                 return PlacementRule::Horizontal;
@@ -130,9 +141,24 @@ namespace Game {
         return idx < BlockRegistry::Size ? s_rules[idx] : PlacementRule::None;
     }
 
-    uint8_t ComputePlacementState(BlockID id, const UseOnContext& context) {
+    // The body still computes a within-block INDEX, because it is written
+    // against BlockStateDefinition's string-keyed IndexOfSingle/IndexOf. That is
+    // an internal detail of this one function now — the public entry point below
+    // hands back a BlockState, so no caller sees the pair. Converting the
+    // string lookups themselves is a separate cleanup.
+    static BlockStateIndex ComputePlacementIndex(BlockID id, const UseOnContext& context) {
         const auto& def = BlockRegistry::GetStateDefinition(id);
-        if (def.properties.empty()) return 0;
+
+        // MC's `getStateForPlacement` starts from `defaultBlockState()` and
+        // overrides only what the click decides. This used to `return 0` for
+        // anything with no rule, which was the same thing while index 0 WAS
+        // the default — it no longer is for 627 blocks. State 0 is
+        // `StateDefinition.any()`: the first value of every property, and
+        // BooleanProperty lists `true` first. Returning it would place every
+        // slab as a waterlogged TOP slab, every door open and powered, every
+        // furnace lit, every lantern hanging.
+        const BlockStateIndex kDefault = def.defaultIndex;
+        if (def.properties.empty()) return kDefault;
 
         const PlacementRule rule = GetPlacementRule(id);
         const Direction look    = context.getHorizontalDirection();
@@ -157,9 +183,9 @@ namespace Game {
             auto candidatePartnerFacing =
                 [&](const glm::ivec3& at) -> std::string_view {
                     if (context.world->GetBlock(at.x, at.y, at.z) != id) return {};
-                    const uint8_t st = context.world->GetBlockState(at.x, at.y, at.z);
-                    if (def.ValueOf(st, "type") != "single") return {};
-                    return def.ValueOf(st, "facing");
+                    const BlockState st = context.world->GetBlockState(at.x, at.y, at.z);
+                    if (st.GetValueByName("type") != "single") return {};
+                    return st.GetValueByName("facing");
                 };
             auto axisOf = [](std::string_view f) {
                 return (f == "north" || f == "south") ? 2 : 0;   // 2 = Z, 0 = X
@@ -253,6 +279,15 @@ namespace Game {
             }
         }
 
+        // ── Stairs ────────────────────────────────────────────────────────
+        // MC StairBlock.getStateForPlacement's FACING + HALF. SHAPE is the
+        // third property and needs the neighbours, so it is applied in
+        // ComputeWorldPlacementState — the same split the redstone wire uses,
+        // and the reason both functions exist.
+        if (IsStairs(id)) {
+            return StairsPlacementState(id, look, clicked, context.getCursorPos().y).Index();
+        }
+
         switch (rule) {
             case PlacementRule::HorizontalOpposite:
                 return def.IndexOfSingle("facing", NameOf(Opposite(look)));
@@ -296,54 +331,104 @@ namespace Game {
             return def.IndexOfSingle("facing", NameOf(context.getNearestLookingDirection()));
         }
 
-        return 0;
+        return kDefault;
+    }
+
+    BlockState ComputePlacementState(BlockID id, const UseOnContext& context) {
+        return BlockStates::FromIndex(id, ComputePlacementIndex(id, context));
     }
 
     namespace {
-        // One row per SegmentableBlock family, ordered 1 → 4 segments. Same
-        // shape as BlockRegistry's kSlabPairs: an explicit table beats name
-        // matching here because the ORDER is the data.
-        constexpr BlockID kSegmentedChains[][4] = {
-            { BlockID::LeafLitter,  BlockID::LeafLitter2,  BlockID::LeafLitter3,  BlockID::LeafLitter4  },
-            { BlockID::Wildflowers, BlockID::Wildflowers2, BlockID::Wildflowers3, BlockID::Wildflowers4 },
-            { BlockID::PinkPetals,  BlockID::PinkPetals2,  BlockID::PinkPetals3,  BlockID::PinkPetals4  },
-        };
-
-        // Index of `id` within its chain, or -1. Linear over 12 entries, and
-        // only on a right-click, so no table needed.
-        bool FindSegment(BlockID id, size_t& outChain, size_t& outStep) {
-            for (size_t c = 0; c < std::size(kSegmentedChains); ++c) {
-                for (size_t s = 0; s < 4; ++s) {
-                    if (kSegmentedChains[c][s] == id) { outChain = c; outStep = s; return true; }
-                }
-            }
-            return false;
+        // MC spells the same idea two ways (BlockStateProperties.java:164-165):
+        // leaf_litter and wildflowers carry `segment_amount`, pink_petals
+        // carries `flower_amount`. Both are IntegerProperty(1, 4), so only the
+        // name differs.
+        //
+        // This replaced an explicit kSegmentedChains table of 12 BlockIDs —
+        // one id per segment count — which is what those ids existed for.
+        PropertyId SegmentPropertyOf(BlockID id) {
+            const BlockState def = BlockStates::Default(id);
+            if (def.HasProperty(PropertyId::SEGMENT_AMOUNT)) return PropertyId::SEGMENT_AMOUNT;
+            if (def.HasProperty(PropertyId::FLOWER_AMOUNT))  return PropertyId::FLOWER_AMOUNT;
+            return PropertyId::Count;
         }
     } // namespace
 
-    BlockID SegmentedFamilyBase(BlockID id) {
-        size_t chain = 0, step = 0;
-        return FindSegment(id, chain, step) ? kSegmentedChains[chain][0] : BlockID::Air;
+    bool IsSegmentedBlock(BlockID id) {
+        return SegmentPropertyOf(id) != PropertyId::Count;
     }
 
-    BlockID SegmentedGrowth(BlockID id) {
-        size_t chain = 0, step = 0;
-        if (!FindSegment(id, chain, step)) return BlockID::Air;
-        if (step + 1 >= 4) return BlockID::Air;      // MC: min(4, n + 1) — already full
-        return kSegmentedChains[chain][step + 1];
+    int SegmentAmountOf(BlockState state) {
+        const PropertyId prop = SegmentPropertyOf(state.Block());
+        if (prop == PropertyId::Count) return 0;
+        const int v = state.GetIndex(prop);
+        return v < 0 ? 0 : v + 1;              // property values run 1..4
     }
 
-    bool CanBeReplacedByPlacement(BlockID existing, uint8_t /*existingState*/,
-                                  BlockID held, bool secondaryUse) {
-        if (existing == BlockID::Air) return true;
+    BlockState SegmentGrownState(BlockState state) {
+        const PropertyId prop = SegmentPropertyOf(state.Block());
+        if (prop == PropertyId::Count) return state;
+        const int amount = SegmentAmountOf(state);
+        if (amount <= 0 || amount >= 4) return state;   // MC: min(4, n + 1)
+        // Value `amount + 1` sits at index `amount`, and setting one property
+        // leaves the rest — the clump keeps the facing it already had, which is
+        // MC's `state.setValue(segment, n + 1)`.
+        return state.SetIndex(prop, amount);
+    }
+
+    bool CanBeReplacedByPlacement(BlockState existing,
+                                  BlockID held, bool secondaryUse,
+                                  const PlacementClick& click) {
+        const BlockID existingId = existing.Block();
+        if (existingId == BlockID::Air) return true;
+
+        // ── MC SlabBlock.canBeReplaced ─────────────────────────────────────
+        //
+        //   ItemStack stack = context.getItemInHand();
+        //   if (type != DOUBLE && stack.is(this.asItem())) {
+        //       if (context.replacingClickedOnBlock()) {
+        //           boolean above = clickLocation.y - clickedPos.getY() > 0.5;
+        //           Direction face = context.getClickedFace();
+        //           if (type == BOTTOM) return face == UP   || (above  && face.getAxis().isHorizontal());
+        //           else                return face == DOWN || (!above && face.getAxis().isHorizontal());
+        //       }
+        //       return true;
+        //   }
+        //   return false;
+        //
+        // This is what merges two slabs into one full block: a bottom slab
+        // clicked on its top face agrees to be replaced, and getStateForPlacement
+        // then sees a slab already in the cell and answers DOUBLE. Without it
+        // the slab is not replaceable at all, the position resolves to the
+        // neighbouring cell, and you can never fill a block in.
+        //
+        // `replacingClickedOnBlock` is vanilla's flag for "this is the block the
+        // crosshair was on" — the second call, against whatever sits in the
+        // resolved cell, skips the geometry test and just says yes.
+        // `existing == held` is now literally MC's `stack.is(this.asItem())` —
+        // one BlockID per slab, so the three halves compare equal without a
+        // family lookup, and the half comes from the state.
+        if (BlockRegistry::IsSlabBlock(existingId) && existingId == held) {
+            using SlabType = BlockRegistry::SlabType;
+            const SlabType half = BlockRegistry::SlabTypeOf(existing);
+            if (half == SlabType::Double) return false;
+            if (!click.replacingClickedOnBlock) return true;
+            const bool above = click.hitY > 0.5f;
+            const Direction face = click.clickedFace;
+            if (half == SlabType::Top) {
+                return face == Direction::Down || (!above && IsHorizontal(face));
+            }
+            return face == Direction::Up || (above && IsHorizontal(face));
+        }
 
         // MC SegmentableBlock.canBeReplaced:
         //   !isSecondaryUseActive() && itemInHand.is(block.asItem()) && n < 4
         // Growth is the ONLY way a segmented clump is replaceable by its own
         // item; at 4 it falls through to the base rule below, which refuses.
-        const BlockID base = SegmentedFamilyBase(existing);
-        if (base != BlockID::Air && base == SegmentedFamilyBase(held)) {
-            return !secondaryUse && SegmentedGrowth(existing) != BlockID::Air;
+        // `existing == held` is MC's `itemInHand.is(block.asItem())`: the
+        // segment count is a state now, so all four counts are one BlockID.
+        if (IsSegmentedBlock(existingId) && existingId == held) {
+            return !secondaryUse && SegmentAmountOf(existing) < 4;
         }
 
         // MC BlockBehaviour.canBeReplaced:
@@ -352,8 +437,8 @@ namespace Game {
         // The second clause is what stops a replaceable block being overwritten
         // by MORE OF ITSELF — placing tall grass into tall grass does nothing
         // rather than silently consuming the item.
-        if (!BlockRegistry::Get(existing).replaceable) return false;
-        return held == BlockID::Air || held != existing;
+        if (!BlockRegistry::Get(existingId).replaceable) return false;
+        return held == BlockID::Air || held != existingId;
     }
 
     namespace {
@@ -363,12 +448,13 @@ namespace Game {
         // covers the whole square. True for full cubes and top slabs, false for
         // bottom slabs, and false for everything `.noCollision()` — including
         // leaf litter, which is what stops a clump from being stacked on itself.
-        bool IsFaceSturdyUp(BlockID id, uint8_t state) {
-            if (!BlockRegistry::HasCollision(id)) return false;
-            const auto& s = BlockRegistry::GetBlockShape(id, state);
-            return s.max.y >= 0.9999f &&
-                   s.min.x <= 0.0001f && s.max.x >= 0.9999f &&
-                   s.min.z <= 0.0001f && s.max.z >= 0.9999f;
+        bool IsFaceSturdyUp(BlockState state) {
+            if (!BlockRegistry::HasCollision(state.Block())) return false;
+            // The box UNION, not its bounds: a bottom-half stair's bounds fill
+            // the cell, but no single box of it covers the top face, so MC
+            // answers false — you cannot put a flower on the low half of a
+            // stair. A top-half stair's slab does cover it, and answers true.
+            return BlockRegistry::GetBlockShapeSet(state).IsFaceSturdyUp();
         }
 
         // #minecraft:dirt, verbatim from data/minecraft/tags/block/dirt.json,
@@ -385,14 +471,15 @@ namespace Game {
         };
     } // namespace
 
-    bool CanSurviveOn(BlockID id, BlockID belowId, uint8_t belowState) {
+    bool CanSurviveOn(BlockID id, BlockState below) {
+        const BlockID belowId = below.Block();
         const std::string& name = BlockRegistry::Get(id).modelName;
 
         // MC LeafLitterBlock.canSurvive — any block with a sturdy top face,
         // not just dirt. This is the override that makes leaf litter placeable
         // on stone or planks while flowers are not.
         if (Has(name, "leaf_litter")) {
-            return IsFaceSturdyUp(belowId, belowState);
+            return IsFaceSturdyUp(below);
         }
 
         // MC FlowerBedBlock (wildflowers, pink_petals) inherits
@@ -430,7 +517,7 @@ namespace Game {
         // redstone, which this engine's shape test already accepts). Without
         // this, dust and string could be placed in mid-air.
         if (name == "redstone_wire" || name == "tripwire_ns") {
-            return IsFaceSturdyUp(belowId, belowState);
+            return IsFaceSturdyUp(below);
         }
 
         // NetherWartBlock.mayPlaceOn: `state.is(Blocks.SOUL_SAND)`.
@@ -469,16 +556,18 @@ namespace Game {
 
     namespace {
         // MC Block.isFaceSturdy(state, level, pos, direction) for an arbitrary
-        // face, approximated from the single collision AABB this engine keeps
-        // per state: the box must cover the whole square of that face and reach
-        // it. True for full cubes, for the top of a top slab, and false for
-        // anything `.noCollision()` — which is what stops a button being hung
-        // on another button.
-        bool IsFaceSturdy(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
-            const BlockID id = level.GetBlock(p.x, p.y, p.z);
-            if (id == BlockID::Air) return false;
-            if (!BlockRegistry::HasCollision(id)) return false;
-            const auto& s = BlockRegistry::GetBlockShape(id, level.GetBlockState(p.x, p.y, p.z));
+        // face: some box of the block's shape must cover the whole square of
+        // that face and reach it. True for full cubes, for the top of a top
+        // slab, and false for anything `.noCollision()` — which is what stops
+        // a button being hung on another button.
+        //
+        // Asked of one box at a time rather than of the union's bounds, which
+        // is what a multi-box shape needs: a straight stair's bounds fill the
+        // cell and would call all six faces sturdy, where vanilla gives it two
+        // — the tall side its step reaches, and the flat side its slab is on.
+        // Two boxes jointly covering a face that neither covers alone would be
+        // missed, but no stair shape is built that way.
+        bool IsBoxFaceSturdy(const BlockRegistry::BlockShape& s, Direction face) {
             constexpr float lo = 0.0001f, hi = 0.9999f;
             switch (face) {
                 case Direction::Up:    return s.max.y >= hi && s.min.x <= lo && s.max.x >= hi &&
@@ -497,23 +586,40 @@ namespace Game {
             return false;
         }
 
+    } // namespace
+
+    bool IsFaceSturdyAt(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
+        const BlockID id = level.GetBlock(p.x, p.y, p.z);
+        if (id == BlockID::Air) return false;
+        if (!BlockRegistry::HasCollision(id)) return false;
+        const auto set =
+            BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z));
+        for (const auto& s : set) if (IsBoxFaceSturdy(s, face)) return true;
+        return false;
+    }
+
+    namespace {
+        // Local alias kept so the call sites below read as they did.
+        bool IsFaceSturdy(const IBlockAccess& level, const glm::ivec3& p, Direction face) {
+            return IsFaceSturdyAt(level, p, face);
+        }
+
         bool IsFaceAttachedBlock(BlockID id) {
             const std::string& n = BlockRegistry::Get(id).modelName;
             return n.find("_button") != std::string::npos || n == "lever";
         }
     } // namespace
 
-    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockID id,
-                      uint8_t stateIndex) {
+    bool CanSurviveAt(const IBlockAccess& level, const glm::ivec3& pos, BlockState state) {
+        const BlockID id = state.Block();
         // MC FaceAttachedHorizontalDirectionalBlock.canSurvive:
         //   canAttach(level, pos, getConnectedDirection(state).getOpposite())
         // where getConnectedDirection is UP for FLOOR, DOWN for CEILING, and
         // FACING for WALL — the direction the block POINTS. Its opposite is the
         // direction of the surface holding it up.
         if (IsFaceAttachedBlock(id)) {
-            const auto& def = BlockRegistry::GetStateDefinition(id);
-            const std::string_view face   = def.ValueOf(stateIndex, "face");
-            const std::string_view facing = def.ValueOf(stateIndex, "facing");
+            const std::string_view face   = state.GetValueByName("face");
+            const std::string_view facing = state.GetValueByName("facing");
 
             Direction connected = Direction::North;
             if (face == "floor")        connected = Direction::Up;
@@ -535,12 +641,68 @@ namespace Game {
         return CanSurviveAt(level, pos, id);
     }
 
-    uint8_t ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
-                                       BlockID id, uint8_t fallback) {
+    BlockState ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
+                                          BlockState fallback) {
+        const BlockID id = fallback.Block();
         if (id == BlockID::RedstoneWire) {
             // MC RedStoneWireBlock.getStateForPlacement:
             //   getConnectionState(level, this.crossState, pos)
             return RedstonePlacementState(level, pos);
+        }
+
+        // MC StairBlock.getStateForPlacement's closing line:
+        //   state.setValue(SHAPE, getStairsShape(state, level, pos))
+        // Applied to the FACING/HALF state ComputePlacementState already
+        // chose, and BEFORE the waterlog pass below, which only rewrites the
+        // trailing bit and so composes with whatever shape lands here.
+        if (IsStairs(id)) {
+            fallback = StairsWorldPlacementState(level, pos, fallback);
+        }
+
+        // MC FenceBlock / IronBarsBlock.getStateForPlacement — resolve all four
+        // connection sides against the neighbours. Same split as the stairs
+        // above: nothing about a fence's orientation comes from the player, so
+        // all of it lives on this side of the placement pair.
+        if (IsCrossCollisionBlock(id)) {
+            fallback = CrossPlacementState(level, pos, fallback);
+        }
+
+        // MC WallBlock.getStateForPlacement — the four connections, then the
+        // block above decides LOW vs TALL and whether the post shows.
+        if (IsWallBlock(id)) {
+            fallback = WallPlacementState(level, pos, fallback);
+        }
+
+        // MC FenceGateBlock.getStateForPlacement's IN_WALL clause. FACING has
+        // already been set by the horizontal placement rule below/above, which
+        // is the same `context.getHorizontalDirection()` vanilla uses.
+        if (IsFenceGateBlock(id)) {
+            fallback = FenceGatePlacementState(level, pos, fallback);
+        }
+
+        // Waterlogging. Every SimpleWaterloggedBlock's getStateForPlacement
+        // ends with the same line — StairBlock.java, SlabBlock.java,
+        // FenceBlock via CrossCollisionBlock, and the rest:
+        //
+        //   .setValue(WATERLOGGED, fluidState.getType() == Fluids.WATER)
+        //
+        // so it belongs here, applied to the whole family at once, rather than
+        // as 386 special cases. Coral and sea pickle additionally require
+        // `getAmount() == 8` (a SOURCE, not flowing) — identical here, because
+        // this engine has no fluid levels and every water cell is a source.
+        //
+        // Placed after the fallback is computed so it composes with whatever
+        // orientation ComputePlacementState already chose: WithWaterlogged
+        // rewrites one bit and leaves every other property alone.
+        //
+        // Assigned in BOTH directions, not only set-when-wet. Coral, sea
+        // pickle and conduit register WATERLOGGED **true** as their default,
+        // so state 0 for them already means waterlogged — placing one in air
+        // has to actively clear the flag, which is exactly what vanilla's
+        // unconditional setValue does.
+        if (BlockRegistry::IsWaterloggable(id)) {
+            return BlockRegistry::WithWaterlogged(
+                fallback, level.ContainsWater(pos.x, pos.y, pos.z));
         }
         return fallback;
     }
@@ -615,8 +777,8 @@ namespace Game {
         // and the facing is not known until placement resolves. Left to the
         // generic path for now — cocoa places like any other block.
 
-        const uint8_t belowState = level.GetBlockState(below.x, below.y, below.z);
-        return CanSurviveOn(id, belowId, belowState);
+        const BlockState belowState = level.GetBlockState(below.x, below.y, below.z);
+        return CanSurviveOn(id, belowState);
     }
 
 } // namespace Game

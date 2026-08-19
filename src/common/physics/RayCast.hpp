@@ -4,6 +4,7 @@
 #include <glm/glm.hpp>
 #include <optional>
 #include "../world/block/Blocks.hpp"
+#include "../world/block/BlockState.hpp"
 #include "../world/math/WorldMath.hpp"
 
 namespace Game {
@@ -23,7 +24,7 @@ namespace Game {
         // outline and the break overlay can size themselves to the SAME shape
         // the ray was tested against — re-reading the world at draw time would
         // work too, but the hit is what the player aimed at.
-        uint8_t stateIndex = 0;
+        BlockState      state;          // the full state at blockPos
         float distance;             // Distance from ray origin to hit point
         int hitFace;                // Which face was hit (0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z)
         bool insideBlock;           // True if raycast started inside this block volume
@@ -44,7 +45,7 @@ namespace Game {
         // states, which IBlockAccess reports for block-only views). Public
         // because renderers that size themselves to a block's shape need the
         // state and don't otherwise hold a world pointer.
-        static uint8_t GetBlockStateAt(int worldX, int worldY, int worldZ);
+        static BlockState GetBlockStateAt(int worldX, int worldY, int worldZ);
 
     private:
         // Helper to get block at world position (thread-safe)

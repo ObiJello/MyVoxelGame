@@ -328,12 +328,11 @@ void main() {
         float yRot = 0.0f;
         {
             const glm::ivec3 p = be.GetWorldPos();
-            uint8_t stateIndex = 0;
+            Game::BlockState state;
             if (Client::g_clientBlockAccess) {
-                stateIndex = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
+                state = Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z);
             }
-            const auto& def = Game::BlockRegistry::GetStateDefinition(be.GetBlockId());
-            const std::string_view facing = def.ValueOf(stateIndex, "facing");
+            const std::string_view facing = state.GetValueByName("facing");
             // MC Direction.toYRot() is degrees clockwise from south; our model
             // is authored with its lock on +Z (south), so south is the zero.
             if      (facing == "east")  yRot =  1.5707963f;

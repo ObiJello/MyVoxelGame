@@ -151,9 +151,9 @@ namespace Game {
             if (world) {
                 const glm::ivec3 p = GetWorldPos();
                 const auto& def = BlockRegistry::GetStateDefinition(GetBlockId());
-                const uint8_t cur = world->GetBlockState(p.x, p.y, p.z);
+                const BlockState cur = world->GetBlockState(p.x, p.y, p.z);
                 BlockRegistry::BlockStateDefinition::PropertyMap props;
-                props["facing"] = std::string(def.ValueOf(cur, "facing"));
+                props["facing"] = std::string(cur.GetValueByName("facing"));
                 props["lit"]    = IsLit() ? "true" : "false";
                 world->SetBlock(p.x, p.y, p.z, GetBlockId(),
                                 World::UpdateFlags::All, def.IndexOf(props));

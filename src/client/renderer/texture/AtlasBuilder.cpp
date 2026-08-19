@@ -1268,6 +1268,12 @@ namespace Render {
         // Parse interpolate flag (default false)
         animation.interpolate = animData.value("interpolate", false);
 
+        // Explicit frame dimensions. Absent on every vanilla block sprite, but
+        // they are the first branch of MC's calculateFrameSize, so a resource
+        // pack that sets them has to win over the min(w,h) fallback.
+        animation.declaredFrameWidth  = animData.value("width", 0);
+        animation.declaredFrameHeight = animData.value("height", 0);
+
         // Parse custom frame sequence if present
         if (animData.contains("frames") && animData["frames"].is_array()) {
             animation.frames.clear();
@@ -1302,15 +1308,38 @@ namespace Render {
             return false;
         }
 
-        // Calculate frame layout from texture dimensions
-        // Standard Minecraft frame size is 16x16
-        const int FRAME_SIZE = 16;
-        animation.width = FRAME_SIZE;
-        animation.height = FRAME_SIZE;
-        
+        // Frame layout, per MC AnimationMetadataSection.calculateFrameSize:
+        // an explicit `width`/`height` wins, a lone one keeps the sprite's
+        // other dimension, and with neither the frame is a
+        // min(spriteWidth, spriteHeight) SQUARE.
+        //
+        // This is not the same as "frames are 16x16". lava_flow is 32x512 and
+        // water_flow is 32x1024, so their frames are 32x32 — assuming 16
+        // sliced each real frame into four quarter-tiles, which then animated
+        // as if they were consecutive frames and packed a sprite at half the
+        // texel density of every other block.
+        int frameW = animation.declaredFrameWidth;
+        int frameH = animation.declaredFrameHeight;
+        if (frameW <= 0 && frameH <= 0) {
+            frameW = frameH = std::min(fullWidth, fullHeight);
+        } else if (frameW <= 0) {
+            frameW = fullWidth;
+        } else if (frameH <= 0) {
+            frameH = fullHeight;
+        }
+
+        if (frameW <= 0 || frameH <= 0 || frameW > fullWidth || frameH > fullHeight) {
+            Log::Warning("Animated texture %s: bad frame size %dx%d for a %dx%d sprite",
+                         texturePath.c_str(), frameW, frameH, fullWidth, fullHeight);
+            return false;
+        }
+
+        animation.width = frameW;
+        animation.height = frameH;
+
         // Calculate how many columns and rows of frames we have
-        int columns = fullWidth / FRAME_SIZE;
-        int rows = fullHeight / FRAME_SIZE;
+        int columns = fullWidth / frameW;
+        int rows = fullHeight / frameH;
         int totalFrames = columns * rows;
 
         if (totalFrames <= 1) {
@@ -1320,38 +1349,43 @@ namespace Render {
 
         animation.frameCount = totalFrames;
 
-        // Extract frames in column-major order (left to right, top to bottom within each column)
+        // Extract frames in ROW-major order. MC indexes a frame as
+        // (index % frameRowSize, index / frameRowSize) — SpriteContents.java
+        // getFrameX/getFrameY — so frame N is the Nth cell reading left to
+        // right, then top to bottom. Column-major only agrees with that for
+        // the single-column strips, which is why it survived: every animated
+        // block sprite except the two *_flow ones is one frame wide.
         frames.clear();
         frames.reserve(totalFrames);
 
-        for (int column = 0; column < columns; ++column) {
-            for (int row = 0; row < rows; ++row) {
-                std::vector<unsigned char> frameData(FRAME_SIZE * FRAME_SIZE * 4);
-                
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                std::vector<unsigned char> frameData(static_cast<size_t>(frameW) * frameH * 4);
+
                 // Calculate source position for this frame
-                int srcStartX = column * FRAME_SIZE;
-                int srcStartY = row * FRAME_SIZE;
-                
+                int srcStartX = column * frameW;
+                int srcStartY = row * frameH;
+
                 // Copy frame data from full texture
-                for (int y = 0; y < FRAME_SIZE; ++y) {
-                    for (int x = 0; x < FRAME_SIZE; ++x) {
+                for (int y = 0; y < frameH; ++y) {
+                    for (int x = 0; x < frameW; ++x) {
                         int srcX = srcStartX + x;
                         int srcY = srcStartY + y;
                         int srcIdx = (srcY * fullWidth + srcX) * 4;
-                        int dstIdx = (y * FRAME_SIZE + x) * 4;
-                        
+                        int dstIdx = (y * frameW + x) * 4;
+
                         frameData[dstIdx + 0] = fullData[srcIdx + 0]; // R
                         frameData[dstIdx + 1] = fullData[srcIdx + 1]; // G
                         frameData[dstIdx + 2] = fullData[srcIdx + 2]; // B
                         frameData[dstIdx + 3] = fullData[srcIdx + 3]; // A
                     }
                 }
-                
-                frames.push_back(frameData);
+
+                frames.push_back(std::move(frameData));
             }
         }
 
-        // Set up source with only the first frame (16x16)
+        // Set up source with only the first frame
         source.width = animation.width;
         source.height = animation.height;
         source.data = frames[0]; // Use first frame for atlas

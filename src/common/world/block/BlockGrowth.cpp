@@ -50,9 +50,8 @@ namespace Game {
             "8", "9", "10", "11", "12", "13", "14", "15",
         };
 
-        int IntProperty(BlockID id, uint8_t stateIndex, std::string_view prop) {
-            const std::string_view v = BlockRegistry::GetStateDefinition(id)
-                                           .ValueOf(stateIndex, prop);
+        int IntProperty(BlockState state, std::string_view prop) {
+            const std::string_view v = state.GetValueByName(prop);
             // Empty means the block doesn't declare the property. Answering 0
             // matches what the state index itself would mean (index 0 is always
             // the default) and keeps a mis-registered block inert rather than
@@ -67,17 +66,18 @@ namespace Game {
         // default. MC's `state.setValue(AGE, n)` preserves the other values;
         // ours only differs for blocks that carry more than one property, and
         // the two that do (bamboo, cocoa) set their properties together below.
-        uint8_t StateWithInt(BlockID id, std::string_view prop, int value) {
+        BlockState StateWithInt(BlockID id, std::string_view prop, int value) {
             if (value < 0) value = 0;
             if (value >= static_cast<int>(std::size(kDigits))) {
                 value = static_cast<int>(std::size(kDigits)) - 1;
             }
-            return BlockRegistry::GetStateDefinition(id).IndexOfSingle(prop, kDigits[value]);
+            return BlockStates::FromIndex(
+                id, BlockRegistry::GetStateDefinition(id).IndexOfSingle(prop, kDigits[value]));
         }
 
-        int AgeOf(BlockID id, uint8_t state)      { return IntProperty(id, state, "age"); }
-        int MoistureOf(BlockID id, uint8_t state) { return IntProperty(id, state, "moisture"); }
-        uint8_t StateForAge(BlockID id, int age)  { return StateWithInt(id, "age", age); }
+        int AgeOf(BlockState state)      { return IntProperty(state, "age"); }
+        int MoistureOf(BlockState state) { return IntProperty(state, "moisture"); }
+        BlockState StateForAge(BlockID id, int age) { return StateWithInt(id, "age", age); }
 
         // ── Update flags ────────────────────────────────────────────────────
         //
@@ -143,15 +143,19 @@ namespace Game {
         BlockID BlockAt(const IBlockAccess& level, const glm::ivec3& p) {
             return level.GetBlock(p.x, p.y, p.z);
         }
-        uint8_t StateAt(const IBlockAccess& level, const glm::ivec3& p) {
+        BlockState StateAt(const IBlockAccess& level, const glm::ivec3& p) {
             return level.GetBlockState(p.x, p.y, p.z);
         }
         bool IsAir(const IBlockAccess& level, const glm::ivec3& p) {
             return BlockAt(level, p) == BlockID::Air;
         }
-        bool SetAt(ILevelWrite& level, const glm::ivec3& p, BlockID id,
-                   uint32_t flags, uint8_t state = 0) {
-            return level.SetBlock(p.x, p.y, p.z, id, flags, state);
+        bool SetAt(ILevelWrite& level, const glm::ivec3& p, BlockState state, uint32_t flags) {
+            return level.SetBlock(p.x, p.y, p.z, state, flags);
+        }
+        // "This block, in its DEFAULT state" — the sentinel dance this used to
+        // need is gone: BlockStates::Default names the thing directly.
+        bool SetAt(ILevelWrite& level, const glm::ivec3& p, BlockID id, uint32_t flags) {
+            return SetAt(level, p, BlockStates::Default(id), flags);
         }
 
         // MC Direction.Plane.HORIZONTAL's face array order. A single
@@ -206,7 +210,7 @@ namespace Game {
                 SetAt(level, pos, BlockID::Torchflower, kUpdateAll);
                 return;
             }
-            SetAt(level, pos, id, kUpdateClients, StateForAge(id, age));
+            SetAt(level, pos, StateForAge(id, age), kUpdateClients);
         }
 
         // CropBlock.getGrowthSpeed (CropBlock.java:95-134), ported literally.
@@ -231,7 +235,7 @@ namespace Game {
                     const glm::ivec3 p{below.x + xx, below.y, below.z + zz};
                     if (BlockAt(level, p) == BlockID::Farmland) {
                         blockSpeed = 1.0f;
-                        if (MoistureOf(BlockID::Farmland, StateAt(level, p)) > 0) {
+                        if (MoistureOf(StateAt(level, p)) > 0) {
                             blockSpeed = 3.0f;
                         }
                     }
@@ -264,9 +268,10 @@ namespace Game {
         // Split out because beetroot and torchflower wrap it in their own
         // probability gate and the stems reuse only the speed half.
         void CropRandomTickBody(ILevelWrite& level, const glm::ivec3& pos,
-                                BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                                BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             if (level.GetRawBrightness(pos.x, pos.y, pos.z) < 9) return;
-            const int age = AgeOf(id, stateIndex);
+            const int age = AgeOf(state);
             const int maxAge = MaxAgeOf(id);
             if (age >= maxAge) return;
 
@@ -279,7 +284,7 @@ namespace Game {
             ApplyCropAge(level, pos, id, age + 1);
         }
 
-        bool CropIsRandomlyTicking(uint8_t /*stateIndex*/) {
+        bool CropIsRandomlyTicking(BlockState /*state*/) {
             // MC's `!isMaxAge(state)` needs the block id to know the max, which
             // this signature deliberately does not carry (it is called for
             // every sampled position, so it must stay a cheap filter). The tick
@@ -294,29 +299,30 @@ namespace Game {
         }
 
         void CropRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                            BlockID id, uint8_t stateIndex, JavaRandom& random) {
-            CropRandomTickBody(level, pos, id, stateIndex, random);
+                            BlockState state, JavaRandom& random) {
+            CropRandomTickBody(level, pos, state, random);
         }
 
         // BeetrootBlock.randomTick — `if (random.nextInt(3) != 0) super(...)`,
         // i.e. beetroot only attempts growth on 2 ticks in 3.
         // TorchflowerCropBlock.randomTick is the same gate.
         void SlowCropRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                                BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                                BlockState state, JavaRandom& random) {
             if (random.NextInt(3) != 0) {
-                CropRandomTickBody(level, pos, id, stateIndex, random);
+                CropRandomTickBody(level, pos, state, random);
             }
         }
 
         // CropBlock.growCrops + getBonemealAgeIncrease.
         bool CropIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                       uint8_t stateIndex) {
-            const BlockID id = BlockAt(level, pos);
-            return AgeOf(id, stateIndex) < MaxAgeOf(id);   // MC: !isMaxAge(state)
+                                       BlockState state) {
+            const BlockID id = state.Block();
+            return AgeOf(state) < MaxAgeOf(id);            // MC: !isMaxAge(state)
         }
 
         void CropPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                 BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                                 BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             // MC getBonemealAgeIncrease: Mth.nextInt(random, 2, 5), inclusive.
             int increase = random.NextInt(2, 5);
             // BeetrootBlock divides that by 3 — integer division, so a roll of
@@ -327,7 +333,7 @@ namespace Game {
             if (id == BlockID::TorchflowerCrop) increase = 1;
 
             const int maxAge = MaxAgeOf(id);
-            const int age = std::min(maxAge, AgeOf(id, stateIndex) + increase);
+            const int age = std::min(maxAge, AgeOf(state) + increase);
             ApplyCropAge(level, pos, id, age);
         }
 
@@ -337,10 +343,11 @@ namespace Game {
         // NetherWartBlock.java:22-28
         // ────────────────────────────────────────────────────────────────────
         void NetherWartRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                                  BlockID id, uint8_t stateIndex, JavaRandom& random) {
-            const int age = AgeOf(id, stateIndex);
+                                  BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
+            const int age = AgeOf(state);
             if (age < 3 && random.NextInt(10) == 0) {
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, age + 1));
+                SetAt(level, pos, StateForAge(id, age + 1), kUpdateClients);
             }
         }
 
@@ -359,7 +366,8 @@ namespace Game {
         }
 
         void StemRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                            BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                            BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             const StemPair* pair = StemPairFor(id);
             if (!pair) return;
             if (level.GetRawBrightness(pos.x, pos.y, pos.z) < 9) return;
@@ -371,9 +379,9 @@ namespace Game {
             const float growthSpeed = GetGrowthSpeed(level, pos, id);
             if (random.NextInt(static_cast<int32_t>(25.0f / growthSpeed) + 1) != 0) return;
 
-            const int age = AgeOf(id, stateIndex);
+            const int age = AgeOf(state);
             if (age < 7) {
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, age + 1));
+                SetAt(level, pos, StateForAge(id, age + 1), kUpdateClients);
                 return;
             }
 
@@ -423,10 +431,11 @@ namespace Game {
             const glm::ivec3 relative{pos.x + StepX(dir), pos.y, pos.z + StepZ(dir)};
             SetAt(level, relative, pair->fruit, kUpdateAll);
             // The stem turns into its attached form pointing AT the fruit.
-            const uint8_t facingState =
+            const BlockState facingState = BlockStates::FromIndex(
+                pair->attached,
                 BlockRegistry::GetStateDefinition(pair->attached)
-                    .IndexOfSingle("facing", NameOf(dir));
-            SetAt(level, pos, pair->attached, kUpdateAll, facingState);
+                    .IndexOfSingle("facing", NameOf(dir)));
+            SetAt(level, pos, facingState, kUpdateAll);
         }
 
         // AttachedStemBlock.updateShape (AttachedStemBlock.java):
@@ -443,47 +452,49 @@ namespace Game {
         // neighbour: only a change in the direction the stem points at means
         // the fruit is gone.
         bool AttachedStemNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
-                                         BlockID id, uint8_t stateIndex,
+                                         BlockState state,
                                          Direction toNeighbour, BlockID neighbourId,
-                                         BlockID& outBlock, uint8_t& outState) {
+                                         BlockState& outState) {
             (void)level; (void)pos;
+            const BlockID id = state.Block();
             const StemPair* pair = nullptr;
             for (const auto& p : kStemPairs) {
                 if (p.attached == id) { pair = &p; break; }
             }
             if (!pair) return false;
 
-            const std::string_view facing =
-                BlockRegistry::GetStateDefinition(id).ValueOf(stateIndex, "facing");
+            const std::string_view facing = state.GetValueByName("facing");
             if (facing != NameOf(toNeighbour)) return false;   // not the fruit's side
             if (neighbourId == pair->fruit) return false;      // fruit still there
 
-            outBlock = pair->stem;
+            // One value now: the block is part of the state.
             outState = StateForAge(pair->stem, 7);
             return true;
         }
 
         bool StemIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                       uint8_t stateIndex) {
-            return AgeOf(BlockAt(level, pos), stateIndex) != 7;   // MC: AGE != 7
+                                       BlockState state) {
+            return AgeOf(state) != 7;   // MC: AGE != 7
         }
 
         void StemPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                 BlockID id, uint8_t stateIndex, JavaRandom& random) {
-            const int age = std::min(7, AgeOf(id, stateIndex) + random.NextInt(2, 5));
-            const uint8_t newState = StateForAge(id, age);
-            SetAt(level, pos, id, kUpdateClients, newState);
+                                 BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
+            const int age = std::min(7, AgeOf(state) + random.NextInt(2, 5));
+            const BlockState newState = StateForAge(id, age);
+            SetAt(level, pos, newState, kUpdateClients);
             // MC: `if (age == 7) newState.randomTick(level, pos, random);` —
             // bone-mealing a stem to maturity gives it an immediate shot at
             // spawning its fruit rather than making you wait for a random tick.
-            if (age == 7) StemRandomTick(level, pos, id, newState, random);
+            if (age == 7) StemRandomTick(level, pos, newState, random);
         }
 
         // ────────────────────────────────────────────────────────────────────
         // SugarCaneBlock — SugarCaneBlock.java:21-36
         // ────────────────────────────────────────────────────────────────────
         void SugarCaneRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                                 BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                                 BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             (void)random;   // cane growth is deterministic once the tick lands
             const glm::ivec3 above{pos.x, pos.y + 1, pos.z};
             if (!IsAir(level, above)) return;
@@ -496,12 +507,12 @@ namespace Game {
             while (level.GetBlock(pos.x, pos.y - height, pos.z) == id) ++height;
             if (height >= 3) return;
 
-            const int age = AgeOf(id, stateIndex);
+            const int age = AgeOf(state);
             if (age == 15) {
                 SetAt(level, above, id, kUpdateAll);
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, 0));
+                SetAt(level, pos, StateForAge(id, 0), kUpdateClients);
             } else {
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, age + 1));
+                SetAt(level, pos, StateForAge(id, age + 1), kUpdateClients);
             }
         }
 
@@ -535,7 +546,7 @@ namespace Game {
         }
 
         bool SugarCaneIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                            uint8_t /*stateIndex*/) {
+                                            BlockState /*state*/) {
             // Measured over the WHOLE stalk, so bone-mealing the bottom segment
             // of a full-height cane correctly does nothing instead of silently
             // consuming the item.
@@ -547,8 +558,8 @@ namespace Game {
         }
 
         void SugarCanePerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                      BlockID id, uint8_t /*stateIndex*/,
-                                      JavaRandom& random) {
+                                      BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             int above = SugarCaneHeightAbove(level, pos);
             int total = above + SugarCaneHeightBelow(level, pos) + 1;
             const int toGrow = 1 + random.NextInt(2);   // Bedrock: one or two
@@ -568,11 +579,12 @@ namespace Game {
         // CactusBlock — CactusBlock.java:24-52
         // ────────────────────────────────────────────────────────────────────
         void CactusRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                              BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                              BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
             const glm::ivec3 above{pos.x, pos.y + 1, pos.z};
             if (!IsAir(level, above)) return;
 
-            const int age = AgeOf(id, stateIndex);
+            const int age = AgeOf(state);
             int height = 1;
             while (level.GetBlock(pos.x, pos.y - height, pos.z) == id) {
                 ++height;
@@ -594,11 +606,11 @@ namespace Game {
                 }
             } else if (age == 15 && height < 3) {
                 SetAt(level, above, id, kUpdateAll);
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, 0));
+                SetAt(level, pos, StateForAge(id, 0), kUpdateClients);
             }
 
             if (age < 15) {
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, age + 1));
+                SetAt(level, pos, StateForAge(id, age + 1), kUpdateClients);
             }
         }
 
@@ -613,18 +625,19 @@ namespace Game {
 
         constexpr int kBambooMaxHeight = 16;
 
-        uint8_t BambooState(int age, std::string_view leaves, int stage) {
+        BlockState BambooState(int age, std::string_view leaves, int stage) {
             BlockRegistry::BlockStateDefinition::PropertyMap props;
             props["age"]    = std::string(kDigits[age]);
             props["leaves"] = std::string(leaves);
             props["stage"]  = std::string(kDigits[stage]);
-            return BlockRegistry::GetStateDefinition(BlockID::Bamboo).IndexOf(props);
+            return BlockStates::FromIndex(
+                BlockID::Bamboo,
+                BlockRegistry::GetStateDefinition(BlockID::Bamboo).IndexOf(props));
         }
 
         std::string_view BambooLeavesOf(const IBlockAccess& level, const glm::ivec3& p) {
             if (BlockAt(level, p) != BlockID::Bamboo) return "none";
-            return BlockRegistry::GetStateDefinition(BlockID::Bamboo)
-                       .ValueOf(StateAt(level, p), "leaves");
+            return StateAt(level, p).GetValueByName("leaves");
         }
 
         int BambooHeightBelow(const IBlockAccess& level, const glm::ivec3& pos) {
@@ -660,42 +673,40 @@ namespace Game {
                 if (below == BlockID::Bamboo && BambooLeavesOf(level, belowPos) != "none") {
                     leaves = "large";
                     if (twoBelow == BlockID::Bamboo) {
-                        SetAt(level, belowPos, BlockID::Bamboo, kUpdateAll,
-                              BambooState(AgeOf(BlockID::Bamboo, StateAt(level, belowPos)),
-                                          "small",
-                                          IntProperty(BlockID::Bamboo,
-                                                      StateAt(level, belowPos), "stage")));
-                        SetAt(level, twoBelowPos, BlockID::Bamboo, kUpdateAll,
-                              BambooState(AgeOf(BlockID::Bamboo, StateAt(level, twoBelowPos)),
-                                          "none",
-                                          IntProperty(BlockID::Bamboo,
-                                                      StateAt(level, twoBelowPos), "stage")));
+                        SetAt(level, belowPos,
+                              BambooState(AgeOf(StateAt(level, belowPos)), "small",
+                                          IntProperty(StateAt(level, belowPos), "stage")),
+                              kUpdateAll);
+                        SetAt(level, twoBelowPos,
+                              BambooState(AgeOf(StateAt(level, twoBelowPos)), "none",
+                                          IntProperty(StateAt(level, twoBelowPos), "stage")),
+                              kUpdateAll);
                     }
                 } else {
                     leaves = "small";
                 }
             }
 
-            const uint8_t selfState = StateAt(level, pos);
+            const BlockState selfState = StateAt(level, pos);
             // Thick bamboo once this is the second segment or higher.
-            const int age = (AgeOf(BlockID::Bamboo, selfState) != 1 &&
+            const int age = (AgeOf(selfState) != 1 &&
                              twoBelow != BlockID::Bamboo) ? 0 : 1;
             // Stop growing near the height cap, or with 1-in-4 odds past 11.
             const int stage = ((height < 11 || !(random.NextFloat() < 0.25f)) && height != 15)
                                   ? 0 : 1;
 
-            SetAt(level, {pos.x, pos.y + 1, pos.z}, BlockID::Bamboo, kUpdateAll,
-                  BambooState(age, leaves, stage));
+            SetAt(level, {pos.x, pos.y + 1, pos.z},
+                  BambooState(age, leaves, stage), kUpdateAll);
         }
 
-        bool BambooIsRandomlyTicking(uint8_t stateIndex) {
+        bool BambooIsRandomlyTicking(BlockState state) {
             // MC: STAGE == 0 — a finished stalk stops ticking for good.
-            return IntProperty(BlockID::Bamboo, stateIndex, "stage") == 0;
+            return IntProperty(state, "stage") == 0;
         }
 
         void BambooRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                              BlockID /*id*/, uint8_t stateIndex, JavaRandom& random) {
-            if (IntProperty(BlockID::Bamboo, stateIndex, "stage") != 0) return;
+                              BlockState state, JavaRandom& random) {
+            if (IntProperty(state, "stage") != 0) return;
             const glm::ivec3 above{pos.x, pos.y + 1, pos.z};
             if (random.NextInt(3) != 0) return;
             if (!IsAir(level, above)) return;
@@ -710,13 +721,13 @@ namespace Game {
         // with SMALL leaves. Note the leaves value: a stalk grown this way is
         // NOT leafless, unlike every segment BambooStalkBlock adds later.
         void GrowBambooSapling(ILevelWrite& level, const glm::ivec3& pos) {
-            SetAt(level, {pos.x, pos.y + 1, pos.z}, BlockID::Bamboo, kUpdateAll,
-                  BambooState(0, "small", 0));
+            SetAt(level, {pos.x, pos.y + 1, pos.z},
+                  BambooState(0, "small", 0), kUpdateAll);
         }
 
         // BambooSaplingBlock.randomTick — a shoot becomes a stalk.
         void BambooSaplingRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                                     BlockID /*id*/, uint8_t /*stateIndex*/,
+                                     BlockState /*state*/,
                                      JavaRandom& random) {
             const glm::ivec3 above{pos.x, pos.y + 1, pos.z};
             if (random.NextInt(3) != 0) return;
@@ -731,27 +742,27 @@ namespace Game {
         // lone shoot does not have.
         bool BambooSaplingIsValidBonemealTarget(const IBlockAccess& level,
                                                 const glm::ivec3& pos,
-                                                uint8_t /*stateIndex*/) {
+                                                BlockState /*state*/) {
             return IsAir(level, {pos.x, pos.y + 1, pos.z});
         }
 
         void BambooSaplingPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                          BlockID /*id*/, uint8_t /*stateIndex*/,
+                                          BlockState /*state*/,
                                           JavaRandom& /*random*/) {
             GrowBambooSapling(level, pos);
         }
 
         bool BambooIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                         uint8_t /*stateIndex*/) {
+                                         BlockState /*state*/) {
             const int above = BambooHeightAbove(level, pos);
             const int below = BambooHeightBelow(level, pos);
             if (above + below + 1 >= kBambooMaxHeight) return false;
             const glm::ivec3 top{pos.x, pos.y + above, pos.z};
-            return IntProperty(BlockID::Bamboo, StateAt(level, top), "stage") != 1;
+            return IntProperty(StateAt(level, top), "stage") != 1;
         }
 
         void BambooPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                   BlockID /*id*/, uint8_t /*stateIndex*/,
+                                   BlockState /*state*/,
                                    JavaRandom& random) {
             int above = BambooHeightAbove(level, pos);
             const int below = BambooHeightBelow(level, pos);
@@ -761,7 +772,7 @@ namespace Game {
             for (int i = 0; i < newBamboo; ++i) {
                 const glm::ivec3 top{pos.x, pos.y + above, pos.z};
                 if (total >= kBambooMaxHeight) return;
-                if (IntProperty(BlockID::Bamboo, StateAt(level, top), "stage") == 1) return;
+                if (IntProperty(StateAt(level, top), "stage") == 1) return;
                 if (!IsAir(level, {top.x, top.y + 1, top.z})) return;
                 GrowBamboo(level, top, random, total);
                 ++above;
@@ -772,66 +783,66 @@ namespace Game {
         // ────────────────────────────────────────────────────────────────────
         // CocoaBlock — CocoaBlock.java:13-55
         // ────────────────────────────────────────────────────────────────────
-        uint8_t CocoaState(const IBlockAccess& level, const glm::ivec3& pos, int age) {
+        BlockState CocoaState(const IBlockAccess& level, const glm::ivec3& pos, int age) {
             const auto& def = BlockRegistry::GetStateDefinition(BlockID::Cocoa);
             BlockRegistry::BlockStateDefinition::PropertyMap props;
-            props["facing"] = std::string(def.ValueOf(StateAt(level, pos), "facing"));
+            props["facing"] = std::string(StateAt(level, pos).GetValueByName("facing"));
             props["age"]    = std::string(kDigits[age]);
-            return def.IndexOf(props);
+            return BlockStates::FromIndex(BlockID::Cocoa, def.IndexOf(props));
         }
 
-        bool CocoaIsRandomlyTicking(uint8_t stateIndex) {
-            return IntProperty(BlockID::Cocoa, stateIndex, "age") < 2;
+        bool CocoaIsRandomlyTicking(BlockState state) {
+            return IntProperty(state, "age") < 2;
         }
 
         void CocoaRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                             BlockID id, uint8_t stateIndex, JavaRandom& random) {
+                             BlockState state, JavaRandom& random) {
             if (random.NextInt(5) != 0) return;
-            const int age = AgeOf(id, stateIndex);
+            const int age = AgeOf(state);
             if (age < 2) {
-                SetAt(level, pos, id, kUpdateClients, CocoaState(level, pos, age + 1));
+                SetAt(level, pos, CocoaState(level, pos, age + 1), kUpdateClients);
             }
         }
 
         bool CocoaIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                        uint8_t stateIndex) {
+                                        BlockState state) {
             (void)level; (void)pos;
-            return IntProperty(BlockID::Cocoa, stateIndex, "age") < 2;
+            return IntProperty(state, "age") < 2;
         }
 
         void CocoaPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                  BlockID id, uint8_t stateIndex, JavaRandom& /*random*/) {
-            SetAt(level, pos, id, kUpdateClients,
-                  CocoaState(level, pos, AgeOf(id, stateIndex) + 1));
+                                  BlockState state, JavaRandom& /*random*/) {
+            SetAt(level, pos, CocoaState(level, pos, AgeOf(state) + 1), kUpdateClients);
         }
 
         // ────────────────────────────────────────────────────────────────────
         // SweetBerryBushBlock — SweetBerryBushBlock.java:27-88
         // Note it reads the brightness of the block ABOVE, not its own.
         // ────────────────────────────────────────────────────────────────────
-        bool BerryIsRandomlyTicking(uint8_t stateIndex) {
-            return IntProperty(BlockID::SweetBerryBush, stateIndex, "age") < 3;
+        bool BerryIsRandomlyTicking(BlockState state) {
+            return IntProperty(state, "age") < 3;
         }
 
         void BerryRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                             BlockID id, uint8_t stateIndex, JavaRandom& random) {
-            const int age = AgeOf(id, stateIndex);
+                             BlockState state, JavaRandom& random) {
+            const BlockID id = state.Block();
+            const int age = AgeOf(state);
             if (age < 3 && random.NextInt(5) == 0 &&
                 level.GetRawBrightness(pos.x, pos.y + 1, pos.z) >= 9) {
-                SetAt(level, pos, id, kUpdateClients, StateForAge(id, age + 1));
+                SetAt(level, pos, StateForAge(id, age + 1), kUpdateClients);
             }
         }
 
         bool BerryIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                        uint8_t stateIndex) {
+                                        BlockState state) {
             (void)level; (void)pos;
-            return IntProperty(BlockID::SweetBerryBush, stateIndex, "age") < 3;
+            return IntProperty(state, "age") < 3;
         }
 
         void BerryPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                  BlockID id, uint8_t stateIndex, JavaRandom& /*random*/) {
-            SetAt(level, pos, id, kUpdateClients,
-                  StateForAge(id, std::min(3, AgeOf(id, stateIndex) + 1)));
+                                  BlockState state, JavaRandom& /*random*/) {
+            const BlockID id = state.Block();
+            SetAt(level, pos, StateForAge(id, std::min(3, AgeOf(state) + 1)), kUpdateClients);
         }
 
         // ────────────────────────────────────────────────────────────────────
@@ -859,14 +870,14 @@ namespace Game {
         }
 
         void FarmlandRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                                BlockID id, uint8_t stateIndex, JavaRandom& /*random*/) {
-            const int moisture = MoistureOf(id, stateIndex);
+                                BlockState state, JavaRandom& /*random*/) {
+            const BlockID id = state.Block();
+            const int moisture = MoistureOf(state);
             // MC also ORs in `level.isRainingAt(pos.above())`. No weather here,
             // so that term is permanently false — see the file header.
             if (!IsNearWater(level, pos)) {
                 if (moisture > 0) {
-                    SetAt(level, pos, id, kUpdateClients,
-                          StateWithInt(id, "moisture", moisture - 1));
+                    SetAt(level, pos, StateWithInt(id, "moisture", moisture - 1), kUpdateClients);
                 } else if (!ShouldMaintainFarmland(level, pos)) {
                     // MC turnToDirt. `pushEntitiesUp` is skipped: farmland and
                     // dirt have the same collision box height for our purposes
@@ -877,11 +888,11 @@ namespace Game {
             } else if (moisture < 7) {
                 // Straight to 7, not +1 — hydration is instant in vanilla and
                 // only drying is gradual.
-                SetAt(level, pos, id, kUpdateClients, StateWithInt(id, "moisture", 7));
+                SetAt(level, pos, StateWithInt(id, "moisture", 7), kUpdateClients);
             }
         }
 
-        bool FarmlandIsRandomlyTicking(uint8_t /*stateIndex*/) { return true; }
+        bool FarmlandIsRandomlyTicking(BlockState /*state*/) { return true; }
 
         // ────────────────────────────────────────────────────────────────────
         // PitcherCropBlock — PitcherCropBlock.java
@@ -894,60 +905,57 @@ namespace Game {
         // ────────────────────────────────────────────────────────────────────
         constexpr int kPitcherDoubleAge = 3;   // DOUBLE_PLANT_AGE_INTERSECTION
 
-        uint8_t PitcherState(int age, std::string_view half) {
+        BlockState PitcherState(int age, std::string_view half) {
             BlockRegistry::BlockStateDefinition::PropertyMap props;
             props["age"]  = std::string(kDigits[age]);
             props["half"] = std::string(half);
-            return BlockRegistry::GetStateDefinition(BlockID::PitcherCrop).IndexOf(props);
+            return BlockStates::FromIndex(
+                BlockID::PitcherCrop,
+                BlockRegistry::GetStateDefinition(BlockID::PitcherCrop).IndexOf(props));
         }
 
-        bool PitcherIsRandomlyTicking(uint8_t stateIndex) {
-            const auto& def = BlockRegistry::GetStateDefinition(BlockID::PitcherCrop);
-            return def.ValueOf(stateIndex, "half") == "lower" &&
-                   IntProperty(BlockID::PitcherCrop, stateIndex, "age") < 4;
+        bool PitcherIsRandomlyTicking(BlockState state) {
+            return state.GetValueByName("half") == "lower" &&
+                   IntProperty(state, "age") < 4;
         }
 
         void PitcherGrow(ILevelWrite& level, const glm::ivec3& pos, int newAge) {
-            SetAt(level, pos, BlockID::PitcherCrop, kUpdateClients,
-                  PitcherState(newAge, "lower"));
+            SetAt(level, pos, PitcherState(newAge, "lower"), kUpdateClients);
             const glm::ivec3 above{pos.x, pos.y + 1, pos.z};
             if (newAge >= kPitcherDoubleAge) {
                 // Only claim the cell above if it is free; MC's grow() checks
                 // canGrow first, which comes to the same thing for our purposes.
                 if (IsAir(level, above) || BlockAt(level, above) == BlockID::PitcherCrop) {
-                    SetAt(level, above, BlockID::PitcherCrop, kUpdateAll,
-                          PitcherState(newAge, "upper"));
+                    SetAt(level, above, PitcherState(newAge, "upper"), kUpdateAll);
                 }
             }
         }
 
         void PitcherRandomTick(ILevelWrite& level, const glm::ivec3& pos,
-                               BlockID id, uint8_t stateIndex, JavaRandom& random) {
-            const auto& def = BlockRegistry::GetStateDefinition(id);
-            if (def.ValueOf(stateIndex, "half") != "lower") return;
-            const int age = AgeOf(id, stateIndex);
+                               BlockState state, JavaRandom& random) {
+            if (state.GetValueByName("half") != "lower") return;
+            const int age = AgeOf(state);
             if (age >= 4) return;
             // No light gate here — PitcherCropBlock.randomTick genuinely has
             // none; light only appears in its canSurvive.
-            const float growthSpeed = GetGrowthSpeed(level, pos, id);
+            const float growthSpeed = GetGrowthSpeed(level, pos, state.Block());
             if (random.NextInt(static_cast<int32_t>(25.0f / growthSpeed) + 1) != 0) return;
             PitcherGrow(level, pos, age + 1);
         }
 
         bool PitcherIsValidBonemealTarget(const IBlockAccess& level, const glm::ivec3& pos,
-                                          uint8_t stateIndex) {
+                                          BlockState state) {
             (void)level; (void)pos;
-            return IntProperty(BlockID::PitcherCrop, stateIndex, "age") < 4;
+            return IntProperty(state, "age") < 4;
         }
 
         void PitcherPerformBonemeal(ILevelWrite& level, const glm::ivec3& pos,
-                                    BlockID id, uint8_t stateIndex, JavaRandom& /*random*/) {
+                                    BlockState state, JavaRandom& /*random*/) {
             // BONEMEAL_INCREASE = 1.
-            const int age = std::min(4, AgeOf(id, stateIndex) + 1);
-            const auto& def = BlockRegistry::GetStateDefinition(id);
+            const int age = std::min(4, AgeOf(state) + 1);
             // Bone-mealing the upper half grows the plant from its lower half.
             glm::ivec3 base = pos;
-            if (def.ValueOf(stateIndex, "half") == "upper") base.y -= 1;
+            if (state.GetValueByName("half") == "upper") base.y -= 1;
             PitcherGrow(level, base, age);
         }
 

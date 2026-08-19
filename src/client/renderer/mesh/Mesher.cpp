@@ -57,7 +57,7 @@ namespace Render {
         // happens to hold today (stems declare `age` as their only property)
         // but would silently produce wrong colours the moment one gained a
         // second property.
-        int StemAgeOf(Game::BlockID id, uint8_t stateIndex) {
+        int StemAgeOf(Game::BlockID id, Game::BlockStateIndex stateIndex) {
             const std::string_view v =
                 Game::BlockRegistry::GetStateDefinition(id).ValueOf(stateIndex, "age");
             int n = 0;
@@ -71,8 +71,13 @@ namespace Render {
         class CacheBlockAccess final : public Game::IBlockAccess {
         public:
             CacheBlockAccess(const Game::BlockID (&cache)[18][18][18],
+                             const Game::BlockStateIndex (&states)[18][18][18],
+                             const bool (&water)[18][18][18],
+                             bool statesAllZero,
                              int baseX, int baseY, int baseZ)
-                : m_cache(cache), m_baseX(baseX), m_baseY(baseY), m_baseZ(baseZ) {}
+                : m_cache(cache), m_states(states), m_water(water),
+                  m_statesAllZero(statesAllZero),
+                  m_baseX(baseX), m_baseY(baseY), m_baseZ(baseZ) {}
 
             Game::BlockID GetBlock(int worldX, int worldY, int worldZ) const override {
                 const int lx = worldX - m_baseX;
@@ -82,6 +87,40 @@ namespace Render {
                     return Game::BlockID::Air;
                 }
                 return m_cache[ly + 1][lz + 1][lx + 1];
+            }
+
+            // Was inherited (always 0) until waterlogging made a neighbour's
+            // state decide whether a fluid face is drawn. The state cache now
+            // spans the same 18^3 halo as the block cache, so this is the same
+            // bounds check and the same array read.
+            Game::BlockState GetBlockState(int worldX, int worldY, int worldZ) const override {
+                const int lx = worldX - m_baseX;
+                const int ly = worldY - m_baseY;
+                const int lz = worldZ - m_baseZ;
+                if (lx < -1 || lx > 16 || ly < -1 || ly > 16 || lz < -1 || lz > 16) {
+                    return Game::BlockState{};
+                }
+                // The cache still keeps block and index in separate planes, so
+                // this is the one place that recombines them. `m_statesAllZero`
+                // cannot short-circuit it any more: index 0 is a real state of
+                // whatever block is here, not "no state".
+                const Game::BlockID id = m_cache[ly + 1][lz + 1][lx + 1];
+                const Game::BlockStateIndex st =
+                    m_statesAllZero ? 0 : m_states[ly + 1][lz + 1][lx + 1];
+                return Game::BlockStates::FromIndex(id, st);
+            }
+
+            // Straight off the derived cache rather than through the base
+            // class's GetBlock + GetBlockState + registry composition. This is
+            // the single hottest query in fluid meshing.
+            bool ContainsWater(int worldX, int worldY, int worldZ) const override {
+                const int lx = worldX - m_baseX;
+                const int ly = worldY - m_baseY;
+                const int lz = worldZ - m_baseZ;
+                if (lx < -1 || lx > 16 || ly < -1 || ly > 16 || lz < -1 || lz > 16) {
+                    return false;
+                }
+                return m_water[ly + 1][lz + 1][lx + 1];
             }
 
             bool IsChunkLoaded(int, int) const override { return true; }
@@ -101,8 +140,8 @@ namespace Render {
             }
 
             bool IsBlockFluid(int worldX, int worldY, int worldZ) const override {
-                const Game::BlockID block = GetBlock(worldX, worldY, worldZ);
-                return block == Game::BlockID::Water || block == Game::BlockID::Lava;
+                if (ContainsWater(worldX, worldY, worldZ)) return true;
+                return GetBlock(worldX, worldY, worldZ) == Game::BlockID::Lava;
             }
 
             bool IsValidPosition(int, int worldY, int) const override {
@@ -111,6 +150,9 @@ namespace Render {
 
         private:
             const Game::BlockID (&m_cache)[18][18][18];
+            const Game::BlockStateIndex (&m_states)[18][18][18];
+            const bool (&m_water)[18][18][18];
+            bool m_statesAllZero;
             int m_baseX, m_baseY, m_baseZ;
         };
     }
@@ -122,6 +164,8 @@ namespace Render {
         m_sectionBaseWorldZ = 0;
         std::memset(m_blockCache, 0, sizeof(m_blockCache));
         std::memset(m_opaqueCache, 0, sizeof(m_opaqueCache));
+        std::memset(m_stateCache, 0, sizeof(m_stateCache));
+        std::memset(m_waterCache, 0, sizeof(m_waterCache));
         m_fluidBuilder = std::make_unique<FluidMeshBuilder>();
         // Water is meshed by the fluid builder, which never reaches
         // AddBlockFace's tint dispatch — hand it the same blended water
@@ -155,19 +199,45 @@ namespace Render {
             // the wall's whole side disappear. Mirrors MC's
             // BlockState.canOcclude() + the per-face shape check it does in
             // BlockBehaviour.skipRendering. v1 approximation: only full cubes
-            // (shape == 0..1 on every axis) participate in face culling. Slab
-            // tops/bottoms not culling the cube above/below them is a minor
-            // hidden-face overdraw that we accept until a proper per-face
-            // occlusion mask is added.
-            // Default state is a valid representative here even for blocks
-            // whose states rotate: a 90° turn about the cell centre maps the
-            // unit cube onto itself, so "is this a full cube" can't change
-            // between states. Occlusion stays a per-BlockID property.
-            const auto& shape = Game::BlockRegistry::GetBlockShape(blockId);
+            // (a single box spanning 0..1 on every axis) participate in face
+            // culling. Slab tops/bottoms not culling the cube above/below them
+            // is a minor hidden-face overdraw that we accept until a proper
+            // per-face occlusion mask is added.
+            //
+            // Asked of the box UNION, not its bounds: a stair is a bottom slab
+            // plus a step, and between them they touch every face, so on bounds
+            // alone every stair would occlude and a wall behind one would lose
+            // the face the stair's open half is meant to show through.
+            //
+            // Asked of EVERY state, not just state 0. A 90° turn about the cell
+            // centre maps the unit cube onto itself, so rotation alone cannot
+            // change the answer — but a property that changes how much of the
+            // cell is filled can, and a slab's `type` is exactly that.
+            //
+            // Slabs now genuinely DO disagree with themselves: `type=double`
+            // fills the cell while top and bottom do not, all under one
+            // BlockID. Before the synthetic ids collapsed, the three halves
+            // were separate blocks and this loop only ever confirmed. It
+            // discovers now, and DeriveOpaqueCache reads the per-voxel state
+            // for anything it flags — without which a double slab would mesh
+            // as a half slab and leak faces.
+            //
+            // No 256 clamp: the state index is 16-bit, and 30 blocks exceed 256
+            // states. Clamping here would silently skip the tail of every one
+            // of them.
+            const uint16_t stateCount = Game::BlockRegistry::GetStateCount(blockId);
             const bool fullCube =
-                shape.min.x <= 0.0001f && shape.max.x >= 0.9999f &&
-                shape.min.y <= 0.0001f && shape.max.y >= 0.9999f &&
-                shape.min.z <= 0.0001f && shape.max.z >= 0.9999f;
+                Game::BlockRegistry::GetBlockShapeSet(
+                    Game::BlockStates::FromIndex(blockId, 0)).IsFullCube();
+            bool variesByState = false;
+            for (uint16_t s = 1; s < stateCount; ++s) {
+                if (Game::BlockRegistry::GetBlockShapeSet(
+                        Game::BlockStates::FromIndex(blockId, s)).IsFullCube() != fullCube) {
+                    variesByState = true;
+                    break;
+                }
+            }
+            s_blockPropsCache[i].occlusionVariesByState = variesByState;
             // BE-flagged blocks (chest, shulker, sign, banner, …) draw their
             // geometry via the BlockEntityRenderer, NOT via the chunk mesh.
             // From the chunk-mesh's POV the cell is empty even if `block.opaque`
@@ -175,6 +245,7 @@ namespace Render {
             // them as non-occluding here prevents the neighbour-face cull
             // from punching visible holes in adjacent walls behind a chest.
             const bool beFlagged = Game::BlockEntityTypes::HasBlockEntity(blockId);
+            s_blockPropsCache[i].opaqueMaterial = block.opaque && !beFlagged;
             s_blockPropsCache[i].isOpaque = block.opaque && fullCube && !beFlagged;
             s_blockPropsCache[i].hasStates = Game::BlockRegistry::HasStates(blockId);
 
@@ -322,6 +393,21 @@ namespace Render {
                 default:                              s_blockPropsCache[i].renderLayer = RenderLayer::Opaque; break;
             }
         }
+
+        // Report which blocks disagree with themselves about occlusion. Expect
+        // none today; expect the slab family the moment `type` becomes a
+        // property. Logged rather than assumed so that change announces itself
+        // instead of showing up later as slabs leaking faces.
+        {
+            size_t varying = 0;
+            for (size_t i = 0; i < BLOCK_ID_COUNT; ++i) {
+                if (s_blockPropsCache[i].occlusionVariesByState) ++varying;
+            }
+            if (varying > 0) {
+                Log::Info("Mesher: %zu block(s) occlude differently per state - "
+                          "their opacity is resolved per voxel", varying);
+            }
+        }
         s_blockPropsCacheValid = true;
     }
 
@@ -347,17 +433,22 @@ namespace Render {
         m_biomeSource = nullptr;
         m_biomeAccess = &blocks;
 
-        // Interior states only — the halo is used for occlusion/AO, which read
-        // block ids, never states.
-        m_stateCacheAllDefault = true;
-        for (int ly = 0; ly < 16; ++ly) {
-            for (int lz = 0; lz < 16; ++lz) {
-                for (int lx = 0; lx < 16; ++lx) {
-                    const uint8_t st = blocks.GetBlockState(m_sectionBaseWorldX + lx,
-                                                            m_sectionBaseWorldY + ly,
-                                                            m_sectionBaseWorldZ + lz);
-                    m_stateCache[ly][lz][lx] = st;
-                    if (st != 0) m_stateCacheAllDefault = false;
+        // States over the FULL 18^3, halo included: a waterlogged neighbour
+        // culls the fluid face it shares with this cell, so the halo's state
+        // is read during meshing just as its block id is.
+        m_stateCacheAllZero = true;
+        for (int ly = -1; ly <= 16; ++ly) {
+            for (int lz = -1; lz <= 16; ++lz) {
+                for (int lx = -1; lx <= 16; ++lx) {
+                    // The cache keeps the within-block index, not the global
+                    // id — it is paired with m_blockCache and read back through
+                    // CacheBlockAccess, which recombines them.
+                    const Game::BlockStateIndex st =
+                        blocks.GetBlockState(m_sectionBaseWorldX + lx,
+                                             m_sectionBaseWorldY + ly,
+                                             m_sectionBaseWorldZ + lz).Index();
+                    m_stateCache[ly + 1][lz + 1][lx + 1] = st;
+                    if (st != 0) m_stateCacheAllZero = false;
                 }
             }
         }
@@ -385,23 +476,27 @@ namespace Render {
         // (RenderSectionRegion.getBlockState); there is no contiguous array to
         // memcpy from once the storage is paletted, and that is the trade the
         // palette makes everywhere else too.
-        m_stateCacheAllDefault = true;
+        m_stateCacheAllZero = true;
         for (int i = 0; i < 4096; ++i) {
             const int lx = i & 15;
             const int lz = (i >> 4) & 15;
             const int ly = (i >> 8) & 15;
 
-            const Game::BlockStateRef ref = Game::BlockStateIds::Unpack(
+            const Game::BlockState ref = Game::BlockState::FromRawId(
                 centre ? centre->GetStateId(static_cast<size_t>(i))
-                       : Game::BlockStateIds::Pack(Game::BlockID::Air, 0));
+                       : Game::BlockState{}.RawId());
 
-            m_blockCache[ly + 1][lz + 1][lx + 1] = ref.id;
-            m_stateCache[ly][lz][lx] = ref.state;
-            if (ref.state != 0) m_stateCacheAllDefault = false;
+            m_blockCache[ly + 1][lz + 1][lx + 1] = ref.Block();
+            m_stateCache[ly + 1][lz + 1][lx + 1] = ref.Index();
+            if (ref.Index() != 0) m_stateCacheAllZero = false;
         }
 
         // The halo: faces, edges AND corners, every one a real block from the
         // neighbouring section copies rather than a clamped approximation.
+        //
+        // Block AND state together, via StateIdAtLocal's single packed read —
+        // the halo's state matters now that a waterlogged neighbour decides
+        // whether the fluid face they share is drawn.
         for (int ly = -1; ly <= 16; ++ly) {
             for (int lz = -1; lz <= 16; ++lz) {
                 for (int lx = -1; lx <= 16; ++lx) {
@@ -409,7 +504,11 @@ namespace Render {
                                           (ly >= 0 && ly < 16) &&
                                           (lz >= 0 && lz < 16);
                     if (interior) continue;
-                    m_blockCache[ly + 1][lz + 1][lx + 1] = region.BlockAtLocal(lx, ly, lz);
+                    const Game::BlockState ref =
+                        Game::BlockState::FromRawId(region.StateIdAtLocal(lx, ly, lz));
+                    m_blockCache[ly + 1][lz + 1][lx + 1] = ref.Block();
+                    m_stateCache[ly + 1][lz + 1][lx + 1] = ref.Index();
+                    if (ref.Index() != 0) m_stateCacheAllZero = false;
                 }
             }
         }
@@ -417,11 +516,57 @@ namespace Render {
 
     void Mesher::DeriveOpaqueCache() {
         PROFILE_ZONE;
-        // One pass over the 18^3 block cache: opacity via the per-thread props table
+        // One pass over the 18^3 block cache: opacity via the per-thread props
+        // table. The table answers for the block's default state, which is the
+        // whole answer only when every state of that block occludes alike.
+        //
+        // `occlusionVariesByState` is false for every block today, so this is
+        // one predictable branch and the same single array read it always was.
+        // It exists because occlusion is NOT a per-BlockID property in general:
+        // a slab occludes at `type=double` and does not at `type=bottom`, and
+        // once those stop being separate BlockIDs this table alone would make
+        // every double slab either leak faces or eat its neighbours'. Same
+        // shape as DeriveWaterCache below, which already reads both planes.
         const Game::BlockID* src = &m_blockCache[0][0][0];
+        const Game::BlockStateIndex* st = &m_stateCache[0][0][0];
         bool* dst = &m_opaqueCache[0][0][0];
         for (size_t i = 0; i < 18 * 18 * 18; ++i) {
-            dst[i] = s_blockPropsCache[static_cast<uint16_t>(src[i])].isOpaque;
+            const auto& props = s_blockPropsCache[static_cast<uint16_t>(src[i])];
+            if (!props.occlusionVariesByState) {
+                dst[i] = props.isOpaque;
+                continue;
+            }
+            dst[i] = props.opaqueMaterial &&
+                     Game::BlockRegistry::GetBlockShapeSet(
+                         Game::BlockStates::FromIndex(src[i], st[i])).IsFullCube();
+        }
+    }
+
+    void Mesher::DeriveWaterCache() {
+        PROFILE_ZONE;
+        // One pass over the 18^3 block+state caches, mirroring MC's
+        // BlockState.getFluidState().is(WATER) for every cell in the region.
+        //
+        // The fast path below is for a region whose states are all literally
+        // ZERO, which now means "every block here has no properties at all" —
+        // ordinary stone-and-dirt terrain. It is no longer the same thing as
+        // "everything is at its default": most blocks default to a non-zero
+        // index, so a section containing one slab takes the slow path. Still
+        // correct either way; it just fires less often than it reads like it
+        // should.
+        const Game::BlockID* src = &m_blockCache[0][0][0];
+        const Game::BlockStateIndex* st = &m_stateCache[0][0][0];
+        bool* dst = &m_waterCache[0][0][0];
+        if (m_stateCacheAllZero) {
+            for (size_t i = 0; i < 18 * 18 * 18; ++i) {
+                dst[i] = Game::BlockRegistry::ContainsWater(
+                    Game::BlockStates::FromIndex(src[i], 0));
+            }
+            return;
+        }
+        for (size_t i = 0; i < 18 * 18 * 18; ++i) {
+            dst[i] = Game::BlockRegistry::ContainsWater(
+                Game::BlockStates::FromIndex(src[i], st[i]));
         }
     }
 
@@ -475,10 +620,14 @@ namespace Render {
         // Derive the opacity cache from the freshly filled block cache — all
         // face culling and AO reads index this instead of registry lookups.
         DeriveOpaqueCache();
+        // Same idea for "this cell's fluid state is water", which the fluid
+        // mesher asks of every voxel and all six of its neighbours.
+        DeriveWaterCache();
 
         // Adapter handed to downstream IBlockAccess consumers (fluid builder);
         // every read resolves to a cache array access.
-        CacheBlockAccess cacheAccess(m_blockCache,
+        CacheBlockAccess cacheAccess(m_blockCache, m_stateCache, m_waterCache,
+                                     m_stateCacheAllZero,
                                      m_sectionBaseWorldX, m_sectionBaseWorldY, m_sectionBaseWorldZ);
 
         // Build visibility graph from the opaque cache (indices offset by +1 for the border)
@@ -538,26 +687,39 @@ namespace Render {
 
     void Mesher::ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                              int localX, int worldY, int localZ,
-                             int sectionY, Game::BlockID blockId, uint8_t stateIndex,
+                             int sectionY, Game::BlockID blockId, Game::BlockStateIndex stateIndex,
                              SectionMesh& mesh) {
 
         int worldX = chunkPos.x * 16 + localX;
         int worldZ = chunkPos.z * 16 + localZ;
         // blockId passed from caller — avoids redundant GetBlock() virtual call
 
-        // Handle fluid blocks separately
-        if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava) {
+        // Fluids. MC SectionCompiler.java:64-69 runs the liquid renderer for
+        // ANY block whose getFluidState() is non-empty and then, separately,
+        // renders the block model — the two are independent passes over the
+        // same voxel, which is the whole reason a waterlogged fence can show
+        // both its posts and the water around them.
+        //
+        // The fluid is emitted first, matching MC's order.
+        const Game::BlockState state = Game::BlockStates::FromIndex(blockId, stateIndex);
+        const bool holdsWater = Game::BlockRegistry::ContainsWater(state);
+        if (holdsWater || blockId == Game::BlockID::Lava) {
             if (m_fluidBuilder) {
                 m_fluidBuilder->BuildFluidBlock(blocks, chunkPos, worldX, worldY, worldZ, mesh);
                 m_lastStats.facesGenerated++;
             }
-            return;
+            // MC LiquidBlock.getRenderShape() is INVISIBLE, so a plain water or
+            // lava cell contributes no model geometry — only the fluid above.
+            // Everything else falls through and draws its model as usual.
+            if (blockId == Game::BlockID::Water || blockId == Game::BlockID::Lava) {
+                return;
+            }
         }
 
         // Model is keyed on (block, state) — the blockstate JSON maps each
         // state to its own, possibly pre-rotated, model. MC's equivalent lookup
         // is BlockModelShaper.getBlockModel(BlockState).
-        const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(blockId, stateIndex);
+        const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
         glm::vec3 worldPos = LocalToWorldPos(chunkPos, localX, worldY, localZ);
 
         // Use cached render layer instead of registry lookup
@@ -615,7 +777,7 @@ namespace Render {
                              const Game::BlockModel& model, const Game::Element& element,
                              Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                              glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
-                             uint8_t stateIndex,
+                             Game::BlockStateIndex stateIndex,
                              int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh) {
 
         // Lookup UV rect from thread-local cache (persists across Mesher instances,
@@ -697,6 +859,14 @@ namespace Render {
                                                              elemMin, elemMax, faceDef.uv,
                                                              faceDef.uvRotation);
 
+        // Where each vertex sits within its CELL, captured before the element
+        // rotation and the block offset move it. This is what AO is sampled
+        // against (MC does the same: AmbientOcclusionFace runs on the quad's
+        // pre-transform shape), and both of those transforms would otherwise
+        // push a vertex outside [0,1] and skew the blend.
+        glm::vec3 aoLocal[4];
+        for (int v = 0; v < 4; ++v) aoLocal[v] = faceVerts[v].pos - blockPos;
+
         // MC FaceBakery.applyElementRotation, applied per vertex because the
         // angle is arbitrary and cannot be folded back into an axis-aligned
         // from/to. Never applied before, which is why the flowerbed stems sat
@@ -741,11 +911,12 @@ namespace Render {
         // against the ground block, where vanilla draws them uniformly at 1.0.
         const float directionalShade = element.shade ? GetDirectionalShade(blockFace) : 1.0f;
         const bool  useAO = model.ambientOcclusion;
+        float aoShades[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        if (useAO) {
+            ComputeFaceAO(blocks, worldX, worldY, worldZ, blockFace, aoLocal, aoShades);
+        }
         for (int v = 0; v < 4; ++v) {
-            float aoShade = useAO
-                                ? CalculateVertexAO(blocks, worldX, worldY, worldZ, blockFace, v)
-                                : 1.0f;
-            float finalShade = aoShade * directionalShade;
+            float finalShade = aoShades[v] * directionalShade;
             glm::vec4 c = faceVerts[v].GetColor();
             c.r *= finalShade;
             c.g *= finalShade;
@@ -874,9 +1045,6 @@ namespace Render {
             // that is MC's no-level fallback for inventory icons, far darker
             // than anything the colormap yields in world.
             case Game::BlockID::LeafLitter:
-            case Game::BlockID::LeafLitter2:
-            case Game::BlockID::LeafLitter3:
-            case Game::BlockID::LeafLitter4:
                 return glm::vec4(163.0f / 255.0f, 109.0f / 255.0f, 70.0f / 255.0f, 1.0f);
 
             case Game::BlockID::OakLeaves:
@@ -1206,6 +1374,47 @@ namespace Render {
 
         float centerShade = 1.0f;
         return (edge1Shade + edge2Shade + cornerShade + centerShade) * 0.25f;
+    }
+
+    void Mesher::ComputeFaceAO(const Game::IBlockAccess& blocks,
+                               int worldX, int worldY, int worldZ,
+                               BlockFace face, const glm::vec3 (&localPos)[4],
+                               float (&outAO)[4]) {
+        if (!m_config.enableAmbientOcclusion) {
+            outAO[0] = outAO[1] = outAO[2] = outAO[3] = 1.0f;
+            return;
+        }
+
+        // The face's two in-plane axes. The normal axis is whichever component
+        // of the face normal is non-zero.
+        const glm::vec3 n = GetFaceNormal(face);
+        const int nAxis = (n.x != 0.0f) ? 0 : ((n.y != 0.0f) ? 1 : 2);
+        const int a1 = (nAxis + 1) % 3;
+        const int a2 = (nAxis + 2) % 3;
+
+        // Each corner's value, and WHICH corner of the cell's face it is.
+        // The side is read straight off AO_NEIGHBORS' own corner offset, so the
+        // weights cannot drift from the values they are weighting.
+        float cornerAO[4];
+        float cornerS[4], cornerT[4];
+        for (int k = 0; k < 4; ++k) {
+            cornerAO[k] = CalculateVertexAO(blocks, worldX, worldY, worldZ, face, k);
+            const glm::ivec3& c = AO_NEIGHBORS[static_cast<int>(face)][k].corner;
+            cornerS[k] = (c[a1] > 0) ? 1.0f : 0.0f;
+            cornerT[k] = (c[a2] > 0) ? 1.0f : 0.0f;
+        }
+
+        for (int v = 0; v < 4; ++v) {
+            const float s = std::clamp(localPos[v][a1], 0.0f, 1.0f);
+            const float t = std::clamp(localPos[v][a2], 0.0f, 1.0f);
+            float ao = 0.0f;
+            for (int k = 0; k < 4; ++k) {
+                const float ws = (cornerS[k] > 0.5f) ? s : (1.0f - s);
+                const float wt = (cornerT[k] > 0.5f) ? t : (1.0f - t);
+                ao += cornerAO[k] * ws * wt;
+            }
+            outAO[v] = ao;
+        }
     }
 
     // Render layer classification — uses thread-local cache when available,

@@ -105,7 +105,7 @@ namespace Game {
                     double shapeTop = 0.0;
                     if (solid) {
                         const BlockRegistry::BlockShape& shape =
-                            BlockRegistry::GetBlockShape(id, blocks->GetBlockState(p.x, p.y, p.z));
+                            BlockRegistry::GetBlockShape(blocks->GetBlockState(p.x, p.y, p.z));
                         shapeTop = static_cast<double>(p.y) + static_cast<double>(shape.max.y);
                     }
 

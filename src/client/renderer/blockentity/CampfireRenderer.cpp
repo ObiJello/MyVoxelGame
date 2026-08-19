@@ -113,10 +113,9 @@ void main() {
         // campfire picks up a state change with no extra sync.
         int facing2D = 0;
         if (Client::g_clientBlockAccess) {
-            const uint8_t stateIndex =
+            const Game::BlockState state =
                 Client::g_clientBlockAccess->GetBlockState(pos.x, pos.y, pos.z);
-            const auto& def = Game::BlockRegistry::GetStateDefinition(be.GetBlockId());
-            facing2D = Horizontal2DIndex(def.ValueOf(stateIndex, "facing"));
+            facing2D = Horizontal2DIndex(state.GetValueByName("facing"));
         }
 
         PipelineState s;

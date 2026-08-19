@@ -41,14 +41,14 @@ namespace Game {
         // Raw `facing` string at a cell, for comparing two chests' facings.
         std::string_view FacingOf(const IBlockAccess& world, const glm::ivec3& pos, BlockID id) {
             const auto& def = BlockRegistry::GetStateDefinition(id);
-            return def.ValueOf(world.GetBlockState(pos.x, pos.y, pos.z), "facing");
+            return world.GetBlockState(pos.x, pos.y, pos.z).GetValueByName("facing");
         }
 
         // The chest's facing, or Invalid when the block carries no facing.
         Horizontal FacingAt(const IBlockAccess& world, const glm::ivec3& pos, BlockID id) {
             const auto& def = BlockRegistry::GetStateDefinition(id);
-            const uint8_t state = world.GetBlockState(pos.x, pos.y, pos.z);
-            return ParseFacing(def.ValueOf(state, "facing"));
+            const BlockState state = world.GetBlockState(pos.x, pos.y, pos.z);
+            return ParseFacing(state.GetValueByName("facing"));
         }
     }
 
@@ -60,11 +60,11 @@ namespace Game {
         if (self != BlockID::Chest && self != BlockID::TrappedChest) return std::nullopt;
 
         const auto& def = BlockRegistry::GetStateDefinition(self);
-        const uint8_t state = world.GetBlockState(pos.x, pos.y, pos.z);
-        const std::string_view type = def.ValueOf(state, "type");
+        const BlockState state = world.GetBlockState(pos.x, pos.y, pos.z);
+        const std::string_view type = state.GetValueByName("type");
         if (type != "left" && type != "right") return std::nullopt;   // SINGLE
 
-        const Horizontal facing = ParseFacing(def.ValueOf(state, "facing"));
+        const Horizontal facing = ParseFacing(state.GetValueByName("facing"));
         if (facing == Horizontal::Invalid) return std::nullopt;
 
         // MC ChestBlock.getConnectedDirection (ChestBlock.java:135-138):
@@ -93,8 +93,8 @@ namespace Game {
         if (world.GetBlock(partner.x, partner.y, partner.z) != self) return std::nullopt;
         if (ParseFacing(FacingOf(world, partner, self)) != facing) return std::nullopt;
 
-        const uint8_t partnerState = world.GetBlockState(partner.x, partner.y, partner.z);
-        const std::string_view partnerType = def.ValueOf(partnerState, "type");
+        const BlockState partnerState = world.GetBlockState(partner.x, partner.y, partner.z);
+        const std::string_view partnerType = partnerState.GetValueByName("type");
         if (partnerType == type) return std::nullopt;                 // both left / both right
         if (partnerType != "left" && partnerType != "right") return std::nullopt;  // single
 

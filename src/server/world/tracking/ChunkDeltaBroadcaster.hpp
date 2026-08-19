@@ -55,12 +55,12 @@ private:
     // Build and send a single block change packet
     void broadcastSingleBlock(const Game::Math::SectionPos& sp, 
                               uint16_t idx, 
-                              Game::BlockStateRef state,
+                              Game::BlockState state,
                               const std::vector<uint32_t>& watchers);
     
     // Build and send a section blocks update packet
     void broadcastSectionUpdate(const Game::Math::SectionPos& sp,
-                               const std::vector<std::pair<uint16_t, Game::BlockStateRef>>& changes,
+                               const std::vector<std::pair<uint16_t, Game::BlockState>>& changes,
                                const std::vector<uint32_t>& watchers);
     
     // Build and send a full chunk (for massive changes)

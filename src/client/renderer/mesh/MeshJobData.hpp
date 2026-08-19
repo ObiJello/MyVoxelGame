@@ -5,7 +5,7 @@
 #include "common/world/block/Blocks.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/chunk/PalettedContainer.hpp"
-#include "common/world/block/BlockStateIds.hpp"
+#include "common/world/block/BlockState.hpp"
 #include <array>
 #include <vector>
 #include <atomic>
@@ -54,20 +54,20 @@ namespace Render {
 
         Game::BlockID GetBlock(int lx, int ly, int lz) const {
             if (allAir) return Game::BlockID::Air;
-            return Game::BlockStateIds::Unpack(
-                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).id;
+            return Game::BlockState::FromRawId(
+                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).Block();
         }
 
-        uint8_t GetState(int lx, int ly, int lz) const {
+        Game::BlockStateIndex GetState(int lx, int ly, int lz) const {
             if (allAir) return 0;
-            return Game::BlockStateIds::Unpack(
-                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).state;
+            return Game::BlockState::FromRawId(
+                       states.Get(static_cast<size_t>(Game::Math::LocalIndex(lx, ly, lz)))).Index();
         }
 
         // Flat state id without unpacking — the mesher's cache fill wants the
         // block and the state together, so it pays one Unpack instead of two.
         uint32_t GetStateId(size_t index) const {
-            return allAir ? Game::BlockStateIds::Pack(Game::BlockID::Air, 0) : states.Get(index);
+            return allAir ? Game::BlockState{}.RawId() : states.Get(index);
         }
 
         uint16_t GetBiome(int qx, int qy, int qz) const {
@@ -122,7 +122,7 @@ namespace Render {
         // Flat state id, for the cache fill that wants block and state together.
         uint32_t StateIdAtLocal(int lx, int ly, int lz) const {
             const SectionCopy* sec = SectionForLocal(lx, ly, lz);
-            if (!sec) return Game::BlockStateIds::Pack(Game::BlockID::Air, 0);
+            if (!sec) return Game::BlockState{}.RawId();
             return sec->GetStateId(
                 static_cast<size_t>(Game::Math::LocalIndex(lx & 15, ly & 15, lz & 15)));
         }

@@ -20,21 +20,21 @@ namespace Game {
     class ChunkSection;
 
     // Represents a Minecraft block state (block type + properties)
-    struct BlockState {
+    struct NbtBlockState {
         std::string name;                                    // e.g. "minecraft:grass_block"
         std::unordered_map<std::string, std::string> properties; // e.g. {"snowy": "false"}
         BlockID resolvedId;                                  // Our internal block ID
-        // Index into resolvedId's own state list (MC BlockState.getId()),
+        // Index into resolvedId's own state list (MC NbtBlockState.getId()),
         // derived from `properties`. 0 = the block's default state, which is
         // also what an unmodelled property set resolves to.
-        uint8_t resolvedState = 0;
+        BlockStateIndex resolvedState = 0;
 
-        BlockState() : resolvedId(BlockID::Air) {}
-        BlockState(const std::string& blockName, BlockID id = BlockID::Air)
+        NbtBlockState() : resolvedId(BlockID::Air) {}
+        NbtBlockState(const std::string& blockName, BlockID id = BlockID::Air)
             : name(blockName), resolvedId(id) {}
 
         // Canonical string key for this block state, matching MC's
-        // `BlockState.toString()` shape: `minecraft:<name>{p1:v1,p2:v2}` with
+        // `NbtBlockState.toString()` shape: `minecraft:<name>{p1:v1,p2:v2}` with
         // properties sorted by name.
         //
         // The sort is load-bearing, not cosmetic: `properties` is an
@@ -107,8 +107,8 @@ namespace Game {
     class BlockStateRegistry {
     public:
         static void Initialize();
-        static BlockID ResolveBlockState(const BlockState& state);
-        static BlockState CreateBlockState(const std::string& name,
+        static BlockID ResolveBlockState(const NbtBlockState& state);
+        static NbtBlockState CreateBlockState(const std::string& name,
                                          const std::unordered_map<std::string, std::string>& props = {});
 
     private:
@@ -130,16 +130,16 @@ namespace Game {
         static bool UnpackSection(const ::World::NBTTagPtr& sectionNBT, Chunk& chunk, int sectionY);
 
         // Parse palette from section NBT
-        static std::vector<BlockState> ParsePalette(const ::World::NBTTagPtr& paletteList);
+        static std::vector<NbtBlockState> ParsePalette(const ::World::NBTTagPtr& paletteList);
 
         // Unpack packed block data using palette
         static bool UnpackBlockData(const std::vector<uint64_t>& packedData,
-                                   const std::vector<BlockState>& palette,
+                                   const std::vector<NbtBlockState>& palette,
                                    Chunk& chunk, int sectionY);
 
         // **NEW**: Unpack block data for Minecraft 1.16+ format (no cross-boundary indices)
         static bool UnpackBlockDataPost116(const std::vector<uint64_t>& packedData,
-                                          const std::vector<BlockState>& palette,
+                                          const std::vector<NbtBlockState>& palette,
                                           ChunkSection& section,
                                           int bitsPerBlock, int sectionY);
 
@@ -159,7 +159,7 @@ namespace Game {
                                        int& worldX, int& worldY, int& worldZ);
 
         // Debug: print section statistics
-        static void PrintSectionStats(const std::vector<BlockState>& palette,
+        static void PrintSectionStats(const std::vector<NbtBlockState>& palette,
                                      int sectionY, int blockCount);
 
     private:

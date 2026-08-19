@@ -1924,6 +1924,29 @@ namespace Server {
         m_stats.packetsReceived.fetch_add(1, std::memory_order_relaxed);
     }
     
+    void IntegratedServer::BroadcastSystemMessage(const std::string& text, uint32_t color) {
+        // MC PlayerList.broadcastSystemMessage(message, false) — sender-less,
+        // position 0 (chat, not the action bar), everyone gets it.
+        if (!m_networkServer) return;
+        Network::ChatMessageS2CPacket packet;
+        packet.senderId = 0;   // 0 = system message (no chat bubble, no name prefix)
+        // Position 1 = system. MC's PlayerList.broadcastSystemMessage sends a
+        // ClientboundSystemChatPacket with overlay=false — a SYSTEM message
+        // shown in the chat box, not a player chat line and not the action bar.
+        // Every command's feedback here already uses 1; join/leave/death belong
+        // in the same channel.
+        packet.position = 1;
+        packet.segments.push_back(Network::ChatSegmentData{
+            text, color, Network::ChatClickAction::None, "", ""});
+
+        for (const auto& conn : m_networkServer->GetConnections()) {
+            if (conn && conn->IsConnected() && conn->IsAuthenticated()) {
+                conn->SendChatMessage(packet);
+            }
+        }
+        Log::Info("[SYSTEM] %s", text.c_str());
+    }
+
     void IntegratedServer::OnPlayerJoined(std::shared_ptr<ServerConnection> connection) {
         Log::Info("[IntegratedServer] Player joined! Setting up session...");
 
@@ -2084,6 +2107,21 @@ namespace Server {
             session->SendInventoryFull();
             Log::Info("[IntegratedServer] Sent full inventory sync to client");
 
+            // MC PlayerList.placeNewPlayer:171-178 —
+            //
+            //   component = Component.translatable("multiplayer.player.joined",
+            //                                      player.getDisplayName());
+            //   this.broadcastSystemMessage(component.withStyle(ChatFormatting.YELLOW), false);
+            //
+            // and it sits right here, immediately before connection.teleport
+            // (:179). ChatFormatting.YELLOW is 0xFFFF55.
+            //
+            // The `.renamed` variant ("%s (formerly known as %s) joined the
+            // game") is deliberately not ported: it fires when the profile
+            // cache holds a different previous name for the same UUID, and we
+            // have no such cache — names come from the launcher each session.
+            BroadcastSystemMessage(playerName + " joined the game", 0xFFFFFF55u);
+
             // Teleport the new client to the player's server-side position
             // (world spawn for fresh players). The client boots at its own
             // hardcoded coords; without this, it stays there no matter what
@@ -2137,6 +2175,25 @@ namespace Server {
 
         Log::Info("[IntegratedServer] Player '%s' (ID: %u, conn: %u) disconnected",
                   playerName.c_str(), playerId, connectionId);
+
+        // MC ServerGamePacketListenerImpl.removePlayerFromWorld:1388 —
+        //
+        //   this.server.getPlayerList().broadcastSystemMessage(
+        //       Component.translatable("multiplayer.player.left",
+        //                              this.player.getDisplayName())
+        //           .withStyle(ChatFormatting.YELLOW), false);
+        //
+        // Covers every exit for the same reason it does in MC: quitting, a
+        // dropped connection and a kick all funnel through the same teardown,
+        // so vanilla has no separate "was kicked" broadcast — the kicked player
+        // sees the reason on their disconnect screen, everyone else just sees
+        // them leave.
+        //
+        // Only for players who actually made it into the world: a connection
+        // that died during handshake/login has no name to announce.
+        if (!playerName.empty() && connection->IsAuthenticated()) {
+            BroadcastSystemMessage(playerName + " left the game", 0xFFFFFF55u);
+        }
 
         // Drop any client settings still waiting on a session that will now
         // never exist — a reused connection id must not inherit them.

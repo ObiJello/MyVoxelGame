@@ -51,7 +51,10 @@ namespace Client {
         std::string m_localIp;
         uint16_t    m_mappedPort = 0;
 
+        // Retries DiscoverOnce; see the definition for why a single SSDP
+        // sweep is not reliable enough to decide the whole session on.
         bool Discover();
+        bool DiscoverOnce();
         bool SoapCall(const std::string& action, const std::string& bodyArgs,
                       std::string& outResponse);
     };

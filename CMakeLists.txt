@@ -51,15 +51,43 @@ else()
                    "(install with `brew install ccache`)")
 endif()
 
+# ── Optimization level ────────────────────────────────────────────────────────
+#
+# Stated explicitly because it is otherwise invisible: CMake supplies it, not
+# this file. The defaults (Modules/Platform/Windows-MSVC.cmake, and the GNU/Clang
+# equivalent) are already what we want, so the lines below are belt-and-braces —
+# they pin the value if a toolchain file or a future edit clears the per-config
+# defaults. They change NOTHING about a stock build.
+#
+#   Clang/GCC  Release  -O3 -DNDEBUG        RelWithDebInfo  -O2 -g -DNDEBUG
+#   MSVC       Release  /MD /O2 /Ob2 /DNDEBUG
+#              RelWithDebInfo  /MD /Zi /O2 /Ob1 /DNDEBUG
+#
+# /O2 is MSVC's MAXIMUM — there is no /O3. Note RelWithDebInfo uses /Ob1 (less
+# inlining) on MSVC and -O2 on Clang, so it is genuinely slower than Release on
+# both; benchmark in Release.
+#
+# Generator expressions, not `if(CMAKE_BUILD_TYPE ...)`: that variable is EMPTY
+# for multi-config generators (Visual Studio, Xcode, Ninja Multi-Config), so a
+# plain if() silently does nothing there.
+add_compile_options(
+    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/O2>
+    $<$<AND:$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-O3>
+)
+
 # ── Include debug symbols in Release builds (for Sentry crash symbolication) ──
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    if(MSVC)
-        add_compile_options(/Zi)
-        add_link_options(/DEBUG /OPT:REF /OPT:ICF)
-    else()
-        add_compile_options(-g)
-    endif()
-endif()
+#
+# Same multi-config trap, and here it MATTERS: under the Visual Studio generator
+# this block used to be skipped entirely, so a Windows Release build produced no
+# PDB — and therefore no symbolicated Windows crash reports. /DEBUG turns
+# /OPT:REF and /OPT:ICF off by default, which is why they are re-stated.
+add_compile_options(
+    $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/Zi>
+    $<$<AND:$<NOT:$<CXX_COMPILER_ID:MSVC>>,$<CONFIG:Release>>:-g>
+)
+add_link_options(
+    "$<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:/DEBUG;/OPT:REF;/OPT:ICF>"
+)
 
 # ── On macOS, build universal (arm64 + x86_64) libraries by default.
 #     The game executable may be restricted to arm64-only when using Homebrew Vulkan,
@@ -772,8 +800,19 @@ set(GAME_SOURCES
             src/common/world/block/BlockGrowth.cpp
             src/common/world/block/RedstoneWire.cpp
             src/common/world/block/RedstoneWire.hpp
+            src/common/world/block/Stairs.cpp
+            src/common/world/block/Stairs.hpp
+            src/common/world/block/CrossCollision.cpp
+            src/common/world/block/CrossCollision.hpp
+            src/common/world/block/GeneratedBlockStates.cpp
+            src/common/world/block/GeneratedBlockStates.hpp
+            src/common/world/block/BlockState.cpp
+            src/common/world/block/BlockState.hpp
+            src/common/world/block/Walls.cpp
+            src/common/world/block/Walls.hpp
+            src/common/world/block/FenceGate.cpp
+            src/common/world/block/FenceGate.hpp
             src/common/world/block/BlockRegistry.hpp
-            src/common/world/block/BlockStateIds.hpp
             src/common/world/block/Blocks.hpp
             src/common/world/block/MiningSpeed.cpp
             src/common/world/block/MiningSpeed.hpp
@@ -790,6 +829,7 @@ set(GAME_SOURCES
             src/common/world/level/WorldDrops.cpp
             src/common/world/level/WorldMobSpawn.cpp
             src/common/world/block/GeneratedBlockShapes.cpp
+            src/common/world/block/GeneratedWaterlogged.cpp
             src/common/world/block/entity/FurnaceBlockEntity.hpp
             src/common/world/block/entity/DoubleChest.cpp
             src/common/world/block/entity/DoubleChest.hpp
@@ -1024,6 +1064,7 @@ set(GAME_SOURCES
             src/server/world/interfaces/IChunkLoader.hpp
             src/server/world/interfaces/IChunkSaver.hpp
             src/server/world/interfaces/INeighborProvider.hpp
+            src/server/world/interfaces/INeighborProvider.cpp
 
             # Server world - Storage
             src/server/world/storage/AnvilChunkSaver.cpp

@@ -25,6 +25,7 @@
 #include "mobs/Animals.hpp"
 #include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
+#include "../world/block/BlockPlacement.hpp"
 #include "../world/level/World.hpp"
 #include "../world/level/WorldDrops.hpp"
 #include "../core/JavaRandom.hpp"
@@ -32,7 +33,9 @@
 #include "../core/Log.hpp"
 #include "IUsePlayer.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <random>
 #include <unordered_map>
 
@@ -151,11 +154,11 @@ namespace Game {
             // `lit` (and `candles`) properties, which nothing declares yet.
             if (here == BlockID::Campfire || here == BlockID::SoulCampfire) {
                 const auto& def = BlockRegistry::GetStateDefinition(here);
-                const uint8_t cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
-                if (def.ValueOf(cur, "lit") == "false") {
+                const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                if (cur.GetValueByName("lit") == "false") {
                     PlaySound("item.flintandsteel.use", pos);
                     BlockRegistry::BlockStateDefinition::PropertyMap props;
-                    props["facing"] = std::string(def.ValueOf(cur, "facing"));
+                    props["facing"] = std::string(cur.GetValueByName("facing"));
                     props["lit"]    = "true";
                     if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, here,
                                              World::UpdateFlags::All,
@@ -310,12 +313,12 @@ namespace Game {
                 // LIT=true (CampfireBlock.java:77) — so it would relight the
                 // fire the shovel just put out.
                 const auto& def = BlockRegistry::GetStateDefinition(src);
-                const uint8_t cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
-                if (def.ValueOf(cur, "lit") != "true") return UseResult::Pass;
+                const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                if (cur.GetValueByName("lit") != "true") return UseResult::Pass;
 
                 PlaySound("block.fire.extinguish", pos);
                 BlockRegistry::BlockStateDefinition::PropertyMap props;
-                props["facing"] = std::string(def.ValueOf(cur, "facing"));
+                props["facing"] = std::string(cur.GetValueByName("facing"));
                 props["lit"]    = "false";
                 if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, src,
                                          World::UpdateFlags::All, def.IndexOf(props))) {
@@ -624,7 +627,7 @@ namespace Game {
             {
                 const Block& def = BlockRegistry::Get(src);
                 if (def.performBonemeal && def.isValidBonemealTarget) {
-                    const uint8_t state = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                    const BlockState state = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
                     if (def.isValidBonemealTarget(*ctx.world, pos, state)) {
                         // Seeded per use rather than kept as a static: this
                         // runs on the client for prediction too, and a shared
@@ -634,7 +637,7 @@ namespace Game {
                         JavaRandom random(static_cast<int64_t>(pos.x) * 341873128712LL +
                                           static_cast<int64_t>(pos.z) * 132897987541LL +
                                           static_cast<int64_t>(pos.y));
-                        def.performBonemeal(*ctx.world, pos, src, state, random);
+                        def.performBonemeal(*ctx.world, pos, state, random);
 
                         // MC: `level.levelEvent(1505, pos, 15)` →
                         // BoneMealItem.addGrowthParticles spawns 15
@@ -724,6 +727,40 @@ namespace Game {
             glm::ivec3 beforePos;   // the cell the ray was in before the hit
             BlockID    block;
         };
+        // Does the ray meet any box of this block's shape inside `cell`?
+        //
+        // MC Item.getPlayerPOVHitResult clips with ClipContext.Block.OUTLINE,
+        // i.e. against `BlockBehaviour.getShape` — the same VoxelShape the
+        // selection box is drawn from. So "did I hit this block" is a question
+        // about its GEOMETRY, not about whether its cell is non-air.
+        bool RayMeetsShape(const glm::vec3& origin, const glm::vec3& dir,
+                           const glm::ivec3& cell, BlockState state,
+                           float maxDistance) {
+            const auto shapes = BlockRegistry::GetBlockShapeSet(state);
+            for (const auto& box : shapes) {
+                const glm::vec3 mn = glm::vec3(cell) + box.min;
+                const glm::vec3 mx = glm::vec3(cell) + box.max;
+                float tNear = 0.0f, tFar = maxDistance;
+                bool  hit   = true;
+                for (int axis = 0; axis < 3 && hit; ++axis) {
+                    if (std::abs(dir[axis]) < 1e-6f) {
+                        // Parallel to this pair of planes — must already be
+                        // between them.
+                        if (origin[axis] < mn[axis] || origin[axis] > mx[axis]) hit = false;
+                        continue;
+                    }
+                    float t1 = (mn[axis] - origin[axis]) / dir[axis];
+                    float t2 = (mx[axis] - origin[axis]) / dir[axis];
+                    if (t1 > t2) std::swap(t1, t2);
+                    tNear = std::max(tNear, t1);
+                    tFar  = std::min(tFar,  t2);
+                    if (tNear > tFar) hit = false;
+                }
+                if (hit) return true;
+            }
+            return false;
+        }
+
         std::optional<BucketHit> BucketClip(ILevelWrite* world,
                                             const IUsePlayer& player,
                                             bool stopOnFluid) {
@@ -737,26 +774,59 @@ namespace Game {
                 Mth::ViewVector(player.getPitch(), player.getYaw());
 
             constexpr float kReach = 5.0f;   // blockInteractionRange
-            constexpr float kStep  = 0.05f;  // fine march — fluid cells are full cubes
-            glm::ivec3 prevCell(
-                static_cast<int>(std::floor(eye.x)),
-                static_cast<int>(std::floor(eye.y)),
-                static_cast<int>(std::floor(eye.z)));
-            for (float t = 0.0f; t <= kReach; t += kStep) {
-                const glm::vec3 sample = eye + dir * t;
-                const glm::ivec3 cell(
-                    static_cast<int>(std::floor(sample.x)),
-                    static_cast<int>(std::floor(sample.y)),
-                    static_cast<int>(std::floor(sample.z)));
-                if (cell == prevCell && t > 0.0f) continue;
+
+            // Walk cells with a DDA and test each one's SHAPE, rather than the
+            // fixed-step "first non-air cell" march this used to be. That march
+            // had two failure modes, and partial blocks hit both: a coarse step
+            // can miss a cell the ray only clips, and a cell was accepted with
+            // no geometry test at all — so the empty half of a stair, the gap
+            // under a top slab and the air around a torch all counted as hits.
+            // The bucket then emptied into a block the crosshair was never on,
+            // and WHERE on the block you had clicked decided whether the two
+            // agreed.
+            glm::ivec3 cell(static_cast<int>(std::floor(eye.x)),
+                            static_cast<int>(std::floor(eye.y)),
+                            static_cast<int>(std::floor(eye.z)));
+            glm::ivec3 stepDir(dir.x > 0.0f ? 1 : -1,
+                               dir.y > 0.0f ? 1 : -1,
+                               dir.z > 0.0f ? 1 : -1);
+            glm::vec3 tMax(0.0f), tDelta(0.0f);
+            for (int axis = 0; axis < 3; ++axis) {
+                if (std::abs(dir[axis]) < 1e-6f) {
+                    tMax[axis]   = std::numeric_limits<float>::infinity();
+                    tDelta[axis] = std::numeric_limits<float>::infinity();
+                } else {
+                    const float bound = (dir[axis] > 0.0f)
+                                            ? std::floor(eye[axis]) + 1.0f
+                                            : std::floor(eye[axis]);
+                    tMax[axis]   = (bound - eye[axis]) / dir[axis];
+                    tDelta[axis] = 1.0f / std::abs(dir[axis]);
+                }
+            }
+
+            glm::ivec3 prevCell = cell;
+            float travelled = 0.0f;
+            while (travelled <= kReach) {
                 if (!world->IsValidPosition(cell.x, cell.y, cell.z)) return std::nullopt;
                 const BlockID block = world->GetBlock(cell.x, cell.y, cell.z);
                 const bool isFluid = (block == BlockID::Water || block == BlockID::Lava);
-                const bool isSolid = (block != BlockID::Air) && !isFluid;
-                if (isSolid || (isFluid && stopOnFluid)) {
-                    return BucketHit{cell, prevCell, block};
+                if (block != BlockID::Air && (!isFluid || stopOnFluid)) {
+                    // Fluids fill their cell, so they need no shape test; every
+                    // other block is clipped against its real geometry.
+                    if (isFluid ||
+                        RayMeetsShape(eye, dir, cell,
+                                      world->GetBlockState(cell.x, cell.y, cell.z), kReach)) {
+                        return BucketHit{cell, prevCell, block};
+                    }
                 }
                 prevCell = cell;
+                if (tMax.x < tMax.y && tMax.x < tMax.z) {
+                    cell.x += stepDir.x; travelled = tMax.x; tMax.x += tDelta.x;
+                } else if (tMax.y < tMax.z) {
+                    cell.y += stepDir.y; travelled = tMax.y; tMax.y += tDelta.y;
+                } else {
+                    cell.z += stepDir.z; travelled = tMax.z; tMax.z += tDelta.z;
+                }
             }
             return std::nullopt;
         }
@@ -767,6 +837,37 @@ namespace Game {
             if (!world || !player) return UseResult::Pass;
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/true);   // :45 SOURCE_ONLY
             if (!hit) return UseResult::Pass;                              // :46-47
+            // MC BucketItem.java:49-53 dispatches on `state.getBlock()
+            // instanceof BucketPickup`, which every SimpleWaterloggedBlock is.
+            // So a waterlogged fence, ladder or stair hands over its water and
+            // STAYS PUT — the block is not removed, only its flag is cleared
+            // (SimpleWaterloggedBlock.pickupBlock:36-44). The always-water
+            // blocks are deliberately not included: kelp and seagrass are not
+            // BucketPickup in vanilla either, so a bucket does nothing to them.
+            const BlockState hitState =
+                world->GetBlockState(hit->pos.x, hit->pos.y, hit->pos.z);
+            if (BlockRegistry::IsWaterloggable(hit->block) &&
+                BlockRegistry::ContainsWater(hitState)) {
+                const BlockState dryState = BlockRegistry::WithWaterlogged(hitState, false);
+                world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z, dryState,
+                                World::UpdateFlags::All);
+                // SimpleWaterloggedBlock.pickupBlock:39-41 — a block that
+                // cannot survive without its water is destroyed on the spot.
+                // Vanilla's case is coral, which dies out of water. A no-op
+                // until coral survival is modelled, wired now so it is not a
+                // second thing to remember when it is.
+                if (!CanSurviveAt(*world, hit->pos, dryState)) {
+                    world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z,
+                                    BlockID::Air, World::UpdateFlags::All);
+                }
+                PlaySound("item.bucket.fill", hit->pos);
+                if (!player->isCreative()) {
+                    stack = ItemStack(Items::WaterBucket, 1);
+                    player->markSlotDirty(player->handSlotIndex(hand));
+                }
+                return UseResult::Success;
+            }
+
             if (hit->block != BlockID::Water && hit->block != BlockID::Lava) {
                 return UseResult::Pass;                                    // :93-94 (BLOCK hit → pass)
             }
@@ -797,6 +898,35 @@ namespace Game {
             const bool isLava = (stack.itemId == Items::LavaBucket);
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);  // ClipContext.Fluid.NONE
             if (!hit) return UseResult::Pass;
+
+            // MC BucketItem.java:83-84:
+            //   BlockPos target = state.getBlock() instanceof LiquidBlockContainer
+            //                     && this.content == Fluids.WATER ? pos : relativePos;
+            //
+            // Pouring WATER onto a waterloggable block fills the block itself
+            // rather than the cell in front of it — that is how you waterlog a
+            // fence or a stair. Lava is excluded by the `content == WATER`
+            // clause, exactly as vanilla has it, so a lava bucket still pours
+            // into the adjacent cell.
+            if (!isLava && BlockRegistry::IsWaterloggable(hit->block)) {
+                const BlockState hitState =
+                    world->GetBlockState(hit->pos.x, hit->pos.y, hit->pos.z);
+                // SimpleWaterloggedBlock.placeLiquid:24 refuses when the block
+                // is already waterlogged, and the refusal propagates all the
+                // way out as a failed use — the bucket is not consumed.
+                if (BlockRegistry::ContainsWater(hitState)) {
+                    return UseResult::Fail;
+                }
+                world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z,
+                                BlockRegistry::WithWaterlogged(hitState, true),
+                                World::UpdateFlags::All);
+                PlaySound("item.bucket.empty", hit->pos);
+                if (!player->isCreative()) {
+                    stack = ItemStack(Items::Bucket, 1);
+                    player->markSlotDirty(player->handSlotIndex(hand));
+                }
+                return UseResult::Success;
+            }
 
             // :76-77 — target = clicked cell when replaceable, else the cell
             // the ray came from (pos.relative(direction)).

@@ -2,6 +2,10 @@
 #include "AsyncChunkSaver.hpp"
 #include "AnvilChunkSaver.hpp"
 #include "common/world/chunk/Chunk.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/BlockState.hpp"
+#include <unordered_map>
+#include <string>
 #include <filesystem>
 #include <fstream>
 #include <zlib.h>
@@ -12,6 +16,100 @@
 #include <cstring>
 
 namespace Game {
+
+    namespace {
+
+        // ── Save keys (MC's section palette, adapted) ───────────────────────
+        //
+        // A section is written the way MC writes one: a palette of (block name,
+        // properties) plus one index per voxel. Names, not BlockIDs, so a save
+        // survives the enum being renumbered — which the pending collapse of
+        // the synthetic *SlabTop/*SlabDouble/... ids will do.
+        //
+        // The wrinkle vanilla does not have: 141 BlockIDs are synthetic
+        // variants SHARING a registry slug with their base block (OakSlab,
+        // OakSlabTop and OakSlabDouble are all "oak_slab"), because each stands
+        // in for a property value this engine has not modelled as a property
+        // yet. A slug alone therefore does not identify a BlockID. `variant` —
+        // the block's position among the ids sharing its slug, in BlockID order
+        // — closes the gap. When those ids collapse into real properties every
+        // group has size one and this is always 0, and the format becomes
+        // exactly vanilla's without another change here.
+        struct SaveKeyTable {
+            std::vector<std::string> keyOf;      // BlockID -> slug ("" = unwritable)
+            std::vector<uint8_t>     variantOf;  // BlockID -> index within its slug group
+            std::unordered_map<std::string, std::vector<BlockID>> group;
+
+            SaveKeyTable() {
+                const size_t n = BlockRegistry::Size;
+                keyOf.resize(n);
+                variantOf.assign(n, 0);
+                size_t unnamed = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    const auto id = static_cast<BlockID>(i);
+                    std::string slug = BlockRegistry::Get(id).registrySlug;
+                    // Air is not a BlockDefs.inc row, so it has no slug of its
+                    // own; it is by far the most common value in a save and
+                    // must round-trip.
+                    if (id == BlockID::Air) slug = "air";
+                    keyOf[i] = slug;
+                    if (slug.empty()) { ++unnamed; continue; }
+                    auto& g = group[slug];
+                    variantOf[i] = static_cast<uint8_t>(g.size());
+                    g.push_back(id);
+                }
+                if (unnamed > 0) {
+                    // Not fatal — such blocks save as air rather than corrupting
+                    // the stream — but it is silent data loss, so say so.
+                    Log::Warning("[ChunkSerializer] %zu BlockID(s) have no registry slug "
+                                 "and cannot be saved; they will load back as air", unnamed);
+                }
+            }
+
+            BlockID Resolve(const std::string& key, uint8_t variant) const {
+                auto it = group.find(key);
+                if (it == group.end()) return BlockID::Air;   // MC: unknown name -> air
+                if (variant >= it->second.size()) return it->second[0];
+                return it->second[variant];
+            }
+        };
+
+        const SaveKeyTable& SaveKeys() {
+            static const SaveKeyTable t;   // built on first save, after registry init
+            return t;
+        }
+
+        inline void PutU8 (std::vector<uint8_t>& b, uint8_t v)  { b.push_back(v); }
+        inline void PutU16(std::vector<uint8_t>& b, uint16_t v) {
+            b.push_back(static_cast<uint8_t>(v & 0xFF));
+            b.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+        }
+        inline void PutStr(std::vector<uint8_t>& b, std::string_view s) {
+            // Registry slugs and property names/values are all short; one length
+            // byte is plenty and keeps the palette compact.
+            const size_t n = s.size() > 255 ? 255 : s.size();
+            b.push_back(static_cast<uint8_t>(n));
+            b.insert(b.end(), s.begin(), s.begin() + static_cast<ptrdiff_t>(n));
+        }
+
+        inline bool TakeU8(const uint8_t*& d, size_t& rem, uint8_t& out) {
+            if (rem < 1) return false;
+            out = *d++; --rem; return true;
+        }
+        inline bool TakeU16(const uint8_t*& d, size_t& rem, uint16_t& out) {
+            if (rem < 2) return false;
+            out = static_cast<uint16_t>(d[0] | (static_cast<uint16_t>(d[1]) << 8));
+            d += 2; rem -= 2; return true;
+        }
+        inline bool TakeStr(const uint8_t*& d, size_t& rem, std::string& out) {
+            uint8_t n;
+            if (!TakeU8(d, rem, n)) return false;
+            if (rem < n) return false;
+            out.assign(reinterpret_cast<const char*>(d), n);
+            d += n; rem -= n; return true;
+        }
+
+    } // namespace
 
     // === CHUNK COMPRESSOR IMPLEMENTATION ===
 
@@ -83,7 +181,9 @@ namespace Game {
                      reinterpret_cast<const uint8_t*>(&magic) + 4);
 
         // Version (4 bytes)
-        const uint32_t version = 1;
+        // v2: palette of (name, properties) + indices. v1 was a flat dump of
+        // BlockIDs that kept no block states at all; it is still readable.
+        const uint32_t version = 2;
         buffer.insert(buffer.end(), reinterpret_cast<const uint8_t*>(&version),
                      reinterpret_cast<const uint8_t*>(&version) + 4);
 
@@ -127,7 +227,7 @@ namespace Game {
         ptr += 4;
         remaining -= 4;
 
-        if (version != 1) {
+        if (version != 1 && version != 2) {
             Log::Error("Unsupported chunk file version: %u", version);
             return false;
         }
@@ -144,7 +244,7 @@ namespace Game {
         for (int sectionY = 0; sectionY < Math::SECTIONS_PER_CHUNK; ++sectionY) {
             chunk.EnsureSection(sectionY);
             ChunkSection* section = chunk.GetSection(sectionY);
-            if (!section || !DeserializeSection(ptr, remaining, *section)) {
+            if (!section || !DeserializeSection(ptr, remaining, *section, version)) {
                 return false;
             }
         }
@@ -155,80 +255,173 @@ namespace Game {
     size_t ChunkSerializer::EstimateSerializedSize(const Chunk& chunk) {
         size_t size = 16; // Header
 
-        // Each section: 1 byte exists flag + up to 4096 * 2 bytes for blocks
-        size += Math::SECTIONS_PER_CHUNK * (1 + 4096 * 2);
+        // Per section: exists flag + palette-count + indexed flag + 4096 uint16
+        // indices, plus a palette allowance. A palette entry is a slug, a
+        // variant byte, and up to ~6 name/value pairs; 160 bytes covers the
+        // worst of them and this is only a reserve() hint.
+        size += Math::SECTIONS_PER_CHUNK * (1 + 2 + 1 + 4096 * 2 + 64 * 160);
 
         return size;
     }
 
     void ChunkSerializer::SerializeSection(const ChunkSection* section, std::vector<uint8_t>& buffer) {
         if (!section) {
-            // Section doesn't exist - write flag
-            buffer.push_back(0);
+            buffer.push_back(0);          // absent
             return;
         }
-
-        // Section exists - write flag
         buffer.push_back(1);
 
-        // Block data, one uint16_t per voxel.
-        //
-        // NOT the storage layout any more — ChunkSection holds a paletted
-        // container. World saving is disabled, so this stays a plain flat dump
-        // purely to keep the round trip self-consistent; it is not a format to
-        // build on. When saving is turned back on this should write the
-        // container (palette + raw words), which would also fix the fact that
-        // block STATES have never been persisted here at all.
-        for (int y = 0; y < ChunkSection::SIZE; ++y) {
-            for (int z = 0; z < ChunkSection::SIZE; ++z) {
-                for (int x = 0; x < ChunkSection::SIZE; ++x) {
-                    const uint16_t raw = section->Get(x, y, z);
-                    buffer.push_back(static_cast<uint8_t>(raw & 0xFF));
-                    buffer.push_back(static_cast<uint8_t>((raw >> 8) & 0xFF));
-                }
+        const SaveKeyTable& keys = SaveKeys();
+        const PalettedContainer& states = section->States();
+
+        // Build the palette: distinct flat state ids, first-seen order.
+        std::unordered_map<uint32_t, uint16_t> indexOf;
+        std::vector<uint32_t> palette;
+        std::vector<uint16_t> voxels(ChunkSection::TOTAL);
+        for (size_t i = 0; i < ChunkSection::TOTAL; ++i) {
+            const uint32_t sid = states.Get(i);
+            auto it = indexOf.find(sid);
+            if (it == indexOf.end()) {
+                // A palette index is written as uint16, and the global state
+                // space is ~30k, so a section can never overflow this.
+                const auto next = static_cast<uint16_t>(palette.size());
+                it = indexOf.emplace(sid, next).first;
+                palette.push_back(sid);
+            }
+            voxels[i] = it->second;
+        }
+
+        PutU16(buffer, static_cast<uint16_t>(palette.size()));
+        for (const uint32_t sid : palette) {
+            const BlockState st = BlockState::FromRawId(sid);
+            const BlockID    b  = st.Block();
+            const size_t     bi = static_cast<size_t>(b);
+
+            PutStr(buffer, bi < keys.keyOf.size() ? keys.keyOf[bi] : std::string{});
+            PutU8 (buffer, bi < keys.variantOf.size() ? keys.variantOf[bi] : 0);
+
+            const uint16_t nprops = BlockStates::PropertyCount(b);
+            PutU8(buffer, static_cast<uint8_t>(nprops));
+            for (uint16_t slot = 0; slot < nprops; ++slot) {
+                const PropertyId prop = BlockStates::PropertyAt(b, slot);
+                PutStr(buffer, BlockStates::PropertyName(prop));
+                PutStr(buffer, st.GetName(prop));
             }
         }
+
+        // A section of one block type — most of a 384-block column — stores no
+        // index array at all, mirroring the single-value palette the in-memory
+        // container uses for the same case.
+        if (palette.size() <= 1) {
+            PutU8(buffer, 0);
+            return;
+        }
+        PutU8(buffer, 1);
+        for (const uint16_t v : voxels) PutU16(buffer, v);
     }
 
-    bool ChunkSerializer::DeserializeSection(const uint8_t*& data, size_t& remaining, ChunkSection& section) {
-        if (remaining < 1) {
-            return false;
-        }
-
-        uint8_t exists = *data++;
-        remaining--;
+    bool ChunkSerializer::DeserializeSection(const uint8_t*& data, size_t& remaining,
+                                             ChunkSection& section, uint32_t version) {
+        uint8_t exists;
+        if (!TakeU8(data, remaining, exists)) return false;
 
         if (!exists) {
-            // Section doesn't exist - clear it
             section = ChunkSection{};
             return true;
         }
 
-        // Read block data (see SerializeSection for why this is a flat dump).
-        const size_t blockDataSize = ChunkSection::TOTAL * sizeof(uint16_t);
-        if (remaining < blockDataSize) {
-            return false;
-        }
-
-        for (int y = 0; y < ChunkSection::SIZE; ++y) {
-            for (int z = 0; z < ChunkSection::SIZE; ++z) {
-                for (int x = 0; x < ChunkSection::SIZE; ++x) {
-                    const uint16_t raw =
-                        static_cast<uint16_t>(data[0]) |
-                        static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8);
-                    section.Set(x, y, z, raw);
-                    data += 2;
+        if (version == 1) {
+            // v1: a flat dump of 4096 BlockIDs and no states at all. Read it so
+            // worlds saved before the state port still open; every block comes
+            // back in its default state because that is genuinely all v1 kept.
+            const size_t blockDataSize = ChunkSection::TOTAL * sizeof(uint16_t);
+            if (remaining < blockDataSize) return false;
+            for (int y = 0; y < ChunkSection::SIZE; ++y) {
+                for (int z = 0; z < ChunkSection::SIZE; ++z) {
+                    for (int x = 0; x < ChunkSection::SIZE; ++x) {
+                        const uint16_t raw = static_cast<uint16_t>(
+                            data[0] | (static_cast<uint16_t>(data[1]) << 8));
+                        section.Set(x, y, z, raw);
+                        data += 2;
+                    }
                 }
             }
+            remaining -= blockDataSize;
+            section.RecountRandomTicking();
+            return true;
         }
-        remaining -= blockDataSize;
 
-        // This is the one path that fills a section without going through
-        // ChunkSection::Set, so the random-tick census it maintains has to be
-        // rebuilt by hand here. Skipping it would load a saved wheat field that
+        const SaveKeyTable& keys = SaveKeys();
+
+        uint16_t paletteCount;
+        if (!TakeU16(data, remaining, paletteCount)) return false;
+        if (paletteCount == 0) return false;
+
+        std::vector<uint32_t> palette;
+        palette.reserve(paletteCount);
+        std::string key, propName, propValue;
+        for (uint16_t e = 0; e < paletteCount; ++e) {
+            uint8_t variant, propCount;
+            if (!TakeStr(data, remaining, key))       return false;
+            if (!TakeU8 (data, remaining, variant))   return false;
+            if (!TakeU8 (data, remaining, propCount)) return false;
+
+            const BlockID b = keys.Resolve(key, variant);
+            // MC NbtUtils.readBlockState: start from the DEFAULT state and set
+            // only what the save names. Anything this build no longer models —
+            // a removed property, a renamed value — is skipped rather than
+            // failing the load, so a world opened on an older build degrades to
+            // sane states instead of refusing to open.
+            BlockState st = BlockStates::Default(b);
+            const uint16_t nprops = BlockStates::PropertyCount(b);
+            for (uint8_t i = 0; i < propCount; ++i) {
+                if (!TakeStr(data, remaining, propName))  return false;
+                if (!TakeStr(data, remaining, propValue)) return false;
+                for (uint16_t slot = 0; slot < nprops; ++slot) {
+                    const PropertyId prop = BlockStates::PropertyAt(b, slot);
+                    if (BlockStates::PropertyName(prop) == propName) {
+                        st = st.SetName(prop, propValue);
+                        break;
+                    }
+                }
+            }
+            palette.push_back(st.RawId());
+        }
+
+        uint8_t indexed;
+        if (!TakeU8(data, remaining, indexed)) return false;
+
+        if (!indexed) {
+            const BlockState ref = BlockState::FromRawId(palette[0]);
+            for (int y = 0; y < ChunkSection::SIZE; ++y)
+                for (int z = 0; z < ChunkSection::SIZE; ++z)
+                    for (int x = 0; x < ChunkSection::SIZE; ++x)
+                        section.SetBlockState(x, y, z, ref.Block(), ref.Index());
+            section.RecountRandomTicking();
+            return true;
+        }
+
+        if (remaining < ChunkSection::TOTAL * sizeof(uint16_t)) return false;
+        for (size_t i = 0; i < ChunkSection::TOTAL; ++i) {
+            const uint16_t pi = static_cast<uint16_t>(
+                data[0] | (static_cast<uint16_t>(data[1]) << 8));
+            data += 2;
+            // A corrupt or truncated index must not read off the end of the
+            // palette; air is the safe answer, as it is for an unknown name.
+            const uint32_t sid = pi < palette.size() ? palette[pi] : 0u;
+            const BlockState ref = BlockState::FromRawId(sid);
+            const int x = static_cast<int>(i & 15);
+            const int z = static_cast<int>((i >> 4) & 15);
+            const int y = static_cast<int>((i >> 8) & 15);
+            section.SetBlockState(x, y, z, ref.Block(), ref.Index());
+        }
+        remaining -= ChunkSection::TOTAL * sizeof(uint16_t);
+
+        // This path fills a section without going through ChunkSection::Set, so
+        // the random-tick census and the has-states flag it maintains have to be
+        // rebuilt by hand. Skipping it would load a saved wheat field that
         // silently never grows again.
         section.RecountRandomTicking();
-
         return true;
     }
 

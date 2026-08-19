@@ -179,7 +179,7 @@ namespace Game {
             // break prediction clears the cell before the server handles the
             // packet, so the server has no way to read either back. Loot
             // tables condition on the state (wheat drops wheat only at age=7).
-            uint8_t    destroyingBlockState = 0;
+            BlockState         destroyingBlockState;
             int        lastSwingTick   = -1000;   // for MINE_SWING_TICKS pump
         };
         DigState digState;
@@ -211,7 +211,7 @@ namespace Game {
         BlockID ReadBlock(const glm::ivec3& pos) const;
         // State index at `pos`, from the same source as ReadBlock. 0 for
         // unloaded/invalid positions and for accessors that don't track state.
-        uint8_t ReadBlockState(const glm::ivec3& pos) const;
+        BlockState ReadBlockState(const glm::ivec3& pos) const;
         // Live look angles in degrees, derived from lookDir (player->yaw/pitch
         // are stale — see the implementation comment).
         void LookAngles(float& yawDeg, float& pitchDeg) const;
@@ -220,7 +220,7 @@ namespace Game {
         // with ClientChunkManager's prediction handler under `sequence` so the
         // server's ack can confirm or roll it back.
         void PredictBlock(const glm::ivec3& pos, BlockID newBlock, uint32_t sequence,
-                          uint8_t stateIndex = 0);
+                          BlockState state = BlockState{});
         void SendMovementIfDue();  // TODO: Implement for networking
         void StartDig(const glm::ivec3& pos, int face);
         void AbortDig();
@@ -248,12 +248,14 @@ namespace Game {
         // back to the un-predicted (wait-for-server) path rather than risk
         // predicting a block the server won't place.
         //
-        // `outState` receives the block-state index from the same shared
+        // `outState` receives the state from the same shared
         // Game::ComputePlacementState the server uses, so an oriented block
         // predicts with the correct facing rather than snapping on the ack.
+        // It carries the block too, so `outBlock` is redundant with it and kept
+        // only because the caller's packet fields are still separate.
         bool ComputePredictedPlacement(const RaycastHit& hit,
                                        glm::ivec3& outPos, BlockID& outBlock,
-                                       uint8_t& outState) const;
+                                       BlockState& outState) const;
 
         // Run the shared block-use / item-useOn chain locally so its block
         // edits land this frame, exactly as MC does inside
@@ -320,7 +322,7 @@ namespace Game {
         // block prediction must be registered under (0 if nothing was sent).
         uint32_t SendDigPacket(Network::BlockActionType action,
                                const glm::ivec3& pos, BlockID blockId,
-                               uint8_t blockState = 0);
+                               BlockState blockState = BlockState{});
     };
 
     // Typedef for compatibility during transition

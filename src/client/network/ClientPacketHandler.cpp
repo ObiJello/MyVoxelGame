@@ -124,7 +124,8 @@ namespace Client {
         
         // Process each packed record
         for (uint64_t packedRecord : packet.packedRecords) {
-            uint8_t localX, localY, localZ, stateIndex;
+            uint8_t localX, localY, localZ;
+            Game::BlockStateIndex stateIndex;
             uint16_t blockId;
             Network::ClientboundSectionBlocksUpdateS2CPacket::UnpackRecord(
                 packedRecord, localX, localY, localZ, blockId, stateIndex);

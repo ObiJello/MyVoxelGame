@@ -194,6 +194,16 @@ namespace Debug {
         size_t incomingQueueSize = 0;
         size_t droppedPacketCount = 0;
         float connectionUptimeSec = 0.0f;
+
+        // How this session is carrying its traffic. Filled in PlatformMain,
+        // because working it out needs the friends client and the connection —
+        // both Asio-dependent, and this header is compiled into the `imgui`
+        // target which must not see Asio. Same reason every other field here
+        // is a snapshot rather than a live query.
+        enum class Transport { Singleplayer, Direct, Relay };
+        Transport transport = Transport::Singleplayer;
+        std::string peerAddress;      // who we actually dialled
+        bool compressionEnabled = false;
     };
 
     // Everything the World Info panel shows about where the player is and what

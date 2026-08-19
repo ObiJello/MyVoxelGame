@@ -46,30 +46,32 @@ namespace Client {
         return chunk->chunkData->GetBiome(localX, worldY, localZ);
     }
 
-    uint8_t ClientBlockAccess::GetBlockState(int worldX, int worldY, int worldZ) const {
+    Game::BlockState ClientBlockAccess::GetBlockState(int worldX, int worldY, int worldZ) const {
         if (!IsValidPosition(worldX, worldY, worldZ) || !g_clientChunkManager) {
-            return 0;
+            return Game::BlockState{};
         }
 
         Game::Math::ChunkPos chunkPos = Game::Math::WorldCoordinates::WorldToChunkPos(worldX, worldZ);
         ClientChunk* chunk = g_clientChunkManager->GetChunk(chunkPos);
         if (!chunk || !chunk->IsLoaded() || !chunk->chunkData) {
-            return 0;
+            return Game::BlockState{};
         }
 
         int localX = worldX - (chunkPos.x * Game::Math::CHUNK_SIZE_X);
         int localZ = worldZ - (chunkPos.z * Game::Math::CHUNK_SIZE_Z);
-        return chunk->chunkData->GetBlockState(localX, worldY, localZ);
+        return chunk->chunkData->StateAt(localX, worldY, localZ);
     }
 
     bool ClientBlockAccess::SetBlock(int worldX, int worldY, int worldZ,
                                      Game::BlockID blockId, uint32_t updateFlags) {
-        return SetBlock(worldX, worldY, worldZ, blockId, updateFlags, 0);
+        // The block's DEFAULT state, not index 0 — see World::SetBlock.
+        return SetBlock(worldX, worldY, worldZ, blockId, updateFlags,
+                        Game::DefaultStateIndexOf(blockId));
     }
 
     bool ClientBlockAccess::SetBlock(int worldX, int worldY, int worldZ,
                                      Game::BlockID blockId, uint32_t /*updateFlags*/,
-                                     uint8_t stateIndex) {
+                                     Game::BlockStateIndex stateIndex) {
         // Only ever writes inside an explicit prediction window — see
         // BeginPrediction. Outside one this is a hard no-op: the client is not
         // authoritative and an unreconciled local write would desync until the
@@ -119,8 +121,13 @@ namespace Client {
     }
 
     bool ClientBlockAccess::IsBlockFluid(int worldX, int worldY, int worldZ) const {
-        Game::BlockID block = GetBlock(worldX, worldY, worldZ);
-        return block == Game::BlockID::Water || block == Game::BlockID::Lava;
+        // MC `!state.getFluidState().isEmpty()`, which is a strictly wider test
+        // than "the block here is water": a waterlogged fence, a kelp stalk and
+        // a coral fan all hold water. You swim in all three in vanilla, because
+        // Entity.updateFluidHeightAndDoFluidPushing reads the FLUID state of
+        // each cell its box overlaps, never the block id.
+        if (ContainsWater(worldX, worldY, worldZ)) return true;
+        return GetBlock(worldX, worldY, worldZ) == Game::BlockID::Lava;
     }
 
     bool ClientBlockAccess::IsValidPosition(int worldX, int worldY, int worldZ) const {

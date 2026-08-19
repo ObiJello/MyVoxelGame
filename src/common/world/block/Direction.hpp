@@ -131,6 +131,29 @@ namespace Game {
         return "north";
     }
 
+    // Index into MC's HORIZONTAL_FACING value list, which runs
+    // north, south, west, east — NOT compass order, and not the order this
+    // engine hand-wrote before the state port. Anything that writes a `facing`
+    // property with SetIndex must go through this.
+    constexpr int HorizontalFacingIndex(Direction d) {
+        switch (d) {
+            case Direction::South: return 1;
+            case Direction::West:  return 2;
+            case Direction::East:  return 3;
+            default:               return 0;   // North, and any vertical
+        }
+    }
+
+    // The inverse, for reading one back.
+    constexpr Direction HorizontalFacingFromIndex(int i) {
+        switch (i) {
+            case 1:  return Direction::South;
+            case 2:  return Direction::West;
+            case 3:  return Direction::East;
+            default: return Direction::North;
+        }
+    }
+
     constexpr std::string_view NameOf(Axis a) {
         switch (a) {
             case Axis::X: return "x";

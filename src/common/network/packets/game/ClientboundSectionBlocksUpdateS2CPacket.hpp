@@ -45,8 +45,11 @@ namespace Network {
         // Helper to add a block change. `stateIndex` is the block-state index
         // within blockId's own state list (MC BlockState.getId()); 0 = default.
         void AddChange(uint8_t localX, uint8_t localY, uint8_t localZ,
-                       uint16_t blockId, uint8_t stateIndex = 0) {
-            uint64_t packed = (static_cast<uint64_t>(blockId)    << 20) |
+                       uint16_t blockId, Game::BlockStateIndex stateIndex = 0) {
+            // State moved from 8 bits to 16 and the block id up to bit 28.
+            // The old layout truncated any state past 255, which is 30 blocks.
+            // A uint64 has room to spare: 12 position + 16 state + 16 id = 44.
+            uint64_t packed = (static_cast<uint64_t>(blockId)    << 28) |
                               (static_cast<uint64_t>(stateIndex) << 12) |
                               (static_cast<uint64_t>(localX & 0xF) << 8) |
                               (static_cast<uint64_t>(localZ & 0xF) << 4) |
@@ -56,12 +59,13 @@ namespace Network {
 
         // Helper to unpack a record.
         static void UnpackRecord(uint64_t packed, uint8_t& localX, uint8_t& localY,
-                                 uint8_t& localZ, uint16_t& blockId, uint8_t& stateIndex) {
+                                 uint8_t& localZ, uint16_t& blockId,
+                                 Game::BlockStateIndex& stateIndex) {
             localX     = (packed >> 8)  & 0xF;
             localZ     = (packed >> 4)  & 0xF;
             localY     =  packed        & 0xF;
-            stateIndex = static_cast<uint8_t>((packed >> 12) & 0xFF);
-            blockId    = static_cast<uint16_t>((packed >> 20) & 0xFFFF);
+            stateIndex = static_cast<Game::BlockStateIndex>((packed >> 12) & 0xFFFF);
+            blockId    = static_cast<uint16_t>((packed >> 28) & 0xFFFF);
         }
     };
 

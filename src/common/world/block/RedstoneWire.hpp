@@ -25,15 +25,15 @@ namespace Game {
     inline bool IsConnected(RedstoneSide s) { return s != RedstoneSide::None; }
 
     // Read one side out of a wire's state index.
-    RedstoneSide RedstoneSideOf(uint8_t stateIndex, Direction dir);
+    RedstoneSide RedstoneSideOf(BlockState state, Direction dir);
 
     // Build a state index from the four sides (MC's PROPERTY_BY_DIRECTION order).
-    uint8_t RedstoneStateFrom(RedstoneSide north, RedstoneSide east,
-                              RedstoneSide south, RedstoneSide west);
+    BlockState RedstoneStateFrom(RedstoneSide north, RedstoneSide east,
+                                 RedstoneSide south, RedstoneSide west);
 
     // MC RedStoneWireBlock.isCross / isDot — all four connected / none connected.
-    bool RedstoneIsCross(uint8_t stateIndex);
-    bool RedstoneIsDot(uint8_t stateIndex);
+    bool RedstoneIsCross(BlockState state);
+    bool RedstoneIsDot(BlockState state);
 
     // MC getConnectionState: resolve every side from the world, then apply the
     // "a wire with nothing on one axis still points both ways along it" rule
@@ -41,24 +41,24 @@ namespace Game {
     //
     // `startFromCross` mirrors vanilla passing either crossState (placement,
     // and the right-click toggle's cross half) or the block's current state.
-    uint8_t RedstoneConnectionState(const IBlockAccess& level, const glm::ivec3& pos,
-                                    bool startFromCross);
+    BlockState RedstoneConnectionState(const IBlockAccess& level, const glm::ivec3& pos,
+                                       bool startFromCross);
 
     // MC getStateForPlacement — getConnectionState(level, crossState, pos).
-    inline uint8_t RedstonePlacementState(const IBlockAccess& level, const glm::ivec3& pos) {
+    inline BlockState RedstonePlacementState(const IBlockAccess& level, const glm::ivec3& pos) {
         return RedstoneConnectionState(level, pos, /*startFromCross=*/true);
     }
 
     // MC updateShape, for a horizontal or upward neighbour change. Returns the
     // state this wire becomes. `changed` is the direction from the wire toward
     // the neighbour that changed.
-    uint8_t RedstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
-                                uint8_t stateIndex, Direction changed);
+    BlockState RedstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
+                                   BlockState state, Direction changed);
 
     // MC useWithoutItem: a wire that is currently a full cross collapses to a
     // dot, and a dot expands back to a cross. Anything in between is left
     // alone. Returns true and fills `outState` when the state should change.
     bool RedstoneToggleShape(const IBlockAccess& level, const glm::ivec3& pos,
-                             uint8_t stateIndex, uint8_t& outState);
+                             BlockState state, BlockState& outState);
 
 } // namespace Game

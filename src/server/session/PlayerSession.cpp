@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 
 
 namespace {
@@ -61,22 +62,20 @@ namespace {
         const Game::BlockID id = world.GetBlock(pos.x, pos.y, pos.z);
         if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) return;
         const auto& def = Game::BlockRegistry::GetStateDefinition(id);
-        const uint8_t cur = world.GetBlockState(pos.x, pos.y, pos.z);
-        if (def.ValueOf(cur, "type") == type) return;      // already right
+        const Game::BlockState cur = world.GetBlockState(pos.x, pos.y, pos.z);
+        if (cur.GetValueByName("type") == type) return;      // already right
         Game::BlockRegistry::BlockStateDefinition::PropertyMap props;
-        props["facing"] = std::string(def.ValueOf(cur, "facing"));
+        props["facing"] = std::string(cur.GetValueByName("facing"));
         props["type"]   = type;
         world.SetBlock(pos.x, pos.y, pos.z, id, Game::World::UpdateFlags::All,
                        def.IndexOf(props));
     }
 
     // The cell this chest's stored type points at, or nullopt when SINGLE.
-    std::optional<glm::ivec3> ChestPartnerCell(Game::BlockID id, uint8_t state,
-                                               const glm::ivec3& pos) {
-        const auto& def = Game::BlockRegistry::GetStateDefinition(id);
-        const std::string_view type = def.ValueOf(state, "type");
+    std::optional<glm::ivec3> ChestPartnerCell(Game::BlockState state, const glm::ivec3& pos) {
+        const std::string_view type = state.GetValueByName("type");
         if (type != "left" && type != "right") return std::nullopt;
-        const std::string_view f = def.ValueOf(state, "facing");
+        const std::string_view f = state.GetValueByName("facing");
         // getConnectedDirection: LEFT -> clockwise, RIGHT -> counter-clockwise.
         auto cw  = [](std::string_view d) -> std::string_view {
             if (d=="north") return "east"; if (d=="east") return "south";
@@ -115,8 +114,8 @@ namespace {
             const glm::ivec3 n = pos + off;
             const Game::BlockID id = world.GetBlock(n.x, n.y, n.z);
             if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) continue;
-            const uint8_t st = world.GetBlockState(n.x, n.y, n.z);
-            const auto claimed = ChestPartnerCell(id, st, n);
+            const Game::BlockState st = world.GetBlockState(n.x, n.y, n.z);
+            const auto claimed = ChestPartnerCell(st, n);
             if (claimed && *claimed == pos) SetChestType(world, n, "single");
         }
     }
@@ -258,6 +257,24 @@ namespace Server {
             const bool deadNow = m_player->isDead();
             if (deadNow && !m_wasPlayerDead) {
                 MarkClientUnloadedAfterDeath();
+
+                // MC ServerPlayer.die (:900): when the showDeathMessages game
+                // rule is on it does
+                //     this.server.getPlayerList()
+                //         .broadcastSystemMessage(deathMessage, false);
+                // with the text from CombatTracker.getDeathMessage. We have no
+                // combat tracker, so the message comes from the killing blow's
+                // damage source, recorded on ServerPlayer.
+                //
+                // Not styled yellow: MC death messages use the default white,
+                // unlike the join/leave notices.
+                if (auto* server = g_integratedServer.get()) {
+                    server->BroadcastSystemMessage(
+                        Server::BuildDeathMessage(m_player->getName(),
+                                                  m_player->getLastDamageSource(),
+                                                  m_player->getLastAttackerName()),
+                        0xFFFFFFFFu);
+                }
             }
             m_wasPlayerDead = deadNow;
 
@@ -642,7 +659,7 @@ namespace Server {
                 // distinct state it holds.
                 uint32_t nonAir = 0;
                 section->States().ForEachValue([&](uint32_t stateId, int count) {
-                    if (Game::BlockStateIds::Unpack(stateId).id != Game::BlockID::Air) {
+                    if (Game::BlockState::FromRawId(stateId).Block() != Game::BlockID::Air) {
                         nonAir += static_cast<uint32_t>(count);
                     }
                 });
@@ -792,7 +809,7 @@ namespace Server {
                 int worldZ = chunk.z * 16 + localZ;
                 
                 Network::BlockChangeS2CPacket packet(worldX, worldY, worldZ,
-                                                     blockId.id, blockId.state);
+                                                     blockId.Block(), blockId.Index());
                 SendSingleBlockChange(packet);
                 
                 // Estimate packet size
@@ -807,7 +824,7 @@ namespace Server {
                     uint8_t localY = (packedPos >> 4) & 0xF;
                     uint8_t localZ = packedPos & 0xF;
                     packet.AddChange(localX, localY, localZ,
-                                     static_cast<uint16_t>(blockId.id), blockId.state);
+                                     static_cast<uint16_t>(blockId.Block()), blockId.Index());
                 }
                 
                 SendSectionBlocksUpdate(packet);
@@ -1059,8 +1076,9 @@ namespace Server {
                 // same for carrots, potatoes and beetroots. The world is only
                 // consulted as a fallback, for a sender that predates the
                 // field (its state byte decodes as 0 either way).
-                uint8_t oldBlockState = packet.blockState;
-                if (oldBlockState == 0) {
+                Game::BlockState oldBlockState =
+                    Game::BlockStates::FromIndex(oldBlock, packet.blockState);
+                if (packet.blockState == 0) {
                     oldBlockState = world->GetBlockState(pos.x, pos.y, pos.z);
                 }
 
@@ -1101,7 +1119,22 @@ namespace Server {
                 // SetBlock may already be a no-op (the world is already Air in integrated
                 // mode), but call it anyway so dedicated multiplayer still clears the
                 // server's world.
-                world->SetBlock(pos.x, pos.y, pos.z, Game::BlockID::Air);
+                //
+                // MC Level.destroyBlock:266 is
+                // `setBlock(pos, fluidState.createLegacyBlock(), 3, ...)` — the
+                // cell becomes the FLUID that was in it, not air. That is what
+                // leaves water behind when you break a waterlogged fence or a
+                // kelp stalk, and it is the only reason those don't punch a dry
+                // hole through an ocean.
+                //
+                // Read from the packet's block+state for the same reason the
+                // two are read from the packet above: in integrated mode the
+                // client's break prediction has already cleared this cell.
+                const Game::BlockID replacement =
+                    Game::BlockRegistry::ContainsWater(oldBlockState)
+                        ? Game::BlockID::Water
+                        : Game::BlockID::Air;
+                world->SetBlock(pos.x, pos.y, pos.z, replacement);
 #if ENABLE_PORTAL_GUN
                 // Remove any portal mounted on this block. Block-break
                 // bypasses IntegratedServer::ApplyBlockChange so the
@@ -1148,7 +1181,7 @@ namespace Server {
                     if (Game::HasCorrectToolForDrops(heldStack.itemId, brokenBlock)) {
                         Game::LootContext lootCtx;
                         lootCtx.block          = oldBlock;
-                        lootCtx.blockState     = oldBlockState;
+                        lootCtx.blockState     = oldBlockState.Index();
                         lootCtx.tool           = &heldStack;
                         lootCtx.world          = world;
                         lootCtx.pos            = pos;
@@ -2272,10 +2305,18 @@ namespace Server {
         // the position resolves up into the litter's own cell, and the growth
         // check happens there rather than on whatever the crosshair touched.
         const Game::BlockID clickedBlockId = world->GetBlock(clicked.x, clicked.y, clicked.z);
-        const uint8_t clickedBlockState = world->GetBlockState(clicked.x, clicked.y, clicked.z);
+        const Game::BlockState clickedBlockState =
+            world->GetBlockState(clicked.x, clicked.y, clicked.z);
+
+        // MC BlockPlaceContext's click data, which the slab rule reads to
+        // decide whether two halves merge into a full block.
+        Game::PlacementClick click;
+        click.clickedFace = context.getClickedFace();
+        click.hitY        = packet.cursorY;
+        click.replacingClickedOnBlock = true;
 
         const bool replaceClicked = Game::CanBeReplacedByPlacement(
-            clickedBlockId, clickedBlockState, blockToPlace, sneaking);
+            clickedBlockState, blockToPlace, sneaking, click);
 
         glm::ivec3 targetPos = replaceClicked ? clicked : context.getPlacementPos();
 
@@ -2287,14 +2328,18 @@ namespace Server {
         }
 
         const Game::BlockID targetBlockId = world->GetBlock(targetPos.x, targetPos.y, targetPos.z);
-        const uint8_t targetBlockState = world->GetBlockState(targetPos.x, targetPos.y, targetPos.z);
+        const Game::BlockState targetBlockState =
+            world->GetBlockState(targetPos.x, targetPos.y, targetPos.z);
 
         // MC BlockPlaceContext.canPlace. Without it we'd silently overwrite the
         // block already sitting in the resolved cell — clicking a wall whose
         // +X neighbour holds a slab would replace that slab, consuming an
         // inventory item while appearing to do nothing.
+        Game::PlacementClick resolvedClick = click;
+        resolvedClick.replacingClickedOnBlock = false;
         if (!replaceClicked &&
-            !Game::CanBeReplacedByPlacement(targetBlockId, targetBlockState, blockToPlace, sneaking)) {
+            !Game::CanBeReplacedByPlacement(targetBlockState, blockToPlace,
+                                            sneaking, resolvedClick)) {
             Log::Debug("HandleUseItemOn: Target cell already occupied at (%d,%d,%d) by block %u",
                        targetPos.x, targetPos.y, targetPos.z, static_cast<unsigned>(targetBlockId));
             failPlacement(targetPos);
@@ -2312,30 +2357,43 @@ namespace Server {
         // The facing is deliberately not recomputed — `state.setValue` mutates
         // the state already there, so a clump never re-orients as you add to it.
         bool growInPlace = false;
-        {
-            const Game::BlockID base = Game::SegmentedFamilyBase(targetBlockId);
-            if (base != Game::BlockID::Air &&
-                base == Game::SegmentedFamilyBase(blockToPlace)) {
-                const Game::BlockID grown = Game::SegmentedGrowth(targetBlockId);
-                if (grown != Game::BlockID::Air) {
-                    blockToPlace = grown;
-                    growInPlace  = true;
-                }
+        Game::BlockState grownState;
+        if (Game::IsSegmentedBlock(targetBlockId) && targetBlockId == blockToPlace) {
+            const Game::BlockState grown = Game::SegmentGrownState(targetBlockState);
+            if (grown != targetBlockState) {
+                grownState  = grown;
+                growInPlace = true;
             }
         }
         
         // === 6c. Slab orientation (top vs bottom half) ===
         // Mirrors MC's SlabBlock.getStateForPlacement (SlabBlock.java:66-90):
         // the slab is placed in the TOP half when the player clicked on the
-        // bottom face of a block (face == DOWN), or when they clicked the
-        // side of a block above its vertical midpoint (cursor.y > 0.5). The
-        // BOTTOM half is the default — picked when clicking on a TOP face or
-        // the lower portion of a side. We promote each "*SlabTop" variant to
-        // its own BlockID, so the rule is a simple BlockID swap here.
-        {
-            const Game::BlockID topVariant =
-                Game::BlockRegistry::SlabTopVariant(blockToPlace);
-            if (topVariant != Game::BlockID::Air) {
+        // bottom face of a block (face == DOWN), or when they clicked the side
+        // of a block above its vertical midpoint (cursor.y > 0.5). The BOTTOM
+        // half is the default — picked when clicking a TOP face or the lower
+        // portion of a side.
+        //
+        // The half is the `type` blockstate, exactly as in vanilla, so this
+        // records the decision and applies it to the state in step 9 rather
+        // than swapping BlockID.
+        std::optional<Game::BlockRegistry::SlabType> slabHalf;
+        if (Game::BlockRegistry::IsSlabBlock(blockToPlace)) {
+            using SlabType = Game::BlockRegistry::SlabType;
+            // MC SlabBlock.getStateForPlacement opens with the merge:
+            //
+            //   BlockState replaced = level.getBlockState(context.getClickedPos());
+            //   if (replaced.is(this)) return replaced.setValue(TYPE, DOUBLE)
+            //                                          .setValue(WATERLOGGED, false);
+            //
+            // against the RESOLVED cell, so a slab that agreed to be replaced
+            // (canBeReplaced above) becomes a full block instead of being
+            // overwritten. `targetBlockId == blockToPlace` IS `replaced.is(this)`
+            // now that one BlockID covers all three halves.
+            if (targetBlockId == blockToPlace &&
+                Game::BlockRegistry::SlabTypeOf(targetBlockState) != SlabType::Double) {
+                slabHalf = SlabType::Double;
+            } else {
                 bool placeAsTop = false;
                 switch (packet.direction) {
                     case 0:                                 // -Y (bottom face)
@@ -2348,9 +2406,7 @@ namespace Server {
                         placeAsTop = (packet.cursorY > 0.5f);
                         break;
                 }
-                if (placeAsTop) {
-                    blockToPlace = topVariant;
-                }
+                slabHalf = placeAsTop ? SlabType::Top : SlabType::Bottom;
             }
         }
 
@@ -2421,22 +2477,32 @@ namespace Server {
         // block never visibly flips when this authoritative update lands.
         // Growing a clump carries its existing facing across (see 6b); every
         // other placement derives orientation from how the player was standing.
-        uint8_t placedState =
-            growInPlace ? targetBlockState
+        Game::BlockState placedState =
+            growInPlace ? grownState
                         : Game::ComputePlacementState(blockToPlace, context);
         // Blocks whose orientation comes from their NEIGHBOURS rather than
         // from the player — redstone dust resolving its four connections.
         // A no-op for everything else.
         if (!growInPlace) {
-            placedState = Game::ComputeWorldPlacementState(*world, targetPos,
-                                                           blockToPlace, placedState);
+            placedState = Game::ComputeWorldPlacementState(*world, targetPos, placedState);
+        }
+        // Applied last so it composes with, rather than overwrites, the
+        // waterlogged bit ComputePlacementState sets when placing into a fluid.
+        // MC clears WATERLOGGED when merging to a double; SetIndex on TYPE
+        // alone would keep it, so the double case clears it explicitly.
+        if (slabHalf) {
+            using SlabType = Game::BlockRegistry::SlabType;
+            placedState = Game::BlockRegistry::SlabStateWithType(placedState, *slabHalf);
+            if (*slabHalf == SlabType::Double) {
+                placedState = Game::BlockRegistry::WithWaterlogged(placedState, false);
+            }
         }
 
         // Second survival gate, now that the state is known. The check in step
         // 7 above is state-free, and a button's support depends entirely on its
         // `face`/`facing` — without this you could hang one on any surface,
         // including nothing at all.
-        if (!Game::CanSurviveAt(*world, targetPos, blockToPlace, placedState)) {
+        if (!Game::CanSurviveAt(*world, targetPos, placedState)) {
             Log::Debug("HandleUseItemOn: Block state cannot survive at (%d,%d,%d)",
                        targetPos.x, targetPos.y, targetPos.z);
             failPlacement(targetPos);
@@ -2447,7 +2513,7 @@ namespace Server {
             targetPos.x, targetPos.y, targetPos.z,
             blockToPlace,
             Game::World::UpdateFlags::All,
-            placedState
+            placedState.Index()
         );
         
         if (!changed) {
@@ -2462,10 +2528,8 @@ namespace Server {
         // chest rendering and opening alone while the new one claims a pair.
         if (blockToPlace == Game::BlockID::Chest ||
             blockToPlace == Game::BlockID::TrappedChest) {
-            const auto& cdef = Game::BlockRegistry::GetStateDefinition(blockToPlace);
-            if (const auto partner =
-                    ChestPartnerCell(blockToPlace, placedState, targetPos)) {
-                const bool selfIsLeft = cdef.ValueOf(placedState, "type") == "left";
+            if (const auto partner = ChestPartnerCell(placedState, targetPos)) {
+                const bool selfIsLeft = placedState.GetValueByName("type") == "left";
                 SetChestType(*world, *partner, selfIsLeft ? "right" : "left");
             }
         }
@@ -2781,13 +2845,13 @@ namespace Server {
                 // every furnace, chest and log that ever got resynced.
                 SendBlockUpdate(clicked,
                                 world->GetBlock(clicked.x, clicked.y, clicked.z),
-                                world->GetBlockState(clicked.x, clicked.y, clicked.z));
+                                world->GetBlockState(clicked.x, clicked.y, clicked.z).Index());
 
                 // Send target block if different
                 if (clicked != target) {
                     SendBlockUpdate(target,
                                     world->GetBlock(target.x, target.y, target.z),
-                                    world->GetBlockState(target.x, target.y, target.z));
+                                    world->GetBlockState(target.x, target.y, target.z).Index());
                 }
             }
 
@@ -2848,7 +2912,7 @@ namespace Server {
     }
     
     void PlayerSession::SendBlockUpdate(const glm::ivec3& pos, Game::BlockID block,
-                                        uint8_t stateIndex) {
+                                        Game::BlockStateIndex stateIndex) {
         if (!m_connection) return;
 
         Network::BlockChangeS2CPacket packet(pos.x, pos.y, pos.z, block, stateIndex);
@@ -2981,7 +3045,7 @@ namespace Server {
 
     void PlayerSession::CoalesceBlockChange(Game::Math::ChunkPos chunk, int section,
                                            uint8_t localX, uint8_t localY, uint8_t localZ,
-                                           Game::BlockID blockId, uint8_t stateIndex) {
+                                           Game::BlockID blockId, Game::BlockStateIndex stateIndex) {
         auto& sectionDiffs = m_pendingDiffs[chunk][section];
         sectionDiffs.chunkPos = chunk;
         sectionDiffs.sectionIndex = section;

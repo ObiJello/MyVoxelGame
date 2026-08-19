@@ -62,7 +62,7 @@ namespace Game {
 
         // IBlockAccess implementation
         BlockID GetBlock(int worldX, int worldY, int worldZ) const override;
-        uint8_t GetBlockState(int worldX, int worldY, int worldZ) const override;
+        BlockState GetBlockState(int worldX, int worldY, int worldZ) const override;
         uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         bool IsChunkLoaded(int chunkX, int chunkZ) const override;
         bool IsPositionLoaded(int worldX, int worldY, int worldZ) const override;
@@ -81,7 +81,10 @@ namespace Game {
         // block's default state — which is what a caller that doesn't know
         // about states means.
         bool SetBlock(int worldX, int worldY, int worldZ, BlockID blockId,
-                      uint32_t updateFlags, uint8_t stateIndex) override;
+                      uint32_t updateFlags, BlockStateIndex stateIndex) override;
+        // Bring the interface's `setBlock(pos, state, flags)` convenience form
+        // back into scope — declaring overloads here would otherwise hide it.
+        using ILevelWrite::SetBlock;
 
         // The server's world is the authority — MC ServerLevel.isClientSide.
         bool IsClientSide() const override { return false; }

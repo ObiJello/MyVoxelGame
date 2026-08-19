@@ -5,6 +5,11 @@
 #include "common/world/chunk/ChunkSection.hpp"   // g_blockRandomlyTicks
 #include "BlockStateModels.hpp"
 #include "GeneratedBlockShapes.hpp"
+#include "GeneratedWaterlogged.hpp"
+#include "Stairs.hpp"
+#include "CrossCollision.hpp"
+#include "Walls.hpp"
+#include "FenceGate.hpp"
 #include "entity/BlockEntityTypes.hpp"
 #include "../../core/Log.hpp"
 #include <string_view>
@@ -13,6 +18,7 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Game {
@@ -281,7 +287,6 @@ namespace Game {
             setHardness(BlockID::Cobblestone,  2.0f, ToolType::Pickaxe, true,  MiningTier::Wood);
             setHardness(BlockID::Dirt,         0.5f, ToolType::Shovel,  false, MiningTier::Wood);
             setHardness(BlockID::Grass,        0.6f, ToolType::Shovel,  false, MiningTier::Wood);
-            setHardness(BlockID::SnowGrass,    0.6f, ToolType::Shovel,  false, MiningTier::Wood);
             setHardness(BlockID::Sand,         0.5f, ToolType::Shovel,  false, MiningTier::Wood);
             setHardness(BlockID::Gravel,       0.6f, ToolType::Shovel,  false, MiningTier::Wood);
             setHardness(BlockID::Obsidian,    50.0f, ToolType::Pickaxe, true,  MiningTier::Diamond);
@@ -326,75 +331,6 @@ namespace Game {
             setHardness(BlockID::BambooSapling, 1.0f, ToolType::Axe,    false, MiningTier::Wood);
         }
 
-        // Slab pair table (bottom BlockID → top BlockID + model + display name).
-        // Used both at Init time to register the top variants and at runtime by
-        // SlabTopVariant / SlabBottomVariant / IsSlabTop. The runtime lookup
-        // tables (below) are built once from this on first call.
-        struct SlabPair { BlockID bottom; BlockID top; const char* model; const char* name; };
-        constexpr SlabPair kSlabPairs[] = {
-            { BlockID::AcaciaSlab,                     BlockID::AcaciaSlabTop,                     "acacia_slab_top",                     "Acacia Slab (Top)" },
-            { BlockID::AndesiteSlab,                   BlockID::AndesiteSlabTop,                   "andesite_slab_top",                   "Andesite Slab (Top)" },
-            { BlockID::BambooMosaicSlab,               BlockID::BambooMosaicSlabTop,               "bamboo_mosaic_slab_top",               "Bamboo Mosaic Slab (Top)" },
-            { BlockID::BambooSlab,                     BlockID::BambooSlabTop,                     "bamboo_slab_top",                     "Bamboo Slab (Top)" },
-            { BlockID::BirchSlab,                      BlockID::BirchSlabTop,                      "birch_slab_top",                      "Birch Slab (Top)" },
-            { BlockID::BlackstoneSlab,                 BlockID::BlackstoneSlabTop,                 "blackstone_slab_top",                 "Blackstone Slab (Top)" },
-            { BlockID::BrickSlab,                      BlockID::BrickSlabTop,                      "brick_slab_top",                      "Brick Slab (Top)" },
-            { BlockID::CherrySlab,                     BlockID::CherrySlabTop,                     "cherry_slab_top",                     "Cherry Slab (Top)" },
-            { BlockID::CobbledDeepslateSlab,           BlockID::CobbledDeepslateSlabTop,           "cobbled_deepslate_slab_top",           "Cobbled Deepslate Slab (Top)" },
-            { BlockID::CobblestoneSlab,                BlockID::CobblestoneSlabTop,                "cobblestone_slab_top",                "Cobblestone Slab (Top)" },
-            { BlockID::CrimsonSlab,                    BlockID::CrimsonSlabTop,                    "crimson_slab_top",                    "Crimson Slab (Top)" },
-            { BlockID::CutCopperSlab,                  BlockID::CutCopperSlabTop,                  "cut_copper_slab_top",                  "Cut Copper Slab (Top)" },
-            { BlockID::CutRedSandstoneSlab,            BlockID::CutRedSandstoneSlabTop,            "cut_red_sandstone_slab_top",            "Cut Red Sandstone Slab (Top)" },
-            { BlockID::CutSandstoneSlab,               BlockID::CutSandstoneSlabTop,               "cut_sandstone_slab_top",               "Cut Sandstone Slab (Top)" },
-            { BlockID::DarkOakSlab,                    BlockID::DarkOakSlabTop,                    "dark_oak_slab_top",                    "Dark Oak Slab (Top)" },
-            { BlockID::DarkPrismarineSlab,             BlockID::DarkPrismarineSlabTop,             "dark_prismarine_slab_top",             "Dark Prismarine Slab (Top)" },
-            { BlockID::DeepslateBrickSlab,             BlockID::DeepslateBrickSlabTop,             "deepslate_brick_slab_top",             "Deepslate Brick Slab (Top)" },
-            { BlockID::DeepslateTileSlab,              BlockID::DeepslateTileSlabTop,              "deepslate_tile_slab_top",              "Deepslate Tile Slab (Top)" },
-            { BlockID::DioriteSlab,                    BlockID::DioriteSlabTop,                    "diorite_slab_top",                    "Diorite Slab (Top)" },
-            { BlockID::EndStoneBrickSlab,              BlockID::EndStoneBrickSlabTop,              "end_stone_brick_slab_top",              "End Stone Brick Slab (Top)" },
-            { BlockID::ExposedCutCopperSlab,           BlockID::ExposedCutCopperSlabTop,           "exposed_cut_copper_slab_top",           "Exposed Cut Copper Slab (Top)" },
-            { BlockID::GraniteSlab,                    BlockID::GraniteSlabTop,                    "granite_slab_top",                    "Granite Slab (Top)" },
-            { BlockID::JungleSlab,                     BlockID::JungleSlabTop,                     "jungle_slab_top",                     "Jungle Slab (Top)" },
-            { BlockID::MangroveSlab,                   BlockID::MangroveSlabTop,                   "mangrove_slab_top",                   "Mangrove Slab (Top)" },
-            { BlockID::MossyCobblestoneSlab,           BlockID::MossyCobblestoneSlabTop,           "mossy_cobblestone_slab_top",           "Mossy Cobblestone Slab (Top)" },
-            { BlockID::MossyStoneBrickSlab,            BlockID::MossyStoneBrickSlabTop,            "mossy_stone_brick_slab_top",            "Mossy Stone Brick Slab (Top)" },
-            { BlockID::MudBrickSlab,                   BlockID::MudBrickSlabTop,                   "mud_brick_slab_top",                   "Mud Brick Slab (Top)" },
-            { BlockID::NetherBrickSlab,                BlockID::NetherBrickSlabTop,                "nether_brick_slab_top",                "Nether Brick Slab (Top)" },
-            { BlockID::OakSlab,                        BlockID::OakSlabTop,                        "oak_slab_top",                        "Oak Slab (Top)" },
-            { BlockID::OxidizedCutCopperSlab,          BlockID::OxidizedCutCopperSlabTop,          "oxidized_cut_copper_slab_top",          "Oxidized Cut Copper Slab (Top)" },
-            { BlockID::PaleOakSlab,                    BlockID::PaleOakSlabTop,                    "pale_oak_slab_top",                    "Pale Oak Slab (Top)" },
-            { BlockID::PetrifiedOakSlab,               BlockID::PetrifiedOakSlabTop,               "petrified_oak_slab_top",               "Petrified Oak Slab (Top)" },
-            { BlockID::PolishedAndesiteSlab,           BlockID::PolishedAndesiteSlabTop,           "polished_andesite_slab_top",           "Polished Andesite Slab (Top)" },
-            { BlockID::PolishedBlackstoneBrickSlab,    BlockID::PolishedBlackstoneBrickSlabTop,    "polished_blackstone_brick_slab_top",    "Polished Blackstone Brick Slab (Top)" },
-            { BlockID::PolishedBlackstoneSlab,         BlockID::PolishedBlackstoneSlabTop,         "polished_blackstone_slab_top",         "Polished Blackstone Slab (Top)" },
-            { BlockID::PolishedDeepslateSlab,          BlockID::PolishedDeepslateSlabTop,          "polished_deepslate_slab_top",          "Polished Deepslate Slab (Top)" },
-            { BlockID::PolishedDioriteSlab,            BlockID::PolishedDioriteSlabTop,            "polished_diorite_slab_top",            "Polished Diorite Slab (Top)" },
-            { BlockID::PolishedGraniteSlab,            BlockID::PolishedGraniteSlabTop,            "polished_granite_slab_top",            "Polished Granite Slab (Top)" },
-            { BlockID::PolishedTuffSlab,               BlockID::PolishedTuffSlabTop,               "polished_tuff_slab_top",               "Polished Tuff Slab (Top)" },
-            { BlockID::PrismarineBrickSlab,            BlockID::PrismarineBrickSlabTop,            "prismarine_brick_slab_top",            "Prismarine Brick Slab (Top)" },
-            { BlockID::PrismarineSlab,                 BlockID::PrismarineSlabTop,                 "prismarine_slab_top",                 "Prismarine Slab (Top)" },
-            { BlockID::PurpurSlab,                     BlockID::PurpurSlabTop,                     "purpur_slab_top",                     "Purpur Slab (Top)" },
-            { BlockID::QuartzSlab,                     BlockID::QuartzSlabTop,                     "quartz_slab_top",                     "Quartz Slab (Top)" },
-            { BlockID::RedNetherBrickSlab,             BlockID::RedNetherBrickSlabTop,             "red_nether_brick_slab_top",             "Red Nether Brick Slab (Top)" },
-            { BlockID::RedSandstoneSlab,               BlockID::RedSandstoneSlabTop,               "red_sandstone_slab_top",               "Red Sandstone Slab (Top)" },
-            { BlockID::ResinBrickSlab,                 BlockID::ResinBrickSlabTop,                 "resin_brick_slab_top",                 "Resin Brick Slab (Top)" },
-            { BlockID::SandstoneSlab,                  BlockID::SandstoneSlabTop,                  "sandstone_slab_top",                  "Sandstone Slab (Top)" },
-            { BlockID::SmoothQuartzSlab,               BlockID::SmoothQuartzSlabTop,               "smooth_quartz_slab_top",               "Smooth Quartz Slab (Top)" },
-            { BlockID::SmoothRedSandstoneSlab,         BlockID::SmoothRedSandstoneSlabTop,         "smooth_red_sandstone_slab_top",         "Smooth Red Sandstone Slab (Top)" },
-            { BlockID::SmoothSandstoneSlab,            BlockID::SmoothSandstoneSlabTop,            "smooth_sandstone_slab_top",            "Smooth Sandstone Slab (Top)" },
-            { BlockID::SmoothStoneSlab,                BlockID::SmoothStoneSlabTop,                "smooth_stone_slab_top",                "Smooth Stone Slab (Top)" },
-            { BlockID::SpruceSlab,                     BlockID::SpruceSlabTop,                     "spruce_slab_top",                     "Spruce Slab (Top)" },
-            { BlockID::StoneBrickSlab,                 BlockID::StoneBrickSlabTop,                 "stone_brick_slab_top",                 "Stone Brick Slab (Top)" },
-            { BlockID::StoneSlab,                      BlockID::StoneSlabTop,                      "stone_slab_top",                      "Stone Slab (Top)" },
-            { BlockID::TuffBrickSlab,                  BlockID::TuffBrickSlabTop,                  "tuff_brick_slab_top",                  "Tuff Brick Slab (Top)" },
-            { BlockID::TuffSlab,                       BlockID::TuffSlabTop,                       "tuff_slab_top",                       "Tuff Slab (Top)" },
-            { BlockID::WarpedSlab,                     BlockID::WarpedSlabTop,                     "warped_slab_top",                     "Warped Slab (Top)" },
-            { BlockID::WaxedCutCopperSlab,             BlockID::WaxedCutCopperSlabTop,             "waxed_cut_copper_slab_top",             "Waxed Cut Copper Slab (Top)" },
-            { BlockID::WaxedExposedCutCopperSlab,      BlockID::WaxedExposedCutCopperSlabTop,      "waxed_exposed_cut_copper_slab_top",      "Waxed Exposed Cut Copper Slab (Top)" },
-            { BlockID::WaxedOxidizedCutCopperSlab,     BlockID::WaxedOxidizedCutCopperSlabTop,     "waxed_oxidized_cut_copper_slab_top",     "Waxed Oxidized Cut Copper Slab (Top)" },
-            { BlockID::WaxedWeatheredCutCopperSlab,    BlockID::WaxedWeatheredCutCopperSlabTop,    "waxed_weathered_cut_copper_slab_top",    "Waxed Weathered Cut Copper Slab (Top)" },
-            { BlockID::WeatheredCutCopperSlab,         BlockID::WeatheredCutCopperSlabTop,         "weathered_cut_copper_slab_top",         "Weathered Cut Copper Slab (Top)" },
-        };
 
     } // anonymous namespace
 
@@ -407,14 +343,15 @@ namespace Game {
     std::array<bool, static_cast<size_t>(BlockID::Count)> g_blockRandomlyTicks{};
 
     void BlockRegistry::RegisterModelBlock(BlockID id, const std::string& name, RenderLayer layer,
-                                              const std::string& modelName) {
+                                              const std::string& modelName,
+                                              std::optional<bool> opaqueOverride) {
         size_t index = static_cast<size_t>(id);
         if (index >= blockDefinitions.size()) {
             Log::Error("Invalid BlockID %u in RegisterModelBlock", static_cast<unsigned>(id));
             return;
         }
 
-        bool opaque = (layer == RenderLayer::Opaque);
+        bool opaque = opaqueOverride.value_or(layer == RenderLayer::Opaque);
         blockDefinitions[index] = Block{
             .name = name,
             .opaque = opaque,
@@ -466,11 +403,20 @@ namespace Game {
 
 
         // Manual entries not in all_blocks.txt
-        RegisterModelBlock(BlockID::SnowGrass, "Snow Grass", RenderLayer::Opaque, "grass_block_snow");
 
         // Override model names for blocks where minecraft ID != model file name
         RegisterModelBlock(BlockID::Water, "Water", RenderLayer::Translucent, "water_still");
-        RegisterModelBlock(BlockID::Lava, "Lava", RenderLayer::Translucent, "lava_still");
+        // Solid LAYER, non-occluding BLOCK — the two are separate in MC and
+        // lava is the block where they disagree. ItemBlockRenderTypes
+        // .LAYER_BY_FLUID registers WATER and FLOWING_WATER and nothing else,
+        // so lava takes getRenderLayer's SOLID fallback; lava_still/lava_flow
+        // have no alpha anywhere, and the translucent layer only bought lava a
+        // per-frame back-to-front sort and an arbitrary order against glass and
+        // water. It still occludes nothing, because LiquidBlock's occlusion
+        // shape is empty — leaving `opaque` true here would delete the face of
+        // every stone block touching a lava lake.
+        RegisterModelBlock(BlockID::Lava, "Lava", RenderLayer::Opaque, "lava_still",
+                           /*opaqueOverride=*/false);
 
         // ── Multipart blocks with no plain model of their own ───────────────
         // blockstates/tripwire.json dispatches on `attached` + four connection
@@ -543,18 +489,6 @@ namespace Game {
         RegisterModelBlock(BlockID::TallGrass,    "Tall Grass (Lower)",
                            RenderLayer::Cutout, "tall_grass_bottom");
 
-        RegisterModelBlock(BlockID::LilacTop,        "Lilac (Upper)",
-                           RenderLayer::Cutout, "lilac_top");
-        RegisterModelBlock(BlockID::PeonyTop,        "Peony (Upper)",
-                           RenderLayer::Cutout, "peony_top");
-        RegisterModelBlock(BlockID::RoseBushTop,     "Rose Bush (Upper)",
-                           RenderLayer::Cutout, "rose_bush_top");
-        RegisterModelBlock(BlockID::LargeFernTop,    "Large Fern (Upper)",
-                           RenderLayer::Cutout, "large_fern_top");
-        RegisterModelBlock(BlockID::TallSeagrassTop, "Tall Seagrass (Upper)",
-                           RenderLayer::Cutout, "tall_seagrass_top");
-        RegisterModelBlock(BlockID::TallGrassTop,    "Tall Grass (Upper)",
-                           RenderLayer::Cutout, "tall_grass_top");
 
         // Bee nest — bare ID = honey_level<5 (empty visual). MC's
         // BlockModelGenerators.createBeeNest (line 791-798) shows only
@@ -563,8 +497,6 @@ namespace Game {
         // "honey_level", 0..5 (BlockStateProperties.java:200).
         RegisterModelBlock(BlockID::BeeNest,      "Bee Nest",
                            RenderLayer::Opaque, "bee_nest_empty");
-        RegisterModelBlock(BlockID::BeeNestHoney, "Bee Nest (Honey)",
-                           RenderLayer::Opaque, "bee_nest_honey");
 
         // Leaf litter — bare ID = segment_amount=1. Variants 2..4 are
         // separate BlockIDs because MC's IntegerProperty SEGMENT_AMOUNT
@@ -573,22 +505,10 @@ namespace Game {
         // segment quads).
         RegisterModelBlock(BlockID::LeafLitter,  "Leaf Litter",
                            RenderLayer::Cutout, "leaf_litter_1");
-        RegisterModelBlock(BlockID::LeafLitter2, "Leaf Litter (2)",
-                           RenderLayer::Cutout, "leaf_litter_2");
-        RegisterModelBlock(BlockID::LeafLitter3, "Leaf Litter (3)",
-                           RenderLayer::Cutout, "leaf_litter_3");
-        RegisterModelBlock(BlockID::LeafLitter4, "Leaf Litter (4)",
-                           RenderLayer::Cutout, "leaf_litter_4");
 
         // Wildflowers — same `segment_amount` pattern as leaf litter.
         RegisterModelBlock(BlockID::Wildflowers,  "Wildflowers",
                            RenderLayer::Cutout, "wildflowers_1");
-        RegisterModelBlock(BlockID::Wildflowers2, "Wildflowers (2)",
-                           RenderLayer::Cutout, "wildflowers_2");
-        RegisterModelBlock(BlockID::Wildflowers3, "Wildflowers (3)",
-                           RenderLayer::Cutout, "wildflowers_3");
-        RegisterModelBlock(BlockID::Wildflowers4, "Wildflowers (4)",
-                           RenderLayer::Cutout, "wildflowers_4");
 
         // Pink petals — same shape but DIFFERENT property name. MC uses
         // `flower_amount` (BlockStateProperties.java:164 FLOWER_AMOUNT)
@@ -597,18 +517,12 @@ namespace Game {
         // model file with progressively more visible petal quads.
         RegisterModelBlock(BlockID::PinkPetals,  "Pink Petals",
                            RenderLayer::Cutout, "pink_petals_1");
-        RegisterModelBlock(BlockID::PinkPetals2, "Pink Petals (2)",
-                           RenderLayer::Cutout, "pink_petals_2");
-        RegisterModelBlock(BlockID::PinkPetals3, "Pink Petals (3)",
-                           RenderLayer::Cutout, "pink_petals_3");
-        RegisterModelBlock(BlockID::PinkPetals4, "Pink Petals (4)",
-                           RenderLayer::Cutout, "pink_petals_4");
 
-        // ── Slab top-half variants — table lives at file scope above so the
-        //    SlabTopVariant / SlabBottomVariant helpers can share it.
-        for (const auto& p : kSlabPairs) {
-            RegisterModelBlock(p.top, p.name, RenderLayer::Opaque, p.model);
-        }
+        // Slab halves used to be registered here as their own BlockIDs, each
+        // with its own model name. They are `type` states now, and
+        // GetBlockModel(id, state) resolves them through BlockStateModels from
+        // the block's own blockstate JSON — which is where vanilla keeps
+        // "type=top" -> oak_slab_top and "type=double" -> oak_planks.
 
         // ── Registry slugs ──────────────────────────────────────────────────
         // Placed here deliberately: AFTER the last RegisterModelBlock (those
@@ -634,33 +548,6 @@ namespace Game {
         // and plain grass all resolve to one vanilla block, which is exactly
         // what MC does: they are BlockStates of a single Block. Mirrors the
         // state keys in SectionDataUnpacker::BlockStateRegistry::Initialize.
-        for (const auto& p : kSlabPairs) {
-            blockDefinitions[static_cast<size_t>(p.top)].registrySlug =
-                blockDefinitions[static_cast<size_t>(p.bottom)].registrySlug;
-        }
-        struct VariantSlug { BlockID variant; const char* slug; };
-        static constexpr VariantSlug kVariantSlugs[] = {
-            { BlockID::SnowGrass,       "grass_block"    },  // {snowy:true}
-            { BlockID::LilacTop,        "lilac"          },  // {half:upper}
-            { BlockID::PeonyTop,        "peony"          },
-            { BlockID::RoseBushTop,     "rose_bush"      },
-            { BlockID::LargeFernTop,    "large_fern"     },
-            { BlockID::TallSeagrassTop, "tall_seagrass"  },
-            { BlockID::TallGrassTop,    "tall_grass"     },
-            { BlockID::BeeNestHoney,    "bee_nest"       },  // {honey_level:5}
-            { BlockID::LeafLitter2,     "leaf_litter"    },  // {segment_amount:2..4}
-            { BlockID::LeafLitter3,     "leaf_litter"    },
-            { BlockID::LeafLitter4,     "leaf_litter"    },
-            { BlockID::Wildflowers2,    "wildflowers"    },
-            { BlockID::Wildflowers3,    "wildflowers"    },
-            { BlockID::Wildflowers4,    "wildflowers"    },
-            { BlockID::PinkPetals2,     "pink_petals"    },  // {flower_amount:2..4}
-            { BlockID::PinkPetals3,     "pink_petals"    },
-            { BlockID::PinkPetals4,     "pink_petals"    },
-        };
-        for (const auto& v : kVariantSlugs) {
-            blockDefinitions[static_cast<size_t>(v.variant)].registrySlug = v.slug;
-        }
 
         // ── MC outline shapes, resolved slug -> BlockID once ───────────────
         // GeneratedBlockShapes carries BlockBehaviour.getShape for every block
@@ -953,8 +840,9 @@ namespace Game {
         return BlockModelRegistry::GetModel(block.modelName);
     }
 
-    const BlockModel& BlockRegistry::GetBlockModel(BlockID id, uint8_t stateIndex) {
-        const std::string& stateModel = BlockStateModels::ModelNameFor(id, stateIndex);
+    const BlockModel& BlockRegistry::GetBlockModel(BlockState state) {
+        const BlockID id = state.Block();
+        const std::string& stateModel = BlockStateModels::ModelNameFor(id, state.Index());
         if (!stateModel.empty()) {
             return BlockModelRegistry::GetModel(stateModel);
         }
@@ -962,121 +850,123 @@ namespace Game {
     }
 
     bool BlockRegistry::HasCollision(BlockID id) {
-        // SLAB TOP variants are ALWAYS collidable, no matter what the
-        // noCollision classifier did during init. Mirrors the fast-path in
-        // GetBlockShape — together these two guards rule out the entire
-        // "top slab has no collision" failure mode regardless of how the
-        // hasCollision flag was populated for their BlockID slot.
-        if (IsSlabTop(id)) return true;
+        // The *SlabTop/*SlabDouble special case that used to sit here is gone
+        // with those BlockIDs. All three halves are one block now, and the slab
+        // classifies as collidable once — so there is no second id that could
+        // be classified differently from the one the player walks on.
         return Get(id).hasCollision;
     }
 
-    namespace {
-        // Two BlockID-indexed lookup tables built once from kSlabPairs.
-        // Cached behind a flag (std::call_once would also work but `static
-        // bool` is fine for a single-threaded init since both PlayerSession
-        // and the mesher only consult this AFTER BlockRegistry::Init has
-        // run). BlockID::Air is the "not a slab" sentinel value.
-        std::array<BlockID, BlockRegistry::Size>& SlabTopTable() {
-            static std::array<BlockID, BlockRegistry::Size> t{};
-            static bool built = false;
-            if (!built) {
-                t.fill(BlockID::Air);
-                for (const auto& p : kSlabPairs) {
-                    const auto bi = static_cast<size_t>(p.bottom);
-                    if (bi < t.size()) t[bi] = p.top;
-                }
-                built = true;
-            }
-            return t;
-        }
-        std::array<BlockID, BlockRegistry::Size>& SlabBottomTable() {
-            static std::array<BlockID, BlockRegistry::Size> t{};
-            static bool built = false;
-            if (!built) {
-                t.fill(BlockID::Air);
-                for (const auto& p : kSlabPairs) {
-                    const auto ti = static_cast<size_t>(p.top);
-                    if (ti < t.size()) t[ti] = p.bottom;
-                }
-                built = true;
-            }
-            return t;
+    // ── Slabs (MC SlabBlock) ────────────────────────────────────────────────
+    //
+    // The half is the `type` blockstate now, not a BlockID. What used to live
+    // here — three BlockID-indexed tables built from kSlabPairs, plus the
+    // SlabTopVariant/SlabBottomVariant/SlabDoubleVariant trio — is gone with
+    // the *SlabTop/*SlabDouble ids they mapped between.
+    //
+    // Those tables were also the source of a shipped bug worth remembering:
+    // every one was FILLED with BlockID::Air as its "not a slab" sentinel, so
+    // at index 0 the entry and the key were both Air and `table[i] == id` said
+    // yes for AIR ITSELF. HasCollision consulted it, so the whole sky went
+    // solid — the player could not move, and the heightmap (also built on
+    // HasCollision) put spawn at the build limit. Reading a property instead of
+    // a sentinel table removes the entire failure mode.
+
+    bool BlockRegistry::IsSlabBlock(BlockID id) {
+        // A slab is exactly a block carrying MC's SlabBlock.TYPE. No name
+        // matching, no table: the state definition is the authority.
+        return BlockStates::Default(id).HasProperty(PropertyId::SLAB_TYPE);
+    }
+
+    BlockRegistry::SlabType BlockRegistry::SlabTypeOf(BlockState state) {
+        const int v = state.GetIndex(PropertyId::SLAB_TYPE);
+        if (v < 0) return SlabType::NotSlab;
+        // MC's value order for SlabType is top, bottom, double.
+        switch (v) {
+            case 0:  return SlabType::Top;
+            case 1:  return SlabType::Bottom;
+            default: return SlabType::Double;
         }
     }
 
-    BlockID BlockRegistry::SlabTopVariant(BlockID bottom) {
-        const auto i = static_cast<size_t>(bottom);
-        if (i >= Size) return BlockID::Air;
-        return SlabTopTable()[i];
+    BlockState BlockRegistry::SlabStateWithType(BlockState state, SlabType type) {
+        if (type == SlabType::NotSlab) return state;
+        const int v = (type == SlabType::Top) ? 0 : (type == SlabType::Bottom) ? 1 : 2;
+        return state.SetIndex(PropertyId::SLAB_TYPE, v);
     }
 
-    BlockID BlockRegistry::SlabBottomVariant(BlockID top) {
-        const auto i = static_cast<size_t>(top);
-        if (i >= Size) return BlockID::Air;
-        return SlabBottomTable()[i];
+    BlockID BlockRegistry::SlabFamilyBase(BlockID id) {
+        return IsSlabBlock(id) ? id : BlockID::Air;
     }
 
-    bool BlockRegistry::IsSlabTop(BlockID id) {
-        return SlabBottomVariant(id) != BlockID::Air;
+    std::string_view BlockRegistry::ImpliedPropertyValue(BlockID id, std::string_view propName) {
+        // Nothing is implied any more. This existed because the slab halves
+        // were separate BlockIDs, so MC's data files could ask a *SlabTop about
+        // `type` and there was no property to answer with. `type` is a real
+        // blockstate now and BlockStateModels reads it directly, so the hook
+        // stays only for the next family that needs it (the segmented clumps
+        // still spend an id per `segment_amount`).
+        (void)id; (void)propName;
+        return {};
     }
 
     // ========================================================================
     // BLOCK STATES  (MC StateDefinition / createBlockStateDefinition)
     // ========================================================================
 
-    uint8_t BlockRegistry::BlockStateDefinition::IndexOf(const PropertyMap& props) const {
-        uint32_t index = 0;
+    // The four methods below are now thin wrappers over BlockState, which is
+    // where the arithmetic actually lives. They exist so the ~190 call sites
+    // that still speak (BlockID, index) keep working while they are converted;
+    // each one is exactly MC's equivalent operation on `defaultBlockState()`.
+
+    uint16_t BlockRegistry::BlockStateDefinition::StateCount() const {
+        return static_cast<uint16_t>(BlockStates::Count(owner));
+    }
+
+    uint16_t BlockRegistry::BlockStateDefinition::IndexOf(const PropertyMap& props) const {
+        // MC NbtUtils.readBlockState: start from the block's DEFAULT state and
+        // set only the properties actually supplied, skipping anything unknown.
+        // Starting from index 0 instead — as this did while "0 == default" held
+        // — would now hand back `waterlogged=true, powered=true, lit=true` for
+        // everything the caller did not mention.
+        BlockState s = BlockStates::Default(owner);
         for (const auto& prop : properties) {
-            index *= static_cast<uint32_t>(prop.values.size());
             auto it = props.find(prop.name);
-            if (it == props.end()) continue;   // absent => default (value index 0)
-            for (size_t v = 1; v < prop.values.size(); ++v) {
-                if (prop.values[v] == it->second) { index += static_cast<uint32_t>(v); break; }
-            }
+            if (it == props.end()) continue;
+            s = s.SetName(prop.id, it->second);
         }
-        return static_cast<uint8_t>(index);
+        return static_cast<uint16_t>(s.RawId() - BlockStates::Base(owner));
     }
 
     BlockRegistry::BlockStateDefinition::PropertyMap
-    BlockRegistry::BlockStateDefinition::PropertiesOf(uint8_t stateIndex) const {
+    BlockRegistry::BlockStateDefinition::PropertiesOf(uint16_t stateIndex) const {
         PropertyMap out;
-        uint32_t remaining = stateIndex;
-        // Decode least-significant (last) property first, so walk backwards.
-        for (size_t i = properties.size(); i-- > 0; ) {
-            const auto& prop = properties[i];
-            const uint32_t radix = static_cast<uint32_t>(prop.values.size());
-            const uint32_t v = remaining % radix;
-            remaining /= radix;
-            out[prop.name] = prop.values[v];
+        const BlockState s = BlockState::FromRawId(BlockStates::Base(owner) + stateIndex);
+        for (const auto& prop : properties) {
+            out[prop.name] = std::string(s.GetName(prop.id));
         }
         return out;
     }
 
-    std::string_view BlockRegistry::BlockStateDefinition::ValueOf(uint8_t stateIndex,
-                                                                 std::string_view propName) const {
-        uint32_t remaining = stateIndex;
-        for (size_t i = properties.size(); i-- > 0; ) {
-            const auto& prop = properties[i];
-            const uint32_t radix = static_cast<uint32_t>(prop.values.size());
-            const uint32_t v = remaining % radix;
-            remaining /= radix;
-            if (prop.name == propName) return prop.values[v];
+    std::string_view BlockRegistry::BlockStateDefinition::ValueOf(
+            uint16_t stateIndex, std::string_view propName) const {
+        for (const auto& prop : properties) {
+            if (prop.name != propName) continue;
+            const BlockState s = BlockState::FromRawId(BlockStates::Base(owner) + stateIndex);
+            return s.GetName(prop.id);
         }
         return {};
     }
 
-    uint8_t BlockRegistry::BlockStateDefinition::IndexOfSingle(std::string_view propName,
-                                                              std::string_view value) const {
-        uint32_t index = 0;
+    uint16_t BlockRegistry::BlockStateDefinition::IndexOfSingle(
+            std::string_view propName, std::string_view value) const {
+        BlockState s = BlockStates::Default(owner);
         for (const auto& prop : properties) {
-            index *= static_cast<uint32_t>(prop.values.size());
-            if (prop.name != propName) continue;   // other properties stay default
-            for (size_t v = 1; v < prop.values.size(); ++v) {
-                if (prop.values[v] == value) { index += static_cast<uint32_t>(v); break; }
-            }
+            if (prop.name != propName) continue;
+            s = s.SetName(prop.id, value);
+            break;
         }
-        return static_cast<uint8_t>(index);
+        return static_cast<uint16_t>(s.RawId() - BlockStates::Base(owner));
     }
 
     namespace {
@@ -1084,256 +974,43 @@ namespace Game {
         // definition (a single state, index 0). Built once in Init().
         std::array<BlockRegistry::BlockStateDefinition, BlockRegistry::Size> s_stateDefs{};
 
-        // Property value lists. DEFAULT VALUE FIRST — see the invariant on
-        // BlockStateDefinition. The defaults match MC's registerDefaultState
-        // for each family (north for horizontal facing, north for 6-way facing,
-        // y for pillar axis).
-        const std::vector<std::string> kHorizontalFacingValues{"north", "east", "south", "west"};
-        // MC ChestType. SINGLE first so state 0 stays the default (lone chest).
-        const std::vector<std::string> kChestTypeValues{"single", "left", "right"};
-        const std::vector<std::string> kFacingValues{"north", "east", "south", "west", "up", "down"};
-        const std::vector<std::string> kAxisValues{"y", "x", "z"};
-        // "false" first so state index 0 is the all-disconnected default, per
-        // BlockStateDefinition's default-first invariant.
-        const std::vector<std::string> kBoolValues{"false", "true"};
-        // For boolean properties whose block defaults them TRUE — today just
-        // a campfire's `lit`. Property values are ordered default-first, so a
-        // block that defaults true needs its own list rather than kBoolValues.
-        const std::vector<std::string> kBoolValuesLitFirst{"true", "false"};
+        // Per-BlockID waterlogging facts, filled by InitBlockStates from the
+        // generated tables. Flat and POD because the mesher asks about the
+        // block AND all six neighbours of every fluid voxel it touches.
+        struct WaterlogInfo {
+            bool waterloggable = false;  // declares the `waterlogged` property
+            bool defaultTrue   = false;  // registerDefaultState installs `true`
+            bool alwaysWater   = false;  // getFluidState is unconditionally WATER
+        };
+        std::array<WaterlogInfo, BlockRegistry::Size> s_waterlog{};
 
-        // ── Integer properties (MC IntegerProperty) ─────────────────────────
-        // MC's IntegerProperty.create(name, min, max) enumerates min..max in
-        // ascending order, and every farming block registers its default at
-        // the MINIMUM (age 0, moisture 0), so ascending order already satisfies
-        // the default-first invariant — no special ordering needed here the way
-        // kBoolValuesLitFirst needed one.
-        //
-        // Values are strings because BlockStateDefinition is string-keyed
-        // throughout; the blockstate JSONs and loot-table conditions both spell
-        // these as text ("age=7"), so keeping them as text means no conversion
-        // at either boundary.
-        const std::vector<std::string> kAge1Values {"0", "1"};
-        const std::vector<std::string> kAge2Values {"0", "1", "2"};
-        const std::vector<std::string> kAge3Values {"0", "1", "2", "3"};
-        const std::vector<std::string> kAge4Values {"0", "1", "2", "3", "4"};
-        const std::vector<std::string> kAge7Values {"0", "1", "2", "3", "4", "5", "6", "7"};
-        const std::vector<std::string> kAge15Values{"0", "1", "2",  "3",  "4",  "5",  "6",  "7",
-                                                    "8", "9", "10", "11", "12", "13", "14", "15"};
-        // FarmBlock.MOISTURE = BlockStateProperties.MOISTURE = create(0, 7).
-        const std::vector<std::string> kMoistureValues = kAge7Values;
-        // MC DoubleBlockHalf. LOWER first — DoublePlantBlock's default state is
-        // the lower half, and the upper half is only ever written explicitly.
-        const std::vector<std::string> kDoubleHalfValues{"lower", "upper"};
-        // MC BambooLeaves. NONE first (BambooStalkBlock's registerDefaultState).
-        const std::vector<std::string> kBambooLeavesValues{"none", "small", "large"};
-        // MC RedstoneSide. NONE first — RedStoneWireBlock's registerDefaultState
-        // sets all four sides to NONE, so state 0 is the unconnected dot.
-        const std::vector<std::string> kRedstoneSideValues{"none", "side", "up"};
-        // MC AttachFace. WALL first: both ButtonBlock and LeverBlock
-        // registerDefaultState with FACE=WALL, so state 0 must be the wall form.
-        const std::vector<std::string> kAttachFaceValues{"wall", "floor", "ceiling"};
-
-        bool NameHas(const std::string& n, std::string_view sub) {
-            return n.find(sub) != std::string::npos;
-        }
-        bool NameIs(const std::string& n, std::string_view exact) {
-            return n == exact;
+        // Generated-table lookups, built once. Keyed on the VANILLA registry
+        // slug, not the model name: a slab's top half is its own BlockID here
+        // with model `oak_slab_top`, and MC knows it only as `oak_slab`.
+        const std::unordered_map<std::string_view, bool>& kWaterloggable() {
+            static const std::unordered_map<std::string_view, bool> m = [] {
+                std::unordered_map<std::string_view, bool> t;
+                t.reserve(kWaterloggableTableSize * 2);
+                for (size_t i = 0; i < kWaterloggableTableSize; ++i) {
+                    t.emplace(kWaterloggableTable[i].slug,
+                              kWaterloggableTable[i].defaultWaterlogged);
+                }
+                return t;
+            }();
+            return m;
         }
 
-        // Which property set (if any) a block carries, decided from its MC
-        // model name. Name-pattern matching rather than a hand-written BlockID
-        // list, matching how ClassifyByName / kNoCollisionSubstr already work
-        // in this file — new blocks from an MC version bump are picked up
-        // automatically instead of silently defaulting to "no states".
-        enum class StateKind { None, HorizontalFacing, ChestFacingType, FurnaceFacingLit,
-                               CampfireFacingLit, Facing6, PillarAxis, FireConnections,
-                               // ── Farming (MC CropBlock / FarmBlock / …) ──
-                               Age7, Age3, Age1, Age15,
-                               PitcherCrop, FarmlandMoisture, BambooStalk, CocoaFacingAge,
-                               RedstoneWire, FaceAttached };
-
-        StateKind ClassifyStates(const std::string& n) {
-            // ── Farming ─────────────────────────────────────────────────────
-            // Checked FIRST, ahead of the generic families below, because two
-            // of these names would otherwise be swallowed: "melon_stem" and
-            // "pumpkin_stem" match the PillarAxis rule's "_stem" (meant for
-            // warped_stem / crimson_stem), and cocoa is already listed under
-            // HorizontalFacing but needs FACING **plus** AGE.
-
-            // CropBlock.AGE = AGE_7, and StemBlock.AGE = AGE_7. Attached stems
-            // carry FACING only and fall through to HorizontalFacing below.
-            if (NameIs(n, "wheat") || NameIs(n, "carrots") || NameIs(n, "potatoes") ||
-                NameIs(n, "melon_stem") || NameIs(n, "pumpkin_stem")) {
-                return StateKind::Age7;
-            }
-
-            // BeetrootBlock.AGE / NetherWartBlock.AGE / SweetBerryBushBlock.AGE
-            // are all AGE_3.
-            if (NameIs(n, "beetroots") || NameIs(n, "nether_wart") ||
-                NameIs(n, "sweet_berry_bush")) {
-                return StateKind::Age3;
-            }
-
-            // TorchflowerCropBlock.AGE = AGE_1. Age 2 is not a state at all —
-            // getStateForAge(2) returns the TORCHFLOWER block instead.
-            if (NameIs(n, "torchflower_crop")) return StateKind::Age1;
-
-            // PitcherCropBlock: AGE_4 + DoublePlantBlock's HALF. 5 x 2 = 10.
-            if (NameIs(n, "pitcher_crop")) return StateKind::PitcherCrop;
-
-            // SugarCaneBlock.AGE / CactusBlock.AGE = AGE_15. These never appear
-            // in a blockstate JSON (both files have a single unconditional
-            // variant) — the property exists purely as the growth counter.
-            if (NameIs(n, "sugar_cane") || NameIs(n, "cactus")) return StateKind::Age15;
-
-            if (NameIs(n, "farmland")) return StateKind::FarmlandMoisture;
-
-            // BambooStalkBlock: AGE_1 + LEAVES + STAGE = 2 x 3 x 2 = 12.
-            if (NameIs(n, "bamboo")) return StateKind::BambooStalk;
-
-            // CocoaBlock: FACING + AGE_2 = 4 x 3 = 12.
-            if (NameIs(n, "cocoa")) return StateKind::CocoaFacingAge;
-
-            // RedStoneWireBlock: NORTH/EAST/SOUTH/WEST, each none|side|up.
-            // 3^4 = 81 states.
-            //
-            // MC also carries POWER 0..15, which would make it 1296 — five
-            // times what the uint8_t state index in ChunkSection can hold. It
-            // is dropped deliberately: there is no redstone power simulation
-            // here, so every wire is at power 0 and the property would encode
-            // nothing. If power ever arrives it needs a wider state index,
-            // not a squeeze.
-            if (NameIs(n, "redstone_wire")) return StateKind::RedstoneWire;
-
-            // MC FaceAttachedHorizontalDirectionalBlock — buttons and levers.
-            // FACE (wall/floor/ceiling) + FACING + POWERED = 3 x 4 x 2 = 24.
-            // Without these a button had no state at all, so it could not
-            // record which surface it was stuck to: every one placed as the
-            // default and sat in the cell looking unattached.
-            if (NameHas(n, "_button") || NameIs(n, "lever")) {
-                return StateKind::FaceAttached;
-            }
-
-            // AttachedStemBlock carries HORIZONTAL_FACING and no age — it is
-            // the "there is a fruit that way" state. This has to be spelled
-            // out HERE rather than left to the horizontal-facing block far
-            // below, because the pillar-axis rule in between matches "_stem"
-            // (for warped_stem / crimson_stem) and would claim it first,
-            // handing an attached stem an `axis` it has no use for and losing
-            // the direction its blockstate JSON dispatches on.
-            if (NameIs(n, "attached_melon_stem") || NameIs(n, "attached_pumpkin_stem")) {
-                return StateKind::HorizontalFacing;
-            }
-
-
-            // Cookers carry FACING + LIT (MC AbstractFurnaceBlock:56). LIT is
-            // what swaps the front texture to its *_front_on variant while
-            // burning — blockstates/furnace.json dispatches every entry on it,
-            // so without it declared here the block can only ever resolve the
-            // unlit model and a running furnace looks cold.
-            if (NameIs(n, "furnace") || NameIs(n, "blast_furnace") || NameIs(n, "smoker")) {
-                return StateKind::FurnaceFacingLit;
-            }
-
-            // Campfires also carry FACING + LIT, but they are NOT the furnace
-            // case with a different name: CampfireBlock's registerDefaultState
-            // sets LIT *true* (CampfireBlock.java:77), so a placed campfire is
-            // burning and `lit=false` is the special case. That inverts which
-            // value has to lead the property list — see the case below.
-            if (NameIs(n, "campfire") || NameIs(n, "soul_campfire")) {
-                return StateKind::CampfireFacingLit;
-            }
-
-            // Chests carry FACING + TYPE. Ender chests are deliberately NOT
-            // here: they never pair (EnderChestBlock has no TYPE), so they stay
-            // plain horizontal-facing.
-            if (NameIs(n, "chest") || NameIs(n, "trapped_chest")) {
-                return StateKind::ChestFacingType;
-            }
-
-            // ── Fire (MC FireBlock) ─────────────────────────────────────────
-            // All six entries of blockstates/fire.json carry a `when` asking
-            // about north/east/south/west/up. BlockStateModels refuses a
-            // multipart file outright unless it can answer every property the
-            // file mentions, so without these five declared here fire resolves
-            // to the default cube and renders as stone.
-            //
-            // Deliberately NOT `age`, even though FireBlock.java:264 declares
-            // it: the blockstate never dispatches on age, and 16 values would
-            // multiply this to 512 states — past what the uint8_t state index
-            // in ChunkSection can hold.
-            //
-            // soul_fire is excluded on purpose. SoulFireBlock extends
-            // BaseFireBlock and adds no properties, which is exactly why
-            // blockstates/soul_fire.json has no `when` clauses at all and
-            // already resolved fine.
-            //
-            // Exact name, not a substring: "fire" would also catch
-            // fire_coral_block (a solid cube) and campfire.
-            if (NameIs(n, "fire")) {
-                return StateKind::FireConnections;
-            }
-
-            // ── Pillar axis (MC RotatedPillarBlock.getStateForPlacement) ────
-            // Careful with ordering: "_wood" would also match "stripped_*_wood",
-            // which is intended — every one of those is a RotatedPillarBlock.
-            if (NameHas(n, "_log") || NameHas(n, "_wood") || NameHas(n, "_stem") ||
-                NameHas(n, "_hyphae") || NameHas(n, "_pillar") ||
-                NameIs(n, "bone_block") || NameIs(n, "hay_block") ||
-                NameIs(n, "basalt") || NameIs(n, "polished_basalt") ||
-                NameIs(n, "deepslate") || NameIs(n, "muddy_mangrove_roots") ||
-                NameIs(n, "ochre_froglight") || NameIs(n, "verdant_froglight") ||
-                NameIs(n, "pearlescent_froglight")) {
-                return StateKind::PillarAxis;
-            }
-
-            // ── Six-way facing (MC DirectionalBlock) ────────────────────────
-            if (NameIs(n, "dispenser") || NameIs(n, "dropper") || NameIs(n, "observer") ||
-                NameIs(n, "barrel") || NameIs(n, "piston") || NameIs(n, "sticky_piston") ||
-                NameIs(n, "command_block") || NameIs(n, "repeating_command_block") ||
-                NameIs(n, "chain_command_block") || NameHas(n, "shulker_box") ||
-                NameIs(n, "hopper") || NameIs(n, "lightning_rod") ||
-                NameIs(n, "end_rod") || NameHas(n, "amethyst_bud") ||
-                NameIs(n, "amethyst_cluster") || NameIs(n, "crafter")) {
-                return StateKind::Facing6;
-            }
-
-            // ── Horizontal facing (MC HorizontalDirectionalBlock) ───────────
-            if (NameHas(n, "_glazed_terracotta") ||
-                NameIs(n, "ender_chest") ||
-                NameIs(n, "carved_pumpkin") || NameIs(n, "jack_o_lantern") ||
-                NameIs(n, "loom") || NameIs(n, "stonecutter") || NameIs(n, "lectern") ||
-                NameIs(n, "chiseled_bookshelf") || NameIs(n, "beehive") || NameIs(n, "bee_nest") ||
-                NameIs(n, "end_portal_frame") || NameIs(n, "vault") ||
-                NameIs(n, "anvil") || NameIs(n, "chipped_anvil") || NameIs(n, "damaged_anvil") ||
-                NameIs(n, "grindstone") ||
-                NameIs(n, "decorated_pot") || NameIs(n, "calibrated_sculk_sensor") ||
-                NameIs(n, "big_dripleaf") || NameIs(n, "small_dripleaf") ||
-                // NOTE: cocoa used to be listed here. It is now handled by the
-                // farming block above, which gives it FACING **and** AGE —
-                // leaving it here as well would be dead code, since that check
-                // runs first.
-                NameIs(n, "ladder") ||
-                NameIs(n, "repeater") || NameIs(n, "comparator") ||
-                NameHas(n, "_stairs") ||
-                // Segmented ground cover — MC LeafLitterBlock and
-                // FlowerBedBlock (pink_petals, wildflowers), both
-                // SegmentableBlock with HORIZONTAL_FACING defaulting to north
-                // (LeafLitterBlock.java:25, FlowerBedBlock.java:35).
-                //
-                // Matched by substring because the segment count is baked into
-                // the model name here (leaf_litter_1 … leaf_litter_4): this
-                // engine spends a BlockID per `segment_amount` value, so only
-                // `facing` is left to carry as state. Without it every clump in
-                // the world sits in the same corner of its block pointing the
-                // same way, which reads as a repeating grid rather than scatter.
-                NameHas(n, "leaf_litter") || NameHas(n, "wildflowers") ||
-                NameHas(n, "pink_petals")) {
-                return StateKind::HorizontalFacing;
-            }
-
-            return StateKind::None;
+        const std::unordered_set<std::string_view>& kAlwaysWaterlogged() {
+            static const std::unordered_set<std::string_view> m = [] {
+                std::unordered_set<std::string_view> t;
+                for (size_t i = 0; i < kAlwaysWaterloggedTableSize; ++i) {
+                    t.emplace(kAlwaysWaterloggedTable[i]);
+                }
+                return t;
+            }();
+            return m;
         }
+
     } // namespace
 
     const BlockRegistry::BlockStateDefinition& BlockRegistry::GetStateDefinition(BlockID id) {
@@ -1345,154 +1022,126 @@ namespace Game {
         return s_stateDefs[idx];
     }
 
+    // Build every block's property list from the generated tables.
+    //
+    // This replaced ~600 lines of hand-written value tables and a `StateKind`
+    // classifier that guessed a block's properties from its MODEL NAME. Three
+    // things were wrong with that and none of them were fixable by care:
+    //
+    //   * it only knew the families someone had written out — a couple of
+    //     dozen, against the 762 blocks that actually carry properties;
+    //   * the value ORDER was guessed, and MC's is not what you would guess
+    //     (`facing` is north,south,west,east; `half` is top,bottom);
+    //   * it keyed properties by NAME, and `type` alone means three different
+    //     things depending on the block.
+    //
+    // See tools/gen_block_states.py. The data is checked against vanilla by
+    // tools/verify_block_states.py and the runtime tables by
+    // tools/blockstate_parity.
     void BlockRegistry::InitBlockStates() {
-        for (size_t i = 0; i < blockDefinitions.size(); ++i) {
-            const Block& b = blockDefinitions[i];
-            if (b.modelName.empty() && b.name.empty()) continue; // unregistered slot
-            const std::string& name = !b.modelName.empty() ? b.modelName : b.name;
+        BlockStates::Init();
 
+        for (size_t i = 0; i < Size; ++i) {
+            const BlockID id = static_cast<BlockID>(i);
             BlockStateDefinition def;
-            switch (ClassifyStates(name)) {
-                case StateKind::HorizontalFacing:
-                    def.properties.push_back({"facing", kHorizontalFacingValues});
-                    break;
+            def.owner        = id;
+            def.defaultIndex = static_cast<uint16_t>(
+                BlockStates::Default(id).RawId() - BlockStates::Base(id));
 
-                case StateKind::ChestFacingType:
-                    // MC ChestBlock.createBlockStateDefinition: FACING + TYPE.
-                    // `type` is what remembers which chest a half is paired
-                    // with, which is the only way the decision can survive the
-                    // click that made it — geometry alone cannot tell you which
-                    // neighbour the player meant. 4 x 3 = 12 states.
-                    def.properties.push_back({"facing", kHorizontalFacingValues});
-                    def.properties.push_back({"type",   kChestTypeValues});
-                    break;
-
-                case StateKind::FurnaceFacingLit:
-                    // MC AbstractFurnaceBlock.createBlockStateDefinition:
-                    // FACING + LIT. 4 x 2 = 8 states, and `false` leads
-                    // kBoolValues so state 0 stays the unlit default — the
-                    // invariant the whole storage layer rests on.
-                    def.properties.push_back({"facing", kHorizontalFacingValues});
-                    def.properties.push_back({"lit",    kBoolValues});
-                    break;
-
-                case StateKind::CampfireFacingLit:
-                    // Same two properties as the furnace, opposite default.
-                    // CampfireBlock.java:77 registers LIT *true*, so `true`
-                    // must lead here or state 0 would mean "unlit" and every
-                    // campfire in the world — placed, generated, or decoded
-                    // from a save that never wrote the property — would come
-                    // out cold. kBoolValues is deliberately NOT reused; the
-                    // whole point of the default-first invariant is that it
-                    // encodes each block's OWN default, not a global one.
-                    def.properties.push_back({"facing", kHorizontalFacingValues});
-                    def.properties.push_back({"lit",    kBoolValuesLitFirst});
-                    break;
-                case StateKind::Facing6:
-                    def.properties.push_back({"facing", kFacingValues});
-                    break;
-                case StateKind::PillarAxis:
-                    def.properties.push_back({"axis", kAxisValues});
-                    break;
-                case StateKind::FireConnections:
-                    // 2^5 = 32 states; index 0 is all-false, which is the state
-                    // MC itself uses whenever fire sits on a solid or burnable
-                    // block (FireBlock.getStateForPlacement returns
-                    // defaultBlockState() in that case) — i.e. every fire a
-                    // flint and steel lights on the ground.
-                    def.properties.push_back({"north", kBoolValues});
-                    def.properties.push_back({"east",  kBoolValues});
-                    def.properties.push_back({"south", kBoolValues});
-                    def.properties.push_back({"west",  kBoolValues});
-                    def.properties.push_back({"up",    kBoolValues});
-                    break;
-
-                // ── Farming ─────────────────────────────────────────────────
-                // MC CropBlock/StemBlock/… declare AGE alone, and every one of
-                // them registers its default at age 0 — which is also index 0
-                // here, so a freshly planted seed needs no explicit state and
-                // a section full of crops still costs no state plane until
-                // something actually grows.
-                case StateKind::Age7:
-                    def.properties.push_back({"age", kAge7Values});
-                    break;
-                case StateKind::Age3:
-                    def.properties.push_back({"age", kAge3Values});
-                    break;
-                case StateKind::Age1:
-                    def.properties.push_back({"age", kAge1Values});
-                    break;
-                case StateKind::Age15:
-                    def.properties.push_back({"age", kAge15Values});
-                    break;
-
-                case StateKind::PitcherCrop:
-                    // MC PitcherCropBlock.createBlockStateDefinition adds AGE
-                    // and then defers to DoublePlantBlock for HALF, so AGE is
-                    // the more significant property. Order matters: it decides
-                    // the numeric layout of the state index, and the blockstate
-                    // JSON is matched by property NAME, so only save
-                    // compatibility depends on it — but it should still mirror
-                    // MC so a future NBT importer can share the arithmetic.
-                    def.properties.push_back({"age",  kAge4Values});
-                    def.properties.push_back({"half", kDoubleHalfValues});
-                    break;
-
-                case StateKind::FarmlandMoisture:
-                    // MC FarmBlock: MOISTURE 0..7, default 0 (dry). Only
-                    // moisture=7 resolves farmland_moist in the blockstate
-                    // JSON; 0..6 all draw the dry model, exactly as vanilla.
-                    def.properties.push_back({"moisture", kMoistureValues});
-                    break;
-
-                case StateKind::BambooStalk:
-                    // MC BambooStalkBlock: builder.add(AGE, LEAVES, STAGE).
-                    // AGE is thin/thick, not a growth counter — the growth
-                    // counter for bamboo is STAGE (0 = still growing).
-                    def.properties.push_back({"age",    kAge1Values});
-                    def.properties.push_back({"leaves", kBambooLeavesValues});
-                    def.properties.push_back({"stage",  kAge1Values});
-                    break;
-
-                case StateKind::CocoaFacingAge:
-                    // MC CocoaBlock: builder.add(FACING, AGE).
-                    def.properties.push_back({"facing", kHorizontalFacingValues});
-                    def.properties.push_back({"age",    kAge2Values});
-                    break;
-
-                case StateKind::FaceAttached:
-                    // MC ButtonBlock/LeverBlock.createBlockStateDefinition:
-                    // builder.add(FACING, POWERED, FACE).
-                    def.properties.push_back({"face",    kAttachFaceValues});
-                    def.properties.push_back({"facing",  kHorizontalFacingValues});
-                    def.properties.push_back({"powered", kBoolValues});
-                    break;
-
-                case StateKind::RedstoneWire:
-                    // Declaring these is what makes the wire RENDER its
-                    // connections: blockstates/redstone_wire.json is multipart
-                    // and every one of its predicates reads exactly these four
-                    // properties. BlockStateModels fails a predicate CLOSED
-                    // when it names a property the block doesn't declare, so
-                    // before this every part was dropped, nothing matched, and
-                    // the wire fell back to a plain model it does not have.
-                    // MC's PROPERTY_BY_DIRECTION order.
-                    def.properties.push_back({"north", kRedstoneSideValues});
-                    def.properties.push_back({"east",  kRedstoneSideValues});
-                    def.properties.push_back({"south", kRedstoneSideValues});
-                    def.properties.push_back({"west",  kRedstoneSideValues});
-                    break;
-
-                case StateKind::None:
-                    break;
+            const uint16_t n = BlockStates::PropertyCount(id);
+            def.properties.reserve(n);
+            for (uint16_t slot = 0; slot < n; ++slot) {
+                const PropertyId p = BlockStates::PropertyAt(id, slot);
+                BlockStateDefinition::Property prop;
+                prop.id   = p;
+                prop.name = std::string(BlockStates::PropertyName(p));
+                const uint16_t vc = BlockStates::PropertyValueCount(p);
+                prop.values.reserve(vc);
+                for (uint16_t v = 0; v < vc; ++v) {
+                    prop.values.emplace_back(BlockStates::PropertyValueName(p, v));
+                }
+                def.properties.push_back(std::move(prop));
             }
+
+            // `waterlogged` is now just another property, found by identity
+            // rather than by a name-keyed table. The old low-bit mask that
+            // ContainsWater/WithWaterlogged used is gone with it: under MC's
+            // sorted-by-name property order `waterlogged` is NOT the trailing
+            // digit for every block — a wall sorts east,north,south,up,
+            // waterlogged,west — so the mask was about to start reading `west`.
+            s_waterlog[i].waterloggable = false;
+            for (const auto& prop : def.properties) {
+                if (prop.id == PropertyId::WATERLOGGED) {
+                    s_waterlog[i].waterloggable = true;
+                    break;
+                }
+            }
+            const std::string& slug = blockDefinitions[i].registrySlug;
+            s_waterlog[i].alwaysWater =
+                !slug.empty() && kAlwaysWaterlogged().count(slug) > 0;
+
             s_stateDefs[i] = std::move(def);
         }
 
-        size_t stateful = 0;
+        // AIR must not have acquired properties, and must still be state id 0 —
+        // the palette fill, a zero-initialised voxel and BlockState{} all mean
+        // air only because of that. Checked rather than assumed: this codebase
+        // has already shipped one bug where air was quietly classified as a
+        // real block and the whole sky turned solid.
+        if (BlockStates::Count(BlockID::Air) != 1 ||
+            BlockStates::Default(BlockID::Air).RawId() != 0 ||
+            !s_stateDefs[static_cast<size_t>(BlockID::Air)].properties.empty()) {
+            Log::Error("AIR has acquired block states - every empty voxel in the "
+                       "world is about to mean something else");
+        }
+
+        size_t stateful = 0, waterloggable = 0, alwaysWater = 0;
         for (const auto& d : s_stateDefs) if (!d.properties.empty()) ++stateful;
-        Log::Info("Block states initialized - %zu of %zu blocks carry state properties",
-                  stateful, static_cast<size_t>(BlockID::Count));
+        for (const auto& w : s_waterlog) {
+            if (w.waterloggable) ++waterloggable;
+            if (w.alwaysWater)   ++alwaysWater;
+        }
+        Log::Info("Block states initialized - %zu of %zu blocks carry state properties, "
+                  "%u states total (%d bits)",
+                  stateful, static_cast<size_t>(BlockID::Count),
+                  BlockStates::Total(), kBlockStateBits);
+        Log::Info("Waterlogging - %zu blocks declare `waterlogged`, %zu are always water",
+                  waterloggable, alwaysWater);
+    }
+
+
+    bool BlockRegistry::IsWaterloggable(BlockID id) {
+        const size_t i = static_cast<size_t>(id);
+        return i < Size && s_waterlog[i].waterloggable;
+    }
+
+    bool BlockRegistry::IsAlwaysWaterlogged(BlockID id) {
+        const size_t i = static_cast<size_t>(id);
+        return i < Size && s_waterlog[i].alwaysWater;
+    }
+
+    // Both of these used to do bit tricks on the state index, valid only while
+    // `waterlogged` was the TRAILING property of every block that declares it.
+    // Under MC's sorted-by-name property order it is not: a wall sorts
+    // east, north, south, up, waterlogged, west — so the low bit is `west`, and
+    // the mask was one rename away from reading the wrong property and one
+    // block away from truncating at 256. Read the property instead.
+    bool BlockRegistry::ContainsWater(BlockState state) {
+        const BlockID id = state.Block();
+        if (id == BlockID::Water) return true;
+        const size_t i = static_cast<size_t>(id);
+        if (i >= Size) return false;
+        const WaterlogInfo& w = s_waterlog[i];
+        if (w.alwaysWater) return true;
+        if (!w.waterloggable) return false;
+        // Booleans list [true, false], so index 0 is true.
+        return state.GetIndex(PropertyId::WATERLOGGED) == 0;
+    }
+
+    BlockState BlockRegistry::WithWaterlogged(BlockState state, bool on) {
+        const size_t i = static_cast<size_t>(state.Block());
+        if (i >= Size || !s_waterlog[i].waterloggable) return state;
+        return state.SetIndex(PropertyId::WATERLOGGED, on ? 0 : 1);
     }
 
     namespace {
@@ -1519,59 +1168,35 @@ namespace Game {
         // every block is one state wide, and clamping against the later, larger
         // count would index straight out of a block's slice and into the next
         // one's.
-        struct StateIdTable {
-            std::array<uint32_t, BlockRegistry::Size> base{};
-            std::array<uint16_t, BlockRegistry::Size> count{};
-            std::vector<BlockStateRef>                reverse;
-            uint32_t                                  total = 0;
-            int                                       bits  = 0;
-
-            StateIdTable() {
-                uint32_t off = 0;
-                size_t   clampedBlocks = 0;
-                for (size_t i = 0; i < BlockRegistry::Size; ++i) {
-                    base[i] = off;
-                    uint16_t n =
-                        BlockRegistry::GetStateDefinition(static_cast<BlockID>(i)).StateCount();
-                    if (n == 0) n = 1;
-                    // stateIndex is a uint8_t everywhere in the engine, so a
-                    // block cannot address more than 256 states no matter what
-                    // its definition declares — BlockStateDefinition::IndexOf
-                    // already truncates. Allocating ids past that would mint
-                    // values Unpack could not represent.
-                    if (n > 256) { n = 256; ++clampedBlocks; }
-                    count[i] = n;
-                    off += n;
-                }
-                total = off;
-
-                reverse.resize(total);
-                for (size_t i = 0; i < BlockRegistry::Size; ++i) {
-                    for (uint16_t st = 0; st < count[i]; ++st) {
-                        reverse[base[i] + st] =
-                            BlockStateRef{static_cast<BlockID>(i), static_cast<uint8_t>(st)};
-                    }
-                }
-
-                // MC Mth.ceillog2 — the width a global palette needs.
-                bits = 0;
-                while ((1u << bits) < total) ++bits;
-
-                Log::Info("Block state ids: %u distinct states across %zu blocks (%d bits)",
-                          total, static_cast<size_t>(BlockRegistry::Size), bits);
-                if (clampedBlocks > 0) {
-                    Log::Warning("%zu block(s) declare more than 256 states and were clamped "
-                                 "— stateIndex is a uint8_t; widen it before adding more",
-                                 clampedBlocks);
-                }
+        // The flat (BlockID, stateIndex) -> global id mapping.
+        //
+        // This used to be a second table built independently of the block state
+        // registry, and it CLAMPED every block to 256 states because the index
+        // was a uint8_t. That clamp is gone with the widening, and so is the
+        // table: BlockStates already owns exactly this mapping, and two tables
+        // that can disagree about how many states a block has is precisely the
+        // kind of split-brain that shows up as a chunk palette sized for a
+        // different world than the one being written into it.
+        struct StateIdTableView {
+            uint32_t base(size_t i) const {
+                return BlockStates::Base(static_cast<BlockID>(i));
             }
+            uint32_t count(size_t i) const {
+                return BlockStates::Count(static_cast<BlockID>(i));
+            }
+            uint32_t total_() const { return BlockStates::Total(); }
         };
 
-        // Magic static: thread-safe one-time init, and lazy enough that the
-        // state definitions are already populated by the time anything asks.
-        StateIdTable& StateIds() {
-            static StateIdTable t;
-            return t;
+        struct StateIdsProxy {
+            uint32_t total;
+            int      bits;
+            StateIdTableView view;
+            uint32_t baseAt(size_t i)  const { return view.base(i); }
+            uint32_t countAt(size_t i) const { return view.count(i); }
+        };
+
+        StateIdsProxy StateIds() {
+            return StateIdsProxy{BlockStates::Total(), kBlockStateBits, {}};
         }
 
         struct StateShapeCache {
@@ -1593,6 +1218,30 @@ namespace Game {
         // for a shape.
         StateShapeCache& StateShapes() {
             static StateShapeCache c;
+            return c;
+        }
+
+        // The same cache for the box-union form. Kept separate rather than
+        // folded into StateShapeCache because GetBlockShape hands out a
+        // reference to its entry and the two are filled on different paths —
+        // a set entry is only ever built for a block whose shape is not one
+        // box, and every other block's set is derived from the single shape.
+        struct StateShapeSetCache {
+            std::vector<BlockRegistry::BlockShapeSet> sets;
+            std::unique_ptr<std::atomic<bool>[]>      computed;
+
+            StateShapeSetCache() {
+                const uint32_t total = StateIds().total;
+                sets.assign(total, BlockRegistry::BlockShapeSet{});
+                computed = std::make_unique<std::atomic<bool>[]>(total);
+                for (uint32_t k = 0; k < total; ++k) {
+                    computed[k].store(false, std::memory_order_relaxed);
+                }
+            }
+        };
+
+        StateShapeSetCache& StateShapeSets() {
+            static StateShapeSetCache c;
             return c;
         }
 
@@ -1677,7 +1326,7 @@ namespace Game {
         // selection box. The subtler half is that the mesher's occlusion test
         // is `block.opaque && fullCube` — so a full-cube shape ALSO made the
         // stem cull the face of the melon or pumpkin beside it.
-        bool AttachedStemShape(BlockID id, uint8_t stateIndex,
+        bool AttachedStemShape(BlockID id, BlockStateIndex stateIndex,
                                BlockRegistry::BlockShape& out) {
             if (id != BlockID::AttachedMelonStem && id != BlockID::AttachedPumpkinStem) {
                 return false;
@@ -1752,7 +1401,7 @@ namespace Game {
         }
 
         // Returns false when the block is not a button or a lever.
-        bool FaceAttachedShapeFor(BlockID id, uint8_t stateIndex,
+        bool FaceAttachedShapeFor(BlockID id, BlockStateIndex stateIndex,
                                   BlockRegistry::BlockShape& out) {
             const std::string& n = BlockRegistry::Get(id).modelName;
             const bool isButton = n.find("_button") != std::string::npos;
@@ -1777,7 +1426,7 @@ namespace Game {
         // The `age` property as an integer. Kept local rather than shared with
         // BlockGrowth.cpp's copy: this one runs inside the shape cache, on the
         // mesher's threads, and must not pull the growth header in.
-        int AgeFromState(BlockID id, uint8_t stateIndex) {
+        int AgeFromState(BlockID id, BlockStateIndex stateIndex) {
             const std::string_view v =
                 BlockRegistry::GetStateDefinition(id).ValueOf(stateIndex, "age");
             int n = 0;
@@ -1882,9 +1531,9 @@ namespace Game {
     }
 
     BlockRegistry::BlockShape BlockRegistry::GetBlockShapeAt(
-            const IBlockAccess& world, const glm::ivec3& pos,
-            BlockID id, uint8_t stateIndex) {
-        BlockShape shape = GetBlockShape(id, stateIndex);
+            const IBlockAccess& world, const glm::ivec3& pos, BlockState state) {
+        const BlockID id = state.Block();
+        BlockShape shape = GetBlockShape(state);
         if (id != BlockID::Chest && id != BlockID::TrappedChest) return shape;
 
         const auto pair = FindChestPartner(world, pos);
@@ -1906,31 +1555,105 @@ namespace Game {
         return shape;
     }
 
+    namespace {
+        // Which families build their shape from a box union rather than from
+        // the model. Each one is a MC class that overrides getShape.
+        bool HasMultiBoxShape(BlockID id) {
+            return IsStairs(id) || IsCrossCollisionBlock(id) ||
+                   IsWallBlock(id) || IsFenceGateBlock(id);
+        }
+
+        // `collision` picks getCollisionShape over getShape. They differ for
+        // the fence, wall and gate families; a stair's are the same shape.
+        BlockRegistry::BlockShapeSet MultiBoxShape(BlockState state,
+                                                   bool collision) {
+            const BlockID id = state.Block();
+            if (IsStairs(id))             return StairShapeBoxes(state);
+            if (IsCrossCollisionBlock(id)) return collision ? CrossCollisionBoxes(state)
+                                                            : CrossShapeBoxes(state);
+            if (IsWallBlock(id))          return collision ? WallCollisionBoxes(state)
+                                                           : WallShapeBoxes(state);
+            return collision ? FenceGateCollisionBoxes(state)
+                             : FenceGateShapeBoxes(state);
+        }
+    } // namespace
+
+    BlockRegistry::BlockShapeSet BlockRegistry::GetBlockShapeSetAt(
+            const IBlockAccess& world, const glm::ivec3& pos, BlockState state) {
+        const BlockID id = state.Block();
+        BlockShapeSet set = GetBlockShapeSet(state);
+        // The only world-aware shape is the paired chest, and a chest is a
+        // single box — so the extension applies to box 0 and nothing else in
+        // the set can be affected. Routed through GetBlockShapeAt rather than
+        // repeating its arithmetic so the two cannot drift.
+        if (id == BlockID::Chest || id == BlockID::TrappedChest) {
+            set.boxes[0] = GetBlockShapeAt(world, pos, state);
+            set.count    = 1;
+        }
+        return set;
+    }
+
     const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockID id) {
-        return GetBlockShape(id, 0);
+        return GetBlockShape(BlockStates::Default(id));
     }
 
-    // ── Game::BlockStateIds ────────────────────────────────────────────────
-
-    uint32_t BlockStateIds::Pack(BlockID id, uint8_t stateIndex) {
+    BlockRegistry::BlockShapeSet BlockRegistry::GetBlockShapeSet(BlockState state) {
+        const BlockID id = state.Block();
+        BlockStateIndex stateIndex = state.Index();
         const size_t idx = static_cast<size_t>(id);
-        if (idx >= BlockRegistry::Size) return 0;   // Air's default state
-        const StateIdTable& t = StateIds();
-        const uint16_t n = t.count[idx];
-        const uint16_t st = (stateIndex < n) ? stateIndex : static_cast<uint16_t>(n - 1);
-        return t.base[idx] + st;
+        BlockShapeSet set;
+
+        // Everything with a single-box shape IS that box, so this API is a
+        // drop-in for GetBlockShape at every call site. Built on the spot from
+        // the already-cached shape rather than memoised again: a second cache
+        // would have to mirror GetBlockShape's "don't cache before the model
+        // JSONs load" rule, and getting that wrong freezes a placeholder full
+        // cube onto every partial block for the rest of the run.
+        const bool multiBox = idx < Size && HasMultiBoxShape(id);
+        if (!multiBox) {
+            set.boxes[0] = GetBlockShape(state);
+            set.count    = 1;
+            return set;
+        }
+
+        // The multi-box families are memoised. Their box sets come from
+        // string-keyed property reads, which is far too much work for a
+        // per-voxel query in the collision sweep.
+        if (stateIndex >= StateIds().countAt(idx)) stateIndex = 0;
+        const uint32_t slot = StateIds().baseAt(idx) + stateIndex;
+
+        StateShapeSetCache& cache = StateShapeSets();
+        if (cache.computed[slot].load(std::memory_order_acquire)) {
+            return cache.sets[slot];
+        }
+        set = MultiBoxShape(state, /*collision=*/false);
+        cache.sets[slot] = set;
+        cache.computed[slot].store(true, std::memory_order_release);
+        return set;
     }
 
-    BlockStateRef BlockStateIds::Unpack(uint32_t stateId) {
-        const StateIdTable& t = StateIds();
-        if (stateId >= t.total) return BlockStateRef{};   // Air, default state
-        return t.reverse[stateId];
+    BlockRegistry::BlockShapeSet BlockRegistry::GetBlockCollisionShapeSet(BlockState state) {
+        const BlockID id = state.Block();
+        // Three families separate the two: fences and walls are taller to walk
+        // into than to look at, and an open gate has no collision shape at all.
+        // Everything else inherits BlockBehaviour.getCollisionShape's default
+        // of "the outline shape".
+        if (static_cast<size_t>(id) < Size &&
+            (IsCrossCollisionBlock(id) || IsWallBlock(id) || IsFenceGateBlock(id))) {
+            return MultiBoxShape(state, /*collision=*/true);
+        }
+        return GetBlockShapeSet(state);
     }
 
-    uint32_t BlockStateIds::Count() { return StateIds().total; }
-    int      BlockStateIds::Bits()  { return StateIds().bits;  }
+    // Game::BlockStateIds used to live here — Pack/Unpack/Count/Bits, the shim
+    // that let the storage and packet layers keep speaking (BlockID, index)
+    // while they were converted. Everything speaks BlockState now, so the
+    // shim, its BlockStateRef pair struct and its header are all gone;
+    // BlockStates::FromIndex is the one remaining boundary conversion.
 
-    const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockID id, uint8_t stateIndex) {
+    const BlockRegistry::BlockShape& BlockRegistry::GetBlockShape(BlockState state) {
+        const BlockID id = state.Block();
+        BlockStateIndex stateIndex = state.Index();
         const size_t idx = static_cast<size_t>(id);
         if (idx >= Size) {
             static const BlockShape kFull;
@@ -1942,27 +1665,36 @@ namespace Game {
         // this build doesn't model. Fall back to the default state rather than
         // indexing past the block's slice into the next block's shapes.
         // BlockStateIds::Pack applies the same clamp for the same reason.
-        if (stateIndex >= StateIds().count[idx]) stateIndex = 0;
+        if (stateIndex >= StateIds().countAt(idx)) stateIndex = 0;
 
-        const uint32_t slot = StateIds().base[idx] + stateIndex;
+        const uint32_t slot = StateIds().baseAt(idx) + stateIndex;
         BlockShape* const shapes = cache.shapes.data();
         std::atomic<bool>* const computed = cache.computed.get();
 
-        // Fast-path: SLAB TOP variants ALWAYS resolve to y∈[0.5, 1] regardless
-        // of whether the JSON model has loaded yet. Without this hardcode the
-        // mesher's per-thread EnsureBlockPropsCache may populate the cache with
-        // the default full-cube shape for every SlabTop ID during the first
-        // mesh build (before BlockModelRegistry::LoadModels has run, or
-        // before the worker thread has imported its tables), permanently
-        // mis-classifying them as full cubes — making the player fall right
-        // through every top slab even though the model JSONs render correctly.
-        // Bottom slabs work because their model name matches an existing
-        // sentinel resolved at vanilla-init time.
-        if (IsSlabTop(id)) {
-            static const BlockShape kSlabTopShape =
+        // Fast-path: a slab ALWAYS resolves from its `type` state, regardless of
+        // whether the JSON model has loaded yet. Without this the mesher's
+        // per-thread EnsureBlockPropsCache can populate the cache with the
+        // default full-cube shape during the first mesh build (before
+        // BlockModelRegistry::LoadModels has run, or before the worker thread
+        // has imported its tables), permanently mis-classifying slabs as full
+        // cubes — which made the player fall right through every top slab even
+        // though the model JSONs rendered correctly.
+        //
+        // This now covers all three halves rather than just the top. Before the
+        // collapse the bottom happened to be safe because its model name
+        // matched a sentinel resolved at vanilla-init time; that was luck, and
+        // it does not survive the halves sharing one BlockID and one cache
+        // slot per state.
+        if (const SlabType half = SlabTypeOf(state); half != SlabType::NotSlab) {
+            static const BlockShape kTop =
                 BlockShape{ glm::vec3(0.0f, 0.5f, 0.0f), glm::vec3(1.0f) };
-            // Still memoise so subsequent lookups skip the IsSlabTop branch.
-            shapes[slot] = kSlabTopShape;
+            static const BlockShape kBottom =
+                BlockShape{ glm::vec3(0.0f), glm::vec3(1.0f, 0.5f, 1.0f) };
+            static const BlockShape kFullCube =
+                BlockShape{ glm::vec3(0.0f), glm::vec3(1.0f) };
+            shapes[slot] = (half == SlabType::Top)    ? kTop
+                         : (half == SlabType::Bottom) ? kBottom
+                                                      : kFullCube;
             computed[slot].store(true, std::memory_order_release);
             return shapes[slot];
         }
@@ -2002,6 +1734,39 @@ namespace Game {
         }
 
         if (computed[slot].load(std::memory_order_acquire)) {
+            return shapes[slot];
+        }
+
+        // ── Stairs ──────────────────────────────────────────────────────────
+        //
+        // MC StairBlock.getShape is a union of two or three boxes, so what
+        // belongs here is its BOUNDS — `getShape().bounds()`, which for a
+        // bottom-half stair really is the whole cell. Callers that need the
+        // union (collision, the raycast, the occlusion test) ask
+        // GetBlockShapeSet instead; the ones that stay on this overload are
+        // asking a question the bounds answer correctly.
+        //
+        // Computed rather than model-derived because the model union would get
+        // the same answer by accident and then be wrong the moment the shape
+        // and the model disagree — which they do for the top half, where the
+        // shape is an INVERT_Y of the bottom one but the model is an x=180
+        // rotation with a compensating y turn.
+        // Same for every other family whose shape is a union — fences, panes,
+        // walls, gates. The bounds are what a caller asking for one AABB wants.
+        if (HasMultiBoxShape(id)) {
+            const BlockShapeSet set = MultiBoxShape(BlockStates::FromIndex(id, stateIndex),
+                                                    /*collision=*/false);
+            glm::vec3 mn(std::numeric_limits<float>::infinity());
+            glm::vec3 mx(-std::numeric_limits<float>::infinity());
+            for (const BlockShape& b : set) {
+                mn = glm::min(mn, b.min);
+                mx = glm::max(mx, b.max);
+            }
+            // An open fence gate has no shape at all for collision, but it is
+            // still drawn and still selectable, so the OUTLINE set is never
+            // empty and this loop always has something to fold.
+            shapes[slot] = BlockShape{mn, mx};
+            computed[slot].store(true, std::memory_order_release);
             return shapes[slot];
         }
 
@@ -2075,7 +1840,7 @@ namespace Game {
         // their rotated positions, so the union below lands on the right
         // quarter of the cell without any extra rotation maths here.
         BlockShape shape;
-        const BlockModel& model = GetBlockModel(id, stateIndex);
+        const BlockModel& model = GetBlockModel(BlockStates::FromIndex(id, stateIndex));
         if (model.elements.empty()) {
             static const BlockShape kFull;
             return kFull;

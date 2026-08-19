@@ -30,10 +30,9 @@ namespace Game {
             const BlockID id = level.GetBlock(p.x, p.y, p.z);
             if (id == BlockID::Air) return false;
             if (!BlockRegistry::HasCollision(id)) return false;
-            const auto& s = BlockRegistry::GetBlockShape(id, level.GetBlockState(p.x, p.y, p.z));
-            return s.min.x <= 0.0001f && s.max.x >= 0.9999f &&
-                   s.min.y <= 0.0001f && s.max.y >= 0.9999f &&
-                   s.min.z <= 0.0001f && s.max.z >= 0.9999f;
+            // The box union: a stair's BOUNDS are a full cube, so asking the
+            // bounds would make dust climb the side of one.
+            return BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z)).IsFullCube();
         }
 
         // MC Block.isFaceSturdy(..., UP) — can dust sit on top of this?
@@ -41,10 +40,7 @@ namespace Game {
             const BlockID id = level.GetBlock(p.x, p.y, p.z);
             if (id == BlockID::Air) return false;
             if (!BlockRegistry::HasCollision(id)) return false;
-            const auto& s = BlockRegistry::GetBlockShape(id, level.GetBlockState(p.x, p.y, p.z));
-            return s.max.y >= 0.9999f &&
-                   s.min.x <= 0.0001f && s.max.x >= 0.9999f &&
-                   s.min.z <= 0.0001f && s.max.z >= 0.9999f;
+            return BlockRegistry::GetBlockShapeSet(level.GetBlockState(p.x, p.y, p.z)).IsFaceSturdyUp();
         }
 
         // MC RedStoneWireBlock.canSurviveOn: a sturdy top face, or a hopper
@@ -90,16 +86,16 @@ namespace Game {
 
             const std::string& n = BlockRegistry::Get(id).modelName;
             const auto& def = BlockRegistry::GetStateDefinition(id);
-            const uint8_t st = level.GetBlockState(p.x, p.y, p.z);
+            const BlockState st = level.GetBlockState(p.x, p.y, p.z);
 
             if (n == "repeater") {
                 // MC: facing == direction || facing.getOpposite() == direction.
-                const std::string_view f = def.ValueOf(st, "facing");
+                const std::string_view f = st.GetValueByName("facing");
                 if (f.empty() || !haveDirection) return false;
                 return f == NameOf(dir) || f == NameOf(Opposite(dir));
             }
             if (n == "observer") {
-                const std::string_view f = def.ValueOf(st, "facing");
+                const std::string_view f = st.GetValueByName("facing");
                 if (f.empty() || !haveDirection) return false;
                 return f == NameOf(dir);
             }
@@ -142,39 +138,52 @@ namespace Game {
 
     } // namespace
 
-    RedstoneSide RedstoneSideOf(uint8_t stateIndex, Direction dir) {
-        const auto& def = BlockRegistry::GetStateDefinition(BlockID::RedstoneWire);
-        const std::string_view v = def.ValueOf(stateIndex, kPropNames[IndexOfDir(dir)]);
-        if (v == "side") return RedstoneSide::Side;
-        if (v == "up")   return RedstoneSide::Up;
-        return RedstoneSide::None;
+    // The redstone north/east/south/west are the THREE-valued up/side/none
+    // properties, distinct from a fence's booleans of the same name.
+    namespace {
+        constexpr PropertyId kSideProps[4] = {
+            PropertyId::NORTH_REDSTONE, PropertyId::EAST_REDSTONE,
+            PropertyId::SOUTH_REDSTONE, PropertyId::WEST_REDSTONE,
+        };
     }
 
-    uint8_t RedstoneStateFrom(RedstoneSide north, RedstoneSide east,
-                              RedstoneSide south, RedstoneSide west) {
-        const RedstoneSide sides[4] = {north, east, south, west};
-        BlockRegistry::BlockStateDefinition::PropertyMap props;
-        for (int i = 0; i < 4; ++i) {
-            props[std::string(kPropNames[i])] =
-                std::string(kSideNames[static_cast<int>(sides[i])]);
+    RedstoneSide RedstoneSideOf(BlockState state, Direction dir) {
+        // Value order is up, side, none — NOT the enum's own order, so this
+        // cannot be a cast.
+        switch (state.GetIndex(kSideProps[IndexOfDir(dir)])) {
+            case 0:  return RedstoneSide::Up;
+            case 1:  return RedstoneSide::Side;
+            default: return RedstoneSide::None;
         }
-        return BlockRegistry::GetStateDefinition(BlockID::RedstoneWire).IndexOf(props);
     }
 
-    bool RedstoneIsCross(uint8_t s) {
+    BlockState RedstoneStateFrom(RedstoneSide north, RedstoneSide east,
+                                 RedstoneSide south, RedstoneSide west) {
+        const RedstoneSide sides[4] = {north, east, south, west};
+        BlockState s = BlockStates::Default(BlockID::RedstoneWire);
+        for (int i = 0; i < 4; ++i) {
+            const int v = (sides[i] == RedstoneSide::Up)   ? 0
+                        : (sides[i] == RedstoneSide::Side) ? 1
+                                                           : 2;
+            s = s.SetIndex(kSideProps[i], v);
+        }
+        return s;
+    }
+
+    bool RedstoneIsCross(BlockState s) {
         for (Direction d : kOrder) if (!IsConnected(RedstoneSideOf(s, d))) return false;
         return true;
     }
 
-    bool RedstoneIsDot(uint8_t s) {
+    bool RedstoneIsDot(BlockState s) {
         for (Direction d : kOrder) if (IsConnected(RedstoneSideOf(s, d))) return false;
         return true;
     }
 
     // MC getConnectionState + getMissingConnections, merged. Vanilla threads a
     // BlockState through both; here the four sides are just locals.
-    uint8_t RedstoneConnectionState(const IBlockAccess& level, const glm::ivec3& pos,
-                                    bool startFromCross) {
+    BlockState RedstoneConnectionState(const IBlockAccess& level, const glm::ivec3& pos,
+                                       bool startFromCross) {
         // getMissingConnections: resolve every side from the world. Vanilla
         // only fills sides that are not already connected, which matters
         // because it starts from crossState — but its crossState sides are
@@ -216,8 +225,8 @@ namespace Game {
         return RedstoneStateFrom(sides[0], sides[1], sides[2], sides[3]);
     }
 
-    uint8_t RedstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
-                                uint8_t stateIndex, Direction changed) {
+    BlockState RedstoneUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
+                                   BlockState state, Direction changed) {
         // MC updateShape. DOWN is handled by the caller (the wire breaks); UP
         // re-resolves everything, because what sits above decides whether any
         // side may climb.
@@ -226,20 +235,20 @@ namespace Game {
             // isDot(state) — not "is cross". Those differ for a wire with one
             // or two connections, where treating it as a dot would let it
             // collapse instead of keeping the straight-line rule.
-            return RedstoneConnectionState(level, pos, !RedstoneIsDot(stateIndex));
+            return RedstoneConnectionState(level, pos, !RedstoneIsDot(state));
         }
 
         const bool canConnectUp = !IsRedstoneConductor(level, {pos.x, pos.y + 1, pos.z});
         const RedstoneSide fresh = ConnectingSide(level, pos, changed, canConnectUp);
-        const RedstoneSide current = RedstoneSideOf(stateIndex, changed);
+        const RedstoneSide current = RedstoneSideOf(state, changed);
 
         // Vanilla's fast path: if the side's CONNECTEDNESS did not change and
         // the wire is not a cross, just write the new side value. Otherwise the
         // whole shape has to be recomputed, because gaining or losing one
         // connection can flip the straight-line rule on the other axis.
-        if (IsConnected(fresh) == IsConnected(current) && !RedstoneIsCross(stateIndex)) {
+        if (IsConnected(fresh) == IsConnected(current) && !RedstoneIsCross(state)) {
             RedstoneSide sides[4];
-            for (int i = 0; i < 4; ++i) sides[i] = RedstoneSideOf(stateIndex, kOrder[i]);
+            for (int i = 0; i < 4; ++i) sides[i] = RedstoneSideOf(state, kOrder[i]);
             sides[IndexOfDir(changed)] = fresh;
             return RedstoneStateFrom(sides[0], sides[1], sides[2], sides[3]);
         }
@@ -247,18 +256,18 @@ namespace Game {
     }
 
     bool RedstoneToggleShape(const IBlockAccess& level, const glm::ivec3& pos,
-                             uint8_t stateIndex, uint8_t& outState) {
+                             BlockState state, BlockState& outState) {
         // MC useWithoutItem: only a full cross or a bare dot toggles. Anything
         // with a real connection is left alone — there is nothing sensible to
         // toggle it to, and vanilla returns PASS.
-        const bool cross = RedstoneIsCross(stateIndex);
-        const bool dot   = RedstoneIsDot(stateIndex);
+        const bool cross = RedstoneIsCross(state);
+        const bool dot   = RedstoneIsDot(state);
         if (!cross && !dot) return false;
 
         // cross -> defaultBlockState (all NONE, i.e. a dot); dot -> crossState.
-        const uint8_t next = RedstoneConnectionState(level, pos,
-                                                     /*startFromCross=*/!cross);
-        if (next == stateIndex) return false;
+        const BlockState next = RedstoneConnectionState(level, pos,
+                                                        /*startFromCross=*/!cross);
+        if (next == state) return false;
         outState = next;
         return true;
     }

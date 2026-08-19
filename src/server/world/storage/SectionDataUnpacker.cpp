@@ -118,8 +118,8 @@ namespace Game {
             s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
 
             // ── Specific block-state overrides ──────────────────────────────
-            // MC's `BlockState.toString()` shape is `minecraft:<name>{p1:v1,p2:v2}`,
-            // alpha-sorted by property name. Our `BlockState::GetStateKey`
+            // MC's `NbtBlockState.toString()` shape is `minecraft:<name>{p1:v1,p2:v2}`,
+            // alpha-sorted by property name. Our `NbtBlockState::GetStateKey`
             // (SectionDataUnpacker.hpp) emits the same canonical form, so
             // these keys match what ResolveBlockState will hash on chunk load.
             //
@@ -128,42 +128,25 @@ namespace Game {
             // explicit non-default states to their variant BlockIDs declared
             // in Blocks.hpp's manual section.
 
-            s_stateToBlockId["minecraft:grass_block{snowy:true}"] = BlockID::SnowGrass;
 
             // Double-tall plants. Property: `half=upper|lower`
             // (BlockStateProperties.DOUBLE_BLOCK_HALF). Lower is MC's default.
             // The bare BlockID handles `half=lower`; the explicit
             // `{half:upper}` key dispatches to the *_top variant.
-            s_stateToBlockId["minecraft:lilac{half:upper}"]         = BlockID::LilacTop;
-            s_stateToBlockId["minecraft:peony{half:upper}"]         = BlockID::PeonyTop;
-            s_stateToBlockId["minecraft:rose_bush{half:upper}"]     = BlockID::RoseBushTop;
-            s_stateToBlockId["minecraft:large_fern{half:upper}"]    = BlockID::LargeFernTop;
-            s_stateToBlockId["minecraft:tall_seagrass{half:upper}"] = BlockID::TallSeagrassTop;
-            s_stateToBlockId["minecraft:tall_grass{half:upper}"]    = BlockID::TallGrassTop;
 
             // Bee nest — only honey_level=5 visually differs from empty
             // (BlockModelGenerators.java:797 dispatches honey_level=5 to
             // _honey, all other levels to _empty). Bare BlockID covers 0..4.
-            s_stateToBlockId["minecraft:bee_nest{honey_level:5}"]   = BlockID::BeeNestHoney;
 
             // Leaf litter — segment_amount=1..4 (BlockStateProperties.java:165).
             // Bare BlockID = segment 1. Add explicit keys for segments 2..4.
-            s_stateToBlockId["minecraft:leaf_litter{segment_amount:2}"] = BlockID::LeafLitter2;
-            s_stateToBlockId["minecraft:leaf_litter{segment_amount:3}"] = BlockID::LeafLitter3;
-            s_stateToBlockId["minecraft:leaf_litter{segment_amount:4}"] = BlockID::LeafLitter4;
 
             // Wildflowers — same segment_amount property as leaf litter.
-            s_stateToBlockId["minecraft:wildflowers{segment_amount:2}"] = BlockID::Wildflowers2;
-            s_stateToBlockId["minecraft:wildflowers{segment_amount:3}"] = BlockID::Wildflowers3;
-            s_stateToBlockId["minecraft:wildflowers{segment_amount:4}"] = BlockID::Wildflowers4;
 
             // Pink petals — DIFFERENT property name (`flower_amount`,
             // BlockStateProperties.java:164 FLOWER_AMOUNT). Same 1..4 shape
             // as leaf_litter/wildflowers but the NBT key is different, so
             // these need their own state-key entries.
-            s_stateToBlockId["minecraft:pink_petals{flower_amount:2}"] = BlockID::PinkPetals2;
-            s_stateToBlockId["minecraft:pink_petals{flower_amount:3}"] = BlockID::PinkPetals3;
-            s_stateToBlockId["minecraft:pink_petals{flower_amount:4}"] = BlockID::PinkPetals4;
 
             // Log statistics
             Log::Info("BlockStateRegistry initialized with %zu base blocks and %zu specific states",
@@ -171,7 +154,7 @@ namespace Game {
         });
     }
 
-    BlockID BlockStateRegistry::ResolveBlockState(const BlockState& state) {
+    BlockID BlockStateRegistry::ResolveBlockState(const NbtBlockState& state) {
         Initialize();
 
         // First try exact state match (for blocks with important properties)
@@ -232,9 +215,9 @@ namespace Game {
         return BlockID::Air; // Default fallback
     }
 
-    BlockState BlockStateRegistry::CreateBlockState(const std::string& name,
+    NbtBlockState BlockStateRegistry::CreateBlockState(const std::string& name,
                                                    const std::unordered_map<std::string, std::string>& props) {
-        BlockState state;
+        NbtBlockState state;
         state.name = NormalizeName(name);
         state.properties = props;
         state.resolvedId = ResolveBlockState(state);
@@ -357,7 +340,7 @@ namespace Game {
             return false;
         }
 
-        std::vector<BlockState> palette = ParsePalette(paletteTag);
+        std::vector<NbtBlockState> palette = ParsePalette(paletteTag);
         if (palette.empty()) {
             Log::Error("Empty palette in section Y=%d", sectionY);
             return false;
@@ -382,7 +365,7 @@ namespace Game {
             }
 
             // Fill entire section with the single block type
-            const uint8_t singleState = palette[0].resolvedState;
+            const BlockStateIndex singleState = palette[0].resolvedState;
             for (int y = 0; y < ChunkSection::SIZE; ++y) {
                 for (int z = 0; z < ChunkSection::SIZE; ++z) {
                     for (int x = 0; x < ChunkSection::SIZE; ++x) {
@@ -422,8 +405,8 @@ namespace Game {
         return UnpackBlockData(packedData, palette, chunk, sectionY);
     }
 
-    std::vector<BlockState> SectionDataUnpacker::ParsePalette(const ::World::NBTTagPtr& paletteList) {
-        std::vector<BlockState> palette;
+    std::vector<NbtBlockState> SectionDataUnpacker::ParsePalette(const ::World::NBTTagPtr& paletteList) {
+        std::vector<NbtBlockState> palette;
 
         auto paletteListTag = std::dynamic_pointer_cast<::World::NBTTagList>(paletteList);
         if (!paletteListTag) {
@@ -459,7 +442,7 @@ namespace Game {
             }
 
             // Create block state
-            BlockState state = BlockStateRegistry::CreateBlockState(blockName, properties);
+            NbtBlockState state = BlockStateRegistry::CreateBlockState(blockName, properties);
             palette.push_back(state);
 
             Log::Debug("Palette entry: %s -> BlockID::%d",
@@ -470,7 +453,7 @@ namespace Game {
     }
 
     bool SectionDataUnpacker::UnpackBlockData(const std::vector<uint64_t>& packedData,
-                                             const std::vector<BlockState>& palette,
+                                             const std::vector<NbtBlockState>& palette,
                                              Chunk& chunk, int sectionY) {
         if (palette.empty()) {
             Log::Error("Empty palette for section Y=%d", sectionY);
@@ -501,7 +484,7 @@ namespace Game {
 
     // **NEW METHOD**: Unpacking for Minecraft 1.16+ format (no crossing long boundaries)
     bool SectionDataUnpacker::UnpackBlockDataPost116(const std::vector<uint64_t>& packedData,
-                                                     const std::vector<BlockState>& palette,
+                                                     const std::vector<NbtBlockState>& palette,
                                                      ChunkSection& section,
                                                      int bitsPerBlock, int sectionY) {
         // Calculate how many indices fit in one 64-bit long
@@ -620,7 +603,7 @@ namespace Game {
         worldZ = chunkZ * Math::CHUNK_SIZE_Z + sectionZ;
     }
 
-    void SectionDataUnpacker::PrintSectionStats(const std::vector<BlockState>& palette,
+    void SectionDataUnpacker::PrintSectionStats(const std::vector<NbtBlockState>& palette,
                                                int sectionY, int blockCount) {
         Log::Debug("Section Y=%d unpacked: %d blocks, palette size: %zu, bits per block: %d",
                   sectionY, blockCount, palette.size(), CalculateBitsPerBlock(palette.size()));

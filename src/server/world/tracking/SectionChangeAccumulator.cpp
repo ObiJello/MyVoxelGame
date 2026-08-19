@@ -11,7 +11,7 @@ SectionChangeAccumulator::SectionChangeAccumulator() {
 
 SectionChangeAccumulator::~SectionChangeAccumulator() = default;
 
-void SectionChangeAccumulator::accumulate(const Game::Math::SectionPos& sp, uint16_t localIdx, Game::BlockStateRef state) {
+void SectionChangeAccumulator::accumulate(const Game::Math::SectionPos& sp, uint16_t localIdx, Game::BlockState state) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     // Get or create bucket for this section
@@ -32,7 +32,7 @@ void SectionChangeAccumulator::accumulate(const Game::Math::SectionPos& sp, uint
 
 void SectionChangeAccumulator::accumulate(const Game::Math::SectionPos& sp, 
                                          uint8_t localX, uint8_t localY, uint8_t localZ, 
-                                         Game::BlockStateRef state) {
+                                         Game::BlockState state) {
     uint16_t idx = packLocalIndex(localX, localY, localZ);
     accumulate(sp, idx, state);
 }

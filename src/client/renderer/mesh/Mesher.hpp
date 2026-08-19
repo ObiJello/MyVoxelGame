@@ -102,7 +102,27 @@ namespace Render {
         // subsequent mesh builds on that thread. Public so free functions
         // (ClassifyBlock, IsBlockOpaque) in the same namespace can access them.
         struct CachedBlockProps {
+            // Occlusion for the block's DEFAULT state. Correct on its own only
+            // while every state of the block occludes the same way — see
+            // `occlusionVariesByState`.
             bool isOpaque;
+            // True when this block's states do NOT all agree about occlusion,
+            // so the answer has to come from the voxel's state rather than from
+            // this table.
+            //
+            // No vanilla block reaches this today, because the one family whose
+            // occlusion genuinely varies — slabs, where `type=double` fills the
+            // cell and `type=bottom` does not — is split across separate
+            // BlockIDs here. It stops being empty the moment those collapse
+            // back into a `type` property, and getting it wrong then would make
+            // every double slab either leak faces or eat its neighbours'. The
+            // flag is computed rather than assumed so that transition cannot be
+            // silent: EnsureBlockPropsCache logs whatever lands in it.
+            bool occlusionVariesByState = false;
+            // The state-independent half of the occlusion test: an opaque
+            // render layer, and not drawn by a BlockEntityRenderer. Combined
+            // with the state's own IsFullCube() when occlusionVariesByState.
+            bool opaqueMaterial = false;
             RenderLayer renderLayer;
             // Whether this block declares any blockstate properties. Lets
             // ProcessBlock skip the per-voxel state lookup entirely for the
@@ -171,11 +191,30 @@ namespace Render {
         // Index with [localY+1][localZ+1][localX+1] where local coords are in [-1,16].
         Game::BlockID m_blockCache[18][18][18];
         bool m_opaqueCache[18][18][18];
-        // Interior-only (no halo): a block's own state affects only its own
-        // model. Neighbour lookups are for occlusion and AO, which depend on
-        // the neighbour's block id, not its state.
-        uint8_t m_stateCache[16][16][16];
-        bool    m_stateCacheAllDefault = true;
+        // Halo included, same 18^3 extent as the block cache.
+        //
+        // This used to be interior-only, on the reasoning that a block's own
+        // state affects only its own model and neighbour lookups are for
+        // occlusion and AO, which read block ids. Waterlogging breaks that:
+        // whether a NEIGHBOUR holds water decides whether the shared fluid
+        // face is culled, so the state of the halo is now load-bearing.
+        // 16-bit, matching BlockStateIndex. As uint8_t this silently truncated
+        // every state past 255 — 30 blocks, including every wall and
+        // redstone_wire — so a waterlogged wall would have meshed as some
+        // unrelated state of itself. 18^3 * 2 = 11.7 KB per mesher.
+        Game::BlockStateIndex m_stateCache[18][18][18];
+        // Fast path: every state in the 18^3 plane is literally index 0.
+        // Deliberately NOT "all default" — since the MC state port, index 0 is
+        // the block's FIRST state, not its default one (grass_block's default is
+        // snowy=false, index 1). The flag only licenses substituting the literal
+        // 0, which is what CachedState and DeriveWaterCache do.
+        bool    m_stateCacheAllZero = true;
+        // "This cell's fluid state is water" (MC BlockState.getFluidState),
+        // derived once per section from the block and state caches. The fluid
+        // mesher asks it for every voxel AND all six neighbours, which is far
+        // too hot for a registry lookup per query — same reasoning as
+        // m_opaqueCache, which exists for exactly the same access pattern.
+        bool m_waterCache[18][18][18];
         // Biome grid for this section (with the blend margin), or null when
         // meshing straight off an IBlockAccess. See ResolveBiome.
         const Client::Render::RegionSnapshot* m_biomeSource = nullptr;
@@ -189,8 +228,14 @@ namespace Render {
         void FillBlockCacheFromRegion(const Client::Render::RegionSnapshot& region,
                                         Game::Math::ChunkPos chunkPos, int sectionY);
         void DeriveOpaqueCache();
-        uint8_t CachedState(int localX, int sectionLocalY, int localZ) const {
-            return m_stateCacheAllDefault ? 0 : m_stateCache[sectionLocalY][localZ][localX];
+        // Also derives m_waterCache — both are one pass over the same 18^3
+        // arrays, and both must be rebuilt together whenever either input is.
+        void DeriveWaterCache();
+        // Section-local coords in [0,16); the +1 shifts into halo indexing.
+        Game::BlockStateIndex CachedState(int localX, int sectionLocalY, int localZ) const {
+            return m_stateCacheAllZero
+                       ? 0
+                       : m_stateCache[sectionLocalY + 1][localZ + 1][localX + 1];
         }
         // Shared meshing body — reads only from m_blockCache/m_opaqueCache
         void BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh);
@@ -205,7 +250,7 @@ namespace Render {
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,
                          int localX, int localY, int localZ,
-                         int sectionY, Game::BlockID blockId, uint8_t stateIndex,
+                         int sectionY, Game::BlockID blockId, Game::BlockStateIndex stateIndex,
                          SectionMesh& mesh);
 
         // `stateIndex` is carried through because one tint resolver needs it:
@@ -217,7 +262,7 @@ namespace Render {
                          const Game::BlockModel& model, const Game::Element& element,
                          Game::FaceDir faceDir, const Game::FaceDef& faceDef,
                          glm::vec3 blockPos, glm::vec3 faceNormal, Game::BlockID blockId,
-                         uint8_t stateIndex,
+                         Game::BlockStateIndex stateIndex,
                          int worldX, int worldY, int worldZ, RenderLayer layer, SectionMesh& mesh);
 
         void GenerateQuad(const std::array<Vertex, 4>& quadVerts,
@@ -261,6 +306,27 @@ namespace Render {
         // Returns a shade value 0.0-1.0 for a vertex corner based on 3 neighbor blocks
         float CalculateVertexAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
                                 BlockFace face, int vertexIndex);
+
+        // AO for a quad that does not fill its cell's face.
+        //
+        // MC ModelBlockRenderer.AmbientOcclusionFace: the four AO values are
+        // properties of the CELL's face corners, and each vertex takes a
+        // BILINEAR blend of them at its own position within that face
+        // (AmbientOcclusionFace.calculate → the u/v weighting after
+        // calculateShape). CalculateVertexAO alone hands corner k's value to
+        // vertex k, which is only right when the quad spans the whole face.
+        //
+        // Every partial element gets this wrong without the blend, and it is
+        // worst where two elements STACK on one side of a cell — a stair's
+        // side and back are a slab quad below a step quad, and handing both
+        // the same four cell-corner values puts the cell's bottom shading on
+        // the step's bottom edge and its top shading on the slab's top edge,
+        // i.e. a hard bright/dark seam across the middle of the block.
+        //
+        // `localPos` is the four vertices in block-local [0,1] space, in
+        // CreateFaceVertices' emission order.
+        void ComputeFaceAO(const Game::IBlockAccess& blocks, int worldX, int worldY, int worldZ,
+                           BlockFace face, const glm::vec3 (&localPos)[4], float (&outAO)[4]);
 
         // Minecraft directional face shading multiplier
         static float GetDirectionalShade(BlockFace face);

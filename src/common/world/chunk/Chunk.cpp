@@ -77,7 +77,7 @@ namespace Game {
         }
     }
 
-    uint8_t Chunk::GetBlockState(int localX, int worldY, int localZ) const {
+    BlockStateIndex Chunk::GetBlockState(int localX, int worldY, int localZ) const {
         if (!ValidateCoordinates(localX, worldY, localZ, "GetBlockState")) {
             return 0;
         }
@@ -97,7 +97,19 @@ namespace Game {
         return section->GetState(localX, sectionY, localZ);
     }
 
-    void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId, uint8_t stateIndex) {
+    BlockState Chunk::StateAt(int localX, int worldY, int localZ) const {
+        if (!ValidateCoordinates(localX, worldY, localZ, "StateAt")) return BlockState{};
+
+        int sectionIndex, sectionY;
+        Math::WorldCoordinates::WorldYToSectionCoords(worldY, sectionIndex, sectionY);
+        if (sectionIndex < 0 || sectionIndex >= SECTION_COUNT) return BlockState{};
+
+        const ChunkSection* section = GetSection(sectionIndex);
+        if (!section) return BlockState{};        // no section = all air
+        return section->StateAt(localX, sectionY, localZ);
+    }
+
+    void Chunk::SetBlock(int localX, int worldY, int localZ, BlockID blockId, BlockStateIndex stateIndex) {
         if (!ValidateCoordinates(localX, worldY, localZ, "SetBlock")) {
             Log::Warning("Attempted to set block at invalid position (%d, %d, %d) in chunk (%d, %d)",
                         localX, worldY, localZ, pos.x, pos.z);
@@ -117,7 +129,7 @@ namespace Game {
         // BlockID-only overload does: re-orienting a block (same id, different
         // state) is a real change and must still write and dirty the section.
         const BlockID oldBlockId = GetBlock(localX, worldY, localZ);
-        const uint8_t oldState   = GetBlockState(localX, worldY, localZ);
+        const BlockStateIndex oldState = GetBlockState(localX, worldY, localZ);
         if (oldBlockId == blockId && oldState == stateIndex) {
             return;
         }

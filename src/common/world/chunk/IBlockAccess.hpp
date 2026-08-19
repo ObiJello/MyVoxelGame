@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../block/Blocks.hpp"
+#include "../block/BlockState.hpp"
 #include "common/world/biome/Biomes.hpp"
 
 namespace Game {
@@ -15,12 +16,23 @@ namespace Game {
         // Core block access methods
         virtual BlockID GetBlock(int worldX, int worldY, int worldZ) const = 0;
 
-        // State index within the block's own state list (MC BlockState.getId());
-        // 0 is always the block's default state. NOT pure virtual on purpose:
-        // "I don't track state" and "everything is at its default state" are the
-        // same answer, so accessors that only carry block ids (mesher snapshots,
-        // physics views) stay correct without implementing anything.
-        virtual uint8_t GetBlockState(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return 0; }
+        // State index within the block's own state list (MC BlockState.getId()).
+        //
+        // PURE VIRTUAL, deliberately. This used to default to `return 0` on the
+        // reasoning that "I don't track state" and "everything is at its
+        // default state" are the same answer. That reasoning holds only while
+        // state index 0 IS the default for every block — and it is about to
+        // stop being true. In MC, `StateDefinition.any()` takes the first value
+        // of every property and BooleanProperty lists `true` first, so the
+        // default is somewhere else entirely for most blocks; once states are
+        // global ids, 0 means "air's default state" and nothing else.
+        //
+        // An accessor that inherited the default would then report the whole
+        // world as air-shaped while GetBlock kept returning stone — no crash,
+        // no warning, wrong collision and wrong meshing. Every implementor
+        // already overrides this, so requiring it costs nothing today and
+        // removes the trap before it can be sprung.
+        virtual BlockState GetBlockState(int worldX, int worldY, int worldZ) const = 0;
 
         // Biome id at a world position, quantised to MC's 4x4x4 noise-biome
         // grid by the chunk. Accessors with no biome data answer 0, which is
@@ -38,6 +50,23 @@ namespace Game {
         virtual bool IsBlockSolid(int worldX, int worldY, int worldZ) const = 0;
         virtual bool IsBlockFluid(int worldX, int worldY, int worldZ) const = 0;
         virtual bool IsValidPosition(int worldX, int worldY, int worldZ) const = 0;
+
+        // MC `level.getFluidState(pos).is(FluidTags.WATER)`.
+        //
+        // NOT the same question as "is the block here water": a waterlogged
+        // fence, a kelp stalk and a coral fan all hold water while being
+        // something else entirely. Every caller that used to compare
+        // GetBlock() against BlockID::Water wants THIS instead — meshing,
+        // entity fluid tests, bucket fill, block placement.
+        //
+        // The default composes GetBlock + GetBlockState, so an accessor only
+        // has to override GetBlockState to answer correctly; one that tracks
+        // no state still gets the always-water blocks and plain water right,
+        // which is strictly better than the block-id comparison it replaces.
+        //
+        // Defined in the .cpp so this header — which half the engine includes —
+        // does not have to pull in BlockRegistry.
+        virtual bool ContainsWater(int worldX, int worldY, int worldZ) const;
 
         // ── Light (MC LevelReader.getRawBrightness(pos, amount)) ────────────
         //
