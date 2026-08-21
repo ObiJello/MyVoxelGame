@@ -105,7 +105,14 @@ namespace Game {
         // → isCrouching(), and the crouch pose is never entered while
         // abilities.flying (LocalPlayer.java:1075, 622). Without the flying
         // exemption, sprint-descending would silently drop back to base speed.
-        physics.isSprinting = sprintPressed && (!sneakPressed || physics.isFlying);
+        //
+        // Noclip needs the SAME exemption and is a separate flag, not a kind of
+        // isFlying. Missing it made sprint asymmetric in noclip: ascending
+        // (jump) kept the boost because sneak was not held, descending (sneak)
+        // silently lost it. Ascend and descend are the same gesture there, so
+        // they must answer the same.
+        physics.isSprinting =
+            sprintPressed && (!sneakPressed || physics.isFlying || physics.noclip);
 
         // Create physics context with block access (World, ClientBlockAccess, etc.)
         PhysicsContext context;

@@ -809,7 +809,11 @@ set(GAME_SOURCES
             src/common/world/block/BlockState.cpp
             src/common/world/block/BlockState.hpp
             src/common/world/block/Walls.cpp
+            src/common/world/block/Vine.cpp
+            src/common/world/block/MultifaceBlock.cpp
             src/common/world/block/Walls.hpp
+            src/common/world/block/Vine.hpp
+            src/common/world/block/MultifaceBlock.hpp
             src/common/world/block/FenceGate.cpp
             src/common/world/block/FenceGate.hpp
             src/common/world/block/BlockRegistry.hpp

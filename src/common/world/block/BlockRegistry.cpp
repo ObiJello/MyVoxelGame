@@ -9,6 +9,8 @@
 #include "Stairs.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
+#include "Vine.hpp"
+#include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "entity/BlockEntityTypes.hpp"
 #include "../../core/Log.hpp"
@@ -1560,7 +1562,8 @@ namespace Game {
         // the model. Each one is a MC class that overrides getShape.
         bool HasMultiBoxShape(BlockID id) {
             return IsStairs(id) || IsCrossCollisionBlock(id) ||
-                   IsWallBlock(id) || IsFenceGateBlock(id);
+                   IsWallBlock(id) || IsFenceGateBlock(id) ||
+                   IsVineBlock(id) || IsMultifaceBlock(id);
         }
 
         // `collision` picks getCollisionShape over getShape. They differ for
@@ -1568,6 +1571,8 @@ namespace Game {
         BlockRegistry::BlockShapeSet MultiBoxShape(BlockState state,
                                                    bool collision) {
             const BlockID id = state.Block();
+            if (IsVineBlock(id))          return VineShapeBoxes(state);
+            if (IsMultifaceBlock(id))     return MultifaceShapeBoxes(state);
             if (IsStairs(id))             return StairShapeBoxes(state);
             if (IsCrossCollisionBlock(id)) return collision ? CrossCollisionBoxes(state)
                                                             : CrossShapeBoxes(state);

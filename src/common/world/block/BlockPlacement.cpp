@@ -6,6 +6,8 @@
 #include "Stairs.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
+#include "Vine.hpp"
+#include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "../../core/Log.hpp"
 
@@ -279,6 +281,27 @@ namespace Game {
             }
         }
 
+        // ── Multiface (glow lichen, sculk vein, resin clump) ──────────────
+        // Same shape of rule as the vine below, different class: six faces
+        // instead of five, and every one it wears must hold.
+        if (IsMultifaceBlock(id)) {
+            const Direction support = Opposite(clicked);
+            return MultifaceStateWithFace(BlockStates::Default(id), support, true).Index();
+        }
+
+        // ── Vines ─────────────────────────────────────────────────────────
+        // Record the face the click implies; whether it can actually hold the
+        // vine needs the world, so ComputeWorldPlacementState re-resolves it.
+        // Clicking the north side of a block puts the vine in the cell north of
+        // it, and the support is then SOUTH of the vine — hence the opposite.
+        if (IsVineBlock(id)) {
+            const Direction support = Opposite(clicked);
+            if (support != Direction::Down) {
+                return VineStateWithFace(BlockStates::Default(id), support, true).Index();
+            }
+            return kDefault;
+        }
+
         // ── Stairs ────────────────────────────────────────────────────────
         // MC StairBlock.getStateForPlacement's FACING + HALF. SHAPE is the
         // third property and needs the neighbours, so it is applied in
@@ -419,6 +442,23 @@ namespace Game {
                 return face == Direction::Down || (!above && IsHorizontal(face));
             }
             return face == Direction::Up || (above && IsHorizontal(face));
+        }
+
+        // MC MultifaceBlock.canBeReplaced:
+        //   !itemInHand.is(asItem()) || hasAnyVacantFace(state)
+        // and VineBlock.canBeReplaced: countFaces(state) < 5.
+        //
+        // Both say the same thing: more of the same block is only allowed onto a
+        // clump that still has a bare face to take it. Without this the generic
+        // rule below refuses (held == existing), and the placement lands in the
+        // neighbouring cell instead of growing the clump you aimed at.
+        if (existingId == held) {
+            if (IsMultifaceBlock(existingId)) {
+                return MultifaceHasAnyVacantFace(existing);
+            }
+            if (IsVineBlock(existingId)) {
+                return VineCountFaces(existing) < 5;   // no DOWN on a vine
+            }
         }
 
         // MC SegmentableBlock.canBeReplaced:
@@ -638,6 +678,8 @@ namespace Game {
             // The support's face that we are stuck to points back at us.
             return IsFaceSturdy(level, support, Opposite(toSupport));
         }
+        if (IsVineBlock(id)) return VineCanSurvive(level, pos, state);
+        if (IsMultifaceBlock(id)) return MultifaceCanSurvive(level, pos, state);
         return CanSurviveAt(level, pos, id);
     }
 
@@ -671,6 +713,38 @@ namespace Game {
         // block above decides LOW vs TALL and whether the post shows.
         if (IsWallBlock(id)) {
             fallback = WallPlacementState(level, pos, fallback);
+        }
+
+        // MC MultifaceBlock / VineBlock.getStateForPlacement.
+        //
+        // The face bit in `fallback` is a HINT, not a result: ComputePlacementState
+        // has no world access, so it records which face the click implied and
+        // leaves the actual decision here. The search must therefore start from a
+        // BARE state — feeding it the hinted state instead makes the search skip
+        // that face as "already taken" and add a SECOND one, which is how a
+        // sculk vein came out clinging to both the wall you clicked and the
+        // ceiling above it.
+        //
+        // MC's base state is `oldState.is(this) ? oldState : defaultBlockState()`,
+        // so placing onto an existing clump ADDS a face to it rather than
+        // starting over — that is the whole point of these blocks stacking up on
+        // a corner.
+        if (IsMultifaceBlock(id) || IsVineBlock(id)) {
+            const bool multiface = IsMultifaceBlock(id);
+
+            Direction hint = Direction::Up;
+            for (Direction d : { Direction::Down, Direction::Up, Direction::North,
+                                 Direction::East, Direction::South, Direction::West }) {
+                const bool has = multiface ? MultifaceFaceOf(fallback, d)
+                                           : VineFaceOf(fallback, d);
+                if (has) { hint = Opposite(d); break; }
+            }
+
+            const BlockState here = level.GetBlockState(pos.x, pos.y, pos.z);
+            const BlockState base = here.Is(id) ? here : BlockStates::Default(id);
+
+            fallback = multiface ? MultifacePlacementState(level, pos, base, hint)
+                                 : VinePlacementState(level, pos, base, hint);
         }
 
         // MC FenceGateBlock.getStateForPlacement's IN_WALL clause. FACING has
@@ -722,6 +796,7 @@ namespace Game {
             "redstone_wire", "tripwire_ns",
             // CanSurviveAt (world-aware)
             "sugar_cane", "cactus", "bamboo", "bamboo_sapling",
+            "vine", "glow_lichen", "sculk_vein", "resin_clump",
         };
         const std::string& name = BlockRegistry::Get(id).modelName;
         for (std::string_view m : kModelled) if (name == m) return true;

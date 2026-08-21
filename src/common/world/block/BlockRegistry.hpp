@@ -250,7 +250,10 @@ namespace Game {
         // (CrossCollisionBlock.makeShapes). Stairs need three. Kept a fixed
         // array rather than a vector so the physics sweep, which asks per
         // voxel, allocates nothing.
-        static constexpr size_t kMaxShapeBoxes = 5;
+        // 6, not 5: a multiface block (glow lichen, sculk vein, resin clump)
+        // can clad all six faces of its cell at once. Fences and walls need 5
+        // (post + four arms) and stairs 3, so this is the family that sets it.
+        static constexpr size_t kMaxShapeBoxes = 6;
         struct BlockShapeSet {
             BlockShape boxes[kMaxShapeBoxes];
             uint8_t    count = 0;

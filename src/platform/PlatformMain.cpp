@@ -177,6 +177,29 @@ static Render::ChatScreen g_chatScreen;
 
 namespace PlatformMain {
 
+// ── Sentry shutdown ─────────────────────────────────────────────────────────
+//
+// sentry_close() joins the "sentry-http" background worker, and that worker can
+// be MID-REQUEST — a TLS handshake, loading the CA store, allocating inside
+// OpenSSL. Doing that from an atexit handler is unsafe: by then main has
+// returned and atexit callbacks are interleaving with static destructors, so
+// the worker is running network I/O against a runtime that is already being
+// torn down. It shows up as a crash on QUIT, on the sentry-http thread, inside
+// malloc, with main parked in sentry__bgworker_shutdown waiting for it.
+//
+// So close it explicitly at the end of Run(), while the process is still fully
+// alive. The atexit registration stays as a fallback for the early-return exit
+// paths, and this flag makes whichever runs first the only one that acts —
+// sentry_close() must not run twice.
+static std::atomic<bool> s_sentryActive{false};
+
+static void CloseSentryOnce() {
+    bool expected = true;
+    if (s_sentryActive.compare_exchange_strong(expected, false)) {
+        sentry_close();
+    }
+}
+
 // Shared "E held" state for cross-branch edge detection (game branch opens inventory,
 // inventory branch closes inventory — both must observe the same held-state to avoid
 // double-firing on the frame the inventory opens). The local `extern bool s_eKeyHeld;`
@@ -1306,8 +1329,10 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         int sentryResult = sentry_init(sentryOptions);
         if (sentryResult == 0) {
             Log::Info("Sentry crash reporting initialized");
-            // Ensure sentry_close() runs on ALL exit paths (early returns, crashes, etc.)
-            std::atexit([]() { sentry_close(); });
+            s_sentryActive.store(true);
+            // Fallback for the early-return exit paths only. The normal path
+            // closes explicitly at the end of Run(); see CloseSentryOnce.
+            std::atexit([]() { CloseSentryOnce(); });
         } else {
             Log::Error("Sentry initialization failed (error %d)", sentryResult);
         }
@@ -4474,6 +4499,13 @@ static std::unique_ptr<Client::UPnPPortMapper> g_portMapper;
         }
 
         Log::Info("=== MINECRAFT JAVA EDITION ARCHITECTURE SHUTDOWN COMPLETE ===");
+
+        // 13. Sentry LAST, but still inside Run() — never from atexit. Joining
+        // its HTTP worker can block while that worker finishes a request, and
+        // that has to happen while the C runtime is intact.
+        Log::Info("Closing crash reporting...");
+        CloseSentryOnce();
+        Log::Info("✓ Crash reporting closed");
 
         // Stamp the log as ending deliberately. Without this marker a truncated
         // log and a clean one look identical, so you cannot tell "crashed" from

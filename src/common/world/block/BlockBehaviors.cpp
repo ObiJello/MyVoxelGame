@@ -17,6 +17,8 @@
 #include "Stairs.hpp"
 #include "CrossCollision.hpp"
 #include "Walls.hpp"
+#include "Vine.hpp"
+#include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "common/world/level/World.hpp"
 #include "common/entity/IUsePlayer.hpp"
@@ -121,6 +123,32 @@ namespace Game {
             if (toNeighbour == Direction::Down) return false;
 
             const BlockState next = RedstoneUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC VineBlock.updateShape — re-derive which faces still have support.
+        // A vine that loses its last face returns AIR, and World turns that into
+        // a destroy-with-drops, which is how a vine curtain falls when the wall
+        // behind it is mined.
+        bool VineNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                 BlockState state,
+                                 Direction toNeighbour, BlockID /*neighbourId*/,
+                                 BlockState& outState) {
+            const BlockState next = VineUpdateShape(level, pos, state, toNeighbour);
+            if (next == state) return false;
+            outState = next;
+            return true;
+        }
+
+        // MC MultifaceBlock.updateShape — the clump drops the one face whose
+        // surface went, and goes with it when that was the last.
+        bool MultifaceNeighborChanged(const IBlockAccess& level, const glm::ivec3& pos,
+                                      BlockState state,
+                                      Direction toNeighbour, BlockID /*neighbourId*/,
+                                      BlockState& outState) {
+            const BlockState next = MultifaceUpdateShape(level, pos, state, toNeighbour);
             if (next == state) return false;
             outState = next;
             return true;
@@ -314,6 +342,17 @@ namespace Game {
         if (Block* wire = forSlug("redstone_wire")) {
             wire->useWithoutItem  = &RedstoneWireUse;
             wire->neighborChanged = &RedstoneWireNeighborChanged;
+        }
+
+        // ── Vines ─────────────────────────────────────────────────────────
+        // Faces drop as their support goes, and the last one taking the vine
+        // with it. Without this a vine hangs in mid-air forever once the wall
+        // behind it is mined.
+        if (Block* vine = forSlug("vine")) {
+            vine->neighborChanged = &VineNeighborChanged;
+        }
+        for (const char* slug : { "glow_lichen", "sculk_vein", "resin_clump" }) {
+            if (Block* b = forSlug(slug)) b->neighborChanged = &MultifaceNeighborChanged;
         }
 
         // ── Stairs ────────────────────────────────────────────────────────
